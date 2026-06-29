@@ -12,6 +12,8 @@ A **goal** is a unit of work with a title, spec (markdown), working directory, a
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). That flag is evaluated only during the goal creation / setup flow: after worktree setup completes, the server may call `teamManager.startTeam()` so no manual "Start Team" click is needed. The retry-setup handler also respects the same flag.
 
+Team worker capacity counts only live active worker sessions, not every historical row in `team-state.json`. Missing or terminated worker records are passively reaped before spawn-cap checks and during restart resubscribe, while explicit dismiss/completion paths still own archive and worktree cleanup. Verification-harness reviewer sessions are excluded from worker capacity; ordinary team-spawned workers with role `reviewer` still count as workers. See [internals.md — Worker liveness, spawn capacity, and stale reap](internals.md#worker-liveness-spawn-capacity-and-stale-reap).
+
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
 ### Per-goal worktree provisioning
