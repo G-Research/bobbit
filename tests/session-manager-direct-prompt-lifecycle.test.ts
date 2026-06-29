@@ -238,6 +238,47 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.status, "streaming");
 	});
 
+	it("fresh prompt before dispatch auto retry drops the recovered failed prompt", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "stale prompt A"),
+			/fetch failed/,
+		);
+		assert.equal(session.promptQueue.length, 1, "expected recovered prompt A before fresh user prompt");
+		assert.ok(session.pendingAutoRetryTimer, "expected pending auto retry before fresh user prompt");
+
+		await manager.enqueuePrompt(session.id, "fresh prompt B");
+
+		assert.equal(prompt.mock.callCount(), 2, "fresh prompt should dispatch immediately without retrying prompt A");
+		assert.match(prompt.mock.calls[1].arguments[0], /fresh prompt B/);
+		assert.doesNotMatch(prompt.mock.calls[1].arguments[0], /stale prompt A/);
+		assert.equal(session.pendingAutoRetryTimer, undefined, "fresh prompt should cancel pending auto retry");
+		assert.equal(session.promptQueue.length, 0, "fresh prompt should drop the recovered stale prompt A row");
+		assert.equal(autoRetryCancelledEvents(session).length, 1, "fresh prompt should emit auto_retry_cancelled");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			true,
+			"expected client-visible auto_retry_cancelled event for superseding prompt",
+		);
+
+		session.status = "idle";
+		manager.drainQueue(session);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 2, "later queue drain must not replay stale prompt A");
+		assert.equal(session.promptQueue.length, 0, "queue should remain empty after later drain");
+	});
+
 	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

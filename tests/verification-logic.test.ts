@@ -361,6 +361,22 @@ describe("llm-review retry decisions", () => {
 			);
 		}
 	});
+
+	it("does not treat unknown internal model errors as unsupported model configuration", () => {
+		const output = "LLM review failed: model returned an unknown internal error";
+
+		assert.equal(isRetryableGenericAgentError(output), true);
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false,
+				output,
+				attempt: 1,
+				maxBoundedAttempts: 3,
+				isTransient: (text) => isTransientReviewError(text) || isRetryableGenericAgentError(text),
+			}),
+			"retry",
+		);
+	});
 });
 
 // ===================================================================
