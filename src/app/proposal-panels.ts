@@ -285,12 +285,12 @@ function bespokeWorkflowOptionLabel(workflow: Workflow): string {
 
 function goalWorkflowSelectOptions(inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
 	const options: WorkflowSelectOption[] = [];
-	const selectedInlineId = hasValidInlineWorkflowDraft(inlineWorkflow) ? inlineWorkflow.id : null;
-	if (selectedInlineId) {
-		options.push({ id: selectedInlineId, label: bespokeWorkflowOptionLabel(inlineWorkflow), kind: "bespoke" });
+	const selectedInline = hasValidInlineWorkflowDraft(inlineWorkflow) ? inlineWorkflow : null;
+	if (selectedInline) {
+		options.push({ id: selectedInline.id, label: bespokeWorkflowOptionLabel(selectedInline), kind: "bespoke" });
 	}
 	for (const workflow of _cachedWorkflows) {
-		if (workflow.id === selectedInlineId) continue;
+		if (workflow.id === selectedInline?.id) continue;
 		options.push({ id: workflow.id, label: projectWorkflowOptionLabel(workflow), kind: "project" });
 	}
 	return options;
