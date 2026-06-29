@@ -588,7 +588,7 @@ test.describe("MCP meta-tool API E2E", () => {
 		}
 	});
 
-	test("POST /api/internal/mcp-call denies persisted per-op `never` despite broader role allow", async ({ gateway }) => {
+	test("POST /api/internal/mcp-call lets broad role allow override persisted per-op `never`", async ({ gateway }) => {
 		const projectId = await defaultProjectId();
 		await seedFakeScopedMcpManager(gateway, projectId!);
 		const token = readE2EToken();
@@ -636,13 +636,12 @@ test.describe("MCP meta-tool API E2E", () => {
 				},
 				body: JSON.stringify({
 					tool: "mcp__fake-server__echo",
-					args: { message: "should be blocked by persisted policy" },
+					args: { message: "role policy should allow this available operation" },
 				}),
 			});
-			expect(callResp.status).toBe(403);
+			expect(callResp.status).toBe(200);
 			const callBody = await callResp.json();
-			expect(callBody.error).toMatch(/denied by policy/);
-			expect(callBody.reason).toBe("policy=never");
+			expect(callBody.content?.[0]?.text).toBe("stub");
 		} finally {
 			await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
 				method: "PUT",

@@ -185,7 +185,7 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 		assert.ok(allowed.includes("mcp_pw"));
 	});
 
-	it("operation-level persisted never prevents MCP registration despite broader role allows", () => {
+	it("broader role MCP allows beat persisted operation-level never for available tools", () => {
 		const tm = mockToolManager({});
 		const role = { toolPolicies: { "mcp__gr": "allow" as const, "mcp__gr__jira": "allow" as const } };
 		const gps = mockGroupPolicyStore({ "mcp__gr__jira__delete_issue": "never" });
@@ -198,6 +198,66 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 				description: "Delete an issue.",
 				inputSchema: { type: "object", properties: {} },
 			},
+			{
+				name: "mcp__gr__jira__get_issue",
+				serverName: "gr",
+				mcpToolName: "jira__get_issue",
+				group: "MCP: gr",
+				description: "Get an issue.",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mcpManager = mockMcpManager(infos) as any;
+
+		const allowed = computeEffectiveAllowedTools(tm as any, role, gps, mcpManager).map(e => e.name);
+		assert.ok(allowed.includes("mcp_gr__jira"));
+
+		const extensionPaths = writeMcpProxyExtensions(mcpManager, allowed, role, tm as any, gps);
+		assert.equal(extensionPaths.length, 1);
+		const source = fs.readFileSync(extensionPaths[0], "utf-8");
+		assert.match(source, /get_issue/);
+		assert.match(source, /delete_issue/);
+	});
+
+	it("exact role operation policy registers an op despite persisted package never", () => {
+		const tm = mockToolManager({});
+		const role = { toolPolicies: { "mcp__gr__jira__delete_issue": "allow" as const } };
+		const gps = mockGroupPolicyStore({ "mcp__gr__jira": "never" });
+		const infos = [
+			{
+				name: "mcp__gr__jira__delete_issue",
+				serverName: "gr",
+				mcpToolName: "jira__delete_issue",
+				group: "MCP: gr",
+				description: "Delete an issue.",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{
+				name: "mcp__gr__jira__get_issue",
+				serverName: "gr",
+				mcpToolName: "jira__get_issue",
+				group: "MCP: gr",
+				description: "Get an issue.",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mcpManager = mockMcpManager(infos) as any;
+
+		const allowed = computeEffectiveAllowedTools(tm as any, role, gps, mcpManager).map(e => e.name);
+		assert.ok(allowed.includes("mcp_gr__jira"));
+
+		const extensionPaths = writeMcpProxyExtensions(mcpManager, allowed, role, tm as any, gps);
+		assert.equal(extensionPaths.length, 1);
+		const source = fs.readFileSync(extensionPaths[0], "utf-8");
+		assert.match(source, /delete_issue/);
+		assert.doesNotMatch(source, /get_issue/);
+	});
+
+	it("activation-disabled MCP operations cannot be restored by role or persisted policies", () => {
+		const tm = mockToolManager({});
+		const role = { toolPolicies: { "mcp__gr__jira__delete_issue": "allow" as const } };
+		const gps = mockGroupPolicyStore({ "mcp__gr__jira__delete_issue": "allow" });
+		const infos = [
 			{
 				name: "mcp__gr__jira__get_issue",
 				serverName: "gr",

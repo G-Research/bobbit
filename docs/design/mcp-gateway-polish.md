@@ -41,8 +41,8 @@ Relevant current code:
   - `McpManager.groupMarketplaceContributions()` groups by `serverName`; same server with different config overrides prior contributions.
   - `getToolInfos()` exposes connected operation names as `mcp__<server>__<op>` or `mcp__<server>__<sub>__<op>` and filters inactive subnamespaces.
 - Tool policy/runtime registration: `src/server/agent/tool-activation.ts`, `src/app/tool-manager-page.ts`
-  - Server-level `mcp__<server>` and package/subnamespace-level `mcp__<server>__<sub>` policies are supported.
-  - Exact per-operation role policy works only as an exact `role.toolPolicies[toolName]` match; group-policy defaults do not currently check a full operation key before sub/server keys.
+  - Server-level `mcp__<server>`, package/subnamespace-level `mcp__<server>__<sub>`, and operation-level `mcp__<server>__<sub>__<op>` policies are supported.
+  - Role policies take precedence over persisted/group policies for operations that are available; installed-package activation remains the hard disable boundary.
   - `/api/internal/mcp-call` enforces `never` via `resolveGrantPolicy()` before dispatch.
 - Tools UI: `src/app/tool-manager-page.ts`
   - MCP section renders server rows, subnamespace rows, and operation rows, but operation rows use normal `renderToolRow()` editing rather than a dedicated operation policy selector.
@@ -407,13 +407,13 @@ interface McpPolicyKeys {
   12. tool YAML default
   13. system fallback `allow`
 
-For MCP tools, a persisted/group operation-level `never` such as `mcp__gr__confluence__confluence_add_comment: never` must override a permissive tool YAML default and any broader package/server/default policy. Registration and call dispatch must use this same resolver so a denied operation is neither exposed nor callable.
+For MCP tools, a persisted/group operation-level `never` such as `mcp__gr__confluence__confluence_add_comment: never` overrides permissive tool YAML defaults and broader persisted package/server/wildcard policies. It does not override role policy: role-level exact, package, server, and wildcard MCP policies are the higher-priority grant-policy source for operations that are otherwise available. Installed-pack activation toggles are the hard disable mechanism; operations disabled or unselected there are omitted before policy resolution and cannot be registered or called by any role/tool policy.
 
 `computeToolPolicies()`, `computeEffectiveAllowedTools()`, and `writeMcpProxyExtensions()` should continue to use `resolveGrantPolicy()` so registration and guard behavior stay aligned.
 
 ### Runtime enforcement
 
-`POST /api/internal/mcp-call` already performs Layer B `never` enforcement. After `resolveGrantPolicy()` gains operation-level group-policy precedence, the dispatcher will reject operation-level `never` even if the server/package meta-tool is allowed or already granted.
+`POST /api/internal/mcp-call` already performs Layer B `never` enforcement using the same role-first resolver as registration. With no higher-priority role override, operation-level persisted/group `never` rejects a call even if the server/package meta-tool is allowed or already granted.
 
 Also enforce activation-disabled operations in `McpManager.callTool()` or immediately before dispatch:
 
@@ -695,7 +695,7 @@ Add/update:
 - Installing packages from two gateways exposes selected operation union through `/api/mcp-servers` and `/api/tools`.
 - Operation collision precedence changes when `pack_order` changes.
 - `PUT /api/marketplace/pack-activation` with `disabled.mcpOperations` hides only selected operations while preserving whole MCP contribution visibility.
-- `/api/internal/mcp-call` rejects disabled operations and operation-level `never` policy.
+- `/api/internal/mcp-call` rejects activation-disabled operations regardless of policy, and rejects operation-level persisted/group `never` when no higher-priority role policy overrides it.
 - Existing manual `.mcp.json` config still loads, exposes tools, restarts, and honors old `mcp__server` policies unchanged.
 
 ### Browser E2E
@@ -718,7 +718,8 @@ Add/update:
 - Tools page:
   - server-level, package/subnamespace-level, and operation-level policy selectors are visible;
   - operation policy persists and shows inherited labels correctly;
-  - operation-level `never` blocks runtime call even when server/package policy allows.
+  - activation-disabled operations stay unavailable regardless of role/tool policy;
+  - operation-level persisted/group `never` blocks runtime call unless a higher-priority role policy allows it.
 
 ### Full checks
 

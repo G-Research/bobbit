@@ -278,7 +278,7 @@ describe("resolveGrantPolicy — tool-key beats group-key", () => {
 		);
 	});
 
-	it("group-store operation-level never beats broader role server/package allows", () => {
+	it("role MCP policies beat persisted/group operation-level never for available tools", () => {
 		const tm = mockToolManager({ "mcp__gr__ai-adoption__delete-article": { grantPolicy: "allow" } });
 		const gps = mockGroupPolicyStore({
 			"mcp__gr__ai-adoption__delete-article": "never",
@@ -292,7 +292,7 @@ describe("resolveGrantPolicy — tool-key beats group-key", () => {
 				tm,
 				gps,
 			),
-			"never",
+			"allow",
 		);
 		assert.equal(
 			resolveGrantPolicy(
@@ -302,7 +302,17 @@ describe("resolveGrantPolicy — tool-key beats group-key", () => {
 				tm,
 				gps,
 			),
-			"never",
+			"allow",
+		);
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr__ai-adoption__delete-article": "allow" as const } },
+				tm,
+				gps,
+			),
+			"allow",
 		);
 	});
 

@@ -174,25 +174,6 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
 	return policy === 'never';
 }
 
-function hasMoreSpecificPersistedMcpNever(
-	mcpKeys: McpPolicyKeys,
-	groupPolicyStore: GroupPolicyProvider,
-	broaderThanSpecificity: number,
-): boolean {
-	const candidates: Array<{ key: string | undefined; specificity: number }> = [
-		{ key: mcpKeys.operation, specificity: 4 },
-		{ key: mcpKeys.package, specificity: 3 },
-		{ key: mcpKeys.server, specificity: 2 },
-		{ key: "mcp__", specificity: 1 },
-	];
-	for (const { key, specificity } of candidates) {
-		if (!key || specificity <= broaderThanSpecificity) continue;
-		const policy = groupPolicyStore.getGroupPolicy(key);
-		if (policy && isNeverPolicy(normalizePolicy(policy))) return true;
-	}
-	return false;
-}
-
 /**
  * Resolve the effective grant policy for a tool.
  * Priority: role tool-specific > role group-level > tool YAML default > group default > system fallback.
@@ -217,39 +198,33 @@ export function resolveGrantPolicy(
 	}
 
 	const mcpKeys = mcpPolicyKeys(toolName);
-	const denyIfMoreSpecificPersistedMcpNever = (policy: GrantPolicy, broaderThanSpecificity: number): GrantPolicy => {
-		if (!mcpKeys || !groupPolicyStore || isNeverPolicy(policy)) return policy;
-		if (hasMoreSpecificPersistedMcpNever(mcpKeys, groupPolicyStore, broaderThanSpecificity)) return 'never';
-		return policy;
-	};
 
 	// 1. Role-level tool-specific override (exact tool name match)
 	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
 	// 2. Role-level MCP hierarchy: exact/operation/package/server/wildcard.
-	// A broader role allow/ask must not bypass a more-specific persisted/group
-	// MCP `never`; operation-level denials are enforced at registration and call time.
+	// Role policy is the most authoritative grant-policy source for tools that
+	// are available. Installed-pack activation toggles remain a harder boundary
+	// because disabled gateway operations never appear in McpManager.getToolInfos().
 	if (mcpKeys) {
 		if (mcpKeys.operation && mcpKeys.operation !== toolName && role?.toolPolicies?.[mcpKeys.operation]) {
 			return normalizePolicy(role.toolPolicies[mcpKeys.operation]);
 		}
 		if (mcpKeys.package && role?.toolPolicies?.[mcpKeys.package]) {
-			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[mcpKeys.package]), 3);
+			return normalizePolicy(role.toolPolicies[mcpKeys.package]);
 		}
 		if (role?.toolPolicies?.[mcpKeys.server]) {
-			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[mcpKeys.server]), 2);
+			return normalizePolicy(role.toolPolicies[mcpKeys.server]);
 		}
 		// Wildcard MCP key: a bare `mcp__` role key matches EVERY MCP server at once.
 		if (role?.toolPolicies?.["mcp__"]) {
-			return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies["mcp__"]), 1);
+			return normalizePolicy(role.toolPolicies["mcp__"]);
 		}
 	}
-	if (toolGroup && role?.toolPolicies?.[toolGroup]) {
-		return denyIfMoreSpecificPersistedMcpNever(normalizePolicy(role.toolPolicies[toolGroup]), 0);
-	}
+	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
 	// 3. Persisted/group MCP hierarchy. This intentionally precedes tool YAML
-	// defaults so an operation-level `never` is authoritative for runtime MCP ops.
+	// defaults so an operation-level `never` overrides YAML and broader persisted policies.
 	if (groupPolicyStore && mcpKeys) {
 		if (mcpKeys.operation) {
 			const opGp = groupPolicyStore.getGroupPolicy(mcpKeys.operation);
@@ -504,11 +479,14 @@ export function computeEffectiveAllowedTools(
 		if (isNeverPolicy(opPolicy)) continue;
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
-		// Drop ops blocked at the meta level — the meta-tool name's own policy
-		// (which cascades through `mcpPolicyKeys` to the group / tool keys).
+		// The per-operation policy above is authoritative. Do not re-apply
+		// persisted package/server `never` through the meta-tool name here: an
+		// exact role operation policy is allowed to override those grant policies.
+		// Only an explicit role policy on the model-facing meta-tool itself can
+		// hide the whole meta-tool after an operation has been allowed.
 		const metaName = makeMetaToolName(parsed.server, parsed.sub);
-		const serverPolicy = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore, scopedContext);
-		if (isNeverPolicy(serverPolicy)) continue;
+		const exactMetaRolePolicy = role?.toolPolicies?.[metaName];
+		if (exactMetaRolePolicy && isNeverPolicy(normalizePolicy(exactMetaRolePolicy))) continue;
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
 		if (!byKey.has(k)) byKey.set(k, { server: parsed.server, sub: parsed.sub });
 	}
@@ -881,12 +859,13 @@ export function computeToolPolicies(
 		const metaName = makeMetaToolName(server, sub);
 		if (result[metaName]) continue;
 		const group = ops[0]?.group ?? `MCP: ${server}`;
-		// Honour an explicit role-level meta-tool override first.
-		const rawMetaPolicy = resolveGrantPolicy(metaName, group, role, toolManager, groupPolicyStore, scopedContext);
+		const exactMetaRolePolicy = role?.toolPolicies?.[metaName]
+			? normalizePolicy(role.toolPolicies[metaName])
+			: undefined;
 		let aggregated: 'allow' | 'ask' | 'never';
-		if (isNeverPolicy(rawMetaPolicy)) {
+		if (exactMetaRolePolicy && isNeverPolicy(exactMetaRolePolicy)) {
 			aggregated = 'never';
-		} else if (isAskPolicy(rawMetaPolicy) || nonNever.some(o => isAskPolicy(o.policy))) {
+		} else if ((exactMetaRolePolicy && isAskPolicy(exactMetaRolePolicy)) || nonNever.some(o => isAskPolicy(o.policy))) {
 			aggregated = 'ask';
 		} else {
 			aggregated = 'allow';
@@ -1091,13 +1070,17 @@ export function writeMcpProxyExtensions(
 			}
 		}
 
-		// Double-check policy: skip 'never' tools explicitly
+		// Double-check policy: skip 'never' tools explicitly. The per-operation
+		// policy is authoritative; do not let a lower-priority persisted
+		// package/server `never` on the meta-tool hide an operation that a role
+		// policy allowed. An explicit role policy on the model-facing meta-tool
+		// can still hide the whole generated proxy.
 		if (role || toolManager || groupPolicyStore) {
 			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
 			if (isNeverPolicy(p)) continue;
 			const metaName = makeMetaToolName(parsed.server, parsed.sub);
-			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore, scopedContext);
-			if (isNeverPolicy(sp)) continue;
+			const exactMetaRolePolicy = role?.toolPolicies?.[metaName];
+			if (exactMetaRolePolicy && isNeverPolicy(normalizePolicy(exactMetaRolePolicy))) continue;
 		}
 
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
