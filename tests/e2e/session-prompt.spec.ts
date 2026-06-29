@@ -85,6 +85,45 @@ test.describe("session_prompt", () => {
 		if (roleName) await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
 	});
 
+	test("default callers without session_prompt permission are rejected before delivery", async ({ gateway }) => {
+		const callerId = await createSession({ cwd: nonGitCwd() });
+		const targetId = await createSession({ cwd: nonGitCwd() });
+		sessions.push(callerId, targetId);
+		await waitForSessionStatus(callerId, "idle");
+		await waitForSessionStatus(targetId, "idle");
+
+		const caller = gateway.sessionManager.getSession(callerId);
+		expect(caller?.allowedTools ?? [], "default caller must not expose session_prompt").not.toContain("session_prompt");
+
+		const sm = gateway.sessionManager;
+		const origEnqueue = sm.enqueuePrompt.bind(sm);
+		const origSteer = sm.deliverLiveSteer.bind(sm);
+		let delivered = false;
+		sm.enqueuePrompt = async (...args: any[]) => {
+			delivered = true;
+			return origEnqueue(...args);
+		};
+		sm.deliverLiveSteer = async (...args: any[]) => {
+			delivered = true;
+			return origSteer(...args);
+		};
+
+		try {
+			const resp = await apiFetch(`/api/sessions/${targetId}/prompt`, {
+				method: "POST",
+				headers: sessionCallerHeaders(gateway, callerId),
+				body: JSON.stringify({ message: "SESSION_PROMPT_SHOULD_NOT_DELIVER", mode: "prompt" }),
+			});
+			const data = await resp.json();
+			expect(resp.status, JSON.stringify(data)).toBe(403);
+			expect(data).toMatchObject({ code: "SESSION_PROMPT_NOT_ALLOWED" });
+			expect(delivered, "authorization failure must not call prompt/steer delivery").toBe(false);
+		} finally {
+			sm.enqueuePrompt = origEnqueue;
+			sm.deliverLiveSteer = origSteer;
+		}
+	});
+
 	test("prompt mode can prompt an arbitrary explicitly enabled live target session", async ({ gateway }) => {
 		const callerId = await createRoleSession(roleName);
 		const targetId = await createSession({ cwd: nonGitCwd() });

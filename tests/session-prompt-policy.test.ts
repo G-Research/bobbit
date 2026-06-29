@@ -1,9 +1,26 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const { computeEffectiveAllowedTools, resolveGrantPolicy } = await import("../src/server/agent/tool-activation.ts");
 
-const SESSION_PROMPT_TOOL = { name: "session_prompt", group: "Agent", grantPolicy: "never" as const };
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
+const sessionPromptYamlText = fs.readFileSync(
+	path.join(repoRoot, "defaults", "tools", "agent", "session_prompt.yaml"),
+	"utf8",
+);
+function topLevelYamlScalar(key: string): string | undefined {
+	return sessionPromptYamlText.match(new RegExp(`^${key}:\\s*([^\\n#]+)`, "m"))?.[1]?.trim().replace(/^['\"]|['\"]$/g, "");
+}
+
+const SESSION_PROMPT_TOOL = {
+	name: topLevelYamlScalar("name"),
+	group: topLevelYamlScalar("group"),
+	grantPolicy: topLevelYamlScalar("grantPolicy"),
+};
 const READ_TOOL = { name: "read_session", group: "Agent" };
 
 function mockToolManager() {
@@ -42,7 +59,14 @@ function allowedNames(role?: { toolPolicies?: Record<string, string> }) {
 }
 
 describe("session_prompt grant policy", () => {
-	it("resolves to never from its tool default even though Agent tools are otherwise default-allow", () => {
+	it("loads the real session_prompt tool default as grantPolicy: never", () => {
+		assert.deepEqual(
+			SESSION_PROMPT_TOOL,
+			{ name: "session_prompt", group: "Agent", grantPolicy: "never" },
+		);
+	});
+
+	it("resolves to never from its real tool default even though Agent tools are otherwise default-allow", () => {
 		const policy = resolveGrantPolicy(
 			"session_prompt",
 			"Agent",

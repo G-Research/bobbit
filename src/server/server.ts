@@ -11021,6 +11021,11 @@ async function handleApiRoute(
 			json({ error: "Valid caller session secret is required", code: "SESSION_SECRET_REQUIRED" }, 403);
 			return;
 		}
+		const callerAllowedTools = callerSession.allowedTools ?? [];
+		if (!callerAllowedTools.some((tool) => tool.toLowerCase() === "session_prompt")) {
+			json({ error: 'Tool "session_prompt" is not allowed for this session', code: "SESSION_PROMPT_NOT_ALLOWED" }, 403);
+			return;
+		}
 		try {
 			const result = await deliverSessionPrompt({
 				getSession: (id) => sessionManager.getSession(id),

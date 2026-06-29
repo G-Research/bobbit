@@ -74,6 +74,14 @@ export async function deliverSessionPrompt(
 		return { ok: true, mode, dispatched: true };
 	}
 
+	if (session.nonInteractive) {
+		throw new SessionPromptDeliveryError(
+			"Cannot enqueue a steered prompt for a non-interactive (automated review) session; steer can only redirect it while streaming.",
+			"NON_INTERACTIVE_STEER",
+			400,
+		);
+	}
+
 	const result = await deps.enqueuePrompt(sessionId, message, { isSteered: true, source: opts.source });
 	return { ok: true, mode, status: result.status };
 }

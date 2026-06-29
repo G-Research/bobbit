@@ -166,6 +166,17 @@ describe("deliverSessionPrompt", () => {
 		assert.deepEqual(mock.liveSteerCalls, []);
 	});
 
+	it("rejects steer mode for idle non-interactive sessions so it cannot start reviewer work", async () => {
+		const mock = deps(session({ status: "idle", nonInteractive: true }));
+
+		await assertRejectsWithMessage(
+			() => deliverSessionPrompt(mock.api, "sess-1", "queued reviewer work", { mode: "steer", defaultMode: "prompt" }),
+			/non[- ]?interactive|reviewer|streaming|steer/i,
+		);
+		assert.deepEqual(mock.enqueueCalls, []);
+		assert.deepEqual(mock.liveSteerCalls, []);
+	});
+
 	it("allows steer mode to redirect a streaming non-interactive session", async () => {
 		const mock = deps(session({ status: "streaming", nonInteractive: true }));
 
