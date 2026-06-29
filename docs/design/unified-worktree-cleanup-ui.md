@@ -49,7 +49,7 @@ Scanned X projects, Y repos, Z worktree-root directories. Last scanned 10:42 AM.
 Helper text / latest result banner
 
 Selection presets / filters
-[Select all safe] [Current project] [Archived-owned] [Git orphan] [Pool entries] [Clear]
+[Select all safe] [Current project] [Archived-owned] [Git orphan] [Clear]
 
 Actionable safe rows only
 [checkbox] Ready to clean  Archived cleanup target  default  app
@@ -121,17 +121,20 @@ type WorktreeMaintenanceItem = {
 
 This is the public REST DTO consumed by the UI. The UI may group sources into display labels such as “Bobbit state” or “Git metadata”, but it must keep the server-provided `classification`, `reason`, `id`, and owner/source provenance intact for cleanup requests and troubleshooting.
 
-Counts should be additive and stable for summary chips:
+Counts should use the canonical `WorktreeInventoryReport.counts` shape from the backend design verbatim and be additive/stable for summary chips:
 
 ```ts
 type WorktreeMaintenanceCounts = {
-  totalItems: number;
+  total: number;
   readyToClean: number;
-  defaultSelected: number;
   protectedInUse: number;
+  archivedOwned: number;
+  unownedGitWorktrees: number;
+  poolEntries: number;
   alreadyCleaned: number;
   needsAttention: number;
-  failed: number;
+  scanErrors: number;
+  defaultSelected: number;
   byClassification: Record<string, number>;
   byReason: Record<string, number>;
   bySource: Record<string, number>;
@@ -198,8 +201,9 @@ Selection behavior:
 - Button label before first scan: “Scan”.
 - Button label after scan: “Rescan”.
 - Loading label: “Scanning…”.
+- Request `GET /api/maintenance/worktrees` with no `include` parameter; the canonical default is `include=all`, so actionable rows, protected rows, already-cleaned rows, and needs-attention examples are all available from the same scan response. The UI hides non-actionable rows until troubleshooting is opened.
 - On success:
-  - normalize counts;
+  - use canonical counts directly;
   - initialize default selection;
   - clear old cleanup result unless scan was triggered by cleanup rescan;
   - collapse troubleshooting.
@@ -257,9 +261,10 @@ Panel copy:
 Group by server `reason` or `classification`, not by client-derived status. Recommended group order:
 
 1. Protected/in use
-2. Needs attention
-3. Already cleaned
-4. Scan errors / cleanup failures
+2. Pool entries (pool-owned entries are visible for audit/reclaim diagnostics but are not maintenance cleanup candidates by default)
+3. Needs attention
+4. Already cleaned
+5. Scan errors / cleanup failures
 
 Each group includes:
 
@@ -371,7 +376,6 @@ Use new IDs for the canonical card. Keep old IDs only in compatibility tests if 
 | Select current project | `worktree-cleanup-select-current-project` |
 | Select archived-owned | `worktree-cleanup-select-archived-owned` |
 | Select Git orphan | `worktree-cleanup-select-git-orphan` |
-| Select pool entries | `worktree-cleanup-select-pool-entry` |
 | Clear selection | `worktree-cleanup-clear-selection` |
 | Troubleshooting toggle | `worktree-cleanup-show-diagnostics` |
 | Troubleshooting panel | `worktree-cleanup-troubleshooting` |
@@ -402,7 +406,7 @@ Also set stable action attributes for fixture tests:
    - Old “Orphaned Worktrees” meaning becomes a classification/filter: `Unowned Git worktree`.
    - Old “Archived Session Worktrees” meaning becomes `Archived-owned` plus owner/source fields.
    - The unified card description should mention both so existing users can find the feature:
-     > Reclaim safe Bobbit worktrees from archived sessions, orphaned Git metadata, pool entries, and known worktree roots.
+     > Reclaim safe Bobbit worktrees from archived sessions, orphaned Git metadata, and known worktree roots while surfacing pool entries and protected paths for troubleshooting.
 
 4. **Test migration**
    - Tests that only validate archived-card behavior should be rewritten against the unified test IDs and fixture data containing mixed classifications.
@@ -423,20 +427,20 @@ Add/replace browser E2E coverage for Settings → Maintenance.
    - Fixture includes:
      - one archived-owned ready candidate;
      - one unowned Git worktree ready candidate;
-     - one pool entry ready candidate;
+     - one pool entry troubleshooting/protected row;
      - one protected live-session row;
      - one filesystem-only needs-attention row;
      - one already-cleaned row.
    - After scan:
-     - summary chips show all counts;
-     - only three ready rows are visible;
-     - protected/attention/already-cleaned rows are hidden;
+     - summary chips show all canonical counts, including `poolEntries` in diagnostics/count assertions;
+     - only two ready rows are visible;
+     - pool/protected/attention/already-cleaned rows are hidden;
      - ready rows are checked by default and have enabled checkboxes;
      - branch outcome text is visible.
 
 3. **Troubleshooting disclosure**
    - Click `worktree-cleanup-show-diagnostics`.
-   - Assert protected, filesystem-only, and already-cleaned groups appear.
+   - Assert pool-entry, protected, filesystem-only, and already-cleaned groups appear.
    - Assert diagnostic rows have no checkbox.
    - Assert “Show all (N)” expands groups over five examples.
 

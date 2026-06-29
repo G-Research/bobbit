@@ -214,7 +214,8 @@ This is also the canonical public REST DTO returned by `GET /api/maintenance/wor
 Canonical routes in `src/server/server.ts`:
 
 - `GET /api/maintenance/worktrees?include=all|actionable|troubleshooting`
-  - Default should include safe/actionable rows and summary counts; protected/stale/error rows can be present for troubleshooting if requested.
+  - Default (`include` omitted) is `include=all`: return all rows plus summary counts so the unified card can reveal troubleshooting groups without a second scan request.
+  - `include=actionable` and `include=troubleshooting` are optional optimization filters for future callers; the Settings UI should use the default/all response.
 - `POST /api/maintenance/cleanup-worktrees`
   - Reuse this existing path as canonical. Accept both old orphaned-worktree body and new selectors.
 
@@ -327,7 +328,7 @@ Apply rules in this order. First safety match wins unless a later rule only adds
 5. **Pool entry**:
    - In-memory pool entry or git branch matching `isPoolBranch()` → `pool-entry`.
    - For maintenance UI, pool entries are not default cleanup candidates; pool reclaim may absorb them.
-   - If the pool path is stale and not active, pool integration can mark it `ready-to-clean` only for pool-owned deletion/reclaim flows.
+   - If the pool path is stale and not active, pool integration can reclaim or clean it through pool-owned flows. The unified maintenance card must not show pool entries as default-selected cleanup rows in this design.
 6. **Archived-owned git worktree**:
    - Archived session/archived goal metadata owns the path and git metadata still exists → `archived-owned` and `ready-to-clean` if no live owner exists.
    - Preserve archived-session legacy reason `safe-archived-session-worktree`.
