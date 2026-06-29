@@ -231,17 +231,24 @@ export function resolveGrantPolicy(
 		if (wildcardGp) return normalizePolicy(wildcardGp);
 	}
 
-	// 4. Tool definition default from YAML
+	// 4. `mcp_describe` is YAML-backed but controls MCP discovery, so the
+	// broad MCP group policy must be able to hide it before its YAML default.
+	if (groupPolicyStore && toolName === "mcp_describe" && toolGroup === "MCP") {
+		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
+		if (gp) return normalizePolicy(gp);
+	}
+
+	// 5. Tool definition default from YAML
 	const toolDef = toolManager?.getToolByName(toolName, scopedContext);
 	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
-	// 5. Non-MCP group-level default policy.
+	// 6. Non-MCP group-level default policy.
 	if (groupPolicyStore && !mcpKeys && toolGroup) {
 		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
 		if (gp) return normalizePolicy(gp);
 	}
 
-	// 6. System fallback — always allow
+	// 7. System fallback — always allow
 	return 'allow';
 }
 
