@@ -247,6 +247,13 @@ function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null
 	return _cachedWorkflows.length > 0 && !inlineWorkflow && !isKnownWorkflowId(id);
 }
 
+function hasValidInlineWorkflowDraft(inlineWorkflow?: Workflow | null): inlineWorkflow is Workflow {
+	return !!inlineWorkflow
+		&& typeof inlineWorkflow.id === "string"
+		&& inlineWorkflow.id.length > 0
+		&& Array.isArray(inlineWorkflow.gates);
+}
+
 type WorkflowSelectOption = {
 	id: string;
 	label: string;
@@ -1660,9 +1667,12 @@ function goalPreviewPanel() {
 			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
 			return;
 		}
-		// Guard: refuse to accept while the linked project has no workflows.
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
+		// Guard: refuse to accept while the linked project has no workflows unless
+		// the proposal carries its own inline workflow body.
 		// The form's banner handles the affordance; this is the defensive backstop.
-		if (workflowStateFor(state.previewProjectId) === "empty") {
+		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
 			showConnectionError(
 				"This project has no workflows yet",
 				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
@@ -1680,7 +1690,6 @@ function goalPreviewPanel() {
 		// title between attempts).
 		const sessionId = activeSessionId();
 		const projectId = state.previewProjectId || undefined;
-		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
 		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 			? _proposalInlineRoles as Record<string, unknown>
 			: undefined;
@@ -3507,7 +3516,9 @@ function goalProposalPanel() {
 			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
 			return;
 		}
-		if (workflowStateFor(state.previewProjectId) === "empty") {
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
+		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
 			showConnectionError(
 				"This project has no workflows yet",
 				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
@@ -3570,7 +3581,6 @@ function goalProposalPanel() {
 					: undefined;
 				// Customised inline workflow takes precedence over the library
 				// workflowId. inlineRoles is only forwarded when non-empty.
-				const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
 				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 					? _proposalInlineRoles as Record<string, unknown>
 					: undefined;
