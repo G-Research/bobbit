@@ -14750,7 +14750,12 @@ async function handleApiRoute(
 	// POST /api/maintenance/cleanup-worktrees
 	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
 		const body = await readBody(req);
-		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "mode")) {
+		const contentLengthHeader = Array.isArray(req.headers["content-length"]) ? req.headers["content-length"][0] : req.headers["content-length"];
+		const hasRequestBody = contentLengthHeader !== undefined
+			? Number(contentLengthHeader) > 0
+			: req.headers["transfer-encoding"] !== undefined;
+		const isPlainObjectBody = body !== null && typeof body === "object" && !Array.isArray(body);
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "mode")) {
 			const mode = (body as any).mode;
 			if (mode !== "all-safe" && mode !== "selected") {
 				json({ error: "mode must be all-safe or selected" }, 400);
@@ -14768,15 +14773,24 @@ async function handleApiRoute(
 			json(await worktreeInventory().cleanup(body as any));
 			return;
 		}
-		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
 			json({ error: "mode is required when itemIds is provided" }, 400);
 			return;
 		}
-		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
+		if ((body === null && hasRequestBody) || (body !== null && !isPlainObjectBody)) {
+			json({ error: "cleanup-worktrees body must be an object" }, 400);
+			return;
+		}
+		const legacyBodyKeys = isPlainObjectBody ? Object.keys(body as Record<string, unknown>) : [];
+		if (legacyBodyKeys.some(key => key !== "worktrees")) {
+			json({ error: "legacy cleanup-worktrees body accepts worktrees only" }, 400);
+			return;
+		}
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
 			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
 			return;
 		}
-		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: body?.worktrees });
+		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: isPlainObjectBody ? (body as any).worktrees : undefined });
 		json({ cleaned: result.counts.cleaned });
 		return;
 	}
