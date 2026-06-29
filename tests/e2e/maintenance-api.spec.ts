@@ -376,6 +376,27 @@ test("POST /api/maintenance/cleanup-worktrees returns cleaned count", async () =
 	expect(typeof body.cleaned).toBe("number");
 });
 
+test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanup bodies", async () => {
+	const invalidMode = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ mode: "all" }),
+	});
+	expect(invalidMode.status).toBe(400);
+
+	const selectedWithLegacyShape = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ mode: "selected", worktrees: [] }),
+	});
+	expect(selectedWithLegacyShape.status).toBe(400);
+
+	const legacyShape = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ worktrees: [] }),
+	});
+	expect(legacyShape.status).toBe(200);
+	expect(await legacyShape.json()).toHaveProperty("cleaned");
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/maintenance/orphaned-sessions
 // ---------------------------------------------------------------------------

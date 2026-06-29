@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ProjectContextManager } from "./project-context-manager.js";
-import type { SessionManager, ArchivedSessionWorktreeItem, ArchivedSessionWorktreeScanResponse, CleanupArchivedSessionWorktreesRequest, CleanupArchivedSessionWorktreesResponse } from "./session-manager.js";
+import type { SessionManager, ArchivedSessionWorktreeGroup, ArchivedSessionWorktreeItem, ArchivedSessionWorktreeScanResponse, ArchivedSessionWorktreeSelectionPreset, ArchivedSessionWorktreeSession, ArchivedWorktreeReason, ArchivedWorktreeReasonCategory, ArchivedWorktreeSelectionCategory, CleanupArchivedSessionWorktreesRequest, CleanupArchivedSessionWorktreesResponse, ArchivedSessionWorktreeCleanupResult } from "./session-manager.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedStaff } from "./staff-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -383,11 +383,264 @@ export class WorktreeInventoryService {
 	}
 
 	async legacyArchivedSessionWorktrees(includeAlreadyCleaned = false): Promise<ArchivedSessionWorktreeScanResponse> {
-		return this.deps.sessionManager.listArchivedSessionWorktrees(includeAlreadyCleaned);
+		const report = await this.scan({ include: "all" });
+		const allItems = report.items
+			.filter(item => item.legacy?.archivedSession)
+			.map(item => this.archivedItemFromInventory(item));
+		const sessionsById = new Map<string, ArchivedSessionWorktreeSession>();
+		for (const item of allItems) {
+			let session = sessionsById.get(item.sessionId);
+			if (!session) {
+				session = {
+					id: item.sessionId,
+					title: item.title,
+					archivedAt: item.archivedAt,
+					projectId: item.projectId,
+					projectName: item.projectName,
+					goalId: item.goalId,
+					teamGoalId: item.teamGoalId,
+					delegateOf: item.delegateOf,
+					parentSessionId: item.parentSessionId,
+					childKind: item.childKind,
+					sandboxed: item.sandboxed,
+					branch: item.branch,
+					repoPath: item.repoPath,
+					worktreePath: item.path,
+					worktrees: [],
+				};
+				sessionsById.set(item.sessionId, session);
+			}
+			session.worktrees.push(item);
+		}
+		const sessions = [...sessionsById.values()].filter(session => includeAlreadyCleaned || !session.worktrees.every(item => item.status === "already-cleaned"));
+		const responseItems = sessions.flatMap(session => session.worktrees);
+		return {
+			sessions,
+			items: responseItems,
+			counts: this.archivedCounts(allItems),
+			groups: this.archivedGroups(allItems),
+			selectionPresets: this.archivedSelectionPresets(responseItems),
+			generatedAt: report.generatedAt,
+		};
 	}
 
 	async cleanupLegacyArchivedSessionWorktrees(request: CleanupArchivedSessionWorktreesRequest): Promise<CleanupArchivedSessionWorktreesResponse> {
-		return this.deps.sessionManager.cleanupArchivedSessionWorktrees(request);
+		const scan = await this.legacyArchivedSessionWorktrees(true);
+		const rows = scan.items.map(item => ({ session: scan.sessions.find(session => session.id === item.sessionId), item }));
+		let selected: Array<{ session?: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> = [];
+		const invalidSelections: ArchivedSessionWorktreeCleanupResult[] = [];
+		if (request.mode === "all") {
+			selected = rows.filter(row => row.item.status === "removable");
+		} else if (request.mode === "selected" && request.sessionIds) {
+			const ids = new Set(request.sessionIds);
+			selected = rows.filter(row => ids.has(row.item.sessionId));
+			for (const id of ids) if (!rows.some(row => row.item.sessionId === id)) invalidSelections.push({ key: id, sessionId: id, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+		} else if (request.mode === "selected" && request.worktrees) {
+			for (const selector of request.worktrees) {
+				const match = rows.find(row => {
+					if (row.item.sessionId !== selector.sessionId) return false;
+					if (selector.key) return row.item.key === selector.key;
+					if (selector.repo !== undefined && row.item.repo !== selector.repo) return false;
+					if (selector.path !== undefined && norm(row.item.path) !== norm(selector.path)) return false;
+					return selector.repo !== undefined || selector.path !== undefined;
+				});
+				if (match) selected.push(match);
+				else invalidSelections.push({ key: selector.key ?? `${selector.sessionId}:${selector.repo ?? ""}:${selector.path ?? ""}`, sessionId: selector.sessionId, repo: selector.repo, path: selector.path, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+			}
+		} else if (request.mode === "category") {
+			const categories = new Set(request.categories);
+			const repoFilter = norm(request.repoPath);
+			selected = rows.filter(row => row.item.status === "removable" && row.item.selectionCategories.some(category => categories.has(category)) && (!request.projectId || row.item.projectId === request.projectId) && (!repoFilter || norm(row.item.repoPath) === repoFilter));
+		} else if (request.mode === "preset") {
+			const preset = scan.selectionPresets.find(candidate => candidate.id === request.presetId);
+			if (!preset) throw new Error("Invalid cleanup preset");
+			const keys = new Set(preset.worktreeKeys);
+			selected = rows.filter(row => row.item.status === "removable" && keys.has(row.item.key));
+		}
+
+		const seen = new Set<string>();
+		selected = selected.filter(row => { if (seen.has(row.item.key)) return false; seen.add(row.item.key); return true; });
+		const byKey = new Map(selected.map(row => [row.item.key, row]));
+		const cleanup = await this.cleanup({ mode: "selected", itemIds: selected.map(row => stableId("archived", row.item.key)) });
+		const response: CleanupArchivedSessionWorktreesResponse = { counts: this.zeroArchivedCleanupCounts(), results: [], generatedAt: cleanup.generatedAt };
+		const record = (result: ArchivedSessionWorktreeCleanupResult) => {
+			response.results.push(result);
+			response.counts.byStatus[result.status] = (response.counts.byStatus[result.status] ?? 0) + 1;
+			if (result.reason) response.counts.byReason[result.reason] = (response.counts.byReason[result.reason] ?? 0) + 1;
+			if (result.worktreeRemoved) response.counts.worktreeRemoved++;
+			if (result.branchDeleted) response.counts.branchDeleted++;
+			if (result.reason === "invalid-selection") response.counts.invalidSelection++;
+			if (result.status === "cleaned") response.counts.cleaned++;
+			if (result.status === "already-cleaned") response.counts.alreadyCleaned++;
+			if (result.status === "failed") response.counts.failed++;
+			if (result.status === "skipped") {
+				response.counts.skipped++;
+				if (result.reason !== "invalid-selection") response.counts.notActionable++;
+			}
+		};
+		for (const invalid of invalidSelections) record(invalid);
+		for (const result of cleanup.results) {
+			const key = result.itemId.startsWith("archived:") ? [...byKey.keys()].find(candidate => stableId("archived", candidate) === result.itemId) : undefined;
+			const row = key ? byKey.get(key) : undefined;
+			const item = row?.item;
+			const base = {
+				key: item?.key ?? result.itemId,
+				sessionId: item?.sessionId ?? result.itemId,
+				title: row?.session?.title ?? item?.title,
+				repo: item?.repo,
+				repoPath: result.repoPath ?? item?.repoPath,
+				path: result.path ?? item?.path,
+				branch: result.branch ?? item?.branch,
+			};
+			if (result.status === "cleaned") record({ ...base, status: "cleaned", reason: result.branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned", worktreeRemoved: result.worktreeRemoved, branchDeleted: result.branchDeleted });
+			else if (result.status === "already-cleaned") record({ ...base, status: "already-cleaned", reason: "already-cleaned", detail: result.detail, worktreeRemoved: false, branchDeleted: false });
+			else if (result.status === "failed") record({ ...base, status: "failed", reason: "scan-error", detail: result.detail, error: result.error, worktreeRemoved: false, branchDeleted: false });
+			else record({ ...base, status: "skipped", reason: this.archivedReasonFromInventory(result.reason, item), detail: result.detail, worktreeRemoved: false, branchDeleted: false });
+		}
+		response.counts.requested = response.results.length;
+		return response;
+	}
+
+	private archivedItemFromInventory(item: WorktreeInventoryItem): ArchivedSessionWorktreeItem {
+		const legacy = item.legacy!.archivedSession!.item;
+		const reason = this.archivedReasonFromInventory(item.reason, legacy) as ArchivedWorktreeReason;
+		const status: ArchivedSessionWorktreeItem["status"] = item.classification === "archived-owned" ? "removable" : item.classification === "already-cleaned" ? "already-cleaned" : "skipped";
+		const disposition: ArchivedSessionWorktreeItem["disposition"] = status === "removable" ? "ready-to-clean" : status === "already-cleaned" ? "already-cleaned" : reason === "stale-worktree-directory" ? "needs-attention" : reason === "scan-error" ? "failed" : "ineligible";
+		return {
+			...legacy,
+			pathExists: item.pathExists,
+			gitWorktreeMetadataExists: item.gitWorktreeMetadataExists,
+			localBranchExists: !!item.localBranchExists,
+			status,
+			reason,
+			detail: item.detail,
+			willDeleteBranch: item.willDeleteBranch,
+			branchDeleteBlockedReason: item.branchDeleteBlockedReason,
+			disposition,
+			reasonCategory: this.archivedReasonCategory(reason),
+			actionable: status === "removable" && item.actionable,
+			selectable: status === "removable" && item.selectable,
+			defaultSelected: status === "removable" && item.defaultSelected,
+		};
+	}
+
+	private archivedReasonFromInventory(reason: WorktreeInventoryReason | "invalid-selection" | undefined, fallback?: ArchivedSessionWorktreeItem): ArchivedWorktreeReason | "invalid-selection" {
+		if (!reason) return fallback?.reason ?? "scan-error";
+		if (reason === "invalid-selection") return "invalid-selection";
+		switch (reason) {
+			case "safe-archived-session-worktree": return "safe-archived-session-worktree";
+			case "git-worktree-metadata-missing": return "already-cleaned";
+			case "missing-worktree-path": return "no-worktree-path";
+			case "missing-repo-path": return "missing-repo-path";
+			case "sandbox-container-path": return "sandbox-container-path";
+			case "filesystem-only-needs-attention": return "stale-worktree-directory";
+			case "referenced-by-live-goal": return "referenced-by-live-goal";
+			case "referenced-by-live-team": return "referenced-by-live-team";
+			case "referenced-by-staff": return "referenced-by-staff";
+			case "referenced-by-live-session":
+			case "referenced-by-delegate":
+			case "referenced-by-pool":
+			case "safe-pool-entry":
+			case "branch-referenced-by-live-record": return "referenced-by-live-session";
+			case "primary-worktree":
+			case "branch-referenced-by-archived-record":
+			case "safe-unowned-session-worktree":
+			case "git-scan-error":
+			case "fs-scan-error": return "scan-error";
+			default: return fallback?.reason ?? "scan-error";
+		}
+	}
+
+	private archivedCounts(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeScanResponse["counts"] {
+		const counts: ArchivedSessionWorktreeScanResponse["counts"] = { archivedSessions: new Set(items.map(item => item.sessionId)).size, sessionsWithWorktrees: 0, removableWorktrees: 0, skippedWorktrees: 0, alreadyCleanedWorktrees: 0, totalItems: items.length, readyToClean: 0, defaultSelected: 0, alreadyCleaned: 0, ineligible: 0, needsAttention: 0, failed: 0, byDisposition: {}, byReason: {}, bySelectionCategory: {} };
+		const bySession = new Map<string, ArchivedSessionWorktreeItem[]>();
+		for (const item of items) {
+			const sessionItems = bySession.get(item.sessionId) ?? [];
+			sessionItems.push(item);
+			bySession.set(item.sessionId, sessionItems);
+			if (item.status === "removable") counts.removableWorktrees++;
+			else if (item.status === "already-cleaned") counts.alreadyCleanedWorktrees++;
+			else counts.skippedWorktrees++;
+			counts.byDisposition[item.disposition] = (counts.byDisposition[item.disposition] ?? 0) + 1;
+			counts.byReason[item.reason] = (counts.byReason[item.reason] ?? 0) + 1;
+			for (const category of item.selectionCategories) counts.bySelectionCategory[category] = (counts.bySelectionCategory[category] ?? 0) + 1;
+			if (item.disposition === "ready-to-clean") counts.readyToClean++;
+			if (item.defaultSelected) counts.defaultSelected++;
+			if (item.disposition === "already-cleaned") counts.alreadyCleaned++;
+			if (item.disposition === "ineligible") counts.ineligible++;
+			if (item.disposition === "failed") counts.failed++;
+			if (item.disposition === "needs-attention" || item.disposition === "failed") counts.needsAttention++;
+		}
+		for (const sessionItems of bySession.values()) if (sessionItems.some(item => item.status !== "already-cleaned" && item.reason !== "no-worktree-path")) counts.sessionsWithWorktrees++;
+		return counts;
+	}
+
+	private archivedGroups(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeGroup[] {
+		const groupSpecs: Array<{ key: string; label: string; description: string; disposition: ArchivedSessionWorktreeItem["disposition"]; reason?: ArchivedWorktreeReason }> = [
+			{ key: "ready-to-clean", label: "Ready to clean", description: "Archived-session worktrees that are safe to remove now.", disposition: "ready-to-clean", reason: "safe-archived-session-worktree" },
+			{ key: "already-cleaned", label: "Already cleaned", description: "Archived sessions whose recorded git worktree is already gone.", disposition: "already-cleaned", reason: "already-cleaned" },
+			{ key: "reason:no-worktree-path", label: "Missing worktree path", description: "Archived sessions without a recorded host worktree path.", disposition: "ineligible", reason: "no-worktree-path" },
+			{ key: "reason:missing-repo-path", label: "Missing repository path", description: "Archived sessions without enough repository metadata to evaluate cleanup.", disposition: "ineligible", reason: "missing-repo-path" },
+			{ key: "reason:sandbox-container-path", label: "Sandbox/container path", description: "Recorded paths are container-internal and do not identify a host worktree.", disposition: "ineligible", reason: "sandbox-container-path" },
+			{ key: "reason:delegate-shared-worktree", label: "Shared delegate worktree", description: "Archived delegates that appear to share a parent worktree.", disposition: "ineligible", reason: "delegate-shared-worktree" },
+			{ key: "reason:stale-worktree-directory", label: "Stale worktree directory", description: "A path remains on disk without matching git worktree metadata; manual inspection may be needed.", disposition: "needs-attention", reason: "stale-worktree-directory" },
+			{ key: "reason:referenced-by-live-session", label: "Referenced by live session", description: "A non-archived or runtime session still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-session" },
+			{ key: "reason:referenced-by-live-goal", label: "Referenced by live goal", description: "A persisted goal still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-goal" },
+			{ key: "reason:referenced-by-live-team", label: "Referenced by live team", description: "A team entry or team agent still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-team" },
+			{ key: "reason:referenced-by-staff", label: "Referenced by staff", description: "A staff record still references the worktree.", disposition: "ineligible", reason: "referenced-by-staff" },
+			{ key: "reason:scan-error", label: "Scan errors", description: "Worktrees that could not be evaluated safely.", disposition: "failed", reason: "scan-error" },
+		];
+		return groupSpecs.flatMap(spec => {
+			const matches = spec.key === "ready-to-clean" ? items.filter(item => item.disposition === "ready-to-clean") : items.filter(item => item.reason === spec.reason);
+			if (matches.length === 0) return [];
+			const sampleItems = matches.slice(0, 5);
+			return [{ key: spec.key, label: spec.label, description: spec.description, disposition: spec.disposition, reason: spec.reason, reasonCategory: spec.reason ? this.archivedReasonCategory(spec.reason) : undefined, count: matches.length, sampleKeys: sampleItems.map(item => item.key), sampleItems, hasMore: matches.length > 5, actionable: spec.disposition === "ready-to-clean" }];
+		});
+	}
+
+	private archivedSelectionPresets(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeSelectionPreset[] {
+		const actionable = items.filter(item => item.actionable);
+		const makePreset = (id: string, label: string, description: string, matches: ArchivedSessionWorktreeItem[], cleanupRequest: CleanupArchivedSessionWorktreesRequest): ArchivedSessionWorktreeSelectionPreset => ({ id, label, description, enabled: matches.length > 0, count: matches.length, worktreeKeys: matches.map(item => item.key), cleanupRequest });
+		const presets: ArchivedSessionWorktreeSelectionPreset[] = [
+			makePreset("all-removable", "Select all removable", "Select every archived-session worktree that is safe to clean.", actionable, { mode: "all" }),
+			makePreset("category:archived-session", "Archived sessions only", "Select all actionable archived-session worktrees.", actionable.filter(item => item.selectionCategories.includes("archived-session")), { mode: "category", categories: ["archived-session"] }),
+		];
+		const categoryLabels: Partial<Record<ArchivedWorktreeSelectionCategory, string>> = { "goal-session": "Goal sessions", "team-session": "Goal/team worktrees", "delegate-session": "Delegate worktrees" };
+		for (const category of ["goal-session", "team-session", "delegate-session"] as const) {
+			const matches = actionable.filter(item => item.selectionCategories.includes(category));
+			if (matches.length > 0) presets.push(makePreset(`category:${category}`, categoryLabels[category] ?? category, `Select actionable ${category.replace(/-/g, " ")} worktrees.`, matches, { mode: "category", categories: [category] }));
+		}
+		const projects = new Map<string, ArchivedSessionWorktreeItem[]>();
+		const repos = new Map<string, ArchivedSessionWorktreeItem[]>();
+		for (const item of actionable) {
+			if (item.projectId) projects.set(item.projectId, [...(projects.get(item.projectId) ?? []), item]);
+			const rk = norm(item.repoPath);
+			if (rk) repos.set(rk, [...(repos.get(rk) ?? []), item]);
+		}
+		for (const [projectId, matches] of projects) presets.push(makePreset(`project:${projectId}`, matches[0]?.projectName ? `Current project: ${matches[0].projectName}` : "Current project", "Select actionable archived worktrees in this project.", matches, { mode: "category", categories: ["archived-session"], projectId }));
+		for (const [repoPath, matches] of repos) presets.push(makePreset(`repo:${repoPath}`, matches[0]?.repoDisplayName ? `Repository: ${matches[0].repoDisplayName}` : "Repository", "Select actionable archived worktrees in this repository.", matches, { mode: "category", categories: ["archived-session"], repoPath }));
+		return presets;
+	}
+
+	private archivedReasonCategory(reason: ArchivedWorktreeReason): ArchivedWorktreeReasonCategory {
+		switch (reason) {
+			case "safe-archived-session-worktree": return "safe";
+			case "already-cleaned": return "already-cleaned";
+			case "no-worktree-path":
+			case "missing-repo-path": return "missing-metadata";
+			case "sandbox-container-path": return "container-path";
+			case "delegate-shared-worktree": return "shared-delegate";
+			case "stale-worktree-directory": return "stale-path";
+			case "referenced-by-live-session":
+			case "referenced-by-live-goal":
+			case "referenced-by-live-team":
+			case "referenced-by-staff": return "referenced-record";
+			case "scan-error": return "error";
+		}
+	}
+
+	private zeroArchivedCleanupCounts(): CleanupArchivedSessionWorktreesResponse["counts"] {
+		return { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0, worktreeRemoved: 0, invalidSelection: 0, notActionable: 0, byStatus: {}, byReason: {} };
 	}
 
 	private discoverRepos(): RepoDescriptor[] {
@@ -540,8 +793,8 @@ export class WorktreeInventoryService {
 		if (isContainerInternalWorktreePath(candidate.path)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "sandbox-container-path", detail: "Container-internal paths are not host cleanup targets." };
 		if (candidate.primary || norm(candidate.path) === norm(candidate.repoPath)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "primary-worktree", detail: "Primary repository worktrees are never cleanup targets." };
 		if (liveOwner) return { ...item, classification: "protected-in-use", disposition: "protected", reason: this.ownerReason(liveOwner.type), detail: "A live Bobbit record still references this worktree." };
-		if (candidate.branch && guards.liveBranches.get(repoKey(candidate.repoPath))?.has(candidate.branch)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "branch-referenced-by-live-record", detail: "A live Bobbit record still references this branch." };
 		if (candidate.sources.has("pool") || isBobbitPoolBranch(candidate.branch)) return { ...item, classification: "pool-entry", disposition: "needs-attention", reason: "safe-pool-entry", detail: "Pool entries are inventoried for troubleshooting and reclaimed by the worktree pool, not selected by maintenance cleanup." };
+		if (candidate.branch && guards.liveBranches.get(repoKey(candidate.repoPath))?.has(candidate.branch)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "branch-referenced-by-live-record", detail: "A live Bobbit record still references this branch." };
 		if (candidate.legacyArchived) return this.fromLegacyArchived(item, candidate.legacyArchived);
 		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true };
 		if (candidate.gitWorktreeMetadataExists && isBobbitOwnedBranch(candidate.branch)) return { ...item, classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", detail: "Unowned Bobbit git worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, legacy: isLegacySessionOrphanBranch(candidate.branch) ? { ...item.legacy, orphanedWorktree: true } : item.legacy };

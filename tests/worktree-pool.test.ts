@@ -236,6 +236,25 @@ describe("WorktreePool — orphan reclaim", () => {
 			await rmRepo(repo);
 		}
 	});
+
+	it("does not duplicate an orphan already present in the in-memory pool", async () => {
+		const repo = await makeRepo();
+		try {
+			const configuredRoot = path.join(path.dirname(repo), "configured-wt");
+			const wtPath = path.join(configuredRoot, "pool-_pool-idempotent");
+			fs.mkdirSync(configuredRoot, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-idempotent", wtPath, "HEAD"], { cwd: repo });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 2, worktreeRoot: configuredRoot });
+			(pool as any).pool.push({ branchName: "pool/_pool-idempotent", worktreePath: wtPath, createdAt: Date.now() });
+			await (pool as any).reclaimOrphaned();
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 1);
+			assert.equal(snapshot.entries[0].branchName, "pool/_pool-idempotent");
+			assert.equal(snapshot.entries[0].worktreePath, wtPath);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
 });
 
 describe("WorktreePool — components[*].worktreeSetupCommand is the source of truth", () => {

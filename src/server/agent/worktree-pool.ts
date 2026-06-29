@@ -37,6 +37,7 @@ import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
 import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, type WorktreePoolSnapshot } from "./worktree-inventory.js";
+import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 
 const execFile = promisify(execFileCb);
 
@@ -613,6 +614,22 @@ export class WorktreePool {
 		}
 	}
 
+	private hasPoolEntry(branchName: string | undefined, worktreePath: string, worktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>): boolean {
+		const candidatePath = normalizeWorktreeHostPath(worktreePath);
+		const candidateWorktreePaths = new Set((worktrees ?? []).map(w => normalizeWorktreeHostPath(w.worktreePath)).filter(Boolean) as string[]);
+		return this.pool.some(entry => {
+			if (branchName && entry.branchName === branchName) return true;
+			const entryPath = normalizeWorktreeHostPath(entry.worktreePath);
+			if (entryPath && candidatePath && entryPath === candidatePath) return true;
+			for (const wt of entry.worktrees ?? []) {
+				const wtPath = normalizeWorktreeHostPath(wt.worktreePath);
+				if (wtPath && candidatePath && wtPath === candidatePath) return true;
+				if (wtPath && candidateWorktreePaths.has(wtPath)) return true;
+			}
+			return false;
+		});
+	}
+
 	/**
 	 * Scan for orphaned pool worktrees from a previous server instance and reclaim them.
 	 * An orphaned pool worktree is a directory under `<repo>-wt/` whose branch is still
@@ -655,6 +672,7 @@ export class WorktreePool {
 						}
 						const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: worktrees.length > 0 });
 						if (!verdict.eligible || !branch) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; if (worktrees.length === 0 && counters) counters.gitMissing++; continue; }
+						if (this.hasPoolEntry(branch, container, worktrees)) continue;
 						this.pool.push({ branchName: branch, worktreePath: container, worktrees, createdAt: Date.now() });
 						if (counters) counters.reclaimed++;
 						console.log(`[worktree-pool] Reclaimed orphaned multi-repo: ${branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);
@@ -667,6 +685,7 @@ export class WorktreePool {
 					const branch = stdout.trim();
 					const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: true });
 					if (!verdict.eligible) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; continue; }
+					if (this.hasPoolEntry(branch, container)) continue;
 					this.pool.push({ branchName: branch, worktreePath: container, createdAt: Date.now() });
 					if (counters) counters.reclaimed++;
 					console.log(`[worktree-pool] Reclaimed orphaned: ${branch} at ${container} (pool: ${this.pool.length}/${this.targetSize})`);

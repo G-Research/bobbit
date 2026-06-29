@@ -26,10 +26,11 @@ import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { isPoolBranch } from "./worktree-pool.js";
 import { cleanupWorktree } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
+import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, parseGitWorktreeList } from "./worktree-inventory.js";
+import { worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
 
 const execFile = promisify(execFileCb);
 
@@ -72,6 +73,8 @@ export interface SweepProject {
 	rootPath: string;
 	/** Multi-repo: distinct repo subfolder names. Single-repo omits or supplies ["."]. */
 	repos?: string[];
+	/** Project-level worktree_root override, resolved with the shared helper. */
+	worktreeRoot?: string;
 }
 
 export interface SweepRecord {
@@ -90,27 +93,7 @@ export interface SweepResult {
 	repaired: number;
 }
 
-interface ParsedWorktree {
-	path: string;
-	branch?: string;
-}
-
-/** Parse `git worktree list --porcelain` output. */
-function parseWorktreeList(stdout: string): ParsedWorktree[] {
-	const blocks = stdout.split(/\r?\n\r?\n/);
-	const out: ParsedWorktree[] = [];
-	for (const block of blocks) {
-		if (!block.trim()) continue;
-		const pathMatch = block.match(/^worktree (.+)$/m);
-		if (!pathMatch) continue;
-		const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
-		out.push({
-			path: pathMatch[1].trim(),
-			branch: branchMatch ? branchMatch[1].trim() : undefined,
-		});
-	}
-	return out;
-}
+type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
 const normalize = normalizeWorktreeHostPath;
 
@@ -167,6 +150,7 @@ export async function sweepOrphanedWorktrees(opts: {
 
 		for (const project of opts.projects) {
 			if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
+			const resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: project.rootPath, worktreeRoot: project.worktreeRoot });
 
 			// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
 			// is reconciled against the goal/session/staff record map. Single-repo
@@ -190,7 +174,7 @@ export async function sweepOrphanedWorktrees(opts: {
 						cwd: repoPath,
 						timeout: 10_000,
 					});
-					for (const wt of parseWorktreeList(stdout)) {
+					for (const wt of parseGitWorktreeList(stdout)) {
 						worktrees.push({ ...wt, repoPath });
 						if (diagCounters) diagCounters.worktreesSeen++;
 					}
@@ -208,11 +192,17 @@ export async function sweepOrphanedWorktrees(opts: {
 
 				const branch = wt.branch;
 
+				// Container-internal paths are not host cleanup targets.
+				if (isContainerInternalWorktreePath(wt.path)) continue;
+
 				// Pool branch — leave for `WorktreePool.reclaimOrphaned` to absorb.
-				// We just count it as "reclaimed" so logs reflect what's happening.
-				if (branch && isPoolBranch(branch)) {
-					reclaimed++;
-					if (diagCounters) diagCounters.reclaimed++;
+				// Use the same branch/root/path classifier primitives as maintenance.
+				if (branch && isBobbitPoolBranch(branch)) {
+					const poolVerdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot, candidatePath: wt.path, branch, gitMetadataExists: true });
+					if (poolVerdict.eligible || poolVerdict.reason === "filesystem-only-needs-attention") {
+						reclaimed++;
+						if (diagCounters) diagCounters.reclaimed++;
+					}
 					continue;
 				}
 
@@ -284,7 +274,7 @@ export function classifyWorktrees(opts: {
 	orphan: ParsedWorktree[];
 	repair: ParsedWorktree[];
 } {
-	const all = parseWorktreeList(opts.porcelainStdout);
+	const all = parseGitWorktreeList(opts.porcelainStdout);
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
@@ -311,7 +301,8 @@ export function classifyWorktrees(opts: {
 	for (const wt of all) {
 		const wtPathNorm = normalize(wt.path);
 		if (wtPathNorm === normalize(opts.repoPath)) continue;
-		if (wt.branch && isPoolBranch(wt.branch)) {
+		if (isContainerInternalWorktreePath(wt.path)) continue;
+		if (wt.branch && isBobbitPoolBranch(wt.branch)) {
 			pool.push(wt);
 			continue;
 		}

@@ -19,12 +19,12 @@ function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?
 	};
 }
 
-function makeService(ctx: any, porcelain: string, archivedItems: any[] = []) {
+function makeService(ctx: any, porcelain: string, archivedItems: any[] = [], pools = new Map()) {
 	return new WorktreeInventoryService({
 		projectContextManager: { visible: function* () { yield ctx; }, all: function* () { yield ctx; } } as any,
 		sessionManager: {
 			listSessions: () => [],
-			getAllWorktreePools: () => new Map(),
+			getAllWorktreePools: () => pools,
 			listArchivedSessionWorktrees: async () => ({ sessions: [], items: archivedItems, counts: {}, groups: [], selectionPresets: [], generatedAt: 1 }),
 		} as any,
 		execGit: async (_repoPath, args) => args[0] === "worktree" ? porcelain : "",
@@ -98,12 +98,45 @@ describe("worktree inventory classifier", () => {
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 
-	it("keeps pool candidates diagnostic and guards container paths", () => {
+	it("keeps pool candidates diagnostic and guards container paths", async () => {
 		assert.equal(isContainerInternalWorktreePath("/workspace-wt/session-x"), true);
 		const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: "/tmp/repo-wt", candidatePath: "/tmp/repo-wt/pool-_pool-a", branch: "pool/_pool-a", gitMetadataExists: true });
 		assert.equal(verdict.eligible, true);
 		const active = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: "/tmp/repo-wt", candidatePath: "/tmp/repo-wt/pool-_pool-a", branch: "pool/_pool-a", gitMetadataExists: true, activeWorktreePaths: new Set(["/tmp/repo-wt/pool-_pool-a"]) });
 		assert.equal(active.eligible, false);
 		assert.equal(active.reason, "referenced-by-live-session");
+
+		const { root, repo } = tmpProject();
+		try {
+			const wt = path.join(root, "repo-wt", "pool-_pool-a");
+			fs.mkdirSync(wt, { recursive: true });
+			const pools = new Map([["p1", { snapshotEntries: () => ({ entries: [{ branchName: "pool/_pool-a", worktreePath: wt, createdAt: 1 }], target: 1, filling: false }) }]]);
+			const service = makeService(makeCtx(repo), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/pool/_pool-a\n`, [], pools);
+			const report = await service.scan();
+			const item = report.items.find(i => i.path === wt)!;
+			assert.equal(item.classification, "pool-entry");
+			assert.equal(item.defaultSelected, false);
+			assert.equal(report.counts.poolEntries, 1);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("classifies multi-repo pool entries as pool-entry instead of branch-referenced live records", async () => {
+		const { root, repo } = tmpProject();
+		try {
+			const apiRepo = path.join(repo, "packages", "api");
+			fs.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
+			const container = path.join(root, "repo-wt", "pool-_pool-multi");
+			const apiWt = path.join(container, "packages", "api");
+			fs.mkdirSync(apiWt, { recursive: true });
+			const components = [{ name: "api", repo: "packages/api" }];
+			const pools = new Map([["p1", { snapshotEntries: () => ({ entries: [{ branchName: "pool/_pool-multi", worktreePath: container, worktrees: [{ repo: "packages/api", repoPath: apiRepo, worktreePath: apiWt }], createdAt: 1 }], target: 1, filling: false }) }]]);
+			const service = makeService(makeCtx(repo, { components }), `worktree ${apiRepo}\nbranch refs/heads/master\n\nworktree ${apiWt}\nbranch refs/heads/pool/_pool-multi\n`, [], pools);
+			const report = await service.scan();
+			const item = report.items.find(i => i.path === apiWt)!;
+			assert.equal(item.classification, "pool-entry");
+			assert.equal(item.reason, "safe-pool-entry");
+			assert.equal(item.defaultSelected, false);
+			assert.equal(report.counts.poolEntries, 1);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 });

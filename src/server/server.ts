@@ -2885,10 +2885,11 @@ export function createGateway(config: GatewayConfig) {
 			// unreachable for many seconds on installs with stale worktrees.
 			//
 			// Concurrency note: the sweeper and the pool init operate on DISJOINT
-			// branch sets — `worktree-sweeper.ts` explicitly skips pool branches
-			// (`isPoolBranch`), and `WorktreePool.reclaimOrphaned` only inspects
-			// pool branches. So the two phases are run concurrently via
-			// `Promise.all`, and project-level pool init is also parallelised
+			// branch sets — `worktree-sweeper.ts` explicitly skips Bobbit pool
+			// branches using the shared inventory classifier helpers, and
+			// `WorktreePool.reclaimOrphaned` only inspects pool branches. So the two
+			// phases are run concurrently via `Promise.all`, and project-level pool
+			// init is also parallelised
 			// across projects (each project's pool is independent). This avoids
 			// the previous serial chain that left the pool empty for minutes on
 			// installs with many stale worktrees, forcing every new session
@@ -2920,7 +2921,7 @@ export function createGateway(config: GatewayConfig) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
@@ -2932,6 +2933,7 @@ export function createGateway(config: GatewayConfig) {
 								id: ctx.project.id,
 								rootPath: ctx.project.rootPath,
 								repos: repoNames.length > 0 ? repoNames : undefined,
+								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});
 							for (const g of ctx.goalStore.getAll()) {
 								sweepGoals.push({
@@ -14721,12 +14723,26 @@ async function handleApiRoute(
 	// POST /api/maintenance/cleanup-worktrees
 	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
 		const body = await readBody(req);
-		if (body && typeof body === "object" && !Array.isArray(body) && ((body as any).mode === "all-safe" || (body as any).mode === "selected")) {
-			if ((body as any).mode === "selected" && (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string"))) {
+		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "mode")) {
+			const mode = (body as any).mode;
+			if (mode !== "all-safe" && mode !== "selected") {
+				json({ error: "mode must be all-safe or selected" }, 400);
+				return;
+			}
+			if (mode === "all-safe") {
+				if (Object.prototype.hasOwnProperty.call(body, "itemIds") || Object.prototype.hasOwnProperty.call(body, "worktrees")) {
+					json({ error: "mode=all-safe does not accept selectors" }, 400);
+					return;
+				}
+			} else if (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string")) {
 				json({ error: "itemIds must be an array of strings" }, 400);
 				return;
 			}
 			json(await worktreeInventory().cleanup(body as any));
+			return;
+		}
+		if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
+			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
 			return;
 		}
 		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: body?.worktrees });
