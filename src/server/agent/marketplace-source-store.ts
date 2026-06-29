@@ -38,6 +38,10 @@ export interface MarketplaceSource {
 	type?: StoredMarketplaceSourceType;
 	/** Git remote URL OR absolute local directory path; MCP endpoint URL for MCP gateway sources. */
 	url: string;
+	/** Persisted readable label for MCP gateway sources. */
+	displayName?: string;
+	/** Unsuffixed normalized readable label for MCP gateway sources. */
+	normalizedName?: string;
 	/** Branch/tag. Optional for pack sources only (defaults to the remote HEAD on clone). */
 	ref?: string;
 	addedAt: string; // ISO-8601
@@ -65,6 +69,43 @@ function nonEmptyString(v: unknown): v is string {
 }
 
 export const LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON = "mcp-registry sources are no longer supported; remove and re-add this source as an MCP Gateway source";
+
+export interface NormalizedMcpGatewaySourceName {
+	baseName: string;
+	slugBase: string;
+}
+
+function slugifySourceName(value: string): string {
+	let slug = value
+		.toLowerCase()
+		.replace(/[^a-z0-9-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.replace(/-{2,}/g, "-");
+	if (!slug || !/^[a-z0-9]/.test(slug)) slug = `source${slug ? `-${slug}` : ""}`;
+	return slug.replace(/^[^a-z0-9]+/, "") || "source";
+}
+
+export function normalizeMcpGatewaySourceName(url: string): NormalizedMcpGatewaySourceName {
+	let parsed: URL;
+	try {
+		parsed = new URL(url.trim());
+	} catch {
+		throw new Error(`invalid mcp-gateway source url: ${url}`);
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("mcp-gateway source url must use http or https");
+	let baseName = `${parsed.host}${parsed.pathname}`.replace(/\/+$/g, "");
+	if (!baseName || baseName === parsed.host) baseName = parsed.host;
+	return { baseName, slugBase: slugifySourceName(baseName) };
+}
+
+function uniqueSourceIdFromSlug(slugBase: string, taken: ReadonlySet<string>): string {
+	let slug = slugBase || "source";
+	if (!/^[a-z0-9]/.test(slug)) slug = `source-${slug}`;
+	if (!taken.has(slug)) return slug;
+	let n = 2;
+	while (taken.has(`${slug}-${n}`)) n++;
+	return `${slug}-${n}`;
+}
 
 function normalizeStoredSourceType(v: unknown): StoredMarketplaceSourceType | null {
 	if (v === undefined || v === "pack") return "pack";
@@ -104,6 +145,16 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 	if (type !== "pack") s.type = type;
 	// Non-pack sources do not support refs. Ignore malformed on-disk refs rather
 	// than preserving them across the next save.
+	if (type === "mcp-gateway") {
+		try {
+			const normalized = normalizeMcpGatewaySourceName(s.url);
+			s.normalizedName = nonEmptyString(r.normalizedName) ? (r.normalizedName as string).trim() : normalized.baseName;
+			s.displayName = nonEmptyString(r.displayName) ? (r.displayName as string).trim() : s.normalizedName;
+		} catch {
+			if (nonEmptyString(r.normalizedName)) s.normalizedName = (r.normalizedName as string).trim();
+			if (nonEmptyString(r.displayName)) s.displayName = (r.displayName as string).trim();
+		}
+	}
 	if (type === "pack" && nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
 	if (nonEmptyString(r.trustedAt)) s.trustedAt = r.trustedAt as string;
 	if (nonEmptyString(r.lastSyncedAt)) s.lastSyncedAt = r.lastSyncedAt as string;
@@ -114,6 +165,10 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 function serializeSource(s: MarketplaceSource): Record<string, unknown> {
 	const out: Record<string, unknown> = { id: s.id, url: s.url };
 	if (s.type && s.type !== "pack") out.type = s.type;
+	if (s.type === "mcp-gateway") {
+		if (s.displayName) out.displayName = s.displayName;
+		if (s.normalizedName) out.normalizedName = s.normalizedName;
+	}
 	if ((!s.type || s.type === "pack") && s.ref) out.ref = s.ref;
 	out.addedAt = s.addedAt;
 	if (s.trustedAt) out.trustedAt = s.trustedAt;
@@ -226,7 +281,17 @@ export class MarketplaceSourceStore {
 			throw new Error(`the built-in source cannot be added`);
 		}
 		if (this.getByUrl(url)) throw new Error(`source already registered: ${url}`);
-		const id = deriveSourceId(url, new Set(this.sources.map((s) => s.id)));
+		let displayName: string | undefined;
+		let normalizedName: string | undefined;
+		let idBase: string | undefined;
+		if (type === "mcp-gateway") {
+			const normalized = normalizeMcpGatewaySourceName(url);
+			normalizedName = normalized.baseName;
+			displayName = this.uniqueGatewayDisplayName(normalized.baseName);
+			idBase = slugifySourceName(displayName);
+		}
+		const takenIds = new Set(this.sources.map((s) => s.id));
+		const id = idBase ? uniqueSourceIdFromSlug(idBase, takenIds) : deriveSourceId(url, takenIds);
 		// Reject the reserved built-in id (§4.4) even if a url happens to slug to it.
 		if (id === BUILTIN_SOURCE_ID) throw new Error(`the built-in source cannot be added`);
 		const now = new Date().toISOString();
@@ -237,10 +302,23 @@ export class MarketplaceSourceStore {
 			trustedAt: now,
 		};
 		if (type !== "pack") source.type = type;
+		if (displayName) source.displayName = displayName;
+		if (normalizedName) source.normalizedName = normalizedName;
 		if (type === "pack" && nonEmptyString(input.ref)) source.ref = input.ref!.trim();
 		this.sources.push(source);
 		this.save();
 		return publicSource(source);
+	}
+
+	private uniqueGatewayDisplayName(baseName: string): string {
+		const used = new Set(this.sources
+			.filter((s) => s.type === "mcp-gateway")
+			.map((s) => s.displayName)
+			.filter((s): s is string => typeof s === "string" && s.length > 0));
+		if (!used.has(baseName)) return baseName;
+		let n = 2;
+		while (used.has(`${baseName} (${n})`)) n++;
+		return `${baseName} (${n})`;
 	}
 
 	/** Patch sync metadata after a sync. No-op if id unknown. */

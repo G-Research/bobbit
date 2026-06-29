@@ -21,6 +21,7 @@ export interface GatewayConnection {
 
 export interface GatewayOperation {
 	name: string;
+	label?: string;
 	description?: string;
 	inputSchema?: unknown;
 }
@@ -69,6 +70,8 @@ export type McpGatewayBrowsePack = PackManifest & {
 
 export interface MaterializeGatewayProviderPackOptions {
 	sourceUrl?: string;
+	sourceId?: string;
+	sourceName?: string;
 	materializedAt?: string;
 }
 
@@ -376,7 +379,7 @@ function normalizeOperations(raw: Record<string, unknown>): GatewayOperation[] |
 		const provider = firstString(item, ["provider", "namespace", "subNamespace"]);
 		if (name && provider && name.startsWith(`${provider}__`)) name = name.slice(provider.length + 2);
 		if (!name) continue;
-		operations.push(stripUndefined({ name, description: firstString(item, ["description"]), inputSchema: item.inputSchema }));
+		operations.push(stripUndefined({ name, label: firstString(item, ["label", "title", "displayName"]), description: firstString(item, ["description"]), inputSchema: item.inputSchema }));
 	}
 	return operations.length > 0 ? operations : undefined;
 }
@@ -441,6 +444,7 @@ function connectionToMcpWire(provider: McpGatewayProvider, listName: string, con
 		transport: "http",
 		url: connection.url,
 		headers: connection.headers ? Object.keys(connection.headers) : undefined,
+		operations: provider.operations,
 	});
 }
 
@@ -473,12 +477,18 @@ export function materializeGatewayProviderPack(provider: McpGatewayProvider, des
 	if (provider.write && writeMcpPath) {
 		fs.writeFileSync(writeMcpPath, stringify(mcpContributionYaml(provider, `${provider.id}-write`, provider.write)), "utf-8");
 	}
+	const gatewayOperations = provider.operations && provider.operations.length > 0
+		? Object.fromEntries(providerMcpWireEntries(provider).map((entry) => [entry.listName as string, provider.operations]))
+		: undefined;
 	fs.writeFileSync(metaPath, stringify(stripUndefined({
 		sourceType: "mcp-gateway",
 		sourceUrl: opts.sourceUrl,
+		sourceId: opts.sourceId,
+		sourceName: opts.sourceName,
 		gatewayProviderId: provider.id,
 		gatewayFingerprint: provider.fingerprint,
 		gatewayVersion: provider.version,
+		gatewayOperations,
 		materializedAt: opts.materializedAt || new Date().toISOString(),
 		label: provider.label,
 		description: provider.description,

@@ -224,6 +224,7 @@ export interface DisabledRefs {
 	providers?: string[];
 	hooks?: string[];
 	mcp?: string[];
+	mcpOperations?: Record<string, string[]>;
 	piExtensions?: string[];
 	runtimes?: string[];
 	workflows?: string[];
@@ -233,6 +234,17 @@ export interface DisabledRefs {
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
 const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows"] as const;
+
+function normalizeMcpOperations(raw: unknown): Record<string, string[]> | undefined {
+	if (!isPlainObject(raw)) return undefined;
+	const out: Record<string, string[]> = {};
+	for (const [contributionId, ops] of Object.entries(raw)) {
+		if (typeof contributionId !== "string" || contributionId.length === 0 || !Array.isArray(ops)) continue;
+		const names = [...new Set(ops.filter((x): x is string => typeof x === "string" && x.length > 0))];
+		if (names.length > 0) out[contributionId] = names;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
 
 function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } {
 	if (!isPlainObject(raw)) return { value: {}, ok: false };
@@ -255,6 +267,8 @@ function normalizeDisabledRefs(raw: unknown): DisabledRefs {
 		const names = v.filter((x): x is string => typeof x === "string");
 		if (names.length > 0) out[kind] = names;
 	}
+	const mcpOperations = normalizeMcpOperations(raw.mcpOperations);
+	if (mcpOperations) out.mcpOperations = mcpOperations;
 	return out;
 }
 
@@ -655,6 +669,8 @@ export class ProjectConfigStore {
 					const arr = refs[kind];
 					if (Array.isArray(arr) && arr.length > 0) o[kind] = [...arr];
 				}
+				const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
+				if (mcpOperations) o.mcpOperations = mcpOperations;
 				if (Object.keys(o).length > 0) scopeOut[packName] = o;
 			}
 			if (Object.keys(scopeOut).length > 0) out[scope] = scopeOut;
@@ -867,6 +883,8 @@ export class ProjectConfigStore {
 			const arr = refs[kind];
 			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
 		}
+		const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
+		if (mcpOperations) out.mcpOperations = mcpOperations;
 		return out;
 	}
 

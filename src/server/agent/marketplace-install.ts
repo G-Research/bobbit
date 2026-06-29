@@ -85,6 +85,10 @@ export interface BrowsePack extends PackManifest {
 	mcpServers?: Array<Record<string, unknown>>;
 	/** Source-level diagnostics for gateway entries skipped while preserving browse compatibility. */
 	mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics;
+	/** Source provenance attached by all-source Browse responses. */
+	source?: { id: string; name: string; type: "builtin" | "pack" | "mcp-gateway"; builtin?: boolean };
+	/** Stable per-source UI key attached by all-source Browse responses. */
+	browseKey?: string;
 }
 
 /** Installed-pack listing row for the REST layer. */
@@ -645,7 +649,7 @@ export class MarketplaceInstaller {
 			scope: args.scope as PackScope,
 		};
 		try {
-			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(staging, dest);
 		} catch (err) {
@@ -764,7 +768,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		try {
-			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, materializedAt: now });
+			materializeGatewayProviderPack(provider, staging, { sourceUrl: source.url, sourceId: source.id, sourceName: source.displayName ?? source.id, materializedAt: now });
 			writeMetaPreservingMaterializedDetails(staging, meta);
 			fs.renameSync(dest, backup);
 			try {

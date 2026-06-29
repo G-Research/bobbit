@@ -157,7 +157,14 @@ test.describe("Marketplace MCP API integration", () => {
 				body: JSON.stringify({ url: gatewaySource.url, type: "mcp-gateway" }),
 			});
 			expect(add.status).toBe(201);
-			sourceId = (await add.json()).source.id;
+			const addBody = await add.json();
+			sourceId = addBody.source.id;
+			expect(addBody.source.displayName).toMatch(/127\.0\.0\.1:\d+\/readonly\/mcp/);
+
+			const unionBrowse = await apiFetch("/api/marketplace/browse");
+			expect(unionBrowse.status).toBe(200);
+			const unionBrowseBody = await unionBrowse.json();
+			expect(unionBrowseBody.sources).toEqual(expect.arrayContaining([expect.objectContaining({ sourceId, sourceType: "mcp-gateway", status: "ok", sourceName: addBody.source.displayName })]));
 
 			const pack = await browseRemoteGatewayPack(sourceId!);
 			packName = pack.name;
@@ -181,7 +188,19 @@ test.describe("Marketplace MCP API integration", () => {
 			const activation = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(pack.name)}`);
 			expect(activation.status).toBe(200);
 			const activationBody = await activation.json();
-			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: "jira", serverName: "gr", subNamespace: "jira", label: "Jira", transport: "http" });
+			const contributionId = activationBody.catalogue.mcp[0].contributionId;
+			expect(contributionId).toMatch(/^mcp:[a-f0-9]{16}$/);
+			expect(activationBody.catalogue.mcp[0]).toMatchObject({ ref: "jira", contributionId, serverName: "gr", subNamespace: "jira", label: "Jira", transport: "http", totalOperationCount: 2, selectedOperationCount: 2 });
+			expect(activationBody.catalogue.mcp[0].operations.map((op: any) => op.name)).toEqual(["jira_search", "jira_get_issue"]);
+
+			const patchOp = await apiFetch("/api/marketplace/pack-activation/mcp-operation", {
+				method: "PATCH",
+				body: JSON.stringify({ scope: "server", contributionId, operationName: "jira_search", disabled: true }),
+			});
+			expect(patchOp.status).toBe(200);
+			const patchOpBody = await patchOp.json();
+			expect(patchOpBody.disabled.mcpOperations[contributionId]).toEqual(["jira_search"]);
+			expect(patchOpBody.catalogue.mcp[0]).toMatchObject({ selectedOperationCount: 1, totalOperationCount: 2, disabledOperations: ["jira_search"] });
 
 			let mcp = await apiFetch("/api/mcp-servers");
 			expect(mcp.status).toBe(200);
@@ -194,10 +213,13 @@ test.describe("Marketplace MCP API integration", () => {
 
 			const disable = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
-				body: JSON.stringify({ scope: "server", packName: pack.name, disabled: { mcp: ["jira"] } }),
+				body: JSON.stringify({ scope: "server", packName: pack.name, disabled: { mcp: [contributionId], mcpOperations: { [contributionId]: ["jira_search", "retired_op"] } } }),
 			});
 			expect(disable.status).toBe(200);
-			expect((await disable.json()).disabled.mcp).toEqual(["jira"]);
+			const disableBody = await disable.json();
+			expect(disableBody.disabled.mcp).toEqual([contributionId]);
+			expect(disableBody.disabled.mcpOperations[contributionId]).toEqual(["jira_search", "retired_op"]);
+			expect(disableBody.catalogue.mcp[0].staleDisabledOperations).toEqual(["retired_op"]);
 			mcp = await apiFetch("/api/mcp-servers");
 			servers = await mcp.json();
 			gr = servers.find((s: any) => s.name === "gr");
