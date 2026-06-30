@@ -1,7 +1,9 @@
 # MCP Gateway Polish
 
-Status: design artifact for `design-doc` gate  
+Status: implemented design record
 Scope: Marketplace MCP gateway source identity, all-source Browse, installed gateway package operation selection, MCP Tools policy hierarchy, and runtime union/conflict behavior.
+
+This document preserves the implementation rationale and target model. For concise operational reference, see [Marketplace MCP](../marketplace.md#marketplace-mcp) and [MCP meta-tool aggregation](../mcp-meta-tools.md).
 
 ## Goals
 
@@ -13,39 +15,40 @@ Scope: Marketplace MCP gateway source identity, all-source Browse, installed gat
 - Allow multiple installed gateway packages/sources to expose a union of selected operations, with deterministic precedence for model-facing name clashes.
 - Keep manual JSON MCP configuration behavior compatible.
 
-## Current architecture summary
+## Implementation architecture summary
 
-Relevant current code:
+Relevant code:
 
 - Source storage: `src/server/agent/marketplace-source-store.ts`
   - `MarketplaceSource.type` supports `"pack" | "mcp-gateway"`; legacy `"mcp-registry"` rows are surfaced as unsupported.
-  - `deriveSourceId()` currently derives an id from the last URL/path segment, not the normalized gateway authority/path.
-  - `MarketplaceSource` has no persisted display name.
+  - `normalizeMcpGatewaySourceName()` derives readable gateway names from URL authority + path, and gateway source ids are slugged from the persisted display name.
+  - Gateway sources persist `normalizedName` and duplicate-suffixed `displayName`.
 - Gateway parsing/materialization: `src/server/agent/mcp-gateway-source.ts`
   - `fetchMcpGatewayWithDiagnostics()` discovers via MCP protocol or catalogue mode and returns providers + skipped diagnostics.
   - `gatewayProviderToVirtualPack()` produces virtual schema-2 packs.
   - `materializeGatewayProviderPack()` writes `pack.yaml`, `mcp/<provider>.yaml`, optional write YAML, and `.pack-meta.yaml`.
   - Gateway provider packs currently materialize runtime servers like `gr` / `gr-write` with `subNamespace: <providerId>`.
 - Marketplace install/browse: `src/server/agent/marketplace-install.ts`
-  - `browseSourcePacks(sourceId)` browses exactly one source.
-  - `BrowsePack` has gateway metadata, but no canonical source metadata on every row.
-  - `listInstalled()` returns installed rows by scope; update detection still assumes installed `packName` is unique inside a source/scope.
+  - `browseSourcePacks(sourceId)` still browses one concrete source; `GET /api/marketplace/browse` composes the all-source union and attaches source metadata to every row.
+  - `BrowsePack` carries gateway metadata plus response-time `source` provenance and `browseKey`.
+  - Gateway pack names are source-qualified; update detection uses persisted source id/provider metadata for gateway rows and normal `sourceUrl`/`packName` behavior for authored pack sources.
 - Marketplace routes: `src/server/server.ts`
-  - `GET /api/marketplace/sources/:id/packs` browses one source.
-  - `GET/PUT /api/marketplace/pack-activation` persists disabled pack entities, including whole MCP contribution refs in `disabled.mcp`.
-  - `buildActivationCatalogue()` enriches MCP entries from `loadPackContributions()` + `GET /api/mcp-servers` status.
+  - `GET /api/marketplace/browse` returns built-in, pack, and MCP gateway rows with per-source status.
+  - `GET/PUT /api/marketplace/pack-activation` persists disabled pack entities, whole MCP contribution refs in `disabled.mcp`, and operation refs in `disabled.mcpOperations`.
+  - `PATCH /api/marketplace/pack-activation/mcp-operation` atomically merges one gateway operation toggle and returns a fresh revision/catalogue.
+  - `buildActivationCatalogue()` enriches MCP entries from installed pack metadata, operation metadata, runtime status, and current policy keys.
 - Pack activation persistence: `src/server/agent/project-config-store.ts`
-  - `DisabledRefs` supports arrays by entity kind, including `mcp?: string[]`, but not nested operation selections.
+  - `DisabledRefs` supports arrays by entity kind plus `mcpOperations?: Record<string, string[]>` for contribution-scoped disabled operation names.
 - MCP contributions/runtime: `src/server/agent/pack-contributions.ts`, `src/server/mcp/mcp-manager.ts`
-  - `McpPackContribution` has `listName`, `serverName`, optional `subNamespace`, and `config`.
-  - `McpManager.groupMarketplaceContributions()` groups by `serverName`; same server with different config overrides prior contributions.
-  - `getToolInfos()` exposes connected operation names as `mcp__<server>__<op>` or `mcp__<server>__<sub>__<op>` and filters inactive subnamespaces.
+  - `McpPackContribution` has `listName`, `serverName`, optional `runtimeServerKey`, optional `subNamespace`, selected/disabled operation lists, optional operation metadata, and `config`.
+  - `McpManager.groupMarketplaceContributions()` groups by runtime key and identical config, preserving owner contributions and active sub-namespaces.
+  - `getToolInfos()` and `callTool()` resolve through a route map that exposes selected operation names as `mcp__<server>__<op>` or `mcp__<server>__<sub>__<op>` and filters disabled/inactive operations.
 - Tool policy/runtime registration: `src/server/agent/tool-activation.ts`, `src/app/tool-manager-page.ts`
   - Server-level `mcp__<server>`, package/subnamespace-level `mcp__<server>__<sub>`, and operation-level `mcp__<server>__<sub>__<op>` policies are supported.
   - Role policies take precedence over persisted/group policies for operations that are available; installed-package activation remains the hard disable boundary.
   - `/api/internal/mcp-call` enforces `never` via `resolveGrantPolicy()` before dispatch.
 - Tools UI: `src/app/tool-manager-page.ts`
-  - MCP section renders server rows, subnamespace rows, and operation rows, but operation rows use normal `renderToolRow()` editing rather than a dedicated operation policy selector.
+  - MCP section renders server rows, subnamespace/package rows, and operation rows; operation rows have policy selectors using server-provided operation policy keys when available.
 
 ## 1. Normalized MCP gateway source naming
 
@@ -383,8 +386,9 @@ In `src/server/agent/tool-activation.ts`:
 
 ```ts
 interface McpPolicyKeys {
-  wildcard: "mcp__";
-  server: string;       // mcp__gr
+  group: string;        // back-compat whole-server key, e.g. mcp__gr
+  server: string;       // same as group
+  tool: string;         // back-compat alias for package ?? group
   package?: string;     // mcp__gr__confluence
   operation?: string;   // mcp__gr__confluence__op or mcp__server__op for flat
 }
@@ -403,8 +407,8 @@ interface McpPolicyKeys {
   8. group policy package/subnamespace key
   9. group policy server key
   10. group policy wildcard `mcp__`
-  11. normal group default
-  12. tool YAML default
+  11. tool YAML default
+  12. non-MCP group default
   13. system fallback `allow`
 
 For MCP tools, a persisted/group operation-level `never` such as `mcp__gr__confluence__confluence_add_comment: never` overrides permissive tool YAML defaults and broader persisted package/server/wildcard policies. It does not override role policy: role-level exact, package, server, and wildcard MCP policies are the higher-priority grant-policy source for operations that are otherwise available. Installed-pack activation toggles are the hard disable mechanism; operations disabled or unselected there are omitted before policy resolution and cannot be registered or called by any role/tool policy.
@@ -432,9 +436,9 @@ In `src/app/tool-manager-page.ts`:
 
 ## 5. MCP runtime union and conflict precedence across gateway packages
 
-### Problem with current model
+### Historical problem fixed by this model
 
-Current gateway packages materialize MCP contributions with shared runtime server names like `gr` and a package `subNamespace`. `McpManager.groupMarketplaceContributions()` groups by `serverName`; if two installed gateway sources both provide `serverName: "gr"` but with different gateway URLs/configs, the later config replaces the earlier one. This loses operations from the first gateway even when their package/subnamespace names are distinct.
+Before this polish, gateway packages materialized MCP contributions with shared runtime server names like `gr` and a package `subNamespace`. `McpManager.groupMarketplaceContributions()` grouped by public `serverName`; if two installed gateway sources both provided `serverName: "gr"` but with different gateway URLs/configs, one config replaced the other. That lost operations from the first gateway even when their package/subnamespace names were distinct.
 
 ### New internal model
 
@@ -499,7 +503,7 @@ Route-map ownership is an explicit `McpManager` responsibility, not a side effec
 2. Build public model names from `serverName`, optional `subNamespace`, and operation name.
 3. Drop operations not selected by package activation.
 4. Insert into `routeMap` by public `modelName`.
-5. If a later contribution produces the same public `modelName`, it replaces the earlier route. The losing operation is hidden from model/tool registration but should be reported in diagnostics/status.
+5. If another contribution produces the same public `modelName`, keep the first route in deterministic contribution order and record a conflict diagnostic for the dropped route. The losing operation is hidden from model/tool registration.
 6. Publish one authoritative map plus diagnostics for readers.
 
 `getToolInfos()` should call `ensureToolRouteMapFresh()` and then read the authoritative map; it should not be the only path that populates routing. `callTool(modelName, args)` must also call `ensureToolRouteMapFresh()` before dispatch and resolve through the route map before falling back to legacy parsing. Legacy fallback is needed for manual MCP compatibility and for tests that manually populate tool maps.
@@ -518,8 +522,8 @@ Use existing pack resolution order as the source of truth:
 For name clashes:
 
 - Distinct public model names from different packages/sources are all exposed.
-- Identical public model names expose only the winner by precedence.
-- Status/activation UI should show hidden conflicts as `Overridden` with the winning source/package when possible.
+- Identical public model names expose only the first route in deterministic contribution order; manual JSON MCP routes are ranked before Marketplace routes for compatibility.
+- Status/activation UI can show hidden conflicts as overridden/shadowed when route diagnostics identify the dropped source/package.
 
 ### Installed package names across sources
 

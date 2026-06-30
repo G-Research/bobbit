@@ -2061,9 +2061,9 @@ See also: [docs/rest-api.md - Image generation](rest-api.md#image-generation) fo
 
 ## MCP servers
 
-MCP discovery has two layers. Marketplace MCP contributions are resolved first, then the manual/Claude-compatible cascade overlays them by runtime server name. Sources (later overrides earlier):
+MCP discovery has two layers. Marketplace MCP contributions are resolved first, then the manual/Claude-compatible cascade overlays them for compatibility. Sources (later manual config entries override earlier manual entries):
 
-0. Active Marketplace MCP contributions from installed schema-2 packs and MCP registry materializations (lowest; `DisabledRefs.mcp` omitted before connection)
+0. Active Marketplace MCP contributions from installed schema-2 packs and MCP Gateway materializations (lowest; `DisabledRefs.mcp` contributions and `DisabledRefs.mcpOperations` operations are omitted before exposure)
 1. Custom directories with type `"mcp"`
 2. Additional registered projects' MCP locations (see below)
 3. `~/.claude.json` → `mcpServers` + `projects[<cwd>].mcpServers`
@@ -2072,6 +2072,8 @@ MCP discovery has two layers. Marketplace MCP contributions are resolved first, 
 6. `<project>/.mcp.json`
 7. `<project>/.claude/.mcp.json`
 8. `<project>/.bobbit/config/mcp.json` (highest priority)
+
+Marketplace gateway installs separate **public** MCP identity from **runtime** identity. Public names (`gr`, `gr-write`, sub-namespaces, and policy keys such as `mcp__gr__jira__jira_search`) stay readable, while runtime client keys include source/install/fingerprint identity so multiple gateway sources can coexist. `McpManager` exposes the union of selected operations through a route map. Distinct public operation names all register; identical public names keep the first route in deterministic contribution order and record a conflict diagnostic. Manual JSON MCP routes are considered before Marketplace routes for collision handling.
 
 **Multi-project discovery:** In multi-project setups, MCP discovery scans all registered projects - not just the primary project. Each additional project's custom MCP directories, `.mcp.json`, `.claude/.mcp.json`, and `.bobbit/config/mcp.json` are included. Additional project configs have lower priority than user-level configs (`~/.claude.json` etc.) and the primary project's own configs, so the primary project always wins on name conflicts. This ensures sessions can access MCP servers defined in any registered project without manual duplication.
 
@@ -2085,7 +2087,7 @@ Config format matches Claude Code `.mcp.json`:
 }
 ```
 
-**Tool surface:** the model sees one **meta-tool per server** named `mcp_<server>(operation, args)` plus a shared `mcp_describe(server, operation?)` discovery tool. The legacy per-op identifier `mcp__<server>__<tool>` remains the internal routing key (used by `_toolNameMap`, `tool-group-policies.yaml` keys like `mcp__playwright`, the dispatcher, and existing tests) but is no longer exposed to the model. Failed servers degrade to a stub meta-tool that reports the failure reason rather than aborting the agent turn. See [docs/mcp-meta-tools.md](mcp-meta-tools.md) for the user-facing overview and [docs/design/mcp-meta-tool-aggregation.md](design/mcp-meta-tool-aggregation.md) for the architecture.
+**Tool surface:** the model sees one **meta-tool per server or gateway sub-namespace** named `mcp_<server>(operation, args)` or `mcp_<server>__<sub>(operation, args)` plus a shared `mcp_describe(server, operation?)` discovery tool. The legacy per-op identifier `mcp__<server>__<tool>` / `mcp__<server>__<sub>__<tool>` remains the internal routing and policy key but is no longer exposed to the model. Tool policies can target the MCP wildcard (`mcp__`), server (`mcp__gr`), package/sub-namespace (`mcp__gr__jira`), or operation (`mcp__gr__jira__jira_search`). Failed servers degrade to a stub meta-tool that reports the failure reason rather than aborting the agent turn. See [docs/mcp-meta-tools.md](mcp-meta-tools.md) for the user-facing overview and [docs/design/mcp-meta-tool-aggregation.md](design/mcp-meta-tool-aggregation.md) for the architecture.
 
 Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`. Marketplace MCP validates the same transport shapes before they reach the runtime and redacts env/header values, args, URL credentials, URL query, and fragments in status payloads.
 
