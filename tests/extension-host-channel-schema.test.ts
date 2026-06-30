@@ -165,14 +165,18 @@ describe("channel contribution schema", () => {
 		assert.equal(reg.getChannel(undefined, "missing-pack", "echo"), undefined);
 	});
 
-	it("preserves sessionPty as metadata for later first-party authorization", () => {
+	it("preserves declared sessionPty through registry resolution", () => {
 		const root = packRoot("pty", "third-party");
 		writeChannelPack(root, {
 			channelFiles: {
-				pty: `${goodEchoYaml}\ncapabilities: [sessionPty]\n`,
+				pty: `${goodEchoYaml.replace("name: echo", "name: pty")}\ncapabilities: [sessionPty]\n`,
 			},
 		});
-		const channels = (loadPackContributions(root, manifest("third-party", ["pty"])) as any).channels;
+		const m = manifest("third-party", ["pty"]);
+		const channels = (loadPackContributions(root, m) as any).channels;
 		assert.deepEqual(channels[0].capabilities, ["sessionPty"]);
+
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]) as any;
+		assert.deepEqual(reg.getChannel(undefined, "third-party", "pty")?.capabilities, ["sessionPty"]);
 	});
 });

@@ -2,7 +2,7 @@
 
 **Surface:** Settings → Maintenance → Archived Session Worktrees  
 **Owner:** UX design only. Production implementation remains in `src/app/settings-page.ts`.  
-**Related docs:** [Archived session worktree cleanup](./archived-session-worktree-cleanup.md), [Maintenance](../maintenance.md#archived-session-worktrees)
+**Related docs:** [Archived session worktree cleanup](./archived-session-worktree-cleanup.md), [Maintenance](../maintenance.md#worktree-cleanup)
 
 ## Problem to solve
 

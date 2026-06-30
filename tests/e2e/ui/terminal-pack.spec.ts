@@ -175,7 +175,7 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalTextVisibleNearBottom(page, cursorHome, "scroll regression after cursor-positioning output");
 	});
 
-	test("touch pan over xterm-screen scrolls the xterm viewport @terminal-repro", async ({ page, browserName }) => {
+	test("touch pan over xterm-screen scrolls the xterm viewport; reproduces ambiguous marker assertion before touch pan hides the terminal tail @terminal-repro", async ({ page, browserName }) => {
 		test.skip(browserName !== "chromium", "CDP touch event dispatch is Chromium-only");
 		test.setTimeout(90_000);
 		await page.setViewportSize({ width: 1220, height: 620 });
@@ -210,22 +210,34 @@ test.describe("terminal pack panel", () => {
 		).toBe(true);
 
 		await dispatchTouchDragOverXtermScreen(page, client, "down");
-		const after = await terminalVisibleTouchLines(page, run);
-		expect(
-			after.firstLine !== null && before.firstLine !== null && after.firstLine < before.firstLine,
-			`TERMINAL_TOUCH_SCROLL: vertical touch pan over .xterm-screen should scroll to older xterm buffer rows; before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
-		).toBe(true);
+		const detached = await waitForStableDetachedTouchScroll(page, client, run, before, burstDone);
 
 		const whileScrolledUp = `${run}_WHILE_SCROLLED_UP`;
 		await injectTerminalTextFrame(page, `${whileScrolledUp}\r\n`);
 		const afterScrolledUpOutput = await terminalVisibleTouchLines(page, run);
+		const afterScrolledUpOutputScroll = await terminalScrollMetrics(page);
+		const afterOutputDiagnostics = terminalTouchScrollDetachedDiagnosticsFromLines(afterScrolledUpOutput, afterScrolledUpOutputScroll, run, burstDone, whileScrolledUp);
+		const noBottomJumpOnOutput =
+			afterOutputDiagnostics.firstLine !== null &&
+			detached.diagnostics.firstLine !== null &&
+			afterOutputDiagnostics.firstLine <= detached.diagnostics.firstLine + 2 &&
+			Math.abs(afterOutputDiagnostics.scroll.scrollTop - detached.diagnostics.scroll.scrollTop) <= 2;
+		const diagnostics = {
+			minDetachPx: detached.minDetachPx,
+			detachAttempts: detached.attempts,
+			stableDetachedState: true,
+			noBottomJumpOnOutput,
+			hiddenLiveMarkerAfterOutput: !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
+			after: detached.diagnostics,
+			afterOutput: afterOutputDiagnostics,
+		};
 		expect(
-			afterScrolledUpOutput.firstLine !== null && after.firstLine !== null && afterScrolledUpOutput.firstLine <= after.firstLine + 2 && !afterScrolledUpOutput.compactText.includes(whileScrolledUp),
-			`TERMINAL_TOUCH_SCROLL: follow-output should stay disabled when output arrives while touch-scrolled up; after=${JSON.stringify(after)} afterOutput=${JSON.stringify(afterScrolledUpOutput)}`,
+			noBottomJumpOnOutput && !afterOutputDiagnostics.whileScrolledUpMarkerVisible,
+			`TERMINAL_TOUCH_SCROLL: output while touch-detached must not force-follow or become visible; diagnostics=${JSON.stringify(diagnostics)}`,
 		).toBe(true);
 
 		let returnedToBottom = await terminalVisibleTouchLines(page, run);
-		for (let i = 0; i < 4 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
+		for (let i = 0; i < 12 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
 			await dispatchTouchDragOverXtermScreen(page, client, "up");
 			returnedToBottom = await terminalVisibleTouchLines(page, run);
 		}
@@ -334,6 +346,8 @@ test.describe("terminal pack panel", () => {
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalReadyForInput(page);
+		const liveChannelId = await latestTerminalChannelId(page);
+		expect(liveChannelId, "gateway restart setup should have a live terminal channel before the crash").toBeTruthy();
 		const marker = `bobbit_terminal_restart_${Date.now()}`;
 		await typeCommand(page, `echo ${marker}`);
 		await expect(page.locator(terminalHost())).toContainText(marker, { timeout: 20_000 });
@@ -348,6 +362,24 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /disconnected/, { timeout: 30_000 });
 		await expect(page.locator(terminalPanel())).toContainText(/disconnected|closed|Restart/i, { timeout: 10_000 });
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 5_000 }).toBe(0);
+
+		const openBeforeRestart = await channelSendCount(page, "ext_channel_open");
+		const startButton = page.locator(terminalPanel()).getByRole("button", { name: "Start or restart terminal" });
+		await expect(startButton, "restored disconnected terminal should offer an explicit Restart/Start action").toBeEnabled({ timeout: 20_000 });
+		await startButton.click();
+		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(openBeforeRestart);
+		await waitForTerminalReadyForInput(page);
+		await expect.poll(
+			async () => {
+				const restartedChannelId = await latestTerminalChannelId(page);
+				return Boolean(restartedChannelId && restartedChannelId !== liveChannelId);
+			},
+			{ message: "Restart after gateway restart should attach a newly opened terminal channel", timeout: 20_000 },
+		).toBe(true);
+
+		const restartMarker = `${marker}_after_restart`;
+		await typeCommand(page, `echo ${restartMarker}`);
+		await expect(page.locator(terminalHost())).toContainText(restartMarker, { timeout: 20_000 });
 	});
 });
 
@@ -441,7 +473,7 @@ async function waitForTerminalAnimationFrames(page: import("@playwright/test").P
 	});
 }
 
-type TerminalScrollMetrics = { scrollTop: number; scrollHeight: number; clientHeight: number; maxScrollTop: number; atBottom: boolean; scrollAreaHeight: string; rowCount: number; scrollElementClass: string };
+type TerminalScrollMetrics = { scrollTop: number; scrollHeight: number; clientHeight: number; maxScrollTop: number; atBottom: boolean; scrollAreaHeight: string; rowCount: number; rowHeight: number | null; scrollElementClass: string };
 
 async function terminalScrollMetrics(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
 	return page.evaluate(() => {
@@ -453,6 +485,9 @@ async function terminalScrollMetrics(page: import("@playwright/test").Page): Pro
 		const clientHeight = scrollElement?.clientHeight ?? 0;
 		const scrollAreaHeight = scrollArea?.style.height || getComputedStyle(scrollArea ?? document.body).height;
 		const scrollAreaHeightPx = Number.parseFloat(scrollAreaHeight) || 0;
+		const rowElements = Array.from(host?.querySelectorAll(".xterm-rows > div") ?? []) as HTMLElement[];
+		const firstRowRect = rowElements[0]?.getBoundingClientRect();
+		const rowHeight = firstRowRect && firstRowRect.height > 0 ? firstRowRect.height : null;
 		const effectiveScrollHeight = Math.max(scrollHeight, scrollAreaHeightPx, scrollTop + clientHeight);
 		const maxScrollTop = Math.max(0, effectiveScrollHeight - clientHeight);
 		return {
@@ -462,7 +497,8 @@ async function terminalScrollMetrics(page: import("@playwright/test").Page): Pro
 			maxScrollTop,
 			atBottom: Math.abs(maxScrollTop - scrollTop) <= 2,
 			scrollAreaHeight,
-			rowCount: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+			rowCount: rowElements.length,
+			rowHeight,
 			scrollElementClass: scrollElement?.className ?? "",
 		};
 	});
@@ -477,13 +513,14 @@ async function dispatchTouchDragOverXtermScreen(
 	page: import("@playwright/test").Page,
 	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },
 	direction: "down" | "up" = "down",
+	travelOverridePx?: number,
 ): Promise<void> {
 	const screen = page.locator(`${terminalHost()} .xterm-screen`).first();
 	await expect(screen, "touch scroll reproducer needs a visible .xterm-screen target").toBeVisible({ timeout: 10_000 });
 	const rect = await screen.boundingBox();
 	if (!rect) throw new Error("touch scroll reproducer could not resolve .xterm-screen bounds");
 	const x = Math.round(rect.x + rect.width / 2);
-	const travel = Math.max(80, Math.min(220, rect.height * 0.45));
+	const travel = travelOverridePx ?? Math.max(80, Math.min(220, rect.height * 0.45));
 	const lowY = Math.round(rect.y + Math.min(rect.height - 10, Math.max(30, rect.height * 0.35)));
 	const highY = Math.round(Math.min(rect.y + rect.height - 6, lowY + travel));
 	const startY = direction === "down" ? lowY : highY;
@@ -518,6 +555,94 @@ async function terminalVisibleTouchLines(page: import("@playwright/test").Page, 
 			rows,
 		};
 	}, run);
+}
+
+function terminalTouchScrollDetachedDiagnosticsFromLines(
+	lines: { firstLine: number | null; lastLine: number | null; text: string; compactText: string; rows: string[] },
+	scroll: TerminalScrollMetrics,
+	run: string,
+	tailMarker: string,
+	whileScrolledUpMarker = "",
+) {
+	let lastIndexedRow = -1;
+	for (let i = lines.rows.length - 1; i >= 0; i -= 1) {
+		if (lines.rows[i]?.includes(`${run}_LINE_`)) {
+			lastIndexedRow = i;
+			break;
+		}
+	}
+	const tailRowsAfterLastIndexedLine = lastIndexedRow >= 0 ? lines.rows.slice(lastIndexedRow + 1).filter((row) => row.trim().length > 0) : [];
+	const promptLikeTailVisible = tailRowsAfterLastIndexedLine.some((row) => /Microsoft Windows|Corporation|[A-Z]:\\|[>$#]\s*$/i.test(row) && !row.includes(tailMarker) && (whileScrolledUpMarker.length === 0 || !row.includes(whileScrolledUpMarker)));
+	return {
+		...lines,
+		scroll,
+		distanceFromBottom: Math.max(0, scroll.maxScrollTop - scroll.scrollTop),
+		tailMarkerVisible: lines.compactText.includes(tailMarker),
+		whileScrolledUpMarkerVisible: whileScrolledUpMarker.length > 0 && lines.compactText.includes(whileScrolledUpMarker),
+		promptLikeTailVisible,
+		tailRowsAfterLastIndexedLine,
+	};
+}
+
+type TerminalVisibleTouchLines = Awaited<ReturnType<typeof terminalVisibleTouchLines>>;
+type TerminalTouchScrollDiagnostics = ReturnType<typeof terminalTouchScrollDetachedDiagnosticsFromLines>;
+
+async function sampleTerminalTouchDetachedState(
+	page: import("@playwright/test").Page,
+	run: string,
+	tailMarker: string,
+): Promise<{ lines: TerminalVisibleTouchLines; scroll: TerminalScrollMetrics; diagnostics: TerminalTouchScrollDiagnostics }> {
+	const lines = await terminalVisibleTouchLines(page, run);
+	const scroll = await terminalScrollMetrics(page);
+	return { lines, scroll, diagnostics: terminalTouchScrollDetachedDiagnosticsFromLines(lines, scroll, run, tailMarker) };
+}
+
+async function waitForStableDetachedTouchScroll(
+	page: import("@playwright/test").Page,
+	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },
+	run: string,
+	before: TerminalVisibleTouchLines,
+	tailMarker: string,
+): Promise<{ lines: TerminalVisibleTouchLines; scroll: TerminalScrollMetrics; diagnostics: TerminalTouchScrollDiagnostics; minDetachPx: number; attempts: number }> {
+	let lastDiagnostics: unknown;
+	for (let attempt = 0; attempt < 10; attempt += 1) {
+		const firstSample = await sampleTerminalTouchDetachedState(page, run, tailMarker);
+		await waitForTerminalAnimationFrames(page);
+		const secondSample = await sampleTerminalTouchDetachedState(page, run, tailMarker);
+		const minDetachPx = Math.max(48, (secondSample.scroll.rowHeight ?? 16) * 3);
+		const stableScrollTop = Math.abs(secondSample.scroll.scrollTop - firstSample.scroll.scrollTop) <= 2;
+		const stableFirstLine =
+			firstSample.diagnostics.firstLine !== null &&
+			secondSample.diagnostics.firstLine !== null &&
+			Math.abs(secondSample.diagnostics.firstLine - firstSample.diagnostics.firstLine) <= 1;
+		const olderFirstLine =
+			before.firstLine !== null &&
+			secondSample.diagnostics.firstLine !== null &&
+			secondSample.diagnostics.firstLine < before.firstLine;
+		const stableDetachedState =
+			stableScrollTop &&
+			stableFirstLine &&
+			olderFirstLine &&
+			!secondSample.diagnostics.scroll.atBottom &&
+			secondSample.diagnostics.distanceFromBottom >= minDetachPx &&
+			!secondSample.diagnostics.tailMarkerVisible &&
+			!secondSample.diagnostics.promptLikeTailVisible;
+		lastDiagnostics = {
+			attempt: attempt + 1,
+			minDetachPx,
+			stableScrollTop,
+			stableFirstLine,
+			olderFirstLine,
+			stableDetachedState,
+			firstSample: firstSample.diagnostics,
+			secondSample: secondSample.diagnostics,
+		};
+		if (stableDetachedState) {
+			return { ...secondSample, minDetachPx, attempts: attempt + 1 };
+		}
+		await dispatchTouchDragOverXtermScreen(page, client, "down", 96);
+	}
+	throw new Error(`TERMINAL_TOUCH_SCROLL_DETACHED_STATE: touch panning did not reach a stable hidden-tail detached state before marker injection; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 async function latestTerminalChannelId(page: import("@playwright/test").Page): Promise<string> {
@@ -719,22 +844,106 @@ async function waitForTerminalMountedForFrameInjection(page: import("@playwright
 	await expect(page.locator(`${terminalHost()} .xterm-helper-textarea`), "xterm input textarea must be mounted before typing").toHaveCount(1, { timeout: 10_000 });
 }
 
+type TerminalFocusDiagnostics = {
+	panelState: string | null;
+	activeTag: string | null;
+	activeClass: string;
+	activeInTerminal: boolean;
+	textareaExists: boolean;
+	textareaDisabled: boolean;
+	textareaReadOnly: boolean;
+	xtermVisible: boolean;
+	screenVisible: boolean;
+	hostRect: { width: number; height: number } | null;
+	xtermRect: { width: number; height: number } | null;
+	screenRect: { width: number; height: number } | null;
+	renderedRows: number;
+};
+
 async function focusTerminal(page: import("@playwright/test").Page): Promise<void> {
 	const xterm = page.locator(`${terminalHost()} .xterm`).first();
+	const helperTextarea = page.locator(`${terminalHost()} .xterm-helper-textarea`).first();
 	await expect(xterm, "xterm must be visible and focusable before typing").toBeVisible({ timeout: 10_000 });
-	await xterm.click({ position: { x: 24, y: 24 } });
-	await page.locator(`${terminalHost()} .xterm-helper-textarea`).focus();
-	await page.evaluate(() => {
-		(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus();
+
+	let lastDiagnostics: TerminalFocusDiagnostics | undefined;
+	let lastFocusError = "";
+	try {
+		await expect.poll(async () => {
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			if (lastDiagnostics.panelState !== "attached" || !lastDiagnostics.textareaExists || !lastDiagnostics.xtermVisible || !lastDiagnostics.screenVisible) {
+				return false;
+			}
+			try {
+				await xterm.click({ position: { x: 24, y: 24 }, timeout: 2_000 });
+				await helperTextarea.focus({ timeout: 2_000 });
+				await page.evaluate(() => {
+					(document.querySelector('[data-testid="terminal-xterm"] .xterm-helper-textarea') as HTMLTextAreaElement | null)?.focus({ preventScroll: true });
+				});
+				lastFocusError = "";
+			} catch (error) {
+				lastFocusError = error instanceof Error ? error.message : String(error);
+			}
+			await waitForTerminalAnimationFrames(page).catch(() => undefined);
+			lastDiagnostics = await terminalFocusDiagnostics(page);
+			return terminalFocusedForInput(lastDiagnostics);
+		}, {
+			message: "terminal xterm should become focused/ready for input",
+			timeout: 20_000,
+			intervals: [100, 250, 500],
+		}).toBe(true);
+	} catch (error) {
+		const detail = JSON.stringify(lastDiagnostics ?? await terminalFocusDiagnostics(page), null, 2);
+		throw new Error(`terminal xterm did not become focused/ready for input within 20s; lastFocusError=${lastFocusError || "none"}; diagnostics=${detail}; assertion=${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function terminalFocusedForInput(diagnostics: TerminalFocusDiagnostics): boolean {
+	return diagnostics.panelState === "attached"
+		&& diagnostics.textareaExists
+		&& !diagnostics.textareaDisabled
+		&& diagnostics.xtermVisible
+		&& diagnostics.screenVisible
+		&& diagnostics.renderedRows > 0
+		&& diagnostics.activeInTerminal;
+}
+
+async function terminalFocusDiagnostics(page: import("@playwright/test").Page): Promise<TerminalFocusDiagnostics> {
+	return page.evaluate(() => {
+		const panel = document.querySelector('[data-testid="terminal-panel"]') as HTMLElement | null;
+		const host = document.querySelector('[data-testid="terminal-xterm"]') as HTMLElement | null;
+		const xterm = host?.querySelector(".xterm") as HTMLElement | null;
+		const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
+		const textarea = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+		const active = document.activeElement as HTMLElement | null;
+		const rectSize = (element: HTMLElement | null) => {
+			if (!element) return null;
+			const rect = element.getBoundingClientRect();
+			return { width: rect.width, height: rect.height };
+		};
+		const visible = (element: HTMLElement | null) => {
+			if (!element) return false;
+			const rect = element.getBoundingClientRect();
+			const css = getComputedStyle(element);
+			return rect.width > 0 && rect.height > 0 && css.display !== "none" && css.visibility !== "hidden";
+		};
+		return {
+			panelState: panel?.getAttribute("data-terminal-state") ?? null,
+			activeTag: active?.tagName ?? null,
+			activeClass: active?.className ? String(active.className) : "",
+			activeInTerminal: active?.classList.contains("xterm-helper-textarea") === true
+				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null,
+			textareaExists: !!textarea,
+			textareaDisabled: textarea?.disabled === true,
+			textareaReadOnly: textarea?.readOnly === true,
+			xtermVisible: visible(xterm),
+			screenVisible: visible(screen),
+			hostRect: rectSize(host),
+			xtermRect: rectSize(xterm),
+			screenRect: rectSize(screen),
+			renderedRows: host?.querySelectorAll(".xterm-rows > div").length ?? 0,
+		};
 	});
-	await expect.poll(
-		() => page.evaluate(() => {
-			const active = document.activeElement as HTMLElement | null;
-			return active?.classList.contains("xterm-helper-textarea") === true
-				|| (active?.closest?.('[data-testid="terminal-xterm"] .xterm') ?? null) !== null;
-		}),
-		{ timeout: 10_000 },
-	).toBe(true);
 }
 
 async function typeCommand(page: import("@playwright/test").Page, command: string): Promise<void> {

@@ -51,6 +51,7 @@ import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePa
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
+import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-bridge.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -269,6 +270,10 @@ export class RemoteAgent {
 	// In-flight C2 write-permit MINT requests, keyed by the correlation id on the
 	// `ext_session_write_permit` frame, settled by `ext_session_write_permit_result`.
 	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
+	// In-flight pack-bound surface-token MINT requests, settled by
+	// `ext_surface_token_result`.
+	private _pendingExtSurfaceTokens = new Map<string, { resolve: (token: string) => void; reject: (e: Error) => void }>();
+	private _surfaceTokenAuthorityKey: string | undefined;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _gatewayUrl = "";
@@ -757,7 +762,7 @@ export class RemoteAgent {
 
 			this.ws.onopen = () => {
 				bootMark("ws-open");
-				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
+				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
 			};
 
 			this.ws.onmessage = (evt) => {
@@ -778,12 +783,14 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
-						// Register the trusted WS poster for `host.session.postMessage` (C2 session
-						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
-						// agent's private WS; pack code has no handle to it and cannot import this
-						// transport, so it cannot drive the agent. No session secret is delivered
-						// to (or capturable from) the client at all — the trusted WS IS the gate.
+						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
+						// Register the sanctioned WS poster for `host.session.postMessage` (C2 session
+						// WRITE, extension-host-phase2.md §8 C2.1). Server-side session binding,
+						// surface-token resolution, and one-time content-bound permits carry the
+						// authorization/provenance checks; the app transport is not an unspoofable
+						// same-origin security boundary.
 						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
+						registerSurfaceTokenMinter(this._sessionId, (surface) => this._mintPackSurfaceToken(surface));
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -909,9 +916,11 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
-		// Drop the trusted WS poster + reject any in-flight session posts so a torn-down
-		// session leaves no stale transport (re-registered on the next auth_ok).
+		// Drop the registered WS poster + reject any in-flight session posts so a
+		// torn-down session leaves no stale transport (re-registered on the next auth_ok).
 		unregisterSessionPoster(this._sessionId);
+		unregisterSurfaceTokenMinter(this._sessionId);
+		this._surfaceTokenAuthorityKey = undefined;
 		this._rejectPendingExtPosts("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
@@ -1399,13 +1408,12 @@ export class RemoteAgent {
 	// ── Internal ─────────────────────────────────────────────────────
 
 	/**
-	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
-	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
-	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
-	 * involved; pack code has no handle to the WS. The server ignores `req.sessionId`
-	 * as a target and posts into its OWN authenticated session.
+	 * Drive the C2 session WRITE (`host.session.postMessage`) over this agent's
+	 * authenticated WebSocket (registered with session-write-bridge.ts on auth_ok).
+	 * The server ignores `req.sessionId` as a target and posts into its own
+	 * authenticated session.
 	 *
-	 * TWO trusted-WS round-trips (design §8 C2.1): first MINT a server-minted,
+	 * TWO permit-bound round-trips (design §8 C2.1): first MINT a server-minted,
 	 * one-time, content-bound write permit (bound to `req.contentHash`), then send the
 	 * post carrying the returned nonce. A captured/replayed post frame is rejected
 	 * (permit already consumed); a forged post without a mint has no valid nonce.
@@ -1415,7 +1423,46 @@ export class RemoteAgent {
 		return this._sendExtSessionPost(req, nonce);
 	}
 
-	/** Step 1: mint a content-bound write permit over the trusted WS. Resolves with
+	/** Mint a pack-bound surface token over the session WS. The frame carries no
+	 *  session id; the server binds the token to this authenticated connection. */
+	private _mintPackSurfaceToken(surface: PackSurfaceRef): Promise<string> {
+		return new Promise<string>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("pack surface-token mint: WebSocket not connected"));
+				return;
+			}
+			if (!this._surfaceTokenAuthorityKey) {
+				reject(new Error("pack surface-token mint: app surface-token key unavailable"));
+				return;
+			}
+			const requestId = `extsurface_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtSurfaceTokens.delete(requestId)) {
+					reject(new Error("pack surface-token mint: timed out awaiting token"));
+				}
+			}, 30_000);
+			this._pendingExtSurfaceTokens.set(requestId, {
+				resolve: (token: string) => { clearTimeout(timer); resolve(token); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_surface_token",
+					requestId,
+					surfaceTokenKey: this._surfaceTokenAuthorityKey,
+					packId: surface.packId,
+					contributionKind: surface.contributionKind,
+					contributionId: surface.contributionId,
+				}));
+			} catch (e) {
+				this._pendingExtSurfaceTokens.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Step 1: mint a content-bound write permit over the session WS. Resolves with
 	 *  the opaque nonce; rejects on server error / timeout / not-connected. */
 	private _mintExtWritePermit(req: SessionPostRequest): Promise<string> {
 		return new Promise<string>((resolve, reject) => {
@@ -1487,10 +1534,13 @@ export class RemoteAgent {
 	/** Reject and clear every in-flight session post + permit mint (call on
 	 *  disconnect/teardown). */
 	private _rejectPendingExtPosts(reason: string): void {
-		const pending = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
+		const pendingPosts = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
+		const pendingSurfaceTokens = [...this._pendingExtSurfaceTokens.values()];
 		this._pendingExtPosts.clear();
 		this._pendingExtPermits.clear();
-		for (const p of pending) p.reject(new Error(`host.session.postMessage: ${reason}`));
+		this._pendingExtSurfaceTokens.clear();
+		for (const p of pendingPosts) p.reject(new Error(`host.session.postMessage: ${reason}`));
+		for (const p of pendingSurfaceTokens) p.reject(new Error(`pack surface-token mint: ${reason}`));
 	}
 
 	private send(msg: any): void {
@@ -1542,6 +1592,15 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "ext_surface_token_result": {
+				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
+				if (pending) {
+					this._pendingExtSurfaceTokens.delete(msg.requestId);
+					if (msg.ok && typeof msg.token === "string" && msg.token) pending.resolve(msg.token);
+					else pending.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "pack surface-token mint denied"));
+				}
+				break;
+			}
 			case "ext_session_write_permit_result": {
 				// Async reply to a C2 write-permit MINT (step 1). Settle the correlated
 				// promise with the opaque nonce (resolve) or the server-side error (reject).

@@ -69,15 +69,12 @@ async function prefs(page: Page): Promise<Record<string, any>> {
 	return await page.evaluate(() => (window as any).__getSettingsAdminPrefs());
 }
 
-type ArchivedWorktreeItemFixture = {
-	key: string;
-	sessionId: string;
-	title: string;
-	status: "removable" | "skipped" | "already-cleaned" | "failed";
-	disposition: "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
+type WorktreeItemFixture = {
+	id: string;
+	title?: string;
+	classification: "ready-to-clean" | "protected-in-use" | "archived-owned" | "unowned-git-worktree" | "pool-entry" | "already-cleaned" | "stale-filesystem-only" | "scan-error";
+	disposition: "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
 	reason: string;
-	reasonCategory: string;
-	selectionCategories?: string[];
 	projectId?: string;
 	projectName?: string;
 	repo?: string;
@@ -88,105 +85,58 @@ type ArchivedWorktreeItemFixture = {
 	actionable?: boolean;
 	selectable?: boolean;
 	defaultSelected?: boolean;
+	sources?: string[];
+	owners?: Array<{ type: string; id: string; title?: string; archived?: boolean }>;
+	willDeleteBranch?: boolean;
+	branchDeleteBlockedReason?: string;
 };
 
-function archivedWorktreeItem(overrides: Partial<ArchivedWorktreeItemFixture> & Pick<ArchivedWorktreeItemFixture, "key" | "sessionId" | "title" | "status" | "disposition" | "reason" | "reasonCategory">): ArchivedWorktreeItemFixture & Record<string, any> {
-	const actionable = overrides.actionable ?? overrides.status === "removable";
+function worktreeItem(overrides: WorktreeItemFixture): WorktreeItemFixture & Record<string, any> {
+	const actionable = overrides.actionable ?? overrides.disposition === "ready-to-clean";
 	return {
-		archivedAt: 1_700_000_000_000,
 		projectId: "proj-1",
 		projectName: "Scope UI Project",
 		repo: ".",
 		repoPath: "/fixture/project",
 		repoDisplayName: "app",
-		path: `/fixture/worktrees/${overrides.key}`,
-		branch: `archived/${overrides.key}`,
-		source: "worktreePath",
-		pathExists: actionable,
-		gitWorktreeMetadataExists: actionable,
-		localBranchExists: actionable,
-		willDeleteBranch: actionable,
-		detail: overrides.status === "removable"
-			? "Safe to remove: no live session, goal, team, staff, or sibling worktree references this path."
-			: "Not removable in this fixture category.",
+		path: `/fixture/worktrees/${overrides.id}`,
+		branch: `session/${overrides.id}`,
+		sources: overrides.sources ?? ["git-worktree"],
+		owners: overrides.owners ?? [],
+		detail: actionable ? "Server classified this worktree as safe to remove." : "Not removable in this fixture category.",
 		actionable,
 		selectable: actionable,
 		defaultSelected: actionable,
-		selectionCategories: actionable ? ["all-removable", ...(overrides.selectionCategories ?? ["archived-session"])] : [],
+		pathExists: actionable,
+		gitWorktreeMetadataExists: actionable,
+		localBranchExists: actionable,
+		willDeleteBranch: overrides.willDeleteBranch ?? actionable,
 		...overrides,
 	};
 }
 
-function archivedWorktreeScan(items: Array<ArchivedWorktreeItemFixture & Record<string, any>>) {
-	const byDisposition: Record<string, number> = {};
-	const byReason: Record<string, number> = {};
-	const bySelectionCategory: Record<string, number> = {};
-	for (const item of items) {
-		byDisposition[item.disposition] = (byDisposition[item.disposition] || 0) + 1;
-		byReason[item.reason] = (byReason[item.reason] || 0) + 1;
-		for (const category of item.selectionCategories || []) bySelectionCategory[category] = (bySelectionCategory[category] || 0) + 1;
-	}
-	const groupedItems = new Map<string, Array<any>>();
-	for (const item of items) {
-		const groupId = item.status === "removable" ? "ready-to-clean" : item.reason;
-		groupedItems.set(groupId, [...(groupedItems.get(groupId) || []), item]);
-	}
-	const groups = [...groupedItems.entries()].map(([id, groupItems]) => ({
-		id,
-		label: id === "ready-to-clean" ? "Ready to clean" : humanizeReason(id),
-		disposition: groupItems[0]?.disposition,
-		reason: groupItems[0]?.reason,
-		reasonCategory: groupItems[0]?.reasonCategory,
-		count: groupItems.length,
-		itemKeys: groupItems.map((item) => item.key),
-		items: groupItems.slice(0, 5),
-	}));
-	const ready = items.filter((item) => item.status === "removable");
-	const already = items.filter((item) => item.status === "already-cleaned");
-	const failed = items.filter((item) => item.status === "failed" || item.disposition === "failed");
-	const ineligible = items.filter((item) => item.status === "skipped" || item.disposition === "ineligible");
-	const sessions = [...new Map(items.map((item) => [item.sessionId, item])).values()].map((sessionItem: any) => ({
-		id: sessionItem.sessionId,
-		title: sessionItem.title,
-		archivedAt: sessionItem.archivedAt,
-		projectId: sessionItem.projectId,
-		projectName: sessionItem.projectName,
-		sandboxed: Boolean(sessionItem.sandboxed),
-		worktrees: items.filter((item) => item.sessionId === sessionItem.sessionId),
-	}));
-	return {
-		sessions,
-		items,
-		counts: {
-			archivedSessions: sessions.length,
-			sessionsWithWorktrees: items.filter((item) => item.path).length,
-			removableWorktrees: ready.length,
-			skippedWorktrees: ineligible.length,
-			alreadyCleanedWorktrees: already.length,
-			totalItems: items.length,
-			readyToClean: ready.length,
-			defaultSelected: ready.filter((item) => item.defaultSelected).length,
-			alreadyCleaned: already.length,
-			ineligible: ineligible.length,
-			needsAttention: ineligible.length + failed.length,
-			failed: failed.length,
-			byDisposition,
-			byReason,
-			bySelectionCategory,
-		},
-		groups,
-		selectionPresets: [
-			{ id: "all-removable", label: "Select all removable", itemKeys: ready.map((item) => item.key), categories: ["all-removable"] },
-			{ id: "archived-session", label: "Archived sessions only", itemKeys: ready.filter((item) => item.selectionCategories?.includes("archived-session")).map((item) => item.key), categories: ["archived-session"] },
-			{ id: "current-project", label: "Current project", itemKeys: ready.filter((item) => item.selectionCategories?.includes("current-project")).map((item) => item.key), categories: ["current-project"] },
-			{ id: "goal-team-delegate", label: "Goal/team/delegate worktrees", itemKeys: ready.filter((item) => item.selectionCategories?.includes("goal-team-delegate")).map((item) => item.key), categories: ["goal-team-delegate"] },
-		],
-		generatedAt: Date.now(),
+function worktreeInventory(items: Array<WorktreeItemFixture & Record<string, any>>) {
+	const counts: Record<string, any> = {
+		total: items.length,
+		readyToClean: items.filter((item) => item.disposition === "ready-to-clean").length,
+		protectedInUse: items.filter((item) => item.disposition === "protected" || item.classification === "protected-in-use" || item.classification === "pool-entry").length,
+		archivedOwned: items.filter((item) => item.classification === "archived-owned").length,
+		unownedGitWorktrees: items.filter((item) => item.classification === "unowned-git-worktree").length,
+		poolEntries: items.filter((item) => item.classification === "pool-entry").length,
+		alreadyCleaned: items.filter((item) => item.disposition === "already-cleaned").length,
+		needsAttention: items.filter((item) => item.disposition === "needs-attention" || item.disposition === "failed").length,
+		scanErrors: items.filter((item) => item.classification === "scan-error").length,
+		defaultSelected: items.filter((item) => item.defaultSelected !== false && item.disposition === "ready-to-clean").length,
+		byClassification: {},
+		byReason: {},
+		bySource: {},
 	};
-}
-
-function humanizeReason(reason: string): string {
-	return reason.split("-").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
+	for (const item of items) {
+		counts.byClassification[item.classification] = (counts.byClassification[item.classification] || 0) + 1;
+		counts.byReason[item.reason] = (counts.byReason[item.reason] || 0) + 1;
+		for (const source of item.sources || []) counts.bySource[source] = (counts.bySource[source] || 0) + 1;
+	}
+	return { items, counts, generatedAt: Date.now(), scanned: { projects: 1, repos: 2, worktreeRoots: 1 } };
 }
 
 function cleanupResponse(counts: Partial<Record<"requested" | "cleaned" | "branchDeleted" | "skipped" | "alreadyCleaned" | "failed", number>>, results: any[] = []) {
@@ -196,32 +146,30 @@ function cleanupResponse(counts: Partial<Record<"requested" | "cleaned" | "branc
 	};
 }
 
-async function setArchivedWorktreeScan(page: Page, scan: any): Promise<void> {
-	await page.evaluate((payload) => (window as any).__setArchivedWorktreeScan(payload), scan);
+async function setWorktreeInventory(page: Page, scan: any): Promise<void> {
+	await page.evaluate((payload) => (window as any).__setWorktreeInventory(payload), scan);
 }
 
-async function setArchivedWorktreeCleanup(page: Page, cleanup: any, nextScan?: any): Promise<void> {
-	await page.evaluate(({ response, next }) => (window as any).__setArchivedWorktreeCleanup(response, next), { response: cleanup, next: nextScan });
+async function setWorktreeCleanup(page: Page, cleanup: any, nextScan?: any): Promise<void> {
+	await page.evaluate(({ response, next }) => (window as any).__setWorktreeCleanup(response, next), { response: cleanup, next: nextScan });
 }
 
-async function scanArchivedWorktrees(page: Page) {
-	const card = page.getByTestId("archived-worktree-maintenance");
+async function scanWorktrees(page: Page) {
+	const card = page.getByTestId("worktree-cleanup-maintenance");
 	await expect(card).toBeVisible();
-	await card.getByTestId("archived-worktree-scan").click();
-	await expect(card.getByTestId("archived-worktree-summary-ready")).toBeVisible();
+	await card.getByTestId("worktree-cleanup-scan").click();
+	await expect(card.getByTestId("worktree-cleanup-summary-ready")).toBeVisible();
 	return card;
 }
 
-function visibleArchivedRows(page: Page): Locator {
-	return page.locator('[data-testid="archived-worktree-row"]:visible');
+function visibleWorktreeRows(page: Page): Locator {
+	return page.locator('[data-testid="worktree-cleanup-row"]:visible');
 }
 
-async function clickArchivedWorktreeRowCheckbox(page: Page, key: string): Promise<void> {
-	const row = page.locator(`[data-testid="archived-worktree-row"][data-archived-worktree-key="${key}"]`).first();
+async function clickWorktreeRowCheckbox(page: Page, id: string): Promise<void> {
+	const row = page.locator(`[data-testid="worktree-cleanup-row"][data-worktree-id="${id}"]`).first();
 	await expect(row).toBeVisible();
-	const checkbox = row.locator('input[type="checkbox"], [role="checkbox"]').first();
-	if (await checkbox.count()) await checkbox.click();
-	else await row.click();
+	await row.locator('input[type="checkbox"]').click();
 }
 
 test.describe("Settings/admin UI fixture", () => {
@@ -230,172 +178,87 @@ test.describe("Settings/admin UI fixture", () => {
 		await resetFixture(page);
 	});
 
-	test("archived worktree maintenance defaults to actionable rows and avoids ambiguous primary counts", async ({ page }) => {
-		const scan = archivedWorktreeScan([
-			archivedWorktreeItem({ key: "ready-1", sessionId: "arch-1", title: "Ready archived one", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" }),
-			archivedWorktreeItem({ key: "ready-2", sessionId: "arch-2", title: "Ready archived two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" }),
-			...Array.from({ length: 8 }, (_, i) => archivedWorktreeItem({ key: `missing-${i}`, sessionId: `skip-missing-${i}`, title: `Missing path ${i}`, status: "skipped", disposition: "ineligible", reason: "no-worktree-path", reasonCategory: "missing-worktree-path", path: "" })),
-			archivedWorktreeItem({ key: "sandbox-1", sessionId: "skip-sandbox-1", title: "Sandbox path", status: "skipped", disposition: "ineligible", reason: "sandbox-container-path", reasonCategory: "sandbox-container-path", path: "/workspace-wt/session/sandbox" }),
-			archivedWorktreeItem({ key: "already-1", sessionId: "already-1", title: "Already cleaned", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" }),
+	test("worktree cleanup defaults to actionable rows and exposes diagnostics", async ({ page }) => {
+		const scan = worktreeInventory([
+			worktreeItem({ id: "ready-arch", title: "Ready archived", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session", "git-worktree"], owners: [{ type: "archived-session", id: "arch-1", title: "Ready archived", archived: true }] }),
+			worktreeItem({ id: "ready-git", title: "Ready Git orphan", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree" }),
+			...Array.from({ length: 6 }, (_, i) => worktreeItem({ id: `fs-${i}`, title: `Filesystem only ${i}`, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", actionable: false, selectable: false, defaultSelected: false, sources: ["filesystem"], branch: undefined, willDeleteBranch: false })),
+			worktreeItem({ id: "pool-1", title: "Pool diagnostic", classification: "pool-entry", disposition: "protected", reason: "safe-pool-entry", actionable: false, selectable: false, defaultSelected: false, sources: ["pool", "filesystem"] }),
+			worktreeItem({ id: "already-1", title: "Already cleaned", classification: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", actionable: false, selectable: false, defaultSelected: false, willDeleteBranch: false }),
 		]);
-		await setArchivedWorktreeScan(page, scan);
+		await setWorktreeInventory(page, scan);
 		await renderSettings(page, "#/settings/system/maintenance");
 
-		const card = await scanArchivedWorktrees(page);
-		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*2/);
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*2/);
-		await expect(card.getByTestId("archived-worktree-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
-		await expect(card.getByTestId("archived-worktree-summary-needs-attention")).toContainText(/Needs attention:\s*9/);
-		await expect(card).not.toContainText(/With worktrees\s*:/);
-		await expect(visibleArchivedRows(page)).toHaveCount(2);
-		await expect(page.locator('[data-testid="archived-worktree-row"][data-status="removable"]:visible')).toHaveCount(2);
-		await expect(page.locator('[data-testid="archived-worktree-row"][data-status="skipped"]:visible')).toHaveCount(0);
-		await expect(card).not.toContainText("no-worktree-path");
-		await expect(card).not.toContainText("sandbox-container-path");
-		await expect(card.getByTestId("archived-worktree-clean-all")).toBeEnabled();
-		await expect(card.getByTestId("archived-worktree-clean-selected")).toBeEnabled();
+		const card = await scanWorktrees(page);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*2/);
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*2/);
+		await expect(card.getByTestId("worktree-cleanup-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
+		await expect(card.getByTestId("worktree-cleanup-summary-needs-attention")).toContainText(/Needs attention:\s*6/);
+		await expect(card).toContainText(/Pool entries:\s*1/);
+		await expect(visibleWorktreeRows(page)).toHaveCount(2);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-disposition="ready-to-clean"]:visible')).toHaveCount(2);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-classification="pool-entry"]:visible')).toHaveCount(0);
+		await expect(card).not.toContainText("filesystem-only-needs-attention");
+		await expect(card.getByTestId("worktree-cleanup-clean-all")).toBeEnabled();
+		await expect(card.getByTestId("worktree-cleanup-clean-selected")).toBeEnabled();
+
+		await card.getByTestId("worktree-cleanup-show-diagnostics").click();
+		const fsGroup = card.getByTestId("worktree-cleanup-group-filesystem-only-needs-attention");
+		await expect(fsGroup.locator('[data-testid="worktree-cleanup-row"]:visible')).toHaveCount(5);
+		await card.getByTestId("worktree-cleanup-show-all-filesystem-only-needs-attention").click();
+		await expect(fsGroup.locator('[data-testid="worktree-cleanup-row"]:visible')).toHaveCount(6);
+		await expect(card.getByTestId("worktree-cleanup-group-pool-entry")).toBeVisible();
+		await expect(card.getByTestId("worktree-cleanup-group-already-cleaned")).toBeVisible();
 	});
 
-	test("archived worktree maintenance shows zero-removable empty state with skipped details hidden", async ({ page }) => {
-		const scan = archivedWorktreeScan([
-			...Array.from({ length: 6 }, (_, i) => archivedWorktreeItem({ key: `missing-${i}`, sessionId: `missing-${i}`, title: `Missing path ${i}`, status: "skipped", disposition: "ineligible", reason: "no-worktree-path", reasonCategory: "missing-worktree-path", path: "" })),
-			archivedWorktreeItem({ key: "sandbox-1", sessionId: "sandbox-1", title: "Sandbox path", status: "skipped", disposition: "ineligible", reason: "sandbox-container-path", reasonCategory: "sandbox-container-path", path: "/workspace-wt/session/sandbox" }),
-			archivedWorktreeItem({ key: "already-1", sessionId: "already-1", title: "Already cleaned", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" }),
-		]);
-		await setArchivedWorktreeScan(page, scan);
+	test("worktree cleanup selection presets and selected cleanup use item ids", async ({ page }) => {
+		const readyArch = worktreeItem({ id: "ready-arch", title: "Archived session one", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session", "git-worktree"] });
+		const readyGit = worktreeItem({ id: "ready-git", title: "Git orphan", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", projectId: "other-project" });
+		await setWorktreeInventory(page, worktreeInventory([readyArch, readyGit]));
+		await setWorktreeCleanup(page, cleanupResponse({ requested: 1, cleaned: 1 }, [{ itemId: "ready-arch", status: "cleaned", worktreeRemoved: true, branchDeleted: false }]), worktreeInventory([readyGit]));
 		await renderSettings(page, "#/settings/system/maintenance");
+		const card = await scanWorktrees(page);
 
-		const card = await scanArchivedWorktrees(page);
-		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
-		await expect(card.getByTestId("archived-worktree-empty-state")).toBeVisible();
-		await expect(card.getByTestId("archived-worktree-empty-state")).toContainText(/Nothing safe to clean right now/i);
-		await expect(card).toContainText(/Cleanup is disabled because there are 0 safe candidates/i);
-		await expect(card.getByTestId("archived-worktree-clean-all")).toBeDisabled();
-		await expect(card.getByTestId("archived-worktree-clean-selected")).toBeDisabled();
-		await expect(page.locator('[data-testid="archived-worktree-row"][data-status="skipped"]:visible')).toHaveCount(0);
-		await expect(card).not.toContainText("Missing path 0");
-		await expect(card).not.toContainText(/With worktrees\s*:/);
-	});
-
-	test("archived worktree maintenance exposes already-cleaned examples from group samples", async ({ page }) => {
-		const alreadyCleaned = archivedWorktreeItem({ key: "already-only-1", sessionId: "already-only-1", title: "Already cleaned only", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" });
-		const scan = archivedWorktreeScan([alreadyCleaned]);
-		scan.sessions = [];
-		scan.items = [];
-		await setArchivedWorktreeScan(page, scan);
-		await renderSettings(page, "#/settings/system/maintenance");
-
-		const card = await scanArchivedWorktrees(page);
-		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
-		await expect(card.getByTestId("archived-worktree-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
-		await expect(card.getByTestId("archived-worktree-empty-state")).toBeVisible();
-		await expect(page.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(0);
-		await card.getByTestId("archived-worktree-show-skipped").click();
-		const alreadyGroup = card.getByTestId("archived-worktree-group-already-cleaned");
-		await expect(alreadyGroup).toBeVisible();
-		await expect(alreadyGroup).toContainText("Already cleaned only");
-		await expect(alreadyGroup.locator('[data-testid="archived-worktree-row"][data-status="already-cleaned"]:visible')).toHaveCount(1);
-	});
-
-	test("archived worktree skipped disclosure groups examples and expands one reason at a time", async ({ page }) => {
-		const scan = archivedWorktreeScan([
-			...Array.from({ length: 6 }, (_, i) => archivedWorktreeItem({ key: `missing-${i}`, sessionId: `missing-${i}`, title: `Missing path ${i}`, status: "skipped", disposition: "ineligible", reason: "no-worktree-path", reasonCategory: "missing-worktree-path", path: "" })),
-			...Array.from({ length: 3 }, (_, i) => archivedWorktreeItem({ key: `sandbox-${i}`, sessionId: `sandbox-${i}`, title: `Sandbox path ${i}`, status: "skipped", disposition: "ineligible", reason: "sandbox-container-path", reasonCategory: "sandbox-container-path", path: `/workspace-wt/session/${i}` })),
-			archivedWorktreeItem({ key: "referenced-1", sessionId: "referenced-1", title: "Referenced live", status: "skipped", disposition: "ineligible", reason: "referenced-by-live-session", reasonCategory: "referenced" }),
-			archivedWorktreeItem({ key: "stale-1", sessionId: "stale-1", title: "Stale directory", status: "skipped", disposition: "needs-attention", reason: "stale-worktree-directory", reasonCategory: "stale" }),
-		]);
-		await setArchivedWorktreeScan(page, scan);
-		await renderSettings(page, "#/settings/system/maintenance");
-
-		const card = await scanArchivedWorktrees(page);
-		await expect(page.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(0);
-		await card.getByTestId("archived-worktree-show-skipped").click();
-		const missingGroup = card.getByTestId("archived-worktree-group-no-worktree-path");
-		await expect(missingGroup).toBeVisible();
-		await expect(missingGroup).toContainText(/Missing Worktree Path|No Worktree Path/i);
-		await expect(missingGroup).toHaveAttribute("data-reason", "no-worktree-path");
-		await expect(missingGroup.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(5);
-		await expect(card.getByTestId("archived-worktree-group-sandbox-container-path")).toBeVisible();
-		await card.getByTestId("archived-worktree-show-all-no-worktree-path").click();
-		await expect(missingGroup.locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(6);
-		await expect(card.getByTestId("archived-worktree-group-sandbox-container-path").locator('[data-testid="archived-worktree-row"]:visible')).toHaveCount(3);
-		await card.getByTestId("archived-worktree-show-skipped").click();
-		await expect(page.locator('[data-testid="archived-worktree-row"][data-status="skipped"]:visible')).toHaveCount(0);
-	});
-
-	test("archived worktree selection presets select only actionable categories", async ({ page }) => {
-		const scan = archivedWorktreeScan([
-			archivedWorktreeItem({ key: "ready-arch-1", sessionId: "ready-arch-1", title: "Archived session one", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", selectionCategories: ["archived-session", "current-project"] }),
-			archivedWorktreeItem({ key: "ready-arch-2", sessionId: "ready-arch-2", title: "Archived session two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", projectId: "other-project" }),
-			archivedWorktreeItem({ key: "ready-goal-1", sessionId: "ready-goal-1", title: "Goal child worktree", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready", selectionCategories: ["goal-team-delegate"], childKind: "team", projectId: "other-project" }),
-			archivedWorktreeItem({ key: "skip-live", sessionId: "skip-live", title: "Live referenced", status: "skipped", disposition: "ineligible", reason: "referenced-by-live-session", reasonCategory: "referenced" }),
-			archivedWorktreeItem({ key: "already-1", sessionId: "already-1", title: "Already cleaned", status: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", reasonCategory: "already-cleaned" }),
-		]);
-		await setArchivedWorktreeScan(page, scan);
-		await renderSettings(page, "#/settings/system/maintenance");
-
-		const card = await scanArchivedWorktrees(page);
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*3/);
-		await card.getByTestId("archived-worktree-clear-selection").click();
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*0/);
-		await expect(card.getByTestId("archived-worktree-clean-selected")).toBeDisabled();
-		await card.getByTestId("archived-worktree-select-archived-sessions").click();
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*2/);
-		await card.getByTestId("archived-worktree-select-all-removable").click();
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*3/);
-		if (await card.getByTestId("archived-worktree-select-current-project").count()) {
-			await card.getByTestId("archived-worktree-select-current-project").click();
-			await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*1/);
-		}
-		if (await card.getByTestId("archived-worktree-select-goal-team-delegate").count()) {
-			await card.getByTestId("archived-worktree-select-goal-team-delegate").click();
-			await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*1/);
-		}
-	});
-
-	test("archived worktree clean selected posts selected keys, reports counts, and rescans", async ({ page }) => {
-		const readyOne = archivedWorktreeItem({ key: "ready-1", sessionId: "ready-1", title: "Clean selected one", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" });
-		const readyTwo = archivedWorktreeItem({ key: "ready-2", sessionId: "ready-2", title: "Clean selected two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" });
-		await setArchivedWorktreeScan(page, archivedWorktreeScan([readyOne, readyTwo]));
-		await setArchivedWorktreeCleanup(page, cleanupResponse({ requested: 1, cleaned: 1 }, [{ key: "ready-1", sessionId: "ready-1", status: "cleaned", reason: "safe-archived-session-worktree", worktreeRemoved: true, branchDeleted: false }]), archivedWorktreeScan([readyTwo]));
-		await renderSettings(page, "#/settings/system/maintenance");
-		const card = await scanArchivedWorktrees(page);
-
-		await card.getByTestId("archived-worktree-clear-selection").click();
-		await clickArchivedWorktreeRowCheckbox(page, "ready-1");
-		await expect(card.getByTestId("archived-worktree-summary-selected")).toContainText(/Selected:\s*1/);
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*2/);
+		await card.getByTestId("worktree-cleanup-clear-selection").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*0/);
+		await card.getByTestId("worktree-cleanup-select-archived-owned").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*1/);
 		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
-		await card.getByTestId("archived-worktree-clean-selected").click();
-		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-archived-session-worktrees").at(-1)?.body)).toMatchObject({
+		await card.getByTestId("worktree-cleanup-clean-selected").click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-worktrees").at(-1)?.body)).toEqual({
 			mode: "selected",
-			worktrees: [expect.objectContaining({ key: "ready-1", sessionId: "ready-1" })],
+			itemIds: ["ready-arch"],
 		});
-		await expect(card).toContainText(/Cleaned:\s*1|Removed:\s*1/i);
-		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*1/);
-		await expect(page.locator('[data-testid="archived-worktree-row"][data-archived-worktree-key="ready-1"]:visible')).toHaveCount(0);
+		await expect(card).toContainText(/Cleaned:\s*1/i);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*1/);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-worktree-id="ready-arch"]:visible')).toHaveCount(0);
+
+		await card.getByTestId("worktree-cleanup-select-git-orphan").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*1/);
 	});
 
-	test("archived worktree clean all posts server-authoritative mode and disables after zero rescan", async ({ page }) => {
-		const readyOne = archivedWorktreeItem({ key: "ready-1", sessionId: "ready-1", title: "Clean all one", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" });
-		const readyTwo = archivedWorktreeItem({ key: "ready-2", sessionId: "ready-2", title: "Clean all two", status: "removable", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", reasonCategory: "ready" });
-		const skipped = archivedWorktreeItem({ key: "skip-live", sessionId: "skip-live", title: "Referenced by live", status: "skipped", disposition: "ineligible", reason: "referenced-by-live-session", reasonCategory: "referenced" });
-		await setArchivedWorktreeScan(page, archivedWorktreeScan([readyOne, readyTwo, skipped]));
-		await setArchivedWorktreeCleanup(page, cleanupResponse({ requested: 2, cleaned: 2, skipped: 0, failed: 0 }, [
-			{ key: "ready-1", sessionId: "ready-1", status: "cleaned", reason: "safe-archived-session-worktree", worktreeRemoved: true, branchDeleted: true },
-			{ key: "ready-2", sessionId: "ready-2", status: "cleaned", reason: "safe-archived-session-worktree", worktreeRemoved: true, branchDeleted: true },
-		]), archivedWorktreeScan([skipped]));
+	test("worktree cleanup clean-all posts all-safe and disables after zero rescan", async ({ page }) => {
+		const readyOne = worktreeItem({ id: "ready-1", title: "Clean all one", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session"] });
+		const readyTwo = worktreeItem({ id: "ready-2", title: "Clean all two", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree" });
+		const protectedItem = worktreeItem({ id: "skip-live", title: "Referenced by live", classification: "protected-in-use", disposition: "protected", reason: "referenced-by-live-session", actionable: false, selectable: false, defaultSelected: false });
+		await setWorktreeInventory(page, worktreeInventory([readyOne, readyTwo, protectedItem]));
+		await setWorktreeCleanup(page, cleanupResponse({ requested: 2, cleaned: 2, branchDeleted: 2 }, [
+			{ itemId: "ready-1", status: "cleaned", worktreeRemoved: true, branchDeleted: true },
+			{ itemId: "ready-2", status: "cleaned", worktreeRemoved: true, branchDeleted: true },
+		]), worktreeInventory([protectedItem]));
 		await renderSettings(page, "#/settings/system/maintenance");
-		const card = await scanArchivedWorktrees(page);
+		const card = await scanWorktrees(page);
 
 		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
-		await card.getByTestId("archived-worktree-clean-all").click();
+		await card.getByTestId("worktree-cleanup-clean-all").click();
 		await page.getByRole("button", { name: "Clean worktrees" }).evaluate((button: HTMLElement) => button.click());
-		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-archived-session-worktrees").at(-1)?.body)).toEqual({ mode: "all" });
-		await expect(card).toContainText(/Cleaned:\s*2|Removed:\s*2/i);
-		await expect(card.getByTestId("archived-worktree-summary-ready")).toContainText(/Ready to clean:\s*0/);
-		await expect(card.getByTestId("archived-worktree-empty-state")).toBeVisible();
-		await expect(card.getByTestId("archived-worktree-clean-all")).toBeDisabled();
-		await expect(card.getByTestId("archived-worktree-clean-selected")).toBeDisabled();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-worktrees").at(-1)?.body)).toEqual({ mode: "all-safe" });
+		await expect(card).toContainText(/Cleaned:\s*2/i);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*0/);
+		await expect(card.getByTestId("worktree-cleanup-empty-state")).toBeVisible();
+		await expect(card.getByTestId("worktree-cleanup-clean-all")).toBeDisabled();
+		await expect(card.getByTestId("worktree-cleanup-clean-selected")).toBeDisabled();
 	});
 
 	test("settings tabs, account providers, and project scope render without a gateway", async ({ page }) => {

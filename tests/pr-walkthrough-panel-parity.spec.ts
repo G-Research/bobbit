@@ -994,6 +994,8 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(firstBlock.locator('.diff-overflow > .inline-lines')).toBeVisible();
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L17"].del')).toContainText('renderCompactDiff(block);');
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18"].add')).toContainText('renderReferenceDiff(block, diffMode);');
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L17"].del .diff-word'), 'inline deleted rows should keep GitHub-style intraline highlights').not.toHaveCount(0);
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18"].add .diff-word'), 'inline added rows should keep GitHub-style intraline highlights').not.toHaveCount(0);
 	});
 
 	test("ready state supports user comments, dislike gating, narrow inline default, historical file headers, and diff collapse", async ({ page }) => {

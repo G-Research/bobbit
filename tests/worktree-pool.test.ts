@@ -41,6 +41,14 @@ async function rmRepo(repoPath: string) {
 	try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
+async function initGitRepo(dir: string): Promise<void> {
+	fs.mkdirSync(dir, { recursive: true });
+	await execFile("git", ["init", "--initial-branch=master"], { cwd: dir });
+	await execFile("git", ["config", "user.email", "test@test"], { cwd: dir });
+	await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
+	await execFile("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
+}
+
 describe("WorktreePool — Phase 3 claim sequence", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
@@ -202,6 +210,124 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 			false,
 			`freshen should not attempt origin in no-remote test mode; warnings: ${warnings.join("\n")}`,
 		);
+	});
+});
+
+describe("WorktreePool — orphan reclaim", () => {
+	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
+	before(() => {
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+	});
+			after(() => {
+		if (originalNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
+		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
+		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("reclaims pool branches from the configured worktree root through the shared classifier", async () => {
+		const repo = await makeRepo();
+		try {
+			const configuredRoot = path.join(path.dirname(repo), "configured-wt");
+			const wtPath = path.join(configuredRoot, "pool-_pool-reclaim1");
+			fs.mkdirSync(configuredRoot, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-reclaim1", wtPath, "HEAD"], { cwd: repo });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 1, worktreeRoot: configuredRoot });
+			await (pool as any).reclaimOrphaned();
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 1);
+			assert.equal(snapshot.entries[0].branchName, "pool/_pool-reclaim1");
+			assert.equal(snapshot.entries[0].worktreePath, wtPath);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
+	it("does not duplicate an orphan already present in the in-memory pool", async () => {
+		const repo = await makeRepo();
+		try {
+			const configuredRoot = path.join(path.dirname(repo), "configured-wt");
+			const wtPath = path.join(configuredRoot, "pool-_pool-idempotent");
+			fs.mkdirSync(configuredRoot, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-idempotent", wtPath, "HEAD"], { cwd: repo });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 2, worktreeRoot: configuredRoot });
+			(pool as any).pool.push({ branchName: "pool/_pool-idempotent", worktreePath: wtPath, createdAt: Date.now() });
+			await (pool as any).reclaimOrphaned();
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 1);
+			assert.equal(snapshot.entries[0].branchName, "pool/_pool-idempotent");
+			assert.equal(snapshot.entries[0].worktreePath, wtPath);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
+	it("does not reclaim a multi-repo pool container with mixed component branches", async () => {
+		const root = makeTmpDir("bobbit-pool-mixed-branch-");
+		try {
+			const apiRepo = path.join(root, "api");
+			const webRepo = path.join(root, "web");
+			await initGitRepo(apiRepo);
+			await initGitRepo(webRepo);
+
+			const configuredRoot = path.join(root, "configured-wt");
+			const container = path.join(configuredRoot, "pool-_pool-mixed");
+			fs.mkdirSync(container, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-mixed", path.join(container, "api"), "HEAD"], { cwd: apiRepo });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-other", path.join(container, "web"), "HEAD"], { cwd: webRepo });
+
+			const components: Component[] = [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			];
+			const pool = new WorktreePool({
+				repoPath: root,
+				projectRoot: root,
+				targetSize: 1,
+				worktreeRoot: configuredRoot,
+				componentsResolver: () => components,
+			});
+			await (pool as any).reclaimOrphaned();
+
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 0, "mixed-branch multi-repo containers must not become ready pool entries");
+		} finally {
+			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
+	it("does not reclaim a multi-repo pool container when a declared component repo is incomplete", async () => {
+		const root = makeTmpDir("bobbit-pool-incomplete-component-");
+		try {
+			const apiRepo = path.join(root, "api");
+			await initGitRepo(apiRepo);
+			fs.mkdirSync(path.join(root, "web"), { recursive: true });
+
+			const configuredRoot = path.join(root, "configured-wt");
+			const container = path.join(configuredRoot, "pool-_pool-incomplete");
+			fs.mkdirSync(container, { recursive: true });
+			await execFile("git", ["worktree", "add", "-b", "pool/_pool-incomplete", path.join(container, "api"), "HEAD"], { cwd: apiRepo });
+
+			const components: Component[] = [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			];
+			const pool = new WorktreePool({
+				repoPath: root,
+				projectRoot: root,
+				targetSize: 1,
+				worktreeRoot: configuredRoot,
+				componentsResolver: () => components,
+			});
+			await (pool as any).reclaimOrphaned();
+
+			const snapshot = pool.snapshotEntries();
+			assert.equal(snapshot.entries.length, 0, "incomplete multi-repo containers must not become ready pool entries");
+		} finally {
+			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
 	});
 });
 

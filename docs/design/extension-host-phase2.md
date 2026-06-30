@@ -287,8 +287,8 @@ opaque token, never a caller-supplied `tool`.
   (`authorizeScopedRequest`), resolves the winning contribution via the SAME
   `resolvePackIdentityForTool` resolution that is the pack identity, and mints an opaque,
   HMAC-signed token bound to `{sessionId, packId, contributionId, tool}`
-  (`mintSurfaceToken`). The client holds it in the Host API **closure** (pack module code
-  never sees or sets it) and echoes it on every scoped call as `surfaceToken`.
+  (`mintSurfaceToken`). The Host API implementation holds it and echoes it on every scoped
+  call as `surfaceToken`; it is not an author-supplied field in the sanctioned contract.
 - Every scoped endpoint + the WS write mint/post call `resolveSurfaceIdentity(...)` — the
   single chokepoint that validates the signature + soft TTL, asserts the token's bound
   session equals the header-canonical (WS-authenticated) session, **re-resolves** the pack
@@ -301,12 +301,13 @@ opaque token, never a caller-supplied `tool`.
   self-heals without surfacing to the pack.
 
 **Residual (Model A, same-realm):** in the shared main UI realm a deliberately malicious
-pack can still mint its own token for any tool name it knows, or read another surface's
-token out of a shared closure / monkey-patch `fetch`. TRUE cross-pack isolation needs
-per-pack realm isolation, which Model A de-scopes for UI. The token closes the **accidental
-+ non-pack-reachable** path and makes the Host API the only *sanctioned* identity path; it is
-**not** claimed as a defense against a same-realm adversary — exactly parallel to the
-session-write same-realm mint-forgery residual (§8 C2.1). Documented in `docs/marketplace.md`.
+installed/enabled pack with the session bearer is already inside the trusted-pack model. It
+could make raw gateway calls, mint a token for another active contribution, or monkey-patch
+`fetch`. TRUE cross-pack isolation needs per-pack realm isolation, which Model A de-scopes
+for UI. The token closes accidental identity confusion in sanctioned Host API calls and
+makes the Host API the only *sanctioned* identity path; it is **not** claimed as a defense
+against a same-realm adversary — exactly parallel to the session-write same-realm
+mint-forgery residual (§8 C2.1). Documented in `docs/marketplace.md`.
 
 ---
 
@@ -859,10 +860,10 @@ other tools/packs — the conflict is only visible at registry build.)
 
 **Deps:** B2 (reads). **Flag:** `session` flips `true` here. **Highest-risk slice.**
 
-### C2.1 Transport: the TRUSTED session WebSocket (NOT a fetch)
+### C2.1 Transport: the session WebSocket path (not a fetch)
 
 > **Revision (session-write hardening).** Earlier revisions of this slice shipped
-> `host.session.postMessage` as `POST /api/ext/session/message` carrying an unforgeable
+> `host.session.postMessage` as `POST /api/ext/session/message` carrying an intended
 > per-session `x-bobbit-session-secret` header (delivered to trusted UI over the WS, held
 > in a client closure). That surface was **vulnerable**: a same-realm pack can
 > monkey-patch `window.fetch`, CAPTURE the secret header during one legitimate
@@ -878,11 +879,11 @@ Its **transport** is now the app's already-authenticated session **WebSocket**, 
 - Client: `host.session.postMessage(msg)` → `postSessionMessageOverWs(...)`
   (`src/app/session-write-bridge.ts`) → the per-session `RemoteAgent`'s WS-bound poster,
   which sends an `ext_session_post` frame and awaits a correlated `ext_session_post_result`
-  ack (`src/app/remote-agent.ts`). The WS object is a **private field of `RemoteAgent`** —
-  pack code has **no handle to it and cannot send on it**, and pack renderers/panels are
-  Blob-URL modules that **cannot import** `session-write-bridge.ts` (the `host` object is
-  their only surface). So there is **no session secret on any `fetch`** for a pack to
-  monkey-patch/capture/replay, and **no fetch path** to the capability at all.
+  ack (`src/app/remote-agent.ts`). This path is held by app infrastructure rather than
+  exposed as a Host API transport handle, so there is **no session secret on any `fetch`**
+  for a pack to monkey-patch/capture/replay, and **no fetch path** to the capability in the
+  sanctioned contract. This is not a claim that same-origin pack code is a separate,
+  non-spoofable browser principal.
 - Server: the WS handler (`src/server/ws/handler.ts`, `case "ext_session_post"`) runs the
   pure `handleSessionPost` (`src/server/extension-host/session-write.ts`) with the
   connection's **own server-authenticated `sessionId`** as the trusted target.
@@ -914,16 +915,16 @@ Its **transport** is now the app's already-authenticated session **WebSocket**, 
 6. reply ext_session_post_result {ok}
 ```
 
-### C2.1b Server-minted, one-time, content-bound write permit (closes same-realm replay)
+### C2.1b Server-minted, one-time, content-bound write permit (closes replay/tamper)
 
-The trusted-WS transport (§C2.1) removed the *secret-exfiltration* vector but did **not**
-close the same-realm *forge/replay* vector: a same-realm pack can still monkey-patch
-`WebSocket.prototype.send` (or capture the live socket) and FORGE or REPLAY an
+The session WebSocket path (§C2.1) removed the *secret-exfiltration via fetch* vector but
+did **not** make same-origin pack code non-spoofable: a same-realm pack can still
+monkey-patch `WebSocket.prototype.send` (or capture the live socket) and FORGE or REPLAY an
 `ext_session_post` frame — e.g. capture one legitimate gesture-driven post and resend it
-later with no gesture. This is closed by a server-minted permit
-(`src/server/extension-host/session-write-permit.ts`):
+later with no gesture. Server-side replay/tamper resistance comes from a server-minted
+permit (`src/server/extension-host/session-write-permit.ts`):
 
-- **Two trusted-WS round-trips.** After the client's *synchronous* transient-activation
+- **Two session-WS round-trips.** After the client's *synchronous* transient-activation
   assertion passes, `host.session.postMessage` computes `contentHash = sha256(role + "\n" +
   text)` (SubtleCrypto) and the poster:
   1. sends `ext_session_write_permit {tool, contentHash}`; the server derives the packId,
@@ -953,16 +954,16 @@ model unambiguously perceives it as an out-of-band system directive — while "u
 delivered verbatim. The framing applies to the delivered text only; the permit's contentHash
 and the audit record bind/record the ORIGINAL role+text.
 
-`postMessage` drives the agent, so the target is the **trusted, WS-authenticated** session
-(never a parameter) and every call is audited. Its security posture is: **trusted-WS
-transport (no capturable secret, pack cannot send) + allowedTools-gated + server-derived
-packId + audited + client user-activation defense-in-depth (§below)** — secure without the
+`postMessage` drives the agent, so the target is the **WS-authenticated** session (never a
+parameter) and every call is audited. Its security posture is: **gateway/session auth +
+allowedTools-gated scoped authorization + server-derived packId + content-bound one-time
+permit + audit + client user-activation provenance (§below)** — secure without the
 inapplicable toolUseId-ownership requirement. The full action guard WITH toolUseId-ownership
 is unchanged for `invokeAction` (the only tool-call-scoped capability).
 
-**Client user-activation is defense-in-depth ("no post on mount"), not the transport gate.**
-The unforgeable gate is the transport (pack code cannot reach the trusted WS); on top of it
-the client adds a browser-enforced activation check:
+**Client user-activation is a user-provenance/UX guard ("no post on mount"), not a same-realm
+security boundary.** On top of server authorization and permit consumption, the client adds a
+browser activation check:
 
 - `src/app/gesture-context.ts` exposes `consumeGesture()`, which reads
   `navigator.userActivation.isActive` — `true` ONLY during a genuine user-gesture call
@@ -970,10 +971,10 @@ the client adds a browser-enforced activation check:
   programmatic calls.
 - `host.session.postMessage` calls `consumeGesture()` **synchronously** at its prologue
   (before any `await`) and **throws** `"postMessage requires a user gesture"` when it is
-  false, so a render/mount-time post fails loudly. This is browser-enforced state a pack
-  cannot fabricate; it is NOT a method parameter, so the frozen v1 `postMessage` signature
-  is **unchanged**. (`runWithUserGesture(fn)` is retained as a thin no-op wrapper for
-  existing call sites; the activation read is the load-bearing check.)
+  false, so a render/mount-time post fails loudly. This is browser state used for
+  user-provenance and UX; it is NOT a method parameter, so the frozen v1 `postMessage`
+  signature is **unchanged**. (`runWithUserGesture(fn)` is retained as a thin no-op wrapper
+  for existing call sites.)
 - The module holds **no per-session secret and exports no secret getter** — that
   exfiltration surface is gone.
 
@@ -988,11 +989,11 @@ UI logic — renderers (`renderer:`) and panels (`panels:`) — runs in the **ma
 (pack source is trusted; embedded untrusted content is iframe-`sandbox`ed; no auto-invoke /
 navigation on mount). A same-realm pack therefore CAN monkey-patch globals like
 `window.fetch` **and `WebSocket.prototype.send`**. The session-write hardening removes the
-concrete surfaces that mattered: **driving the agent now goes over the trusted session
-WebSocket that pack code cannot access** (no session secret rides any `fetch`), AND every
-post must carry a **server-minted, one-time, content-bound write permit** (§C2.1b) so a
-captured/replayed/forged/tampered `ext_session_post` frame is rejected server-side. What
-remains explicitly OUT of Phase 2 scope is **FULL realm isolation** of pack UI logic
+specific fetch-secret surface: **driving the agent now uses the app's session WebSocket
+path** (no session secret rides any `fetch`), AND every post must carry a **server-minted,
+one-time, content-bound write permit** (§C2.1b) so a captured/replayed/forged/tampered
+`ext_session_post` frame is rejected server-side. What remains explicitly OUT of Phase 2
+scope is **FULL realm isolation** of pack UI logic
 (running renderers/panels in a separate iframe/worker realm so they cannot touch app globals
 at all) — which is what would close the last residual (a pack forging the permit MINT during
 a genuine user gesture). That is a documented future hardening, tracked beyond Phase 2; the
@@ -1015,12 +1016,12 @@ internal wire. Scoped to the bound session.
   carrying the nonce) for the mint; `ext_session_post` gains a required `nonce`.
 - `src/server/extension-host/session-write.ts`: `handleSessionPost` requires + consumes the
   permit (§C2.1b) and applies role-aware delivery via `formatSessionMessage` (§C2.1c).
-- Client `host.session.postMessage` (trusted-WS transport, §C2.1; computes the contentHash,
+- Client `host.session.postMessage` (session WebSocket path, §C2.1; computes the contentHash,
   mints then posts via `RemoteAgent`) + `subscribe` bodies.
   **Flip `flags.session = true`** (reads from B2 + writes here = full namespace live).
 - There is intentionally **no** `ServerHostApi.session.postMessage`: driving the agent is a
-  client-gesture-originated, trusted-WS capability (Fix B). The server host's `session`
-  namespace exposes reads only.
+  client-gesture-originated capability over the session WebSocket path (Fix B). The server
+  host's `session` namespace exposes reads only.
 - Transport plumbing: `ext_session_post` / `ext_session_post_result` WS frames
   (`src/server/ws/protocol.ts`); server handler in `src/server/ws/handler.ts`; the pure
   authorize/validate/post/audit core in `src/server/extension-host/session-write.ts`;

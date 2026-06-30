@@ -106,11 +106,47 @@ async function cleanup(sourceId?: string, projectId?: string, packNames: string[
 	if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
 }
 
+const EXPECTED_GATEWAY_PROVIDERS = ["confluence", "jira", "jira-readonly"];
+
+type GatewayBrowseSnapshot = {
+	status: number;
+	providers: string[];
+	packNames: string[];
+	packCount: number;
+	error?: string;
+	rawBodySnippet?: string;
+};
+
 async function browseRemoteGatewayPack(sourceId: string): Promise<any> {
-	const browse = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}/packs`);
-	expect(browse.status).toBe(200);
-	const packs = (await browse.json()).packs;
-	expect(packs.map((p: any) => p.gatewayProviderId).sort()).toEqual(["confluence", "jira", "jira-readonly"]);
+	let packs: any[] = [];
+	await expect.poll(async () => {
+		const browse = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}/packs`);
+		const rawBody = await browse.text();
+		let body: any = {};
+		try {
+			body = rawBody ? JSON.parse(rawBody) : {};
+		} catch (err: any) {
+			body = { error: `failed to parse /packs response JSON: ${err?.message ?? String(err)}` };
+		}
+		packs = Array.isArray(body?.packs) ? body.packs : [];
+		const snapshot: GatewayBrowseSnapshot = {
+			status: browse.status,
+			providers: packs.map((p: any) => p.gatewayProviderId).filter((id: any): id is string => typeof id === "string").sort(),
+			packNames: packs.map((p: any) => p.name).filter((name: any): name is string => typeof name === "string").sort(),
+			packCount: packs.length,
+		};
+		if (typeof body?.error === "string") snapshot.error = body.error;
+		if (!browse.ok || !Array.isArray(body?.packs)) snapshot.rawBodySnippet = rawBody.slice(0, 500);
+		return snapshot;
+	}, {
+		message: "remote MCP gateway provider discovery should list all mock providers",
+		timeout: 15_000,
+		intervals: [100, 250, 500, 1_000],
+	}).toEqual(expect.objectContaining({
+		status: 200,
+		providers: EXPECTED_GATEWAY_PROVIDERS,
+	}));
+
 	const pack = packs.find((p: any) => p.gatewayProviderId === "jira");
 	expect(pack).toBeTruthy();
 	return pack;
