@@ -248,12 +248,12 @@ export interface DisabledRefs {
 Introduce a stable installed MCP contribution identity and expose it anywhere activation is read or written:
 
 ```ts
-type InstalledMcpContributionId = string; // e.g. hash(sourceId + installedPackName + gatewayProviderId + listName + runtimeServerKey)
+type InstalledMcpContributionId = string; // e.g. hash(sourceId-or-sourceUrl + installedPackName + gatewayProviderId + listName + public server/subNamespace)
 ```
 
 Identity requirements:
 
-- Gateway contribution ids must include source id, installed/materialized pack name, gateway provider id, MCP `listName`, public `serverName`/`subNamespace`, and runtime server key/fingerprint as available.
+- Gateway activation contribution ids must include stable logical ownership only: persisted source id when available (falling back to source URL for older/hand-authored metadata), installed/materialized pack name, gateway provider id, MCP `listName`, and public `serverName`/`subNamespace`. They must not include gateway catalogue/provider fingerprints or runtime server keys, so operation preferences survive gateway refreshes.
 - Manual MCP contribution ids can remain compatible aliases based on existing server/list refs; manual behavior must not change.
 - Model-facing policy keys stay readable (`mcp__gr__confluence__op`), but they are never storage ownership keys because the same public key can exist in multiple gateway installs before precedence is applied.
 
