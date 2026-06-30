@@ -21,6 +21,7 @@ export interface GatewayConnection {
 
 export interface GatewayOperation {
 	name: string;
+	label?: string;
 	description?: string;
 	inputSchema?: unknown;
 }
@@ -67,8 +68,16 @@ export type McpGatewayBrowsePack = PackManifest & {
 	mcpGatewayDiagnostics?: { skippedEntries: McpGatewaySkippedEntry[] };
 };
 
-export interface MaterializeGatewayProviderPackOptions {
+export interface GatewayProviderPackIdentityOptions {
+	/** Source-qualified installed identity. Omit for legacy/direct materialization. */
+	sourceId?: string;
+	/** Existing installed pack name to preserve during updates/migrations. */
+	installedPackName?: string;
+}
+
+export interface MaterializeGatewayProviderPackOptions extends GatewayProviderPackIdentityOptions {
 	sourceUrl?: string;
+	sourceName?: string;
 	materializedAt?: string;
 }
 
@@ -376,7 +385,7 @@ function normalizeOperations(raw: Record<string, unknown>): GatewayOperation[] |
 		const provider = firstString(item, ["provider", "namespace", "subNamespace"]);
 		if (name && provider && name.startsWith(`${provider}__`)) name = name.slice(provider.length + 2);
 		if (!name) continue;
-		operations.push(stripUndefined({ name, description: firstString(item, ["description"]), inputSchema: item.inputSchema }));
+		operations.push(stripUndefined({ name, label: firstString(item, ["label", "title", "displayName"]), description: firstString(item, ["description"]), inputSchema: item.inputSchema }));
 	}
 	return operations.length > 0 ? operations : undefined;
 }
@@ -397,8 +406,8 @@ function normalizeHeaders(raw: unknown, where: string): Record<string, string> |
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
-export function gatewayProviderToVirtualPack(provider: McpGatewayProvider): McpGatewayBrowsePack {
-	const packName = gatewayPackNameForProvider(provider.id);
+export function gatewayProviderToVirtualPack(provider: McpGatewayProvider, opts: GatewayProviderPackIdentityOptions = {}): McpGatewayBrowsePack {
+	const packName = opts.installedPackName ?? gatewayPackNameForProvider(provider.id, opts.sourceId);
 	const mcpEntries = providerMcpWireEntries(provider);
 	const contentsMcp = mcpEntries.map((entry) => entry.ref as string);
 	const mcpDescriptions: Record<string, string> = {};
@@ -441,12 +450,13 @@ function connectionToMcpWire(provider: McpGatewayProvider, listName: string, con
 		transport: "http",
 		url: connection.url,
 		headers: connection.headers ? Object.keys(connection.headers) : undefined,
+		operations: provider.operations,
 	});
 }
 
 export function materializeGatewayProviderPack(provider: McpGatewayProvider, destOrStagingDir: string, opts: MaterializeGatewayProviderPackOptions = {}): PackManifest {
 	const root = path.resolve(destOrStagingDir);
-	const manifest = gatewayProviderToVirtualPack(provider);
+	const manifest = gatewayProviderToVirtualPack(provider, opts);
 	fs.mkdirSync(root, { recursive: true });
 	const mcpDir = path.join(root, "mcp");
 	const packYamlPath = path.join(root, "pack.yaml");
@@ -473,12 +483,18 @@ export function materializeGatewayProviderPack(provider: McpGatewayProvider, des
 	if (provider.write && writeMcpPath) {
 		fs.writeFileSync(writeMcpPath, stringify(mcpContributionYaml(provider, `${provider.id}-write`, provider.write)), "utf-8");
 	}
+	const gatewayOperations = provider.operations && provider.operations.length > 0
+		? Object.fromEntries(providerMcpWireEntries(provider).map((entry) => [entry.listName as string, provider.operations]))
+		: undefined;
 	fs.writeFileSync(metaPath, stringify(stripUndefined({
 		sourceType: "mcp-gateway",
 		sourceUrl: opts.sourceUrl,
+		sourceId: opts.sourceId,
+		sourceName: opts.sourceName,
 		gatewayProviderId: provider.id,
 		gatewayFingerprint: provider.fingerprint,
 		gatewayVersion: provider.version,
+		gatewayOperations,
 		materializedAt: opts.materializedAt || new Date().toISOString(),
 		label: provider.label,
 		description: provider.description,
@@ -492,13 +508,28 @@ function mcpContributionYaml(provider: McpGatewayProvider, listName: string, con
 		subNamespace: provider.id,
 		label: listName.endsWith("-write") ? writeLabel(provider) : provider.label,
 		description: listName.endsWith("-write") ? writeDescription(provider) : provider.description,
+		operations: operationMetadataForMcpYaml(provider.operations),
 		transport: stripUndefined({ type: "http", url: connection.url, headers: connection.headers }),
 	});
 }
 
-export function gatewayPackNameForProvider(providerId: string): string {
+function operationMetadataForMcpYaml(operations: GatewayOperation[] | undefined): Array<Record<string, unknown>> | undefined {
+	if (!operations || operations.length === 0) return undefined;
+	return operations.map((op) => stripUndefined({ name: op.name, label: op.label, description: op.description }));
+}
+
+export function gatewayPackNameForProvider(providerId: string, sourceId?: string): string {
 	try {
-		return mcpGeneratedPackNameForId(providerId);
+		const base = mcpGeneratedPackNameForId(providerId);
+		if (!sourceId) return base;
+		const sourceSlug = sourceId
+			.toLowerCase()
+			.replace(/[^a-z0-9-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.replace(/-{2,}/g, "-");
+		const qualified = `${base}-${sourceSlug || "source"}`;
+		if (!/^[a-z0-9][a-z0-9-]*$/.test(qualified)) throw new McpGatewayError(`unsafe gateway source id: ${sourceId}`);
+		return qualified;
 	} catch (err) {
 		throw new McpGatewayError(err instanceof Error ? err.message : String(err));
 	}

@@ -32,20 +32,49 @@ export interface ResolvedMcpOrigin {
 export interface ResolvedMcpContribution {
   /** Pack-local contents.mcp basename and DisabledRefs.mcp key. */
   listName: string;
-  /** Runtime mcpServers key. */
+  /** Public/model-facing MCP server name used in mcp__<server>__... tool names. */
   serverName: string;
+  /** Runtime MCP client key. Manual JSON MCPs leave this equal to serverName. */
+  runtimeServerKey?: string;
+  /** Stable installed contribution identity used by marketplace activation. */
+  contributionId?: string;
   /** Optional gateway sub-namespace owned by this contribution. */
   subNamespace?: string;
+  /** Optional enabled operation allow-list after install activation is applied. */
+  selectedOperations?: string[];
+  /** Optional disabled operation names owned by this contribution. */
+  disabledOperations?: string[];
   config: McpServerConfig;
   origin: ResolvedMcpOrigin;
 }
 
 export interface ResolvedMcpConnectionGroup {
+  /** Runtime MCP client key. Kept as serverName for compatibility with existing status/config callers. */
   serverName: string;
+  runtimeServerKey: string;
   config: McpServerConfig;
   ownerContributions: ResolvedMcpContribution[];
   /** undefined means a flat contribution owns all namespaces. */
   activeSubNamespaces?: Set<string>;
+}
+
+export interface McpRouteDiagnostic {
+  type: "conflict";
+  toolName: string;
+  keptRuntimeServerKey: string;
+  droppedRuntimeServerKey: string;
+  keptContributionId?: string;
+  droppedContributionId?: string;
+}
+
+interface McpToolRoute {
+  name: string;
+  runtimeServerKey: string;
+  publicServerName: string;
+  mcpToolName: string;
+  tool: McpToolDef;
+  contribution: ResolvedMcpContribution;
+  group: string;
 }
 
 export interface RedactedMcpServerConfig {
@@ -76,6 +105,13 @@ export interface McpReloadResult {
   statuses: McpServerStatus[];
 }
 
+export interface McpReloadOptions {
+  force?: boolean;
+  timeoutMs?: number;
+  /** Queue one fresh reload after the active reload. Used when activation mutates while discovery is in flight. */
+  queueIfInFlight?: boolean;
+}
+
 export interface McpToolRegistrationRefresh {
   /** Remove these external-tool prefixes before registering toolInfos. */
   removePrefixes: string[];
@@ -104,6 +140,14 @@ export interface McpToolInfo {
   serverName: string;
   mcpToolName: string;
   inputSchema: Record<string, unknown>;
+}
+
+export interface McpToolRouteSnapshot extends McpToolInfo {
+  runtimeServerKey: string;
+  publicServerName: string;
+  contributionId?: string;
+  listName: string;
+  subNamespace?: string;
 }
 
 /**
@@ -209,11 +253,17 @@ export class McpManager {
   private connectionGroups = new Map<string, ResolvedMcpConnectionGroup>();
   private serverFingerprints = new Map<string, string>();
   private reloadPromise: Promise<McpReloadResult> | undefined;
+  private queuedReloadPromise: Promise<McpReloadResult> | undefined;
+  private queuedReloadStarted = false;
   private marketplaceResolver: MarketplaceMcpResolver | null = null;
   private readonly discoveryScope: McpDiscoveryScope;
-  /** Maps truncated Bobbit tool names back to original MCP tool names. */
+  /** Maps public Bobbit tool names to their authoritative runtime route. */
+  private _toolRouteMap = new Map<string, McpToolRoute>();
+  private _routeDiagnostics: McpRouteDiagnostic[] = [];
+  private _routeMapDirty = true;
+  /** Maps truncated Bobbit tool names back to original MCP tool names. Kept for legacy tests/introspection. */
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
-  /** In-memory cache: serverName → toolName → summary */
+  /** In-memory cache: runtimeServerKey → toolName → summary */
   private _summaryCache = new Map<string, Map<string, string>>();
 
   private projectConfigStore: ProjectConfigReader | null;
@@ -339,6 +389,7 @@ export class McpManager {
     for (const [name, config] of Object.entries(manual)) {
       byServer.set(name, {
         serverName: name,
+        runtimeServerKey: name,
         config,
         ownerContributions: [flatManualContribution(name, config)],
       });
@@ -354,7 +405,7 @@ export class McpManager {
     try {
       return this.marketplaceResolver(this.getDiscoveryScope()).filter((c) => {
         return !!c && typeof c.listName === "string" && typeof c.serverName === "string" && !!c.config;
-      });
+      }).map((c) => ({ ...c, runtimeServerKey: c.runtimeServerKey ?? c.serverName }));
     } catch (err) {
       console.error("[mcp] Marketplace MCP resolver failed:", (err as Error).message);
       return [];
@@ -372,12 +423,15 @@ export class McpManager {
   }
 
   static groupMarketplaceContributions(contributions: ResolvedMcpContribution[]): ResolvedMcpConnectionGroup[] {
-    const byServer = new Map<string, ResolvedMcpConnectionGroup>();
-    for (const contrib of contributions) {
-      const existing = byServer.get(contrib.serverName);
+    const byRuntime = new Map<string, ResolvedMcpConnectionGroup>();
+    for (const rawContrib of contributions) {
+      const contrib = { ...rawContrib, runtimeServerKey: rawContrib.runtimeServerKey ?? rawContrib.serverName };
+      const runtimeKey = contrib.runtimeServerKey;
+      const existing = byRuntime.get(runtimeKey);
       if (!existing || !sameConfig(existing.config, contrib.config)) {
-        byServer.set(contrib.serverName, {
-          serverName: contrib.serverName,
+        byRuntime.set(runtimeKey, {
+          serverName: runtimeKey,
+          runtimeServerKey: runtimeKey,
           config: contrib.config,
           ownerContributions: [contrib],
           activeSubNamespaces: contrib.subNamespace ? new Set([contrib.subNamespace]) : undefined,
@@ -392,7 +446,7 @@ export class McpManager {
         existing.activeSubNamespaces.add(contrib.subNamespace);
       }
     }
-    return [...byServer.values()];
+    return [...byRuntime.values()];
   }
 
   private _discoverManualServers(): Record<string, McpServerConfig> {
@@ -514,6 +568,7 @@ export class McpManager {
   async connectServer(name: string, config: McpServerConfig): Promise<void> {
     const desiredGroup = this.discoveredConnectionGroups.get(name) ?? {
       serverName: name,
+      runtimeServerKey: name,
       config,
       ownerContributions: [flatManualContribution(name, config)],
     };
@@ -554,6 +609,7 @@ export class McpManager {
         // report `error` while .connected is true; downstream callTool will
         // simply find no tools to dispatch.
         this.toolDefs.set(name, []);
+        this._markRouteMapDirty();
         return;
       }
 
@@ -571,6 +627,7 @@ export class McpManager {
       }
 
       this.toolDefs.set(name, validTools);
+      this._markRouteMapDirty();
 
       // Generate/update doc cache and summaries
       this._updateDocCache(name, validTools);
@@ -594,13 +651,14 @@ export class McpManager {
       }
       this.clients.delete(name);
       this.toolDefs.delete(name);
+      this._markRouteMapDirty();
     }
   }
 
   private _fingerprintGroup(group: ResolvedMcpConnectionGroup): string {
     return stableFingerprint({
+      runtimeServerKey: group.runtimeServerKey,
       config: group.config,
-      activeSubNamespaces: group.activeSubNamespaces ? [...group.activeSubNamespaces].sort() : null,
     });
   }
 
@@ -615,24 +673,58 @@ export class McpManager {
     }
   }
 
-  async reloadDiscoveredServers(opts?: { force?: boolean; timeoutMs?: number }): Promise<McpReloadResult> {
-    if (!this.reloadPromise) {
-      this.reloadPromise = this._reloadDiscoveredServers(opts?.force === true)
-        .finally(() => {
-          this.reloadPromise = undefined;
-        });
-    }
+  async reloadDiscoveredServers(opts?: McpReloadOptions): Promise<McpReloadResult> {
+    const force = opts?.force === true;
+    const reload = this._reloadPromiseForRequest(force, opts?.queueIfInFlight === true);
 
     const timeoutMs = opts?.timeoutMs ?? 30_000;
-    if (timeoutMs <= 0) return this.reloadPromise;
+    if (timeoutMs <= 0) return reload;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Promise<McpReloadResult>((resolve) => {
       timer = setTimeout(() => resolve(this._pendingReloadResult()), timeoutMs);
     });
-    return Promise.race([this.reloadPromise, pending]).finally(() => {
+    return Promise.race([reload, pending]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+  }
+
+  private _reloadPromiseForRequest(force: boolean, queueIfInFlight: boolean): Promise<McpReloadResult> {
+    if (!this.reloadPromise) {
+      this.reloadPromise = this._makeReloadPromise(force);
+      return this.reloadPromise;
+    }
+    if (!queueIfInFlight) return this.reloadPromise;
+    if (!this.queuedReloadPromise || this.queuedReloadStarted) {
+      const previous = this.reloadPromise;
+      let queued!: Promise<McpReloadResult>;
+      queued = previous
+        .catch(() => undefined)
+        .then(() => {
+          if (this.queuedReloadPromise === queued) this.queuedReloadStarted = true;
+          return this._reloadDiscoveredServers(force);
+        })
+        .finally(() => {
+          if (this.queuedReloadPromise === queued) {
+            this.queuedReloadPromise = undefined;
+            this.queuedReloadStarted = false;
+          }
+          if (this.reloadPromise === queued) this.reloadPromise = undefined;
+        });
+      this.queuedReloadPromise = queued;
+      this.queuedReloadStarted = false;
+      this.reloadPromise = queued;
+    }
+    return this.queuedReloadPromise;
+  }
+
+  private _makeReloadPromise(force: boolean): Promise<McpReloadResult> {
+    let promise!: Promise<McpReloadResult>;
+    promise = this._reloadDiscoveredServers(force)
+      .finally(() => {
+        if (this.reloadPromise === promise) this.reloadPromise = undefined;
+      });
+    return promise;
   }
 
   /** Return the in-flight reload, if any, so callers can refresh dependents after a pending response completes. */
@@ -680,6 +772,7 @@ export class McpManager {
         this.configs.set(name, group.config);
         this.connectionGroups.set(name, group);
         this.serverFingerprints.set(name, fp);
+        this._markRouteMapDirty();
         if (this.errors.has(name)) {
           skippedErrored.push(name);
           return;
@@ -721,6 +814,7 @@ export class McpManager {
     }
     this.toolDefs.delete(name);
     this.errors.delete(name);
+    this._markRouteMapDirty();
     if (opts?.forget) {
       this.configs.delete(name);
       this.connectionGroups.delete(name);
@@ -741,47 +835,287 @@ export class McpManager {
     this.connectionGroups.clear();
     this.discoveredConnectionGroups.clear();
     this.serverFingerprints.clear();
+    this._markRouteMapDirty();
   }
 
   // ── Tool queries ───────────────────────────────────────────────────
 
   /**
    * Get all MCP tools as Bobbit-compatible tool info objects.
-   * Tool names use double-underscore separator: mcp__<server>__<tool>
+   * Tool names use double-underscore separator: mcp__<public-server>__<tool>
    */
   getToolInfos(): McpToolInfo[] {
+    this._ensureRouteMapFresh();
     const infos: McpToolInfo[] = [];
-    this._toolNameMap.clear();
 
-    for (const [serverName, tools] of this.toolDefs) {
-      const group = this.connectionGroups.get(serverName);
-      for (const tool of tools) {
-        const name = this._makeBobbitToolName(serverName, tool.name);
-        const parsed = parseMcpToolName(name);
-        if (group?.activeSubNamespaces && (!parsed?.sub || !group.activeSubNamespaces.has(parsed.sub))) {
-          continue;
-        }
+    for (const route of this._toolRouteMap.values()) {
+      const summary = this._summaryCache.get(route.runtimeServerKey)?.get(route.mcpToolName);
+      // Compact inline docs — description is already in the summary line,
+      // so docs only carry parameter names. Full tables live in the MD file.
+      const paramNames = this._getParamNames(route.tool);
+      const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
 
-        const summary = this._summaryCache.get(serverName)?.get(tool.name);
-        // Compact inline docs — description is already in the summary line,
-        // so docs only carry parameter names. Full tables live in the MD file.
-        const paramNames = this._getParamNames(tool);
-        const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
-
-        infos.push({
-          name,
-          description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
-          group: `MCP: ${serverName}`,
-          docs,
-          summary,
-          serverName,
-          mcpToolName: tool.name,
-          inputSchema: tool.inputSchema as Record<string, unknown>,
-        });
-      }
+      infos.push({
+        name: route.name,
+        description: route.tool.description || `MCP tool ${route.mcpToolName} from ${route.publicServerName}`,
+        group: route.group,
+        docs,
+        summary,
+        serverName: route.publicServerName,
+        mcpToolName: route.mcpToolName,
+        inputSchema: route.tool.inputSchema as Record<string, unknown>,
+      });
     }
 
     return infos;
+  }
+
+  getRouteDiagnostics(): McpRouteDiagnostic[] {
+    this._ensureRouteMapFresh();
+    return this._routeDiagnostics.map((d) => ({ ...d }));
+  }
+
+  getToolRouteSnapshots(): McpToolRouteSnapshot[] {
+    this._ensureRouteMapFresh();
+    return [...this._toolRouteMap.values()].map((route) => {
+      const summary = this._summaryCache.get(route.runtimeServerKey)?.get(route.mcpToolName);
+      const paramNames = this._getParamNames(route.tool);
+      const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
+      return {
+        name: route.name,
+        description: route.tool.description || `MCP tool ${route.mcpToolName} from ${route.publicServerName}`,
+        group: route.group,
+        docs,
+        summary,
+        serverName: route.publicServerName,
+        mcpToolName: route.mcpToolName,
+        inputSchema: route.tool.inputSchema as Record<string, unknown>,
+        runtimeServerKey: route.runtimeServerKey,
+        publicServerName: route.publicServerName,
+        ...(route.contribution.contributionId ? { contributionId: route.contribution.contributionId } : {}),
+        listName: route.contribution.listName,
+        ...(route.contribution.subNamespace ? { subNamespace: route.contribution.subNamespace } : {}),
+      };
+    });
+  }
+
+  private _markRouteMapDirty(): void {
+    this._routeMapDirty = true;
+  }
+
+  private _ensureRouteMapFresh(): void {
+    if (!this._routeMapDirty) return;
+    this._rebuildRouteMap();
+  }
+
+  private _rebuildRouteMap(): void {
+    this._toolRouteMap.clear();
+    this._toolNameMap.clear();
+    this._routeDiagnostics = [];
+
+    const precedence = this._buildRoutePrecedenceRanks();
+    const candidates: Array<{ route: McpToolRoute; rank: number; ownerIndex: number; toolIndex: number }> = [];
+
+    for (const [runtimeServerKey, tools] of this.toolDefs) {
+      const group = this.connectionGroups.get(runtimeServerKey) ?? this.discoveredConnectionGroups.get(runtimeServerKey);
+      const owners = this._routeOwnersForRuntimeGroup(runtimeServerKey, group);
+      tools.forEach((tool, toolIndex) => {
+        owners.forEach((contribution, ownerIndex) => {
+          const route = this._routeForContributionTool(runtimeServerKey, contribution, tool, owners.length);
+          if (!route) return;
+          candidates.push({
+            route,
+            rank: precedence.get(this._contributionPrecedenceKey(runtimeServerKey, contribution)) ?? Number.MAX_SAFE_INTEGER,
+            ownerIndex,
+            toolIndex,
+          });
+        });
+      });
+    }
+
+    candidates.sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      const runtime = a.route.runtimeServerKey.localeCompare(b.route.runtimeServerKey);
+      if (runtime !== 0) return runtime;
+      if (a.ownerIndex !== b.ownerIndex) return a.ownerIndex - b.ownerIndex;
+      if (a.toolIndex !== b.toolIndex) return a.toolIndex - b.toolIndex;
+      return a.route.name.localeCompare(b.route.name);
+    });
+
+    for (const { route } of candidates) {
+      const existing = this._toolRouteMap.get(route.name);
+      if (existing) {
+        const diagnostic: McpRouteDiagnostic = {
+          type: "conflict",
+          toolName: route.name,
+          keptRuntimeServerKey: existing.runtimeServerKey,
+          droppedRuntimeServerKey: route.runtimeServerKey,
+          ...(existing.contribution.contributionId ? { keptContributionId: existing.contribution.contributionId } : {}),
+          ...(route.contribution.contributionId ? { droppedContributionId: route.contribution.contributionId } : {}),
+        };
+        this._routeDiagnostics.push(diagnostic);
+        console.warn(
+          `[mcp] tool route conflict for "${route.name}" — keeping ${existing.runtimeServerKey}, dropping ${route.runtimeServerKey}`,
+        );
+        continue;
+      }
+      this._toolRouteMap.set(route.name, route);
+      this._toolNameMap.set(route.name, { serverName: route.runtimeServerKey, mcpToolName: route.mcpToolName });
+    }
+
+    this._routeMapDirty = false;
+  }
+
+  private _buildRoutePrecedenceRanks(): Map<string, number> {
+    const ranks = new Map<string, number>();
+    let rank = 0;
+    const groups: Array<[string, ResolvedMcpConnectionGroup]> = [
+      ...this.discoveredConnectionGroups,
+      ...this.connectionGroups,
+    ];
+    const addGroup = (runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined, manual: boolean) => {
+      if (!group?.ownerContributions?.length) return;
+      for (const contribution of group.ownerContributions) {
+        if ((contribution.origin?.scope === "manual") !== manual) continue;
+        const key = this._contributionPrecedenceKey(runtimeServerKey, contribution);
+        if (!ranks.has(key)) ranks.set(key, rank++);
+      }
+    };
+
+    // Manual JSON MCPs preserve legacy behavior and must win public-name
+    // conflicts over marketplace/gateway contributions. Marketplace order then
+    // remains deterministic for gateway-vs-gateway conflicts.
+    for (const [runtimeServerKey, group] of groups) addGroup(runtimeServerKey, group, true);
+    for (const [runtimeServerKey, group] of groups) addGroup(runtimeServerKey, group, false);
+    return ranks;
+  }
+
+  private _contributionPrecedenceKey(runtimeServerKey: string, contribution: ResolvedMcpContribution): string {
+    const origin = contribution.origin ?? { scope: "manual" };
+    return [
+      contribution.contributionId ?? "",
+      runtimeServerKey,
+      contribution.runtimeServerKey ?? "",
+      contribution.serverName,
+      contribution.listName,
+      contribution.subNamespace ?? "",
+      origin.scope ?? "",
+      origin.packId ?? "",
+      origin.packName ?? "",
+      origin.sourceUrl ?? "",
+      origin.path ?? "",
+    ].join("\0");
+  }
+
+  private _routeOwnersForRuntimeGroup(runtimeServerKey: string, group: ResolvedMcpConnectionGroup | undefined): ResolvedMcpContribution[] {
+    if (group?.ownerContributions?.length) return group.ownerContributions;
+    const config = group?.config ?? this.configs.get(runtimeServerKey) ?? {};
+    if (group?.activeSubNamespaces?.size) {
+      return [...group.activeSubNamespaces]
+        .sort()
+        .map((subNamespace) => ({
+          ...flatManualContribution(runtimeServerKey, config),
+          runtimeServerKey,
+          subNamespace,
+        }));
+    }
+    return [flatManualContribution(runtimeServerKey, config)];
+  }
+
+  private _routeForContributionTool(runtimeServerKey: string, contribution: ResolvedMcpContribution, tool: McpToolDef, ownerCount = 1): McpToolRoute | undefined {
+    const publicServerName = contribution.serverName;
+    const publicMcpToolName = this._publicMcpToolNameForContribution(contribution, tool.name, ownerCount);
+    if (!publicMcpToolName) return undefined;
+    const name = this._makeBobbitToolName(publicServerName, publicMcpToolName);
+    const parsed = parseMcpToolName(name);
+    if (contribution.subNamespace && (!parsed?.sub || parsed.sub !== contribution.subNamespace)) return undefined;
+    if (!this._operationSelected(contribution, tool.name, parsed?.op)) return undefined;
+    return {
+      name,
+      runtimeServerKey,
+      publicServerName,
+      mcpToolName: tool.name,
+      tool,
+      contribution,
+      group: `MCP: ${publicServerName}`,
+    };
+  }
+
+  private _publicMcpToolNameForContribution(contribution: ResolvedMcpContribution, rawToolName: string, ownerCount: number): string | undefined {
+    const subNamespace = contribution.subNamespace;
+    if (!subNamespace) return rawToolName;
+
+    const prefix = `${subNamespace}__`;
+    if (rawToolName.startsWith(prefix) && rawToolName.length > prefix.length) {
+      return rawToolName;
+    }
+
+    // Gateway sub-namespace contributions may expose raw, unprefixed operation
+    // names. Publish them under Bobbit's package namespace while preserving the
+    // raw MCP call name. A shared gateway endpoint can list sibling package
+    // operations, so gateway packages must prove ownership by selected operation
+    // metadata or the sub-namespace naming heuristic even when only one package
+    // is installed. Non-gateway sub-namespace contributions keep the legacy
+    // single-owner fallback for backwards compatibility.
+    if (!rawToolName.includes("__")) {
+      const selectedByContribution = contribution.selectedOperations?.includes(rawToolName) ?? false;
+      const looksOwnedBySubNamespace = this._rawToolNameLooksOwnedBySubNamespace(subNamespace, rawToolName);
+      const legacySingleOwnerFallback = ownerCount <= 1 && !this._isGatewaySubNamespaceContribution(contribution);
+      if (legacySingleOwnerFallback || selectedByContribution || looksOwnedBySubNamespace) {
+        return `${subNamespace}__${rawToolName}`;
+      }
+    }
+
+    return undefined;
+  }
+
+  private _isGatewaySubNamespaceContribution(contribution: ResolvedMcpContribution): boolean {
+    return Boolean(
+      contribution.subNamespace
+      && contribution.contributionId
+      && contribution.contributionId !== contribution.listName
+      && contribution.runtimeServerKey
+      && contribution.runtimeServerKey !== contribution.serverName,
+    );
+  }
+
+  private _rawToolNameLooksOwnedBySubNamespace(subNamespace: string, rawToolName: string): boolean {
+    return rawToolName.startsWith(`${subNamespace}_`) || rawToolName.startsWith(`${subNamespace}-`);
+  }
+
+  private _operationSelected(contribution: ResolvedMcpContribution, rawToolName: string, parsedOp?: string): boolean {
+    const candidates = new Set([rawToolName]);
+    if (parsedOp) candidates.add(parsedOp);
+
+    if (contribution.selectedOperations !== undefined) {
+      const selected = new Set(contribution.selectedOperations);
+      if (![...candidates].some((name) => selected.has(name))) return false;
+    }
+
+    if (contribution.disabledOperations !== undefined) {
+      const disabled = new Set(contribution.disabledOperations);
+      if ([...candidates].some((name) => disabled.has(name))) return false;
+    }
+
+    return true;
+  }
+
+  private _manualFallbackRuntimeKey(publicServerName: string): string | undefined {
+    const isManualOnlyGroup = (group: ResolvedMcpConnectionGroup | undefined): boolean => {
+      if (!group?.ownerContributions?.length) return true;
+      return group.ownerContributions.some((c) => c.serverName === publicServerName && c.origin.scope === "manual");
+    };
+
+    const direct = this.connectionGroups.get(publicServerName) ?? this.discoveredConnectionGroups.get(publicServerName);
+    if (this.configs.has(publicServerName) && isManualOnlyGroup(direct)) return publicServerName;
+
+    for (const [runtimeServerKey, group] of this.connectionGroups) {
+      if (group.serverName === publicServerName && isManualOnlyGroup(group)) return runtimeServerKey;
+      if (group.ownerContributions.some((c) => c.serverName === publicServerName && c.origin.scope === "manual")) {
+        return runtimeServerKey;
+      }
+    }
+    return undefined;
   }
 
   /** Helper for callers that refresh external MCP tools without leaving stale rows. */
@@ -954,30 +1288,70 @@ export class McpManager {
     bobbitToolName: string,
     args: Record<string, unknown>,
   ): Promise<McpToolResult> {
-    const { serverName, toolName } = this._parseToolName(bobbitToolName);
-    const parsed = parseMcpToolName(bobbitToolName);
-    const group = this.connectionGroups.get(serverName);
-    if (group?.activeSubNamespaces && (!parsed?.sub || !group.activeSubNamespaces.has(parsed.sub))) {
-      throw new Error(`MCP server "${serverName}" sub-namespace is not active for tool "${bobbitToolName}"`);
+    this._ensureRouteMapFresh();
+    const route = this._toolRouteMap.get(bobbitToolName);
+    if (!route) {
+      // Preserve the old sub-namespace error shape for callers/tests that try a
+      // namespace not owned by any installed contribution.
+      const parsed = parseMcpToolName(bobbitToolName);
+      if (parsed) {
+        const rawMcpToolName = parsed.sub ? `${parsed.sub}__${parsed.op}` : parsed.op;
+        const marketplacePublicServerKnown = [...this.connectionGroups.values()].some((group) =>
+          group.ownerContributions.some((c) => c.serverName === parsed.server),
+        );
+        const subNamespaceKnown = parsed.sub && [...this.connectionGroups.values()].some((group) =>
+          group.ownerContributions.some((c) => c.serverName === parsed.server && c.subNamespace === parsed.sub),
+        );
+        if (marketplacePublicServerKnown && parsed.sub && !subNamespaceKnown) {
+          throw new Error(`MCP server "${parsed.server}" sub-namespace is not active for tool "${bobbitToolName}"`);
+        }
+
+        // Manual JSON MCPs historically forwarded unknown operation names to
+        // the MCP server and returned its tool-call-layer isError payload. Keep
+        // that compatibility without bypassing marketplace operation selection:
+        // if the raw op is known locally but absent from the route map, it was
+        // filtered out by namespace/selection/disablement and must stay denied.
+        const manualFallbackRuntimeKey = this._manualFallbackRuntimeKey(parsed.server);
+        if (manualFallbackRuntimeKey) {
+          const knownTools = this.toolDefs.get(manualFallbackRuntimeKey) ?? [];
+          if (!knownTools.some((tool) => tool.name === rawMcpToolName)) {
+            const fallbackRoute: McpToolRoute = {
+              name: bobbitToolName,
+              runtimeServerKey: manualFallbackRuntimeKey,
+              publicServerName: parsed.server,
+              mcpToolName: rawMcpToolName,
+              tool: { name: rawMcpToolName, inputSchema: { type: "object" } },
+              contribution: flatManualContribution(parsed.server, this.configs.get(manualFallbackRuntimeKey) ?? {}),
+              group: `MCP: ${parsed.server}`,
+            };
+            return this._callRouteTool(fallbackRoute, args);
+          }
+        }
+      }
+      throw new Error(`MCP tool "${bobbitToolName}" is not available or is disabled`);
     }
 
-    const client = this.clients.get(serverName);
+    return this._callRouteTool(route, args);
+  }
+
+  private async _callRouteTool(route: McpToolRoute, args: Record<string, unknown>): Promise<McpToolResult> {
+    const client = this.clients.get(route.runtimeServerKey);
     if (!client) {
       throw new Error(
-        `MCP server "${serverName}" is not connected`,
+        `MCP server "${route.runtimeServerKey}" is not connected`,
       );
     }
 
     if (!client.connected) {
       throw new Error(
-        `MCP server "${serverName}" is disconnected`,
+        `MCP server "${route.runtimeServerKey}" is disconnected`,
       );
     }
 
     return this._withTimeout(
-      client.callTool(toolName, args),
+      client.callTool(route.mcpToolName, args),
       this.callToolTimeoutMs,
-      `MCP tool "${bobbitToolName}"`,
+      `MCP tool "${route.name}"`,
     );
   }
 
@@ -998,43 +1372,7 @@ export class McpManager {
         fullName = prefix + mcpToolName.slice(0, maxToolLen);
       }
     }
-    this._toolNameMap.set(fullName, { serverName, mcpToolName });
     return fullName;
   }
 
-  /**
-   * Parse a Bobbit MCP tool name back to server + MCP tool name.
-   * Uses the lookup map first (handles truncated names), falls back to parsing.
-   */
-  private _parseToolName(bobbitToolName: string): {
-    serverName: string;
-    toolName: string;
-  } {
-    // Check lookup map first (handles truncated names)
-    const mapped = this._toolNameMap.get(bobbitToolName);
-    if (mapped) {
-      return { serverName: mapped.serverName, toolName: mapped.mcpToolName };
-    }
-
-    // Fallback: parse from the name structure
-    const prefix = "mcp__";
-    if (!bobbitToolName.startsWith(prefix)) {
-      throw new Error(
-        `Invalid MCP tool name "${bobbitToolName}": must start with "mcp__"`,
-      );
-    }
-
-    const rest = bobbitToolName.slice(prefix.length);
-    const sepIdx = rest.indexOf("__");
-    if (sepIdx < 1) {
-      throw new Error(
-        `Invalid MCP tool name "${bobbitToolName}": cannot parse server and tool name`,
-      );
-    }
-
-    return {
-      serverName: rest.slice(0, sepIdx),
-      toolName: rest.slice(sepIdx + 2),
-    };
-  }
 }

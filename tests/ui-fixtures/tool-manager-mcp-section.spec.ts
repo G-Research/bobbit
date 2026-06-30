@@ -167,6 +167,49 @@ test.describe("Tools page → MCP section fixture", () => {
 		});
 	});
 
+	test("uses supplied public MCP policy keys when gateway runtime names differ", async ({ page }) => {
+		await setupMcp(page, [{
+			name: "gateway_gr_jira_source_a_deadbeef",
+			status: "connected",
+			toolCount: 1,
+			serverPolicyKey: "mcp__gr",
+			policyKey: "mcp__gr",
+			tools: [{
+				name: "mcp__gr__jira__jira_search",
+				description: "Search Jira issues.",
+				subNamespace: "jira",
+				op: "jira_search",
+				serverPolicyKey: "mcp__gr",
+				packagePolicyKey: "mcp__gr__jira",
+				operationPolicyKey: "mcp__gr__jira__jira_search",
+				policyKey: "mcp__gr__jira__jira_search",
+			}],
+		}]);
+
+		const section = page.locator('[data-testid="mcp-section"]');
+		const gateway = section.locator('[data-server-name="gateway_gr_jira_source_a_deadbeef"]');
+		await expect(gateway).toHaveAttribute("data-policy-key", "mcp__gr");
+		await gateway.locator('[data-testid="mcp-server-toggle"]').click({ position: { x: 10, y: 10 } });
+		const jiraTool = gateway.locator('[data-testid="mcp-tool-row"][data-tool-name="jira"]');
+		await gateway.locator('[data-testid="mcp-server-policy"]').first().selectOption("never");
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
+			url: "/api/tool-group-policies/mcp__gr",
+			method: "PUT",
+			body: { policy: "never" },
+		});
+		await expect(jiraTool).toHaveAttribute("data-policy-key", "mcp__gr__jira");
+		await jiraTool.locator('[data-testid="mcp-tool-policy"]').selectOption("ask");
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
+			url: "/api/tool-group-policies/mcp__gr__jira",
+			method: "PUT",
+			body: { policy: "ask" },
+		});
+
+		await jiraTool.locator('[data-testid="mcp-tool-toggle"]').click();
+		const op = gateway.locator('[data-testid="mcp-operation-row"][data-tool-name="mcp__gr__jira__jira_search"]');
+		await expect(op).toHaveAttribute("data-policy-key", "mcp__gr__jira__jira_search");
+	});
+
 	test("shows inherited parent MCP policy for unset sub-namespace rows without storing override", async ({ page }) => {
 		await setupMcp(page, GATEWAY_SERVERS, { "mcp__gr": "never" });
 

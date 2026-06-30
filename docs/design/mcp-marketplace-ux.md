@@ -1,7 +1,9 @@
-# MCP Marketplace UX
+# MCP Marketplace UX (historical MCP Registry proposal)
 
-Status: design recommendation  
-Scope: Market page UX for Marketplace MCP support. This document specifies UI behavior only; it does not define backend schema beyond the client-facing shape needed for the UI.
+Status: historical design recommendation; superseded for current MCP Gateway UX by [mcp-gateway-polish-ux.md](mcp-gateway-polish-ux.md) and the current [Marketplace reference](../marketplace.md#marketplace-mcp).
+Scope: original Market page UX for Marketplace MCP Registry support. This document is not current implementation guidance.
+
+> Current behavior: new MCP sources use `type: "mcp-gateway"`. New `type: "mcp-registry"` source creation is rejected; persisted legacy registry rows are tolerated only as unsupported/removable compatibility rows. Do not use the registry-source sections below for new work.
 
 ## Existing surface to preserve
 

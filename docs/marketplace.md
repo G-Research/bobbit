@@ -69,11 +69,21 @@ Sources are **global to the server** — once registered, a source can be browse
 
 In the **Sources** panel, click "Add source", choose the source type, then paste a git URL, local/`file://` path, or MCP Gateway URL. Git sources may carry an optional branch/tag `ref`; MCP Gateway sources are URL-only and do not render or accept a ref field. Adding a source immediately validates/syncs it (shallow clone for git, read-in-place for local dirs, MCP `initialize` + `tools/list` discovery for gateways). Per-source "Re-sync" and "Remove" actions are available.
 
+MCP Gateway source labels are derived from the URL authority and path only: protocol, query, hash, and trailing slashes are removed. For example, `http://mcp-local.t3.zone/readonly/mcp?token=x#frag` displays as `mcp-local.t3.zone/readonly/mcp`. If two gateway URLs normalize to the same readable name, Bobbit persists deterministic suffixes (`name`, `name (2)`, `name (3)`) so existing rows do not rename when another source is removed. Exact duplicate URL strings are still rejected.
+
 Private repos rely on your ambient git credentials (credential helper / SSH agent) — the marketplace stores no credentials of its own. MCP Gateway URLs are contacted as trusted streamable-HTTP MCP endpoints during source sync and then materialized as trusted remote HTTP MCP endpoints. Actual gateway auth is runtime configuration: do not put secrets in marketplace source URLs or pack files.
 
 ### Browsing packs
 
-Select a source to list its installable entries. Git/local pack sources list authored pack directories. MCP Gateway sources list each supported provider namespace as a **virtual pack** named `mcp-<provider>` with `contents.mcp: [<provider>]`; installing it materializes a normal pack directory under the target scope. Each card shows its name, version, description, and declared entities (the `contents` from `pack.yaml`, rendered as chips). A directory in a pack source is only treated as a pack if it contains a valid `pack.yaml`; anything else (a `README.md`, a `docs/` folder) is ignored.
+Browse is an all-source catalogue. It shows the union of built-in first-party packs, registered git/local pack sources, and MCP Gateway provider packs. Source management never changes the current tab: adding, syncing, removing, or clicking a source leaves the user where they are. Browse filtering is explicit through the source chips at the top of the Browse panel.
+
+Every browse row carries source provenance (`source.id`, readable `source.name`, `source.type`, and a stable `browseKey`). Git/local pack sources list authored pack directories. MCP Gateway sources list each supported provider namespace as a **virtual pack** named with source-qualified identity, such as `mcp-jira-mcp-local-t3-zone-readonly-mcp`; installing it materializes a normal schema-2 pack directory under the target scope. Each card shows its name, version, description, declared entities, and source provenance. A directory in a pack source is only treated as a pack if it contains a valid `pack.yaml`; anything else (a `README.md`, a `docs/` folder) is ignored.
+
+Browse includes:
+
+- **Source chips** — one chip per source, including Built-in. Chips independently include/exclude that source's cards; unsupported legacy sources are disabled. The **All** chip enables every supported source, and **None** clears the selection.
+- **Search** — client-side text search over package name, description, version, source name/id/type, manifest contents, MCP provider labels, MCP contribution labels, and operation names/descriptions when available.
+- **Per-source states** — one failed source does not fail the whole catalogue. Healthy source cards stay visible, while source chips and a compact warning block show `error` or `unsupported` states. Empty states distinguish no sources selected, no configured sources, no supported packages, and no search matches.
 
 **Per-entity descriptions.** Below the entity chips, a collapsed **"Show details"** disclosure (a `<details>` element) reveals a one-line description for each declared role, tool, skill, and entry point. Descriptions are read straight from the pack dir on the source — role frontmatter, a representative tool-group YAML, skill `SKILL.md` frontmatter, and entry-point YAML respectively. The disclosure is collapsed by default so the at-a-glance chips stay the default and the descriptions are progressive disclosure — a pack with many entities never produces a wall of text. Entities without a description are simply omitted, and the disclosure disappears entirely when nothing would render.
 
@@ -161,7 +171,7 @@ What disabling does:
   `/api/ext/contributions`, so the launcher/deep-link disappears. **A panel the entrypoint
   targets stays available** to any enabled tool/entrypoint that opens it — disabling an
   entrypoint never disables a panel.
-- **Disable an MCP contribution** — its `contents.mcp` list name is added to `DisabledRefs.mcp`, so the contribution is omitted from Marketplace MCP discovery/connection. Runtime status and external `mcp_*` tools are refreshed immediately; the disabled row remains visible in the activation catalogue so it can be re-enabled.
+- **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
@@ -172,20 +182,22 @@ is keyed by those concrete tool names, and the runtime filters compare against t
 `/api/tools`, prompt docs, role effective-tool resolution, and extension/action/surface-token
 resolution. Disabling one tool in a group does not disable its siblings.
 
-**MCP toggle keys and granularity.** `DisabledRefs.mcp` is keyed by the pack-local `contents.mcp` basename (`listName`), not the runtime `server` name, not the model-facing `mcp_<server>` tool name, and not an operation id. Flat MCP contributions toggle the whole server. Contributions that declare a `subNamespace` toggle one model-facing sub-namespace (`mcp_<server>__<sub>`); identical-config sub-namespaces may share one underlying MCP client, so disabling one sub-namespace removes only that meta-tool while the shared client stays up if another enabled contribution still needs it. Raw per-operation activation is deliberately not exposed in Market; per-operation `never` remains a Tools-policy/runtime guard.
+**MCP toggle keys and granularity.** `DisabledRefs.mcp` disables a whole installed MCP contribution. For authored packs this remains the pack-local `contents.mcp` basename (`listName`). For MCP Gateway installs, the key is a stable installed contribution id derived from logical ownership only: persisted source id when available, source URL as a fallback for older/hand-authored metadata, installed/materialized pack name, gateway provider id, MCP `listName`, public `serverName`, and `subNamespace`. It intentionally excludes runtime keys, `entry.meta.commit`, and gateway/provider fingerprints, so disabled whole-contribution and operation refs survive catalogue refreshes while still not leaking across gateways with the same provider/list name.
+
+Gateway packages also expose operation activation in `DisabledRefs.mcpOperations`, keyed by the same contribution id with values of disabled operation names. Operation rows are rendered from the installed package catalogue and gateway metadata, not from runtime-filtered status, so disabled operations and stale/retired disabled operation names remain visible and can be re-enabled. New operations discovered after an update default enabled because Bobbit stores disabled names rather than an enabled-only allowlist.
 
 **Why a catalogue/runtime split.** Toggles persist in `pack_activation` (per scope/project,
 keyed by pack name + entity kind + name; tool refs are concrete tool names; entrypoints are
 keyed by their `contents.entrypoints` basename, so one toggle covers both the launcher id and
-the deep-link `routeId` from that file; MCP refs are keyed by their `contents.mcp` basename; pi-extension refs are keyed by their `contents.pi-extensions` basename). The toggle UI must render from the **unfiltered
+the deep-link `routeId` from that file; MCP refs are keyed by contribution id/listName as described above; pi-extension refs are keyed by their `contents.pi-extensions` basename). The toggle UI must render from the **unfiltered
 catalogue** — read from the installed pack's manifest plus its declared tool-group files via
 `GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools`,
-`/api/ext/contributions`, `/api/mcp-servers`, or session spawn args. If the UI read the filtered runtime endpoints, a disabled entity
+`/api/ext/contributions`, `/api/mcp-servers`, or session spawn args. If the UI read the filtered runtime endpoints, a disabled entity or operation
 would vanish from the list and become impossible to re-enable. So the catalogue stays complete
-(every toggle visible, `checked = name ∉ disabled[kind]`) while the runtime registries stay
-filtered (a disabled entity does not register/resolve). The `PUT` returns the refreshed
+(every toggle visible, `checked = name ∉ disabled[kind]`; gateway operations include disabled and stale rows) while the runtime registries stay
+filtered (a disabled entity or operation does not register/resolve). The `PUT` returns the refreshed
 catalogue alongside the normalized `disabled`, then invalidates resolver caches so the effect
-is live without a reload. Scope split mirrors `pack_order`: project activation lives in the
+is live without a reload. Gateway operation switches use `PATCH /api/marketplace/pack-activation/mcp-operation` to merge one operation without clobbering concurrent whole-contribution toggles. Scope split mirrors `pack_order`: project activation lives in the
 project config, server + global-user in the server config.
 
 **No standalone help paragraph.** An earlier version rendered an explanatory paragraph below
@@ -345,7 +357,7 @@ contents:
   mcp: [github]
 ```
 
-Each basename loads exactly one `mcp/<listName>.yaml`, `.yml`, or `.json` file. The `listName` is the stable pack-local identity used by `contents.mcp`, `DisabledRefs.mcp`, activation toggles, gateway materialization, and source metadata. It is intentionally separate from the runtime MCP `server` name, which is the key merged into `McpManager` and used to form policy keys/model-facing meta-tools.
+Each basename loads exactly one `mcp/<listName>.yaml`, `.yml`, or `.json` file. The `listName` is the stable pack-local identity used by `contents.mcp`, authored-pack activation, gateway materialization, and source metadata. Gateway installs derive a stable contribution id from source ownership, installed/materialized pack name, gateway provider id, `listName`, and public `serverName`/`subNamespace` for `DisabledRefs.mcp` and `DisabledRefs.mcpOperations`. Runtime keys and gateway fingerprints are deliberately not activation storage keys. The list name is intentionally separate from the public MCP `server` name, which forms policy keys/model-facing meta-tools.
 
 ```yaml
 # mcp/github.yaml
@@ -393,16 +405,16 @@ http://mcp-local.t3.zone/readonly/mcp
 
 Bobbit treats the configured URL as the exact streamable-HTTP MCP endpoint. Discovery opens the normal `McpClient` path against that URL, sends the MCP `initialize` handshake, then calls `tools/list`. It does not probe sibling paths, perform plain `GET` JSON discovery, or call `/signin/aigateway` by default. The HTTP client advertises both JSON and SSE responses and preserves a server-assigned `Mcp-Session-Id` across `initialize`, `notifications/initialized`, and `tools/list`, so session-aware streamable-HTTP gateways work without extra marketplace configuration.
 
-The default discovery result is the `tools` array returned by `tools/list`. Bobbit groups tools into provider records from an explicit `provider`, `namespace`, or `subNamespace` field when present, otherwise from names shaped `<provider>__<operation>`; for example, `jira__jira_search` and `confluence__confluence_get_page` produce `jira` and `confluence` provider packs. Labels and descriptions are display-only; operation lists are used for preview/fingerprint metadata, not for Market-level operation toggles. Provider ids must pass the same safety guards as pack-local MCP list names and runtime `subNamespace` values. Duplicate, unsafe, non-HTTP, credentialed, secret-header, or otherwise malformed entries are skipped and reported as `mcpGatewayDiagnostics`.
+The default discovery result is the `tools` array returned by `tools/list`. Bobbit groups tools into provider records from an explicit `provider`, `namespace`, or `subNamespace` field when present, otherwise from names shaped `<provider>__<operation>`; for example, `jira__jira_search` and `confluence__confluence_get_page` produce `jira` and `confluence` provider packs. Labels, descriptions, operation names, and operation schemas are kept as provider metadata for Browse search, package-scoped counts, and installed operation toggles. Provider ids must pass the same safety guards as pack-local MCP list names and runtime `subNamespace` values. Duplicate, unsafe, non-HTTP, credentialed, secret-header, or otherwise malformed entries are skipped and reported as `mcpGatewayDiagnostics` without hiding valid providers from the same source.
 
 JSON catalogue parsing exists only as an explicit fallback path for callers that opt into catalogue discovery. That fallback fetches the configured URL itself as bounded JSON and accepts provider arrays (`{ providers: [...] }`, `{ data: { providers: [...] } }`) or tool arrays (`{ tools: [...] }`) that can be grouped by provider namespace. It is not the default source path for MCP Gateway sources and should not be relied on for standard streamable-HTTP gateways.
 
-Each valid provider becomes one virtual provider pack:
+Each valid provider becomes one virtual provider pack. Gateway pack names are source-qualified so the same provider id can be installed from multiple gateway sources in the same scope:
 
 ```yaml
 # pack.yaml, generated on install
 schema: 2
-name: mcp-jira
+name: mcp-jira-mcp-local-t3-zone-readonly-mcp
 description: Jira issue tools
 version: 0.0.0
 contents:
@@ -445,9 +457,9 @@ transport:
   url: http://mcp-local.t3.zone/write/mcp
 ```
 
-This is still one provider pack. The Installed tab toggles pack-local MCP entries (`jira`, and `jira-write` when present); it does not expose raw operation toggles. Per-operation denial remains a Tools-policy/runtime guard keyed by canonical ids such as `mcp__gr__jira__jira_search`.
+This is still one provider pack. The Installed tab toggles pack-local MCP entries (`jira`, and `jira-write` when present) and, for gateway packages, individual operations under each entry. Operation toggles persist in `disabled.mcpOperations[contributionId]`; disabling the whole MCP entry does not erase the operation subset, so re-enabling restores the previous operation selection. Because the gateway `contributionId` excludes runtime keys, `entry.meta.commit`, and gateway/provider fingerprints, those operation selections survive catalogue/provider fingerprint refreshes. Stale disabled operations remain visible as disabled rows labelled as no longer provided or disabled by name.
 
-`McpManager` groups installed gateway contributions by identical runtime `server` and transport. Multiple read providers with the same gateway URL share one `gr` MCP client connection, while `activeSubNamespaces` records which provider namespaces are enabled. Write providers group separately under `gr-write`. The model-facing tools stay sub-namespace meta-tools such as `mcp_gr__jira`, and the internal route id remains `mcp__gr__jira__<operation>`.
+`McpManager` separates public policy/model identity from runtime client identity. Gateway contributions keep public server names such as `gr` / `gr-write` and package sub-namespaces such as `jira`, but their runtime client key includes source/install/fingerprint identity. This lets multiple gateway sources expose a union of selected operations without one `gr` config replacing another. Identical runtime config can still share a client; write providers group separately under `gr-write`. The model-facing tools stay sub-namespace meta-tools such as `mcp_gr__jira`, and the internal route id remains `mcp__gr__jira__<operation>`.
 
 `GET /api/mcp-servers` exposes the hierarchy the Tools page renders:
 
@@ -467,7 +479,7 @@ This is still one provider pack. The Installed tab toggles pack-local MCP entrie
 ]
 ```
 
-The Tools page uses that server → sub-namespace → operation hierarchy for policy editing: server policy keys look like `mcp__gr`, provider/sub-namespace policy keys look like `mcp__gr__jira`, and operation rows are read-only.
+The Tools page uses that server → sub-namespace → operation hierarchy for policy editing: server policy keys look like `mcp__gr`, provider/sub-namespace policy keys look like `mcp__gr__jira`, and operation policy keys look like `mcp__gr__jira__jira_search`.
 
 ### Legacy `mcp-registry` rows
 
@@ -480,9 +492,12 @@ Persisted legacy rows are tolerated so old config files do not crash the marketp
 Marketplace MCP contributions are resolved by scope and then grouped into MCP client connections:
 
 1. Market packs are read in scope order (`server`, `global-user`, then current `project`), respecting each scope's `pack_order`.
-2. `DisabledRefs.mcp` is applied before same-name grouping, so disabled Marketplace entries do not connect.
-3. Same runtime `server` with identical config can share a connection; sub-namespace contributions filter which `mcp_<server>__<sub>` meta-tools are exposed.
-4. Manual MCP config discovery then runs unchanged and overlays Marketplace by runtime server name. A manual definition with the same server name wins over Marketplace and is shown as an override in Market status.
+2. `DisabledRefs.mcp` and `DisabledRefs.mcpOperations` are applied before runtime exposure. Disabled contributions do not connect; disabled operations are omitted from route maps and external tool registration.
+3. Gateway contributions group by source-qualified `runtimeServerKey`, not just public `serverName`, so multiple gateway sources can expose distinct providers/operations under the same public `gr` prefix.
+4. Same runtime key with identical config can share a connection; sub-namespace contributions filter which `mcp_<server>__<sub>` meta-tools are exposed.
+5. Manual MCP config discovery then runs unchanged and has route precedence over Marketplace when public model-facing operation names collide.
+
+`McpManager` builds a route map from public operation ids (for example, `mcp__gr__jira__jira_search`) to the selected runtime client and raw MCP operation. Distinct public names from different packages/sources are all exposed. If two sources expose the same public name, the deterministic contribution order keeps the first route and records a conflict diagnostic for the dropped route; manual JSON MCP routes are considered before Marketplace routes for compatibility.
 
 MCP runtime state is contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own their own clients, status, tool docs, and external tool registrations. `GET /api/mcp-servers?projectId=...` or `?cwd=...` reads that scoped manager; without parameters it reads the default manager. A status read does not create a scoped manager unless the UI asks with `ensure=true`.
 
@@ -783,8 +798,8 @@ so they round-trip through the same `GET/PUT /api/marketplace/pack-activation` R
 tools, skills, and entrypoints — see [Activation controls](#activation-controls):
 
 - **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
-  `workflows` arrays, and all six are in `ACTIVATION_KINDS` so normalisation, hydration,
-  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
+  `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
+  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename for authored packs and a source-qualified contribution id for gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same
@@ -794,7 +809,7 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
-- An MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
+- An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 
 These REST shapes are **purely additive** — a schema-1 pack produces a byte-identical
@@ -914,15 +929,17 @@ All marketplace routes live in `server.ts::handleApiRoute()`. Full request/respo
 | `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` (syncs immediately). `type: "mcp-gateway"` registers a URL-only MCP Gateway source; omitted/`"pack"` registers git/local pack sources. New `type: "mcp-registry"` requests are rejected as legacy/unsupported. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source and its cache dir. |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch for pack sources, MCP `initialize` + `tools/list` discovery/fingerprint update for gateways). |
-| `GET /api/marketplace/sources/:id/packs` | Browse a source's packs or MCP Gateway provider virtual packs (`hasTools` reflects whether the pack ships tools; informational only — it no longer drives a per-pack gate). |
+| `GET /api/marketplace/sources/:id/packs` | Browse one source's packs or MCP Gateway provider virtual packs (compatibility route). |
+| `GET /api/marketplace/browse?projectId=` | Browse the all-source union. Returns `sources[]` with per-source status plus `packs[]` rows with source provenance and stable `browseKey`. |
 | `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` — install a pack or materialize/install an MCP Gateway provider virtual pack. May return `mcpReload`. |
 | `POST /api/marketplace/update` | `{ scope, packName, projectId? }` — re-pull/re-materialize + replace. May return `mcpReload`. |
 | `DELETE /api/marketplace/installed` | `{ scope, packName, projectId? }` — uninstall. |
 | `GET /api/marketplace/installed?projectId=` | List installed packs across scopes with provenance. |
 | `GET /api/marketplace/pack-order?scope=&projectId=` | Read a scope's market-pack order. |
 | `PUT /api/marketplace/pack-order` | `{ scope, projectId?, order }` — replace a scope's order. May return `mcpReload` if MCP packs are affected. |
-| `GET /api/marketplace/pack-activation?scope=&projectId=&packName=` | Read a pack's activation state for a scope — returns the **unfiltered** `catalogue` (all toggleable entities the installed pack declares, including disabled MCP refs) + the current `disabled` refs. |
-| `PUT /api/marketplace/pack-activation` | `{ scope, projectId?, packName, disabled }` — replace a pack's activation overrides; returns the refreshed `catalogue` + normalized `disabled`, then invalidates caches. May return `mcpReload` when `disabled.mcp` changes. |
+| `GET /api/marketplace/pack-activation?scope=&projectId=&packName=` | Read a pack's activation state for a scope — returns the **unfiltered** `catalogue` (all toggleable entities the installed pack declares, including disabled MCP refs and disabled/stale operation rows) + the current `disabled` refs. |
+| `PUT /api/marketplace/pack-activation` | `{ scope, projectId?, packName, disabled }` — replace a pack's activation overrides; returns the refreshed `catalogue` + normalized `disabled`, then invalidates caches. Preserves `disabled.mcpOperations` when omitted. May return `mcpReload` when MCP refs or operations change. |
+| `PATCH /api/marketplace/pack-activation/mcp-operation` | `{ scope, projectId?, contributionId, operationName, disabled, expectedRevision? }` — atomically merge one gateway operation toggle and return the refreshed catalogue/revision. |
 | `GET /api/packs/conflicts?projectId=` | List same-name conflicts `(type, name, winner, shadowed[])`. |
 
 `scope` ∈ `"global-user" | "server" | "project"`; `projectId` is required when `scope === "project"`. Install/update/uninstall, pack-order changes, and activation changes invalidate resolver/catalogue caches synchronously. MCP-affecting mutations also reload affected MCP managers, disconnect removed servers, and refresh external ToolManager MCP registrations; Marketplace state is not rolled back if runtime reconnect partially fails.

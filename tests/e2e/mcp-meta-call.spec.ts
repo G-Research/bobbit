@@ -104,6 +104,53 @@ async function seedFakeScopedMcpManager(
 	return mgr;
 }
 
+async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: string) {
+	const { McpManager } = await import("../../dist/server/mcp/mcp-manager.js");
+	const scopeKey = projectId ? `project:${projectId}` : undefined;
+	const mgr = new (McpManager as any)(gw.bobbitDir, undefined, undefined, projectId ? { projectId, scopeKey } : undefined);
+	const makeGroup = (runtimeServerKey: string, contributionId: string, url: string) => {
+		const config = { url };
+		return {
+			serverName: runtimeServerKey,
+			runtimeServerKey,
+			config,
+			ownerContributions: [{
+				listName: contributionId,
+				serverName: "gr",
+				runtimeServerKey,
+				contributionId,
+				subNamespace: "jira",
+				config,
+				origin: { scope: "project", packName: contributionId },
+			}],
+			activeSubNamespaces: new Set(["jira"]),
+		};
+	};
+	for (const [runtimeServerKey, contributionId, url] of [
+		["gw-a-gr", "first-contribution", "https://gateway-a.test/mcp"],
+		["gw-b-gr", "second-contribution", "https://gateway-b.test/mcp"],
+	] as const) {
+		const client = new FakeMcpClient(runtimeServerKey);
+		client.connected = true;
+		const group = makeGroup(runtimeServerKey, contributionId, url);
+		(mgr as any).clients.set(runtimeServerKey, client);
+		(mgr as any).toolDefs.set(runtimeServerKey, [{
+			name: "jira__search",
+			description: `${contributionId} search`,
+			inputSchema: { type: "object", properties: { q: { type: "string" } } },
+		}]);
+		(mgr as any).configs.set(runtimeServerKey, group.config);
+		(mgr as any).discoveredConnectionGroups.set(runtimeServerKey, group);
+		(mgr as any).connectionGroups.set(runtimeServerKey, group);
+	}
+	if (scopeKey) {
+		(gw.sessionManager as any).scopedMcpManagers.set(scopeKey, mgr);
+	} else {
+		(gw.sessionManager as any).mcpManager = mgr;
+	}
+	return mgr;
+}
+
 function clearFakeMcpManager(gw: GatewayInfo) {
 	(gw.sessionManager as any).mcpManager = null;
 	(gw.sessionManager as any).scopedMcpManagers.clear();
@@ -136,6 +183,30 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(fake.status).toBe("connected");
 		expect(typeof fake.toolCount).toBe("number");
 		expect(fake.toolCount).toBe(2);
+	});
+
+	test("GET /api/mcp-servers attributes conflicted public tools only to the winning runtime owner", async ({ gateway }) => {
+		await seedFakeGatewayRuntimeMcpManager(gateway);
+
+		const resp = await apiFetch("/api/mcp-servers");
+		expect(resp.status).toBe(200);
+		const servers = await resp.json();
+		const first = servers.find((s: any) => s.name === "gw-a-gr");
+		const second = servers.find((s: any) => s.name === "gw-b-gr");
+		expect(first?.serverPolicyKey).toBe("mcp__gr");
+		expect(first?.policyKey).toBe("mcp__gr");
+		expect(first?.tools.map((t: any) => t.name)).toEqual(["mcp__gr__jira__search"]);
+		expect(first?.tools[0]).toMatchObject({
+			serverPolicyKey: "mcp__gr",
+			packagePolicyKey: "mcp__gr__jira",
+			subNamespacePolicyKey: "mcp__gr__jira",
+			operationPolicyKey: "mcp__gr__jira__search",
+			policyKey: "mcp__gr__jira__search",
+		});
+		expect(first?.toolCount).toBe(1);
+		expect(second?.serverPolicyKey).toBe("mcp__gr");
+		expect(second?.tools).toEqual([]);
+		expect(second?.toolCount).toBe(0);
 	});
 
 	test("GET /api/mcp-servers scoped reads do not create managers unless ensure=true", async ({ gateway }) => {
@@ -369,6 +440,28 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(missBody.error).toMatch(/operation not found/i);
 	});
 
+	test("POST /api/internal/mcp-describe accepts gateway public server names with generated runtime keys", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		await seedFakeGatewayRuntimeMcpManager(gateway, projectId!);
+		const sessionId = await createSession({ projectId });
+		const token = readE2EToken();
+
+		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"X-Bobbit-Session-Id": sessionId,
+			},
+			body: JSON.stringify({ server: "gr" }),
+		});
+		expect(resp.status).toBe(200);
+		const body = await resp.json();
+		expect(body.tools).toHaveLength(1);
+		expect(body.tools[0]).toMatchObject({ name: "search", subNamespace: "jira" });
+		expect(body.tools[0].description).toMatch(/first-contribution/);
+	});
+
 	test("POST /api/internal/mcp-describe uses stripped operation names for sub-namespace servers", async ({ gateway }) => {
 		const projectId = await defaultProjectId();
 		const subNamespaceOps = [
@@ -491,6 +584,69 @@ test.describe("MCP meta-tool API E2E", () => {
 			expect(callBody.error).toMatch(/denied by policy/);
 			expect(callBody.tool).toBe("mcp__fake-server__echo");
 		} finally {
+			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	test("POST /api/internal/mcp-call lets broad role allow override persisted per-op `never`", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		await seedFakeScopedMcpManager(gateway, projectId!);
+		const token = readE2EToken();
+		const roleName = "mcp-meta-broad-allow-role";
+		const opPolicyKey = "mcp__fake-server__echo";
+
+		await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+			method: "PUT",
+			body: JSON.stringify({ policy: null }),
+		}).catch(() => {});
+		const createResp = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({ name: roleName, label: "MCP Broad Allow Test" }),
+		});
+		expect([200, 201]).toContain(createResp.status);
+
+		const roleResp = await apiFetch(`/api/roles/${roleName}`, {
+			method: "PUT",
+			body: JSON.stringify({
+				toolPolicies: { "mcp__fake-server": "allow" },
+			}),
+		});
+		expect(roleResp.status).toBe(200);
+		const policyResp = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+			method: "PUT",
+			body: JSON.stringify({ policy: "never" }),
+		});
+		expect(policyResp.status).toBe(200);
+
+		try {
+			const sessionId = await createSession({ projectId });
+			const assignResp = await apiFetch(`/api/sessions/${sessionId}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId: roleName }),
+			});
+			expect([200, 204]).toContain(assignResp.status);
+
+			const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+					"X-Bobbit-Session-Id": sessionId,
+				},
+				body: JSON.stringify({
+					tool: "mcp__fake-server__echo",
+					args: { message: "role policy should allow this available operation" },
+				}),
+			});
+			expect(callResp.status).toBe(200);
+			const callBody = await callResp.json();
+			expect(callBody.content?.[0]?.text).toBe("stub");
+		} finally {
+			await apiFetch(`/api/tool-group-policies/${encodeURIComponent(opPolicyKey)}`, {
+				method: "PUT",
+				body: JSON.stringify({ policy: null }),
+			}).catch(() => {});
 			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
 		}
 	});

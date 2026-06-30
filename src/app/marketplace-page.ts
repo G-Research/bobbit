@@ -27,13 +27,14 @@ import { renderApp, state } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
-	browseMarketplacePacks,
+	browseMarketplace,
 	getPackActivation,
 	getPackConflicts,
 	installMarketplacePack,
 	listInstalledPacks,
 	listMarketplaceSources,
 	removeMarketplaceSource,
+	setMcpOperationActivation,
 	setPackActivation,
 	setPackOrder,
 	syncMarketplaceSource,
@@ -46,11 +47,13 @@ import {
 	type ConflictWire,
 	type DisabledRefs,
 	type InstalledPackWire,
+	type MarketplaceBrowseSourceState,
 	type MarketplaceSource,
 	type MarketplaceSourceType,
 	type MarketScope,
 	type McpServerInfo,
 	type PackActivationMcpEntry,
+	type PackActivationMcpOperationEntry,
 	type PackActivationPiExtensionEntry,
 	type PackActivationResponse,
 	type PackEntityDescriptions,
@@ -70,8 +73,10 @@ let loading = true;
 let sourcesError = "";
 let sources: MarketplaceSource[] = [];
 
-let selectedSourceId: string | null = null;
+let browseSources: MarketplaceBrowseSourceState[] = [];
 let browsePacks: BrowsePackWire[] = [];
+let enabledBrowseSourceIds = new Set<string>();
+let browseSearch = "";
 let browseError = "";
 let browseLoading = false;
 
@@ -127,8 +132,10 @@ export function clearMarketplaceState(): void {
 	loading = true;
 	sourcesError = "";
 	sources = [];
-	selectedSourceId = null;
+	browseSources = [];
 	browsePacks = [];
+	enabledBrowseSourceIds = new Set<string>();
+	browseSearch = "";
 	browseError = "";
 	browseLoading = false;
 	installed = [];
@@ -228,13 +235,6 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	if (srcRes.ok) {
 		sources = srcRes.data.sources || [];
 		sourcesError = "";
-		// Default the browse selection to the first USER source, not the synthetic
-		// built-in source (its packs are provided-in-place, not installable, so it's a
-		// poor default browse target). Fall back to whatever exists (e.g. only the
-		// built-in source is present) so the picker is never empty.
-		if (!selectedSourceId && sources.length > 0) {
-			selectedSourceId = (sources.find((s) => !s.builtin) ?? sources[0]).id;
-		}
 	} else {
 		sources = [];
 		sourcesError = srcRes.error;
@@ -258,7 +258,7 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	void loadActivationForInstalled();
 	void loadMcpRuntimeForInstalled();
 
-	if (selectedSourceId) await loadBrowse(selectedSourceId);
+	await loadBrowse();
 }
 
 /** Fetch the UNFILTERED activation catalogue + disabled overrides for every
@@ -304,8 +304,10 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 	renderApp();
 }
 
+type ActivationArrayKey = "roles" | "tools" | "skills" | "entrypoints" | "mcp" | "piExtensions";
+
 /** Maps the singular testid kind → the `DisabledRefs` array key. */
-const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension", keyof DisabledRefs> = {
+const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension", ActivationArrayKey> = {
 	role: "roles",
 	tool: "tools",
 	skill: "skills",
@@ -340,13 +342,14 @@ async function handleToggleAllActivation(pack: InstalledPackWire, enable: boolea
 	if (!current) return;
 	const cat = current.catalogue;
 	const disabled: DisabledRefs = enable
-		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [], piExtensions: [] }
+		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [], mcpOperations: current.disabled?.mcpOperations ?? {}, piExtensions: [] }
 		: {
 			roles: [...cat.roles],
 			tools: [...cat.tools],
 			skills: [...cat.skills],
 			entrypoints: cat.entrypoints.map((e) => e.listName),
-			mcp: normalizedActivationMcp(cat.mcp).map((e) => e.ref),
+			mcp: normalizedActivationMcp(cat.mcp).map((e) => mcpContributionKey(e)),
+			mcpOperations: current.disabled?.mcpOperations ?? {},
 			piExtensions: normalizedActivationPiExtensions(cat.piExtensions).map((e) => e.ref),
 		};
 	await savePackActivation(pack, disabled, `activation:${cacheKey}:all`);
@@ -374,15 +377,53 @@ async function savePackActivation(pack: InstalledPackWire, disabled: DisabledRef
 	}
 }
 
-async function loadBrowse(sourceId: string): Promise<void> {
-	selectedSourceId = sourceId;
+async function handleToggleMcpOperation(pack: InstalledPackWire, entry: PackActivationMcpEntry, operationName: string, enable: boolean): Promise<void> {
+	const cacheKey = `${pack.scope}:${pack.packName}`;
+	const current = activationByPack.get(cacheKey);
+	const contributionId = mcpContributionKey(entry);
+	const busyKey = `activation:${cacheKey}:mcp-op:${contributionId}:${operationName}`;
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	busy.add(busyKey);
+	renderApp();
+	const res = await setMcpOperationActivation({
+		scope: pack.scope,
+		projectId,
+		contributionId,
+		operationName,
+		disabled: !enable,
+		...(current?.revision ? { expectedRevision: current.revision } : {}),
+	});
+	busy.delete(busyKey);
+	if (res.ok) {
+		activationByPack.set(cacheKey, res.data);
+		await refreshConfigPages();
+		await loadMcpRuntimeForInstalled();
+		renderApp();
+	} else {
+		installedError = res.error;
+		renderApp();
+	}
+}
+
+async function loadBrowse(): Promise<void> {
 	browseLoading = true;
 	browseError = "";
 	renderApp();
-	const res = await browseMarketplacePacks(sourceId);
+	const before = new Set(enabledBrowseSourceIds);
+	const knownBefore = new Set(browseSources.map((src) => src.sourceId));
+	const res = await browseMarketplace(currentProjectId());
 	if (res.ok) {
+		browseSources = res.data.sources || [];
 		browsePacks = res.data.packs || [];
+		const enabled = new Set<string>();
+		const hadPriorSelection = before.size > 0;
+		for (const src of browseSources) {
+			if (src.status === "unsupported") continue;
+			if (!hadPriorSelection || before.has(src.sourceId) || !knownBefore.has(src.sourceId)) enabled.add(src.sourceId);
+		}
+		enabledBrowseSourceIds = enabled;
 	} else {
+		browseSources = [];
 		browsePacks = [];
 		browseError = res.error;
 	}
@@ -422,10 +463,6 @@ async function handleAddSource(): Promise<void> {
 		newSourceRef = "";
 		newSourceType = "pack";
 		await loadMarketplaceData(false);
-		if (res.data.source?.id) {
-			activeTab = "browse";
-			await loadBrowse(res.data.source.id);
-		}
 	} else {
 		sourcesError = res.error;
 		renderApp();
@@ -440,7 +477,6 @@ async function handleSyncSource(id: string): Promise<void> {
 	busy.delete(key);
 	if (res.ok) {
 		await loadMarketplaceData(false);
-		if (selectedSourceId === id) await loadBrowse(id);
 	} else {
 		sourcesError = res.error;
 		renderApp();
@@ -453,10 +489,7 @@ async function handleRemoveSource(id: string): Promise<void> {
 	if (!ok) return;
 	const res = await removeMarketplaceSource(id);
 	if (res.ok) {
-		if (selectedSourceId === id) {
-			selectedSourceId = null;
-			browsePacks = [];
-		}
+		enabledBrowseSourceIds.delete(id);
 		await loadMarketplaceData(false);
 	} else {
 		sourcesError = res.error;
@@ -477,14 +510,20 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	// same project we installed into (finding #2).
 	if (scope === "project" && projectId) focusProjectId = projectId;
 
-	const key = `install:${pack.dirName}`;
+	const key = `install:${pack.browseKey || `${pack.source?.id || "unknown"}:${pack.dirName}`}`;
 	busy.add(key);
 	renderApp();
-	const res = await installMarketplacePack({ sourceId: selectedSourceId!, dirName: pack.dirName, scope, projectId });
+	const sourceId = pack.source?.id;
+	if (!sourceId) {
+		busy.delete(key);
+		browseError = "This package row is missing source provenance. Refresh Browse and try again.";
+		renderApp();
+		return;
+	}
+	const res = await installMarketplacePack({ sourceId, dirName: pack.dirName, scope, projectId });
 	busy.delete(key);
 	if (res.ok) {
 		await loadMarketplaceData(false);
-		if (selectedSourceId) await loadBrowse(selectedSourceId);
 		await refreshConfigPages();
 	} else {
 		browseError = res.error;
@@ -620,8 +659,10 @@ function sourceType(src: MarketplaceSource | undefined): MarketplaceSourceKind {
 	return "pack";
 }
 
-function selectedSourceType(): MarketplaceSourceKind {
-	return sourceType(sources.find((s) => s.id === selectedSourceId));
+function sourceDisplayLabel(src: MarketplaceSource | MarketplaceBrowseSourceState | undefined): string {
+	if (!src) return "unknown source";
+	if ("sourceName" in src) return src.sourceName || src.sourceId;
+	return src.displayName || src.normalizedName || src.id;
 }
 
 function sourceMcpCount(src: MarketplaceSource): number | undefined {
@@ -687,6 +728,43 @@ function mcpEntryLabel(entry: PackActivationMcpEntry | PackMcpContributionWire):
 	const server = entry.serverName || ref;
 	const base = entry.subNamespace ? `${server} / ${entry.subNamespace}` : server;
 	return entry.label && entry.label !== base ? `${entry.label} · ${base}` : base;
+}
+
+function mcpContributionKey(entry: PackActivationMcpEntry): string {
+	return entry.contributionId || entry.ref;
+}
+
+function disabledMcpContribution(disabled: DisabledRefs, entry: PackActivationMcpEntry): boolean {
+	const refs = disabled.mcp ?? [];
+	return refs.includes(mcpContributionKey(entry)) || refs.includes(entry.ref);
+}
+
+function disabledOperationNames(activation: PackActivationResponse, entry: PackActivationMcpEntry): Set<string> {
+	const key = mcpContributionKey(entry);
+	return new Set([...(activation.disabled?.mcpOperations?.[key] ?? []), ...(entry.disabledOperations ?? [])]);
+}
+
+function mcpOperationRows(activation: PackActivationResponse, entry: PackActivationMcpEntry): PackActivationMcpOperationEntry[] {
+	const disabled = disabledOperationNames(activation, entry);
+	const rows = [...(entry.operations ?? [])].map((op) => ({
+		...op,
+		selected: op.selected ?? !disabled.has(op.name),
+		disabledByActivation: op.disabledByActivation ?? disabled.has(op.name),
+	}));
+	const existing = new Set(rows.map((op) => op.name));
+	for (const name of entry.staleDisabledOperations ?? []) {
+		if (!existing.has(name)) {
+			rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "No longer provided by this source" });
+			existing.add(name);
+		}
+	}
+	for (const name of disabled) {
+		if (!existing.has(name)) {
+			rows.push({ name, selected: false, disabledByActivation: true, stale: true, description: "Disabled by name" });
+			existing.add(name);
+		}
+	}
+	return rows;
 }
 
 function keyNames(value: string[] | Record<string, unknown> | undefined): string[] {
@@ -958,12 +1036,7 @@ function renderSourcesPanel(): TemplateResult {
 }
 
 function renderSourceRow(src: MarketplaceSource): TemplateResult {
-	const isSelected = selectedSourceId === src.id;
 	const syncing = busy.has(`sync:${src.id}`);
-	// The synthetic built-in source (§4.4/§7.4) is non-removable and resolves its
-	// packs in place — render it as a distinct "Built-in" row, omit the Remove
-	// control entirely, and hide Re-sync (a harmless no-op server-side) to reduce
-	// confusion. It stays clickable so users can browse the shipped packs.
 	const isBuiltin = src.builtin === true;
 	const kind = sourceType(src);
 	const mcpCount = sourceMcpCount(src);
@@ -972,13 +1045,13 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	const syncedSuffix = src.lastSyncedAt ? ` · synced ${new Date(src.lastSyncedAt).toLocaleString()}` : "";
 	return html`
 		<div
-			class="market-source-row ${isSelected ? "market-source-row--selected" : ""}"
+			class="market-source-row"
 			data-testid="market-source-row"
 			data-builtin=${isBuiltin ? "true" : "false"}
 		>
-			<button class="flex-1 min-w-0 text-left" @click=${() => { activeTab = "browse"; loadBrowse(src.id); }} title="Browse packs">
+			<div class="flex-1 min-w-0 text-left">
 				<div class="flex items-center gap-1.5">
-					<span class="text-sm font-medium truncate">${src.id}</span>
+					<span class="text-sm font-medium truncate">${sourceDisplayLabel(src)}</span>
 					<span class="market-source-type-chip" data-kind=${kind} data-testid="market-source-type-chip">${chip}</span>
 					${isBuiltin ? html`<span class="market-builtin-badge" data-testid="market-source-builtin-badge">Built-in</span>` : ""}
 				</div>
@@ -990,7 +1063,7 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 						: kind === "mcp-registry"
 							? html`<div class="text-[10px] text-muted-foreground/80">${src.unsupportedReason || "Legacy MCP registry sources are unsupported. Remove and re-add as an MCP Gateway source."}</div>`
 							: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
-			</button>
+			</div>
 			${isBuiltin
 				? ""
 				: html`
@@ -1041,22 +1114,149 @@ function renderScopePicker(): TemplateResult {
 	`;
 }
 
+function browsePackSourceId(pack: BrowsePackWire): string {
+	return pack.source?.id || (pack.builtin ? "builtin" : "");
+}
+
+function browsePackSearchText(pack: BrowsePackWire): string {
+	const mcp = normalizedBrowseMcp(pack);
+	const parts: unknown[] = [
+		pack.name,
+		pack.description,
+		pack.version,
+		pack.source?.name,
+		pack.source?.id,
+		pack.source?.type,
+		pack.gatewayProviderId,
+		pack.contents?.roles,
+		pack.contents?.tools,
+		pack.contents?.skills,
+		pack.contents?.entrypoints,
+		pack.contents?.mcp,
+		pack.contents?.piExtensions,
+		pack.descriptions,
+		mcp.map((entry) => [
+			entry.ref,
+			entry.listName,
+			entry.serverName,
+			entry.subNamespace,
+			entry.label,
+			entry.description,
+			entry.operations?.map((op) => [op.name, op.label, op.description, op.toolName, op.policyKey]),
+		]),
+	];
+	return parts.flat(Infinity).filter((v): v is string => typeof v === "string").join(" ").toLowerCase();
+}
+
+function filteredBrowsePacks(): BrowsePackWire[] {
+	const query = browseSearch.trim().toLowerCase();
+	return browsePacks.filter((pack) => {
+		const sourceId = browsePackSourceId(pack);
+		if (!sourceId || !enabledBrowseSourceIds.has(sourceId)) return false;
+		return !query || browsePackSearchText(pack).includes(query);
+	});
+}
+
+function toggleBrowseSource(sourceId: string): void {
+	const next = new Set(enabledBrowseSourceIds);
+	if (next.has(sourceId)) next.delete(sourceId);
+	else next.add(sourceId);
+	enabledBrowseSourceIds = next;
+	renderApp();
+}
+
+function setAllBrowseSources(enabled: boolean): void {
+	enabledBrowseSourceIds = enabled
+		? new Set(browseSources.filter((src) => src.status !== "unsupported").map((src) => src.sourceId))
+		: new Set<string>();
+	renderApp();
+}
+
+function renderBrowseControls(): TemplateResult {
+	const countBySource = new Map<string, number>();
+	for (const pack of browsePacks) {
+		const id = browsePackSourceId(pack);
+		if (id) countBySource.set(id, (countBySource.get(id) ?? 0) + 1);
+	}
+	const allEnabled = browseSources.filter((src) => src.status !== "unsupported").every((src) => enabledBrowseSourceIds.has(src.sourceId));
+	return html`
+		<div class="market-browse-controls" data-testid="market-browse-controls">
+			<div class="market-search-wrap">
+				<input
+					type="text"
+					class="market-input market-search-input"
+					data-testid="market-browse-search"
+					placeholder="Search packages, descriptions, sources, operations…"
+					.value=${browseSearch}
+					@input=${(e: Event) => { browseSearch = (e.target as HTMLInputElement).value; renderApp(); }}
+				/>
+				${browseSearch ? html`<button class="market-search-clear" data-testid="market-browse-search-clear" title="Clear search" @click=${() => { browseSearch = ""; renderApp(); }}>×</button>` : ""}
+			</div>
+			<div class="market-source-chips" data-testid="market-browse-source-chips">
+				<button class="market-source-chip ${allEnabled ? "market-source-chip--active" : ""}" data-testid="market-source-chip-all" @click=${() => setAllBrowseSources(true)}>All ${browsePacks.length}</button>
+				<button class="market-source-chip" data-testid="market-source-chip-none" @click=${() => setAllBrowseSources(false)}>None</button>
+				${browseSources.map((src) => {
+					const enabled = enabledBrowseSourceIds.has(src.sourceId);
+					const count = countBySource.get(src.sourceId) ?? 0;
+					const status = src.status === "ok" ? "" : src.status === "loading" ? " · loading" : src.status === "error" ? " · error" : " · unsupported";
+					return html`
+						<button
+							class="market-source-chip ${enabled ? "market-source-chip--active" : "market-source-chip--off"} ${src.status === "error" ? "market-source-chip--error" : ""}"
+							data-testid="market-source-chip"
+							data-source-id=${src.sourceId}
+							?disabled=${src.status === "unsupported"}
+							@click=${() => toggleBrowseSource(src.sourceId)}
+							title=${src.error || src.sourceId}
+						>${src.sourceName} ${count}${status}</button>
+					`;
+				})}
+			</div>
+		</div>
+	`;
+}
+
+function renderBrowseWarnings(): TemplateResult {
+	const selected = browseSources.filter((src) => enabledBrowseSourceIds.has(src.sourceId));
+	const warnings = selected.filter((src) => src.status === "error" || src.status === "unsupported");
+	if (!warnings.length) return html``;
+	return html`
+		<div class="market-source-warning" data-testid="market-browse-source-warnings">
+			<div class="font-medium">${warnings.length} selected source${warnings.length === 1 ? "" : "s"} could not load.</div>
+			${warnings.map((src) => html`<div><span class="font-medium">${src.sourceName}</span>: ${src.error || (src.status === "unsupported" ? "Unsupported source" : "Load failed")}</div>`)}
+		</div>
+	`;
+}
+
+function renderBrowseEmptyState(visible: BrowsePackWire[]): TemplateResult {
+	if (browseLoading && browsePacks.length === 0) return html`<p class="text-sm text-muted-foreground">Loading browse catalogue…</p>`;
+	if (browseError) return html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`;
+	if (browseSources.length === 0) return html`<p class="text-sm text-muted-foreground italic">No marketplace sources yet. Add a source in Sources, then return to Browse.</p>`;
+	const selected = browseSources.filter((src) => enabledBrowseSourceIds.has(src.sourceId));
+	if (selected.length === 0) return html`<p class="text-sm text-muted-foreground italic">No sources selected. Enable a source chip to browse packages.</p>`;
+	const selectedIds = new Set(selected.map((src) => src.sourceId));
+	const selectedPacks = browsePacks.filter((pack) => selectedIds.has(browsePackSourceId(pack)));
+	const allSelectedFailed = selected.every((src) => src.status === "error" || src.status === "unsupported");
+	if (allSelectedFailed) return html`<div class="market-error" data-testid="market-browse-error">Could not load selected sources.</div>`;
+	if (selectedPacks.length === 0) {
+		const okSelected = selected.filter((src) => src.status === "ok");
+		return html`<p class="text-sm text-muted-foreground italic">${okSelected.length === 1 ? `${okSelected[0].sourceName} returned no supported packages.` : "Selected sources returned no supported packages."}</p>`;
+	}
+	if (visible.length === 0) return html`<p class="text-sm text-muted-foreground italic">${browseSearch.trim() ? `No packages match “${browseSearch.trim()}” across selected sources.` : "No packages match your filters."}</p>`;
+	return html``;
+}
+
 function renderBrowsePanel(): TemplateResult {
+	const visible = filteredBrowsePacks();
 	return html`
 		<section class="market-panel" data-testid="market-browse-panel">
 			<div class="flex items-center justify-between gap-2 flex-wrap">
-				<h2 class="market-panel-title">${icon(Download, "sm")} Browse${selectedSourceId ? html` <span class="text-xs font-normal text-muted-foreground">— ${selectedSourceId}</span>` : ""}</h2>
+				<h2 class="market-panel-title">${icon(Download, "sm")} Browse</h2>
 				${renderScopePicker()}
 			</div>
-			${!selectedSourceId
-				? html`<p class="text-sm text-muted-foreground italic">Select a source to browse its packs.</p>`
-				: browseLoading
-					? html`<p class="text-sm text-muted-foreground">${selectedSourceType() === "mcp-gateway" ? "Loading MCP providers…" : "Loading packs…"}</p>`
-					: browseError
-						? html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`
-						: browsePacks.length === 0
-							? html`<p class="text-sm text-muted-foreground italic">${selectedSourceType() === "mcp-gateway" ? "This gateway has no supported MCP providers." : selectedSourceType() === "mcp-registry" ? "This legacy MCP registry source is unsupported. Remove it and add an MCP Gateway source." : "This source has no packs."}</p>`
-							: html`<div class="flex flex-col gap-2">${browsePacks.map(renderBrowsePackCard)}</div>`}
+			${renderBrowseControls()}
+			${renderBrowseWarnings()}
+			${renderBrowseEmptyState(visible)}
+			${visible.length ? html`<div class="flex flex-col gap-2">${visible.map(renderBrowsePackCard)}</div>` : ""}
 		</section>
 	`;
 }
@@ -1074,9 +1274,18 @@ function installedMatchForBrowse(pack: BrowsePackWire): InstalledPackWire | unde
 	return installed.find((p) => p.scope === installScope && p.packName === pack.name);
 }
 
+function mcpGatewayDiagnosticsSkippedCount(pack: BrowsePackWire): number {
+	const diag = pack.mcpGatewayDiagnostics;
+	if (Array.isArray(diag)) return diag.length;
+	return diag?.skippedEntries?.length ?? 0;
+}
+
 function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
-	const installing = busy.has(`install:${pack.dirName}`);
+	const installing = busy.has(`install:${pack.browseKey || `${pack.source?.id || "unknown"}:${pack.dirName}`}`);
 	const match = installedMatchForBrowse(pack);
+	const sourceName = pack.source?.name || (pack.builtin ? "Built-in" : "Unknown source");
+	const sourceType = pack.source?.type || pack.sourceType || (pack.builtin ? "builtin" : "pack");
+	const skippedDiagnostics = mcpGatewayDiagnosticsSkippedCount(pack);
 	let action: TemplateResult;
 	if (pack.builtin) {
 		// Built-in (first-party) packs are resolved in place — provided, not
@@ -1105,7 +1314,7 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 	}
 	const entrypointNames = (pack.contents?.entrypoints ?? []).map((listName) => ({ listName }));
 	return html`
-		<div class="market-pack-card" data-testid="market-browse-pack" data-pack-name=${pack.name}>
+		<div class="market-pack-card" data-testid="market-browse-pack" data-pack-name=${pack.name} data-browse-key=${pack.browseKey || ""}>
 			<div class="flex items-start justify-between gap-3">
 				<div class="flex-1 min-w-0">
 					<div class="flex items-center gap-2 flex-wrap">
@@ -1113,6 +1322,11 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 						${pack.version ? html`<span class="text-[11px] text-muted-foreground">v${pack.version}</span>` : ""}
 					</div>
 					<div class="text-xs text-muted-foreground mt-0.5">${pack.description}</div>
+					<div class="market-browse-provenance" data-testid="market-browse-provenance">
+						<span class="market-lozenge market-lozenge--muted">source: ${sourceName}</span>
+						<span class="market-source-type-chip" data-kind=${sourceType}>${sourceType}</span>
+						${skippedDiagnostics ? html`<span class="market-lozenge market-lozenge--warning" title="Some gateway entries were skipped">${skippedDiagnostics} skipped</span>` : ""}
+					</div>
 					<div class="mt-1.5">${entityChips(pack)}</div>
 					${renderEntityDetails(pack.name, pack.descriptions, {
 						roles: pack.contents?.roles ?? [],
@@ -1348,12 +1562,14 @@ function activationEntityTotal(activation: PackActivationResponse): number {
 
 function activationEntityEnabledCount(activation: PackActivationResponse): number {
 	const disabled = activation.disabled || {};
+	const mcpEntries = normalizedActivationMcp(activation.catalogue.mcp);
+	const disabledMcpCount = mcpEntries.filter((entry) => disabledMcpContribution(disabled, entry)).length;
 	const disabledCount =
 		(disabled.roles ?? []).length +
 		(disabled.tools ?? []).length +
 		(disabled.skills ?? []).length +
 		(disabled.entrypoints ?? []).length +
-		(disabled.mcp ?? []).length +
+		disabledMcpCount +
 		(disabled.piExtensions ?? []).length;
 	return Math.max(0, activationEntityTotal(activation) - disabledCount);
 }
@@ -1423,9 +1639,13 @@ function renderMcpRuntimeStatus(pack: InstalledPackWire, entry: PackActivationMc
 		`;
 	}
 	if (runtime?.status === "connected" || ownerStatus === "connected") {
-		const ops = runtime?.toolCount ?? entry.toolCount;
+		const totalOps = entry.totalOperationCount ?? entry.operations?.length ?? runtime?.toolCount ?? entry.toolCount;
+		const selectedOps = entry.selectedOperationCount ?? (typeof totalOps === "number" ? Math.max(0, totalOps - (entry.disabledOperations?.length ?? 0)) : undefined);
+		const opSummary = typeof totalOps === "number"
+			? (typeof selectedOps === "number" && selectedOps !== totalOps ? ` · ${selectedOps}/${totalOps} ops enabled` : ` · ${totalOps} ops`)
+			: "";
 		return html`
-			<span class="market-lozenge market-lozenge--positive" data-testid="market-mcp-status-${entry.ref}">Connected${typeof ops === "number" ? ` · ${ops} ops` : ""}</span>
+			<span class="market-lozenge market-lozenge--positive" data-testid="market-mcp-status-${entry.ref}">Connected${opSummary}</span>
 			<span class="market-mcp-policy-link" data-testid="market-mcp-policy-link-${entry.ref}">Policy in Tools</span>
 		`;
 	}
@@ -1456,6 +1676,51 @@ function piExtensionStatusClass(status: PiExtensionDiagnostic["status"] | undefi
 	}
 }
 
+function renderMcpOperationPolicy(op: PackActivationMcpOperationEntry): string {
+	if (op.disabledByActivation || op.selected === false) return "Disabled";
+	if (op.policy === "never") return "Never in Tools";
+	if (op.policy === "allow") return "Allow in Tools";
+	if (op.policy === "ask") return "Ask in Tools";
+	return op.policyKey ? "Policy in Tools" : "Policy in Tools";
+}
+
+function renderMcpOperationSection(pack: InstalledPackWire, activation: PackActivationResponse, entry: PackActivationMcpEntry): TemplateResult {
+	const rows = mcpOperationRows(activation, entry);
+	const key = mcpContributionKey(entry);
+	if (rows.length === 0) {
+		if (!entry.contributionId && !entry.gatewayProviderId && !entry.sourceId) return html``;
+		return html`<div class="market-activation-help" data-testid="market-operation-empty-${key}">Operation list unavailable until the server connects.</div>`;
+	}
+	return html`
+		<div class="market-mcp-operation-list" data-testid="market-operation-list-${key}">
+			${rows.map((op) => {
+				const checked = op.selected !== false && !op.disabledByActivation;
+				const busyKey = `activation:${pack.scope}:${pack.packName}:mcp-op:${key}:${op.name}`;
+				return html`
+					<label class="market-mcp-operation-row ${checked ? "" : "market-mcp-operation-row--disabled"} ${op.stale ? "market-mcp-operation-row--stale" : ""}" data-testid="market-operation-row-${op.name}">
+						<span class="market-toggle-switch">
+							<input
+								type="checkbox"
+								data-testid="market-toggle-operation-${op.name}"
+								.checked=${checked}
+								?disabled=${busy.has(busyKey)}
+								@change=${(e: Event) => handleToggleMcpOperation(pack, entry, op.name, (e.target as HTMLInputElement).checked)}
+							/>
+							<span class="market-toggle-slider"></span>
+						</span>
+						<span class="market-mcp-operation-main">
+							<span class="market-mcp-operation-name">${op.label && op.label !== op.name ? html`${op.label} · ` : ""}<code>${op.name}</code></span>
+							${op.description ? html`<span class="market-mcp-operation-desc">${op.description}</span>` : ""}
+						</span>
+						<span class="market-mcp-operation-policy" data-testid="market-operation-policy-link-${op.name}" title=${op.policyKey || "Tools policy"}>${op.stale ? "No longer provided" : renderMcpOperationPolicy(op)}</span>
+						${busy.has(busyKey) ? html`<span class="market-lozenge market-lozenge--warning">Saving…</span>` : ""}
+					</label>
+				`;
+			})}
+		</div>
+	`;
+}
+
 function renderPiExtensionRuntimeStatus(entry: PackActivationPiExtensionEntry, checked: boolean): TemplateResult {
 	if (!checked) return html`<span class="market-lozenge market-lozenge--muted" data-testid="market-pi-extension-status-${entry.ref}">Disabled</span>`;
 	const diagnostic = entry.diagnostic;
@@ -1473,7 +1738,7 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	if (!activation) return html``;
 	const cat = activation.catalogue;
 	const disabled = activation.disabled || {};
-	const isEnabled = (kindKey: keyof DisabledRefs, name: string) => !(disabled[kindKey] ?? []).includes(name);
+	const isEnabled = (kindKey: ActivationArrayKey, name: string) => !(disabled[kindKey] ?? []).includes(name);
 
 	const toggle = (
 		kind: "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension",
@@ -1526,12 +1791,24 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 		groups.push(group(
 			"MCP servers",
 			mcpEntries.map((entry) => {
-				const checked = isEnabled("mcp", entry.ref);
-				const busyKey = `activation:${pack.scope}:${pack.packName}:mcp:${entry.ref}`;
-				return toggle("mcp", entry.ref, mcpEntryLabel(entry), undefined, renderMcpRuntimeStatus(pack, entry, checked, busy.has(busyKey)));
+				const key = mcpContributionKey(entry);
+				const checked = !disabledMcpContribution(disabled, entry);
+				const busyKey = `activation:${pack.scope}:${pack.packName}:mcp:${key}`;
+				const rows = mcpOperationRows(activation, entry);
+				const totalOps = entry.totalOperationCount ?? rows.filter((op) => !op.stale).length;
+				const selectedOps = entry.selectedOperationCount ?? rows.filter((op) => !op.stale && op.selected !== false && !op.disabledByActivation).length;
+				return html`
+					<div class="market-mcp-contribution" data-testid="market-installed-operation-section-${pack.packName}" data-contribution-id=${key}>
+						${toggle("mcp", key, mcpEntryLabel(entry), undefined, renderMcpRuntimeStatus(pack, entry, checked, busy.has(busyKey)))}
+						${typeof totalOps === "number" && totalOps > 0
+							? html`<div class="market-mcp-operation-summary" data-testid="market-mcp-operation-summary-${key}">${selectedOps}/${totalOps} operations enabled</div>`
+							: ""}
+						${renderMcpOperationSection(pack, activation, entry)}
+					</div>
+				`;
 			}),
 			"market-activation-mcp-group",
-			html`<div class="market-activation-help">Activation controls whether this MCP server is installed into Bobbit. Allow/ask/never policy is managed on the Tools page.</div>`,
+			html`<div class="market-activation-help">Activation controls whether this MCP server is installed into Bobbit. Operation selection controls which gateway operations exist; allow/ask/never policy is managed on the Tools page.</div>`,
 		));
 	}
 	const piExtensionEntries = normalizedActivationPiExtensions(cat.piExtensions);

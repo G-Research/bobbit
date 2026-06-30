@@ -300,26 +300,30 @@ describe("MCP gateway catalogue primitives", () => {
 				id: "jira",
 				label: "Jira",
 				description: "Jira issue tools",
+				operations: [{ name: "jira_search", label: "Search", description: "Search issues", inputSchema: { type: "object" } }],
 				readUrl: SOURCE_URL,
 				writeUrl: "http://mcp-local.t3.zone/write/mcp",
 				writeHeaders: { "X-Gateway": "write" },
 			}],
 		}, SOURCE_URL).providers;
-		const dest = path.join(dir, "mcp-jira");
-		const manifest = materializeGatewayProviderPack(provider, dest, { sourceUrl: SOURCE_URL, materializedAt: "2026-06-29T00:00:00.000Z" });
-		assert.equal(manifest.name, "mcp-jira");
+		const packName = "mcp-jira-gateway";
+		const dest = path.join(dir, packName);
+		const manifest = materializeGatewayProviderPack(provider, dest, { sourceUrl: SOURCE_URL, sourceId: "gateway", sourceName: "mcp-local.t3.zone/readonly/mcp", materializedAt: "2026-06-29T00:00:00.000Z" });
+		assert.equal(manifest.name, packName);
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "pack.yaml"), "utf-8")), {
 			schema: 2,
-			name: "mcp-jira",
+			name: packName,
 			description: "Jira issue tools",
 			version: "0.0.0",
 			contents: { roles: [], tools: [], skills: [], entrypoints: [], mcp: ["jira", "jira-write"] },
 		});
+		const expectedOperations = [{ name: "jira_search", label: "Search", description: "Search issues" }];
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "mcp", "jira.yaml"), "utf-8")), {
 			server: "gr",
 			subNamespace: "jira",
 			label: "Jira",
 			description: "Jira issue tools",
+			operations: expectedOperations,
 			transport: { type: "http", url: SOURCE_URL },
 		});
 		assert.deepEqual(parse(fs.readFileSync(path.join(dest, "mcp", "jira-write.yaml"), "utf-8")), {
@@ -327,12 +331,19 @@ describe("MCP gateway catalogue primitives", () => {
 			subNamespace: "jira",
 			label: "Jira write",
 			description: "Jira issue tools (write-capable)",
+			operations: expectedOperations,
 			transport: { type: "http", url: "http://mcp-local.t3.zone/write/mcp", headers: { "X-Gateway": "write" } },
 		});
 		const meta = parse(fs.readFileSync(path.join(dest, ".pack-meta.yaml"), "utf-8")) as Record<string, unknown>;
 		assert.equal(meta.sourceType, "mcp-gateway");
 		assert.equal(meta.sourceUrl, SOURCE_URL);
+		assert.equal(meta.sourceId, "gateway");
+		assert.equal(meta.sourceName, "mcp-local.t3.zone/readonly/mcp");
 		assert.equal(meta.gatewayProviderId, "jira");
+		assert.deepEqual(meta.gatewayOperations, {
+			jira: [{ name: "jira_search", label: "Search", description: "Search issues", inputSchema: { type: "object" } }],
+			"jira-write": [{ name: "jira_search", label: "Search", description: "Search issues", inputSchema: { type: "object" } }],
+		});
 		assert.match(String(meta.gatewayFingerprint), /^[a-f0-9]{64}$/);
 	});
 });

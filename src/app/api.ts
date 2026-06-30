@@ -2447,6 +2447,12 @@ export interface McpOperationInfo {
 	name: string;
 	/** Description shown in the UI. */
 	description: string;
+	/** Public policy keys returned by /api/mcp-servers for Tools controls. */
+	policyKey?: string;
+	serverPolicyKey?: string;
+	packagePolicyKey?: string;
+	subNamespacePolicyKey?: string;
+	operationPolicyKey?: string;
 	/**
 	 * Sub-namespace for gateway-style servers (e.g. "ai-adoption" in
 	 * `mcp__gr__ai-adoption__list-articles`). undefined ⇒ flat server.
@@ -2463,6 +2469,10 @@ export interface McpServerInfo {
 	status: "connected" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	/** Public server policy key (for gateway runtimes this differs from name). */
+	serverPolicyKey?: string;
+	policyKey?: string;
+	mcpPolicyKey?: string;
 	/** Active provider sub-namespaces for grouped gateway-backed MCP servers. */
 	activeSubNamespaces?: string[];
 	tools: McpOperationInfo[];
@@ -2968,6 +2978,10 @@ export interface MarketplaceSource {
 	id: string;
 	url: string;
 	ref?: string;
+	/** Server-persisted readable label for MCP gateway sources. Render verbatim. */
+	displayName?: string;
+	/** Gateway URL authority/path before duplicate suffixing. */
+	normalizedName?: string;
 	/** Source backend type. Omitted means the original pack git/local source. Legacy mcp-registry rows may still appear as unsupported. */
 	type?: StoredMarketplaceSourceType;
 	addedAt: string;
@@ -3019,13 +3033,40 @@ export interface PackMcpContributionWire {
 	winningPack?: string;
 	error?: string;
 	toolCount?: number;
+	operations?: PackActivationMcpOperationEntry[];
+	disabledOperations?: string[];
+	staleDisabledOperations?: string[];
+}
+
+export interface PackActivationMcpOperationEntry {
+	name: string;
+	label?: string;
+	description?: string;
+	toolName?: string;
+	selected?: boolean;
+	disabledByActivation?: boolean;
+	policyKey?: string;
+	policy?: "allow" | "ask" | "never";
+	stale?: boolean;
+	shadowed?: boolean;
 }
 
 export interface PackActivationMcpEntry extends PackMcpContributionWire {
-	/** Stable DisabledRefs.mcp key, usually the contents.mcp basename. */
+	/** Stable DisabledRefs.mcp key; gateway backends prefer contributionId. */
 	ref: string;
+	/** Stable installed MCP contribution id used for DisabledRefs.mcp/mcpOperations ownership. */
+	contributionId?: string;
 	/** Runtime MCP server name. Older servers may omit it; the UI falls back to ref. */
 	serverName?: string;
+	sourceId?: string;
+	installedPackName?: string;
+	gatewayProviderId?: string;
+	runtimeServerKey?: string;
+	selectedOperationCount?: number;
+	totalOperationCount?: number;
+	operations?: PackActivationMcpOperationEntry[];
+	disabledOperations?: string[];
+	staleDisabledOperations?: string[];
 }
 
 export interface PiExtensionDiagnostic {
@@ -3052,9 +3093,45 @@ export interface PackActivationPiExtensionEntry {
 	tools?: PiExtensionToolInfo[];
 }
 
+export type MarketplaceBrowseSourceType = "builtin" | StoredMarketplaceSourceType;
+
+export interface MarketplaceBrowseSourceState {
+	sourceId: string;
+	sourceName: string;
+	sourceType: MarketplaceBrowseSourceType;
+	builtin?: boolean;
+	status: "ok" | "loading" | "error" | "unsupported";
+	error?: string;
+	lastSyncedAt?: string;
+}
+
+export interface BrowsePackSource {
+	id: string;
+	name: string;
+	type: "builtin" | MarketplaceSourceType;
+	builtin?: boolean;
+}
+
+export interface McpGatewaySkippedEntryDiagnostic {
+	id?: string;
+	name?: string;
+	reason?: string;
+	message?: string;
+	[key: string]: unknown;
+}
+
+export interface McpGatewayDiagnosticsWire {
+	skippedEntries?: McpGatewaySkippedEntryDiagnostic[];
+	[key: string]: unknown;
+}
+
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	/** Stable union-browse row key, usually `${source.id}:${dirName}`. */
+	browseKey?: string;
+	/** Source provenance for union Browse rows. */
+	source?: BrowsePackSource;
 	/** Response-only: shipped first-party pack (built-in source). */
 	builtin?: boolean;
 	/** Response-only: resolved in place (not copy-installed). */
@@ -3066,7 +3143,12 @@ export interface BrowsePackWire extends PackManifest {
 	/** Response-only metadata for virtual MCP gateway provider packs. */
 	sourceType?: StoredMarketplaceSourceType;
 	gatewayProviderId?: string;
-	mcpGatewayDiagnostics?: string[];
+	mcpGatewayDiagnostics?: McpGatewayDiagnosticsWire | string[];
+}
+
+export interface MarketplaceBrowseResponse {
+	sources: MarketplaceBrowseSourceState[];
+	packs: BrowsePackWire[];
 }
 
 export interface InstalledPackWire {
@@ -3163,6 +3245,11 @@ export function browseMarketplacePacks(id: string): Promise<MarketResult<{ packs
 	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/packs`);
 }
 
+export function browseMarketplace(projectId?: string): Promise<MarketResult<MarketplaceBrowseResponse>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/marketplace/browse${qs}`);
+}
+
 export function installMarketplacePack(opts: { sourceId: string; dirName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
 	return marketFetch("/api/marketplace/install", jsonInit("POST", opts));
 }
@@ -3214,6 +3301,8 @@ export interface DisabledRefs {
 	entrypoints?: string[];
 	mcp?: string[];
 	piExtensions?: string[];
+	/** contributionId -> disabled operation names. */
+	mcpOperations?: Record<string, string[]>;
 }
 
 /** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
@@ -3244,6 +3333,7 @@ export interface PackActivationResponse {
 	packName: string;
 	catalogue: PackActivationCatalogue;
 	disabled: DisabledRefs;
+	revision?: string;
 }
 
 export function getPackActivation(scope: MarketScope, packName: string, projectId?: string): Promise<MarketResult<PackActivationResponse>> {
@@ -3254,4 +3344,15 @@ export function getPackActivation(scope: MarketScope, packName: string, projectI
 
 export function setPackActivation(opts: { scope: MarketScope; projectId?: string; packName: string; disabled: DisabledRefs }): Promise<MarketResult<PackActivationResponse>> {
 	return marketFetch("/api/marketplace/pack-activation", jsonInit("PUT", opts));
+}
+
+export function setMcpOperationActivation(opts: {
+	scope: MarketScope;
+	projectId?: string;
+	contributionId: string;
+	operationName: string;
+	disabled: boolean;
+	expectedRevision?: string;
+}): Promise<MarketResult<PackActivationResponse>> {
+	return marketFetch("/api/marketplace/pack-activation/mcp-operation", jsonInit("PATCH", opts));
 }

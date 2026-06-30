@@ -1,7 +1,9 @@
 # Marketplace MCP support — research and implementation design
 
-Status: implemented design record; registry-source format uses the official MCP Registry API
-Scope: add Marketplace support for installable MCP server definitions and official MCP Registry API sources without changing the existing manual MCP config cascade.
+Status: historical implemented design record; superseded for gateway-source polish by [mcp-gateway-polish.md](mcp-gateway-polish.md)
+Scope: original Marketplace support for installable MCP server definitions and official MCP Registry API sources without changing the existing manual MCP config cascade.
+
+This record documents the first Marketplace MCP implementation. Current gateway behavior differs in important ways: MCP Registry sources are legacy/unsupported, Browse is all-source, gateway installs are source-qualified, and gateway operation activation is supported. Use [../marketplace.md#marketplace-mcp](../marketplace.md#marketplace-mcp) for the current reference.
 
 ## 1. Current architecture summary
 
