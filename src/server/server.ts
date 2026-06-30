@@ -6696,6 +6696,31 @@ async function handleApiRoute(
 
 	// ── Role endpoints ─────────────────────────────────────────────
 
+	const toolDiagnosticsForProject = (projectId?: string): Array<Record<string, unknown>> => {
+		const diagnostics: Array<Record<string, unknown>> = [];
+		const seen = new Set<string>();
+		const add = (rows: Array<Record<string, unknown>> | undefined): void => {
+			for (const row of rows ?? []) {
+				const key = `${row.toolName ?? row.tool ?? ""}\0${row.extensionPath ?? row.path ?? ""}\0${row.message ?? ""}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				diagnostics.push(row);
+			}
+		};
+		if (toolManager) add(toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>>);
+		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>> | undefined);
+		return diagnostics;
+	};
+	const attachToolDiagnostics = (tools: Array<Record<string, unknown>>, diagnostics: Array<Record<string, unknown>>): void => {
+		if (diagnostics.length === 0) return;
+		for (const tool of tools) {
+			const name = typeof tool.name === "string" ? tool.name : undefined;
+			if (!name) continue;
+			const related = diagnostics.filter((diagnostic) => diagnostic.toolName === name || diagnostic.tool === name || diagnostic.name === name);
+			if (related.length > 0) tool.diagnostics = related;
+		}
+	};
+
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -6729,7 +6754,9 @@ async function handleApiRoute(
 			}
 		}
 		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId)));
-		json({ tools });
+		const toolDiagnostics = toolDiagnosticsForProject(projectId);
+		attachToolDiagnostics(tools, toolDiagnostics);
+		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
 		return;
 	}
 
@@ -6754,6 +6781,7 @@ async function handleApiRoute(
 			// Without this, the tools edit page replaces the cascade list item with the
 			// raw detail and a market-pack tool loses its origin badge + read-only state.
 			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
+			const toolDiagnostics = toolDiagnosticsForProject(projectId);
 			if (cascadeEntry && tool) {
 				const withMeta = withOrigin(cascadeEntry as any);
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
@@ -6761,13 +6789,17 @@ async function handleApiRoute(
 				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
 				const detail: Record<string, unknown> = { ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) };
 				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				attachToolDiagnostics([detail], toolDiagnostics);
 				json(detail);
 			} else if (tool) {
 				const detail: Record<string, unknown> = { ...tool };
 				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				attachToolDiagnostics([detail], toolDiagnostics);
 				json(detail);
 			} else {
-				json(piTool);
+				const detail: Record<string, unknown> = { ...(piTool as Record<string, unknown>) };
+				attachToolDiagnostics([detail], toolDiagnostics);
+				json(detail);
 			}
 			return;
 		}

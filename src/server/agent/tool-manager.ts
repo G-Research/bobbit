@@ -112,6 +112,8 @@ export interface ToolInfo {
 	originPackId?: string;
 	sourcePath?: string;
 	providers?: PiExtensionToolProviderInfo[];
+	/** Invalid config-level override diagnostics related to this tool, when a lower-priority fallback won. */
+	diagnostics?: ToolExtensionDiagnostic[];
 }
 
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
@@ -294,13 +296,27 @@ function invalidConfigToolDiagnostic(tool: BaseToolInfo): ToolExtensionDiagnosti
 	});
 }
 
-function filterInvalidConfigTools(tools: BaseToolInfo[]): BaseToolInfo[] {
-	return tools.filter((tool) => {
+function collectInvalidConfigToolDiagnostics(tools: BaseToolInfo[]): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	const seen = new Set<string>();
+	for (const tool of tools) {
 		const diagnostic = invalidConfigToolDiagnostic(tool);
-		if (!diagnostic) return true;
+		if (!diagnostic) continue;
+		const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		diagnostics.push(diagnostic);
+	}
+	return diagnostics;
+}
+
+function filterInvalidConfigTools(tools: BaseToolInfo[]): BaseToolInfo[] {
+	const invalidNames = new Set<string>();
+	for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) {
 		logToolExtensionDiagnostic(diagnostic);
-		return false;
-	});
+		invalidNames.add(diagnostic.toolName);
+	}
+	return tools.filter((tool) => !invalidNames.has(tool.name));
 }
 
 /**
@@ -668,6 +684,13 @@ export class ToolManager {
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
 		}));
+	}
+
+	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
+	getToolDiagnostics(): ToolExtensionDiagnostic[] {
+		const diagnostics = collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir));
+		for (const diagnostic of diagnostics) logToolExtensionDiagnostic(diagnostic);
+		return diagnostics;
 	}
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */

@@ -163,6 +163,55 @@ describe("tool startup resilience", () => {
 		}
 	});
 
+	it("exposes diagnostics for a broken config override while bundled fallback wins", () => {
+		const fixture = makeAgentFixture();
+		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
+			name: "session_prompt",
+			description: "broken config session prompt override",
+		});
+		writeFile(fixture.configAgentExtension, [
+			"import './missing-local-gateway.js';",
+			"export default function extension() { return {}; }",
+			"",
+		].join("\n"));
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const tools = tm.getAvailableTools();
+		const diagnostics = tm.getToolDiagnostics();
+
+		assert.equal(tools.find((tool) => tool.name === "session_prompt")?.description, "bundled session prompt");
+		assert.equal(diagnostics.length, 1);
+		assert.equal(diagnostics[0].toolName, "session_prompt");
+		assert.equal(diagnostics[0].code, "missing-local-import");
+		assert.match(diagnostics[0].message, /missing-local-gateway|agent[\\/]extension\.ts/i);
+	});
+
+	it("catches module-load failures before activating a config override", () => {
+		const fixture = makeAgentFixture();
+		const configExtension = path.join(fixture.configToolsDir, "agent", "extension.mjs");
+		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
+			name: "session_prompt",
+			description: "throwing config session prompt override",
+			provider: "provider:\n  type: bobbit-extension\n  extension: extension.mjs",
+		});
+		writeFile(configExtension, "throw new Error('boom during module load');\nexport default function extension() { return {}; }\n");
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const diagnostics = tm.getToolDiagnostics();
+		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
+
+		assert.equal(tm.getToolByName("session_prompt")?.description, "bundled session prompt");
+		assert.equal(diagnostics.length, 1);
+		assert.equal(diagnostics[0].code, "module-load-failed");
+		assert.match(diagnostics[0].message, /boom during module load|extension\.js/i);
+		assert.ok(
+			!nonBuiltinExtensionPaths(result.args).some((p) => path.resolve(p) === path.resolve(configExtension)),
+			"throwing config extension must not become runtime activation",
+		);
+	});
+
 	it("omits and diagnoses a broken config-only extension instead of activating it", () => {
 		const root = tempRoot();
 		const configDir = path.join(root, "project", ".bobbit", "config");

@@ -1,14 +1,24 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { builtinModules, createRequire } from "node:module";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { ToolProvider } from "./tool-manager.js";
 
 export interface ToolExtensionDiagnostic {
 	type: "invalid-tool-extension";
+	severity: "error";
+	code: "missing-extension" | "missing-local-import" | "module-load-failed";
 	toolName: string;
+	tool?: string;
 	groupDir: string;
+	group?: string;
 	extensionPath: string;
+	path?: string;
+	sourcePath?: string;
 	message: string;
+	skipped: true;
 }
 
 export function isIgnoredToolGroupDir(name: string): boolean {
@@ -76,19 +86,48 @@ function stripComments(source: string): string {
 		.replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
-function localImportSpecifiers(source: string): string[] {
-	const specs: string[] = [];
+interface ImportSpecifier {
+	specifier: string;
+	typeOnly: boolean;
+}
+
+function importSpecifiers(source: string): ImportSpecifier[] {
+	const specs: ImportSpecifier[] = [];
 	const body = stripComments(source);
-	const re = /(?:\bimport\s+(?:[^'"()]*?\s+from\s+)?|\bexport\s+(?:[^'"]*?\s+from\s+)|\bimport\s*\(\s*)["']([^"']+)["']/g;
+	const staticRe = /\b(import|export)\s+(type\s+)?(?:[^'"()]*?\s+from\s+)?["']([^"']+)["']/g;
 	let match: RegExpExecArray | null;
-	while ((match = re.exec(body))) {
-		const spec = match[1];
-		if (spec.startsWith("./") || spec.startsWith("../")) specs.push(spec);
+	while ((match = staticRe.exec(body))) {
+		specs.push({ specifier: match[3], typeOnly: !!match[2] });
+	}
+	const dynamicRe = /\bimport\s*\(\s*["']([^"']+)["']/g;
+	while ((match = dynamicRe.exec(body))) {
+		specs.push({ specifier: match[1], typeOnly: false });
 	}
 	return specs;
 }
 
-function validateImportGraph(entryPath: string): string | undefined {
+const NODE_BUILTINS = new Set<string>([
+	...builtinModules,
+	...builtinModules.map((name) => `node:${name}`),
+]);
+
+function isNodeBuiltinSpecifier(specifier: string): boolean {
+	if (NODE_BUILTINS.has(specifier)) return true;
+	if (specifier.startsWith("node:")) return NODE_BUILTINS.has(specifier.slice(5));
+	const [head] = specifier.split("/");
+	return NODE_BUILTINS.has(head);
+}
+
+function isRelativeSpecifier(specifier: string): boolean {
+	return specifier.startsWith("./") || specifier.startsWith("../");
+}
+
+interface ImportGraphError {
+	code: ToolExtensionDiagnostic["code"];
+	message: string;
+}
+
+function validateImportGraph(entryPath: string): ImportGraphError | undefined {
 	const seen = new Set<string>();
 	const stack = [entryPath];
 	while (stack.length > 0) {
@@ -101,19 +140,96 @@ function validateImportGraph(entryPath: string): string | undefined {
 		try {
 			raw = fs.readFileSync(resolvedFile, "utf-8");
 		} catch (err) {
-			return `cannot read ${resolvedFile}: ${formatFsError(err)}`;
+			return { code: "module-load-failed", message: `cannot read ${resolvedFile}: ${formatFsError(err)}` };
 		}
 
 		if (!isScriptFile(resolvedFile)) continue;
-		for (const specifier of localImportSpecifiers(raw)) {
-			const child = resolveLocalImport(resolvedFile, specifier);
-			if (!child) {
-				return `missing local import ${JSON.stringify(specifier)} from ${resolvedFile}`;
+		for (const { specifier, typeOnly } of importSpecifiers(raw)) {
+			if (typeOnly) continue;
+			if (isRelativeSpecifier(specifier)) {
+				const child = resolveLocalImport(resolvedFile, specifier);
+				if (!child) {
+					return { code: "missing-local-import", message: `missing local import ${JSON.stringify(specifier)} from ${resolvedFile}` };
+				}
+				if (isScriptFile(child)) stack.push(child);
+				continue;
 			}
-			if (isScriptFile(child)) stack.push(child);
+			if (isNodeBuiltinSpecifier(specifier)) continue;
+			try {
+				createRequire(resolvedFile).resolve(specifier);
+			} catch (err) {
+				return { code: "module-load-failed", message: `cannot resolve module import ${JSON.stringify(specifier)} from ${resolvedFile}: ${formatFsError(err)}` };
+			}
 		}
 	}
 	return undefined;
+}
+
+const MODULE_LOAD_TIMEOUT_MS = 5_000;
+const MODULE_LOAD_MAX_OUTPUT_BYTES = 64 * 1024;
+const moduleLoadCache = new Map<string, { fingerprint: string; error?: string }>();
+
+function supportsNativeModuleLoadPreflight(extensionPath: string): boolean {
+	// Plain node does not necessarily resolve TypeScript's extension aliases
+	// (for example import "./helper.js" backed by helper.ts) the same way the
+	// agent loader does. Keep executable module-load isolation to JS entries;
+	// TypeScript entries still get static local/bare import validation above.
+	return [".js", ".mjs", ".cjs"].includes(path.extname(extensionPath).toLowerCase());
+}
+
+function sanitizeModuleLoadOutput(value: unknown): string {
+	const text = String(value ?? "").replace(/\s+/g, " ").trim();
+	return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
+}
+
+function moduleLoadFailure(extensionPath: string): string | undefined {
+	if (!supportsNativeModuleLoadPreflight(extensionPath)) return undefined;
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(extensionPath);
+	} catch (err) {
+		return `extension file cannot be loaded: ${extensionPath}: ${formatFsError(err)}`;
+	}
+	const fingerprint = `${extensionPath}:${stat.mtimeMs}:${stat.size}`;
+	const cached = moduleLoadCache.get(extensionPath);
+	if (cached?.fingerprint === fingerprint) return cached.error;
+
+	const script = `import(${JSON.stringify(pathToFileURL(extensionPath).href)}).then(() => undefined).catch((err) => { console.error(err && err.stack ? err.stack : err); process.exitCode = 1; });`;
+	const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+		cwd: path.dirname(extensionPath),
+		env: { ...process.env, BOBBIT_TOOL_PREFLIGHT: "1" },
+		encoding: "utf-8",
+		windowsHide: true,
+		timeout: MODULE_LOAD_TIMEOUT_MS,
+		maxBuffer: MODULE_LOAD_MAX_OUTPUT_BYTES,
+	});
+	let error: string | undefined;
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal === "SIGTERM") {
+		error = `module load timed out after ${MODULE_LOAD_TIMEOUT_MS}ms`;
+	} else if (result.error) {
+		error = `module load failed: ${formatFsError(result.error)}`;
+	} else if ((result.status ?? 0) !== 0) {
+		error = `module load failed: ${sanitizeModuleLoadOutput(result.stderr || result.stdout || `exit ${result.status}`)}`;
+	}
+	moduleLoadCache.set(extensionPath, { fingerprint, error });
+	return error;
+}
+
+function makeDiagnostic(input: { toolName: string; groupDir: string }, extensionPath: string, code: ToolExtensionDiagnostic["code"], message: string): ToolExtensionDiagnostic {
+	return {
+		type: "invalid-tool-extension",
+		severity: "error",
+		code,
+		toolName: input.toolName,
+		tool: input.toolName,
+		groupDir: input.groupDir,
+		group: input.groupDir,
+		extensionPath,
+		path: extensionPath,
+		sourcePath: extensionPath,
+		message,
+		skipped: true,
+	};
 }
 
 export function preflightConfigBobbitExtension(input: {
@@ -125,45 +241,30 @@ export function preflightConfigBobbitExtension(input: {
 	if (input.provider?.type !== "bobbit-extension") return undefined;
 	if (!input.provider.extension) {
 		const extensionPath = path.join(input.baseDir, input.groupDir, "<missing>");
-		return {
-			type: "invalid-tool-extension",
-			toolName: input.toolName,
-			groupDir: input.groupDir,
+		return makeDiagnostic(
+			input,
 			extensionPath,
-			message: `bobbit-extension provider for ${input.toolName} does not declare an extension file`,
-		};
+			"missing-extension",
+			`bobbit-extension provider for ${input.toolName} does not declare an extension file`,
+		);
 	}
 
 	const extensionPath = path.resolve(input.baseDir, input.groupDir, input.provider.extension);
 	try {
 		if (!fs.statSync(extensionPath).isFile()) {
-			return {
-				type: "invalid-tool-extension",
-				toolName: input.toolName,
-				groupDir: input.groupDir,
-				extensionPath,
-				message: `extension file does not exist: ${extensionPath}`,
-			};
+			return makeDiagnostic(input, extensionPath, "missing-extension", `extension file does not exist: ${extensionPath}`);
 		}
 	} catch (err) {
-		return {
-			type: "invalid-tool-extension",
-			toolName: input.toolName,
-			groupDir: input.groupDir,
-			extensionPath,
-			message: `extension file cannot be loaded: ${extensionPath}: ${formatFsError(err)}`,
-		};
+		return makeDiagnostic(input, extensionPath, "missing-extension", `extension file cannot be loaded: ${extensionPath}: ${formatFsError(err)}`);
 	}
 
 	const importError = validateImportGraph(extensionPath);
 	if (importError) {
-		return {
-			type: "invalid-tool-extension",
-			toolName: input.toolName,
-			groupDir: input.groupDir,
-			extensionPath,
-			message: `${extensionPath}: ${importError}`,
-		};
+		return makeDiagnostic(input, extensionPath, importError.code, `${extensionPath}: ${importError.message}`);
+	}
+	const loadError = moduleLoadFailure(extensionPath);
+	if (loadError) {
+		return makeDiagnostic(input, extensionPath, "module-load-failed", `${extensionPath}: ${loadError}`);
 	}
 	return undefined;
 }
@@ -179,4 +280,5 @@ export function logToolExtensionDiagnostic(diagnostic: ToolExtensionDiagnostic):
 
 export function __resetToolExtensionPreflightDiagnostics(): void {
 	loggedDiagnostics.clear();
+	moduleLoadCache.clear();
 }
