@@ -783,7 +783,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	} else if (plan.mode === "delegate") {
-		// Delegate sessions: AGENTS.md only + task spec
+		// Delegate sessions: AGENTS.md + durable task spec. Render through the Task
+		// section (not Goal) so fresh spawn, restore, cached PromptParts, and
+		// prompt-section refresh all expose one task-oriented delegate section.
 		let taskSpec = plan.instructions || "";
 		if (plan.context && Object.keys(plan.context).length > 0) {
 			taskSpec += "\n\n## Context";
@@ -794,14 +796,12 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
-			// Delegates still get the global base system prompt. The task spec is
-			// layered on top as goalSpec; AGENTS.md from the worktree is also included.
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
-			goalSpec: taskSpec,
-			goalTitle: "Delegate Task",
-			goalState: "active",
+			taskTitle: "Delegate Task",
+			taskSpec,
+			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
 		});

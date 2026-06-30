@@ -80,6 +80,8 @@ mutating (file-changing) tool.
   system default; that bug is gone.)
 - **Timeout** — blocking-mode default is 10 minutes.
 
+The System Prompt Inspector treats the child's persisted `instructions` and optional `context` as a durable **Delegate Task**. Prompt-section refreshes, including provider `before-prompt` hooks and restart restore, rebuild that task from the session record so the viewer keeps the same task-oriented section the model received. Delegate instructions should appear in that Task section only, not duplicated into both Goal and Task.
+
 > ### ⚠️ Shared-worktree race (non-blocking mode) — accepted, not mitigated
 >
 > A `team_delegate` child runs in **your** worktree (shares your `cwd`). In **blocking**

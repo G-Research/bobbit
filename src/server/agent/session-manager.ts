@@ -2696,11 +2696,87 @@ export class SessionManager {
 		}
 	}
 
+	private buildDelegateTaskSpec(instructions: string, context?: Record<string, string>): string {
+		let taskSpec = instructions;
+		if (context && Object.keys(context).length > 0) {
+			taskSpec += "\n\n## Context";
+			for (const [key, value] of Object.entries(context)) {
+				taskSpec += `\n- **${key}**: ${value}`;
+			}
+		}
+		return taskSpec;
+	}
+
+	private buildDelegatePromptParts(opts: {
+		cwd: string;
+		projectRoot?: string;
+		instructions: string;
+		context?: Record<string, string>;
+		allowedTools?: string[];
+		sectionOrder?: string[];
+	}): PromptParts {
+		return {
+			baseSystemPromptPath: this.systemPromptPath,
+			cwd: opts.cwd,
+			projectRoot: opts.projectRoot,
+			// Delegates carry a durable task, not a goal. Older spawn code mapped this
+			// through goalSpec before the live SessionInfo existed; reconstruction uses
+			// the existing Task renderer so the inspector shows one task-oriented section
+			// and never duplicates the instructions across Goal + Task.
+			taskTitle: "Delegate Task",
+			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
+			allowedTools: opts.allowedTools,
+			projectConfigStore: this.projectConfigStore,
+			sectionOrder: opts.sectionOrder,
+		};
+	}
+
 	/** Get cached PromptParts for serving prompt-sections API.
 	 *  If not cached (e.g. dormant session), rebuild from session metadata. */
 	getPromptParts(sessionId: string): PromptParts | undefined {
 		const session = this.sessions.get(sessionId);
 		if (!session) return undefined;
+
+		let persisted: PersistedSession | undefined;
+		try { persisted = this.resolveStoreForId(session.id)?.get(session.id); }
+		catch { persisted = undefined; }
+		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
+		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+
+		// Delegate task instructions are durable store data, not ordinary cached prompt
+		// state. A provider hook can run after an early incomplete cache was created;
+		// for delegates, always rebuild from persisted instructions/context so the
+		// refresh path cannot overwrite the inspector snapshot with a task-less prompt.
+		const isDelegate = !!(session.delegateOf || persisted?.delegateOf);
+		if (isDelegate && persisted?.instructions?.trim()) {
+			const parts = this.buildDelegatePromptParts({
+				cwd: session.cwd,
+				projectRoot: persisted.repoPath,
+				instructions: persisted.instructions,
+				context: persisted.context,
+				allowedTools: session.allowedTools ?? persisted.allowedTools,
+				sectionOrder,
+			});
+			parts.dynamicContext = session.promptParts?.dynamicContext;
+			if (this.toolManager && !parts.toolDocs) {
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			}
+			if (!parts.skillsCatalog) {
+				parts.skillsCatalog = this.computeSkillsCatalog(
+					parts.allowedTools,
+					parts.projectRoot || parts.cwd,
+					parts.projectConfigStore,
+					session.projectId ?? persisted.projectId,
+				);
+			}
+			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+				const pref = this.preferencesStore.get("skillsCatalogBudget");
+				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
+			}
+			session.promptParts = parts;
+			return parts;
+		}
+
 		if (session.promptParts) return session.promptParts;
 
 		// Rebuild on demand for dormant / restored sessions missing cached parts
@@ -2732,11 +2808,13 @@ export class SessionManager {
 				// so it survives respawn / rebuild paths (not just initial session-setup).
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
+				projectRoot: persisted?.repoPath,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder,
 			};
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
@@ -2757,6 +2835,7 @@ export class SessionManager {
 			parts = {
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
+				projectRoot: persisted?.repoPath,
 				goalTitle: goal?.title,
 				goalState: goal?.state,
 				goalSpec: goal?.spec,
@@ -2764,7 +2843,24 @@ export class SessionManager {
 				roleName,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder,
 			};
+		}
+
+		if (this.toolManager && !parts.toolDocs) {
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		}
+		if (!parts.skillsCatalog) {
+			parts.skillsCatalog = this.computeSkillsCatalog(
+				parts.allowedTools,
+				parts.projectRoot || parts.cwd,
+				parts.projectConfigStore,
+				session.projectId ?? persisted?.projectId,
+			);
+		}
+		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+			const pref = this.preferencesStore.get("skillsCatalogBudget");
+			if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 		}
 
 		// Cache for future calls
@@ -5074,31 +5170,19 @@ export class SessionManager {
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else if (ps.delegateOf && !ps.goalId) {
-			// Delegate restore: rebuild the system prompt from the durable task fields
-			// (instructions + context) — the delegate's equivalent of a worker's goal
-			// spec. Mirrors session-setup.ts::_resolvePrompt mode === "delegate" so a
-			// revived delegate carries its original task, not an empty goal/role prompt.
-			let taskSpec = ps.instructions || "";
-			if (ps.context && Object.keys(ps.context).length > 0) {
-				taskSpec += "\n\n## Context";
-				for (const [key, value] of Object.entries(ps.context)) {
-					taskSpec += `\n- **${key}**: ${value}`;
-				}
-			}
-			const promptPath = this.assemblePrompt(ps.id, {
-				baseSystemPromptPath: this.systemPromptPath,
+			// Delegate restore: rebuild the system prompt from durable instructions +
+			// context — the delegate's equivalent of a worker task spec. Use the Task
+			// fields so restored delegates and prompt-section reconstruction agree.
+			const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
 				cwd: ps.cwd,
-				// Mirror the spawn path (session-setup.ts::_resolvePrompt mode ===
-				// "delegate") so AGENTS.md / project config dirs are readable for
-				// sandbox or multi-repo delegates whose cwd is container-internal.
+				// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
+				// delegates whose cwd is container-internal.
 				projectRoot: ps.repoPath,
-				goalSpec: taskSpec,
-				goalTitle: "Delegate Task",
-				goalState: "active",
+				instructions: ps.instructions || "",
+				context: ps.context,
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
-			});
+			}));
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
