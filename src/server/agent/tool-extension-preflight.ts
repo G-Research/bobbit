@@ -177,21 +177,113 @@ const MODULE_LOAD_TIMEOUT_MS = 5_000;
 const MODULE_LOAD_MAX_OUTPUT_BYTES = 64 * 1024;
 const moduleLoadCache = new Map<string, { fingerprint: string; error?: string }>();
 
-function supportsNativeModuleLoadPreflight(extensionPath: string): boolean {
-	// Plain node does not necessarily resolve TypeScript's extension aliases
-	// (for example import "./helper.js" backed by helper.ts) the same way the
-	// agent loader does. Keep executable module-load isolation to JS entries;
-	// TypeScript entries still get static local/bare import validation above.
-	return [".js", ".mjs", ".cjs"].includes(path.extname(extensionPath).toLowerCase());
-}
-
 function sanitizeModuleLoadOutput(value: unknown): string {
 	const text = String(value ?? "").replace(/\s+/g, " ").trim();
 	return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
 }
 
+function moduleLoadPreflightScript(extensionPath: string): string {
+	// Bundle first, then import the bundle in the child process. This lets the
+	// executable preflight cover TypeScript config extensions while preserving
+	// copied overrides that import Bobbit-installed dependencies (for example
+	// @sinclair/typebox) from isolated project config directories.
+	const bobbitRequire = createRequire(import.meta.url);
+	const esbuildPath = bobbitRequire.resolve("esbuild");
+	const esbuildPackageJson = bobbitRequire.resolve("esbuild/package.json");
+	const bobbitRoot = path.dirname(path.dirname(path.dirname(esbuildPackageJson)));
+	return `
+import fs from "node:fs";
+import path from "node:path";
+import { builtinModules } from "node:module";
+import { pathToFileURL } from "node:url";
+import { build } from ${JSON.stringify(pathToFileURL(esbuildPath).href)};
+
+const entry = ${JSON.stringify(extensionPath)};
+const bobbitRoot = ${JSON.stringify(bobbitRoot)};
+const builtins = new Set([...builtinModules, ...builtinModules.map((name) => "node:" + name)]);
+function isBuiltin(specifier) {
+	if (builtins.has(specifier)) return true;
+	if (specifier.startsWith("node:")) return builtins.has(specifier.slice(5));
+	const head = specifier.split("/")[0];
+	return builtins.has(head);
+}
+function candidateFiles(candidate) {
+	const ext = path.extname(candidate);
+	if (ext) {
+		const base = candidate.slice(0, -ext.length);
+		const aliases = ext === ".js"
+			? [candidate, base + ".ts", base + ".tsx", base + ".mts", base + ".cts", base + ".jsx", base + ".mjs", base + ".cjs"]
+			: ext === ".mjs"
+				? [candidate, base + ".mts", base + ".ts"]
+				: ext === ".cjs"
+					? [candidate, base + ".cts", base + ".ts"]
+					: [candidate];
+		return [...new Set(aliases)];
+	}
+	return [
+		candidate,
+		candidate + ".ts",
+		candidate + ".tsx",
+		candidate + ".mts",
+		candidate + ".cts",
+		candidate + ".js",
+		candidate + ".jsx",
+		candidate + ".mjs",
+		candidate + ".cjs",
+		candidate + ".json",
+		path.join(candidate, "index.ts"),
+		path.join(candidate, "index.tsx"),
+		path.join(candidate, "index.mts"),
+		path.join(candidate, "index.cts"),
+		path.join(candidate, "index.js"),
+		path.join(candidate, "index.jsx"),
+		path.join(candidate, "index.mjs"),
+		path.join(candidate, "index.cjs"),
+	];
+}
+function resolveLocalImport(resolveDir, specifier) {
+	const candidate = path.resolve(resolveDir, specifier);
+	for (const file of candidateFiles(candidate)) {
+		try { if (fs.statSync(file).isFile()) return file; } catch {}
+	}
+	return undefined;
+}
+const result = await build({
+	entryPoints: [entry],
+	bundle: true,
+	write: false,
+	platform: "node",
+	format: "esm",
+	target: "node20",
+	logLevel: "silent",
+	packages: "external",
+	plugins: [{
+		name: "bobbit-tool-preflight-resolve",
+		setup(build) {
+			build.onResolve({ filter: /.*/ }, (args) => {
+				if (args.kind === "entry-point") return undefined;
+				if (args.path.startsWith("./") || args.path.startsWith("../")) {
+					const resolved = resolveLocalImport(args.resolveDir, args.path);
+					if (resolved) return { path: resolved };
+					return undefined;
+				}
+				if (isBuiltin(args.path)) return { path: args.path, external: true };
+				return { path: args.path, external: true };
+			});
+		},
+	}],
+});
+const outFile = path.join(bobbitRoot, ".bobbit-tool-preflight-" + process.pid + "-" + Date.now() + ".mjs");
+try {
+	fs.writeFileSync(outFile, result.outputFiles[0].text, "utf-8");
+	await import(pathToFileURL(outFile).href);
+} finally {
+	try { fs.rmSync(outFile, { force: true }); } catch {}
+}
+`;
+}
+
 function moduleLoadFailure(extensionPath: string): string | undefined {
-	if (!supportsNativeModuleLoadPreflight(extensionPath)) return undefined;
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(extensionPath);
@@ -202,7 +294,12 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	const cached = moduleLoadCache.get(extensionPath);
 	if (cached?.fingerprint === fingerprint) return cached.error;
 
-	const script = `import(${JSON.stringify(pathToFileURL(extensionPath).href)}).then(() => undefined).catch((err) => { console.error(err && err.stack ? err.stack : err); process.exitCode = 1; });`;
+	let script: string;
+	try {
+		script = moduleLoadPreflightScript(extensionPath);
+	} catch (err) {
+		return `module load failed: cannot prepare preflight: ${formatFsError(err)}`;
+	}
 	const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
 		cwd: path.dirname(extensionPath),
 		env: { ...process.env, BOBBIT_TOOL_PREFLIGHT: "1" },
@@ -240,24 +337,7 @@ function makeDiagnostic(input: { toolName: string; groupDir: string }, extension
 	};
 }
 
-export function preflightConfigBobbitExtension(input: {
-	toolName: string;
-	groupDir: string;
-	baseDir: string;
-	provider?: ToolProvider;
-}): ToolExtensionDiagnostic | undefined {
-	if (input.provider?.type !== "bobbit-extension") return undefined;
-	if (!input.provider.extension) {
-		const extensionPath = path.join(input.baseDir, input.groupDir, "<missing>");
-		return makeDiagnostic(
-			input,
-			extensionPath,
-			"missing-extension",
-			`bobbit-extension provider for ${input.toolName} does not declare an extension file`,
-		);
-	}
-
-	const extensionPath = path.resolve(input.baseDir, input.groupDir, input.provider.extension);
+function preflightConfigExtensionPath(input: { toolName: string; groupDir: string }, extensionPath: string): ToolExtensionDiagnostic | undefined {
 	try {
 		if (!fs.statSync(extensionPath).isFile()) {
 			return makeDiagnostic(input, extensionPath, "missing-extension", `extension file does not exist: ${extensionPath}`);
@@ -275,6 +355,43 @@ export function preflightConfigBobbitExtension(input: {
 		return makeDiagnostic(input, extensionPath, "module-load-failed", `${extensionPath}: ${loadError}`);
 	}
 	return undefined;
+}
+
+export function preflightConfigExtensionFile(input: {
+	toolName: string;
+	groupDir: string;
+	baseDir: string;
+	extension: string;
+}): ToolExtensionDiagnostic | undefined {
+	return preflightConfigExtensionPath(
+		{ toolName: input.toolName, groupDir: input.groupDir },
+		path.resolve(input.baseDir, input.groupDir, input.extension),
+	);
+}
+
+export function preflightConfigBobbitExtension(input: {
+	toolName: string;
+	groupDir: string;
+	baseDir: string;
+	provider?: ToolProvider;
+}): ToolExtensionDiagnostic | undefined {
+	if (input.provider?.type !== "bobbit-extension") return undefined;
+	if (!input.provider.extension) {
+		const extensionPath = path.join(input.baseDir, input.groupDir, "<missing>");
+		return makeDiagnostic(
+			input,
+			extensionPath,
+			"missing-extension",
+			`bobbit-extension provider for ${input.toolName} does not declare an extension file`,
+		);
+	}
+
+	return preflightConfigExtensionFile({
+		toolName: input.toolName,
+		groupDir: input.groupDir,
+		baseDir: input.baseDir,
+		extension: input.provider.extension,
+	});
 }
 
 const loggedDiagnostics = new Set<string>();
