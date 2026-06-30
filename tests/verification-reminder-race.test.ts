@@ -23,7 +23,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { VerificationHarness } from "../src/server/agent/verification-harness.ts";
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -296,14 +298,78 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		);
 		assert.match(
 			resumeBody,
-			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);/,
-			"Boot resume must surface orphaned nonInteractive reviewer sessions deterministically.",
+			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);[\s\S]*if \(persisted\.length === 0\)/,
+			"Boot resume must surface orphaned nonInteractive reviewer sessions before any early return.",
 		);
 		assert.match(
 			source,
 			/listOrphanedNonInteractiveSessions\(\)/,
 			"Orphan surfacing should use SessionManager's active-verification-aware orphan detector.",
 		);
+	});
+
+	it("orphan surfacing is not blocked behind unrelated running verification resume", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-orphan-surface-"));
+		try {
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
+				verifications: [{
+					goalId: "goal-1",
+					gateId: "gate-1",
+					signalId: "signal-1",
+					overallStatus: "running",
+					startedAt: Date.now(),
+					steps: [{
+						name: "Busy review",
+						type: "llm-review",
+						status: "running",
+						startedAt: Date.now(),
+						sessionId: "active-reviewer",
+					}],
+				}],
+			}, null, 2));
+
+			let orphanListCalls = 0;
+			const fakeSession = {
+				status: "streaming",
+				rpcClient: { onEvent: () => () => {} },
+			};
+			const sessionManager = {
+				getSession: () => fakeSession,
+				waitForIdle: () => new Promise<void>(() => {}),
+				waitForStreaming: () => Promise.resolve(),
+				terminateSession: () => Promise.resolve(),
+				listOrphanedNonInteractiveSessions: async () => {
+					orphanListCalls += 1;
+					return [{ id: "orphan-reviewer", title: "Orphan reviewer", createdAt: Date.now() }];
+				},
+			} as any;
+			const gateStore = {
+				updateSignalVerification: () => {},
+				updateGateStatus: () => {},
+				getGate: () => undefined,
+				getGatesForGoal: () => [],
+			} as any;
+			const harness = new VerificationHarness(
+				stateDir,
+				gateStore,
+				() => {},
+				{ get: () => undefined, getAll: () => [] } as any,
+				undefined,
+				sessionManager,
+				{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
+			);
+
+			void harness.resumeInterruptedVerifications();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+
+			assert.equal(
+				orphanListCalls,
+				1,
+				"orphan reviewer surfacing must run promptly before an unrelated running verification can block in waitForIdle",
+			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
 	});
 
 	it("live llm-review checks errored-turn recovery after post-reminder idle before declaring the reminder ignored", () => {

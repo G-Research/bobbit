@@ -979,6 +979,7 @@ export class VerificationHarness {
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
+	private surfacedOrphanedNonInteractiveSessionIds = new Set<string>();
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
@@ -1227,8 +1228,12 @@ export class VerificationHarness {
 	 */
 	async resumeInterruptedVerifications(): Promise<void> {
 		const persisted = this._loadActive();
+		// Surface orphaned reviewers before resuming unrelated active verifications.
+		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
+		// absent from active verification context should not be hidden behind that
+		// sequential recovery path.
+		await this._surfaceOrphanedNonInteractiveReviewers();
 		if (persisted.length === 0) {
-			await this._surfaceOrphanedNonInteractiveReviewers();
 			return;
 		}
 
@@ -1236,7 +1241,6 @@ export class VerificationHarness {
 		if (running.length === 0) {
 			// Clean up stale file
 			try { fs.unlinkSync(this._persistPath); } catch {}
-			await this._surfaceOrphanedNonInteractiveReviewers();
 			return;
 		}
 
@@ -1342,7 +1346,9 @@ export class VerificationHarness {
 			console.warn("[verification] Failed to inspect orphaned nonInteractive reviewer sessions:", err);
 			return;
 		}
+		orphans = orphans.filter(o => !this.surfacedOrphanedNonInteractiveSessionIds.has(o.id));
 		if (orphans.length === 0) return;
+		for (const orphan of orphans) this.surfacedOrphanedNonInteractiveSessionIds.add(orphan.id);
 		const summary = orphans
 			.map(o => `${o.title || "Untitled"} (${o.id}, created ${new Date(o.createdAt).toISOString()})`)
 			.join("; ");
