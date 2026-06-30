@@ -64,8 +64,10 @@ export function registerSessionPoster(sessionId: string, poster: WsSessionPoster
 }
 
 /** Drop a session's poster (call on disconnect / teardown). */
-export function unregisterSessionPoster(sessionId: string): void {
-	if (sessionId) posters.delete(sessionId);
+export function unregisterSessionPoster(sessionId: string, poster?: WsSessionPoster): void {
+	if (!sessionId) return;
+	if (poster && posters.get(sessionId) !== poster) return;
+	posters.delete(sessionId);
 }
 
 /**

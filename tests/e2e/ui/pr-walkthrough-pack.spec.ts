@@ -625,6 +625,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 			return sid;
 		}, { timeout: 15_000 }).toBeTruthy();
 		expect(sid).toBeTruthy();
+		await waitForSessionStatus(sid!, "idle");
 
 		const runPosts: string[] = [];
 		page.on("request", (r) => {
@@ -658,6 +659,39 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 
 		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
 		expect(sidAfter, "a NO_PR launch must not switch the view").toBe(sid);
+	});
+
+	test("T-2b — inactive sidebar session-menu launch binds to that row without switching view", async ({ page }) => {
+		await openApp(page);
+		const ownerSid = await createSessionViaUI(page);
+		await waitForSessionStatus(ownerSid, "idle");
+		const activeSid = await createSessionViaUI(page);
+		await waitForSessionStatus(activeSid, "idle");
+		expect(activeSid).not.toBe(ownerSid);
+
+		const ownerRow = page.locator(`[data-session-id="${ownerSid}"][data-sidebar-actions-row-root]`).first();
+		await expect(ownerRow, "inactive owner row must be present in the sidebar").toBeVisible({ timeout: 10_000 });
+		await ownerRow.hover();
+		const trigger = ownerRow.getByTestId("sidebar-actions-trigger");
+		await expect(trigger, "inactive row session-actions trigger must be available").toBeVisible({ timeout: 10_000 });
+		await trigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR Walkthrough" }).first();
+		await expect(launcher, "the PR Walkthrough launcher must render for inactive rows").toBeVisible({ timeout: 10_000 });
+
+		const runResp = page.waitForResponse(
+			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
+			{ timeout: 25_000 },
+		);
+		await launcher.click();
+		const resp = await runResp;
+		expect(resp.request().headers()["x-bobbit-session-id"], "inactive-row launcher route must be authorized as the row session").toBe(ownerSid);
+		expect(JSON.parse(resp.request().postData() || "{}").sessionId, "inactive-row launcher route body must target the row session").toBe(ownerSid);
+		expect(resp.status(), `inactive launch run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
+
+		await expect(page.locator('[data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
+		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+		expect(sidAfter, "a failed inactive-row PR walkthrough launch must stay on the currently selected session").toBe(activeSid);
 	});
 
 	// ── T-3: a BOUND reviewer child pane auto-shows the pending state on mount —

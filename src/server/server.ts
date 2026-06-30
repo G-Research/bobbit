@@ -2216,8 +2216,9 @@ export function createGateway(config: GatewayConfig) {
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
 			if (req.method === "OPTIONS") {
 				res.writeHead(204);

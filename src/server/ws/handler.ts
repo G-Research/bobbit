@@ -636,6 +636,14 @@ export function handleWebSocketConnection(
 				case "prompt":
 					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
 					break;
+				case "ext_surface_token":
+					// Pack-bound Host API calls (session-menu launchers, panels) may be clicked
+					// while a newly-created session is still preparing. Surface-token minting is
+					// authorization-only and does not touch the agent turn, so let it proceed;
+					// the subsequent scoped REST/route call carries the minted token and remains
+					// server-authorized. Blocking this frame makes launchers hang waiting for an
+					// ext_surface_token_result that never arrives.
+					break;
 				default:
 					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
 					return;

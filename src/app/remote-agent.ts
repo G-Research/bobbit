@@ -273,6 +273,8 @@ export class RemoteAgent {
 	// In-flight pack-bound surface-token MINT requests, settled by
 	// `ext_surface_token_result`.
 	private _pendingExtSurfaceTokens = new Map<string, { resolve: (token: string) => void; reject: (e: Error) => void }>();
+	private _sessionPoster: ((req: SessionPostRequest) => Promise<void>) | undefined;
+	private _surfaceTokenMinter: ((surface: PackSurfaceRef) => Promise<string>) | undefined;
 	private _surfaceTokenAuthorityKey: string | undefined;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
@@ -660,6 +662,21 @@ export class RemoteAgent {
 	get connected() {
 		return this.ws?.readyState === WebSocket.OPEN;
 	}
+	registerHostApiTransports(): void {
+		if (!this._sessionId) return;
+		this._sessionPoster = (req) => this._postExtSession(req);
+		this._surfaceTokenMinter = (surface) => this._mintPackSurfaceToken(surface);
+		registerSessionPoster(this._sessionId, this._sessionPoster);
+		registerSurfaceTokenMinter(this._sessionId, this._surfaceTokenMinter);
+	}
+	private _unregisterHostApiTransports(reason: string): void {
+		unregisterSessionPoster(this._sessionId, this._sessionPoster);
+		unregisterSurfaceTokenMinter(this._sessionId, this._surfaceTokenMinter);
+		this._sessionPoster = undefined;
+		this._surfaceTokenMinter = undefined;
+		this._surfaceTokenAuthorityKey = undefined;
+		this._rejectPendingExtPosts(reason);
+	}
 	get connectionStatus(): ConnectionStatus {
 		return this._connectionStatus;
 	}
@@ -757,15 +774,16 @@ export class RemoteAgent {
 		const wsUrl = this._gatewayUrl.replace(/^http/, "ws");
 
 		return new Promise<void>((resolve, reject) => {
-			this.ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
+			const ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
+			this.ws = ws;
 			let settled = false;
 
-			this.ws.onopen = () => {
+			ws.onopen = () => {
 				bootMark("ws-open");
-				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
+				ws.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
 			};
 
-			this.ws.onmessage = (evt) => {
+			ws.onmessage = (evt) => {
 				let msg: any;
 				try {
 					msg = JSON.parse(evt.data);
@@ -784,13 +802,12 @@ export class RemoteAgent {
 					if (msg.type === "auth_ok") {
 						settled = true;
 						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
-						// Register the sanctioned WS poster for `host.session.postMessage` (C2 session
-						// WRITE, extension-host-phase2.md §8 C2.1). Server-side session binding,
-						// surface-token resolution, and one-time content-bound permits carry the
-						// authorization/provenance checks; the app transport is not an unspoofable
-						// same-origin security boundary.
-						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
-						registerSurfaceTokenMinter(this._sessionId, (surface) => this._mintPackSurfaceToken(surface));
+						// Register the sanctioned WS transports for pack-bound surface-token minting
+						// and `host.session.postMessage` (C2 session WRITE, extension-host-phase2.md
+						// §8 C2.1). Server-side session binding, surface-token resolution, and
+						// one-time content-bound permits carry the authorization/provenance checks;
+						// the app transport is not an unspoofable same-origin security boundary.
+						this.registerHostApiTransports();
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -846,7 +863,7 @@ export class RemoteAgent {
 				this.handleServerMessage(msg).catch(() => {});
 			};
 
-			this.ws.onerror = () => {
+			ws.onerror = () => {
 				if (!settled) {
 					settled = true;
 					if (initial) {
@@ -855,7 +872,7 @@ export class RemoteAgent {
 				}
 			};
 
-			this.ws.onclose = () => {
+			ws.onclose = () => {
 				// Mark that the WS dropped — the next visibility-driven resync
 				// must run a fresh `requestMessages()` to pick up anything we
 				// missed while disconnected.
@@ -866,6 +883,12 @@ export class RemoteAgent {
 						reject(new Error("Connection closed before auth"));
 						return;
 					}
+				}
+				// If this is still the current socket, drop registered Host API transports so
+				// stale minters/posters cannot mask the background fallback during reconnect.
+				if (this.ws === ws) {
+					this.ws = null;
+					this._unregisterHostApiTransports("session WebSocket closed");
 				}
 				// If this wasn't an intentional disconnect, attempt to reconnect
 				if (!this._intentionalDisconnect) {
@@ -916,12 +939,9 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
-		// Drop the registered WS poster + reject any in-flight session posts so a
+		// Drop the registered WS transports + reject in-flight extension requests so a
 		// torn-down session leaves no stale transport (re-registered on the next auth_ok).
-		unregisterSessionPoster(this._sessionId);
-		unregisterSurfaceTokenMinter(this._sessionId);
-		this._surfaceTokenAuthorityKey = undefined;
-		this._rejectPendingExtPosts("session disconnected");
+		this._unregisterHostApiTransports("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
 

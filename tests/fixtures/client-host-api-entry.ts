@@ -95,6 +95,122 @@ import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "../../
 	}
 };
 
+(window as any).__packSurfaceTokenMintFallsBackToBackgroundWebSocket = async () => {
+	const originalFetch = window.fetch;
+	const OriginalWebSocket = window.WebSocket;
+	const sent: any[] = [];
+	let storeToken: string | undefined;
+	class MockWebSocket {
+		static readonly CONNECTING = 0;
+		static readonly OPEN = 1;
+		static readonly CLOSING = 2;
+		static readonly CLOSED = 3;
+		readyState = MockWebSocket.CONNECTING;
+		onopen: ((event: Event) => void) | null = null;
+		onmessage: ((event: MessageEvent) => void) | null = null;
+		onerror: ((event: Event) => void) | null = null;
+		onclose: ((event: CloseEvent) => void) | null = null;
+		constructor(readonly url: string) {
+			setTimeout(() => {
+				this.readyState = MockWebSocket.OPEN;
+				this.onopen?.(new Event("open"));
+			}, 0);
+		}
+		send(data: string): void {
+			const msg = JSON.parse(data);
+			sent.push(msg);
+			if (msg.type === "auth") this.emit({ type: "auth_ok", surfaceTokenKey: "authority-key" });
+			if (msg.type === "ext_surface_token") this.emit({ type: "ext_surface_token_result", requestId: msg.requestId, ok: true, token: "background-token" });
+		}
+		close(): void {
+			this.readyState = MockWebSocket.CLOSED;
+			this.onclose?.(new CloseEvent("close"));
+		}
+		private emit(message: unknown): void {
+			setTimeout(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent), 0);
+		}
+	}
+	localStorage.setItem("gateway.url", "https://gateway.test");
+	localStorage.setItem("gateway.token", "gateway-token");
+	window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = String(input);
+		if (url.includes("/api/ext/surface-token")) return new Response("unexpected pack-bound REST mint", { status: 500 });
+		if (url.includes("/api/ext/store/stats")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			storeToken = body.surfaceToken;
+			return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		return new Response("not found", { status: 404 });
+	};
+	(window as any).WebSocket = MockWebSocket;
+	try {
+		const h: any = getHostApi("sess-background", undefined, { kind: "pack", packId: "terminal", contributionKind: "panel", contributionId: "terminal" } as any);
+		await h.store.stats();
+		return { storeToken, sentTypes: sent.map((msg) => msg.type), mint: sent.find((msg) => msg.type === "ext_surface_token") };
+	} finally {
+		window.fetch = originalFetch;
+		window.WebSocket = OriginalWebSocket;
+		localStorage.removeItem("gateway.url");
+		localStorage.removeItem("gateway.token");
+	}
+};
+
+(window as any).__staleRegisteredSurfaceTokenMinterFallsBackToBackgroundWebSocket = async () => {
+	const originalFetch = window.fetch;
+	const OriginalWebSocket = window.WebSocket;
+	const sent: any[] = [];
+	let storeToken: string | undefined;
+	class MockWebSocket {
+		static readonly CONNECTING = 0;
+		static readonly OPEN = 1;
+		static readonly CLOSING = 2;
+		static readonly CLOSED = 3;
+		readyState = MockWebSocket.CONNECTING;
+		onopen: ((event: Event) => void) | null = null;
+		onmessage: ((event: MessageEvent) => void) | null = null;
+		onerror: ((event: Event) => void) | null = null;
+		onclose: ((event: CloseEvent) => void) | null = null;
+		constructor(readonly url: string) {
+			setTimeout(() => {
+				this.readyState = MockWebSocket.OPEN;
+				this.onopen?.(new Event("open"));
+			}, 0);
+		}
+		send(data: string): void {
+			const msg = JSON.parse(data);
+			sent.push(msg);
+			if (msg.type === "auth") this.emit({ type: "auth_ok", surfaceTokenKey: "authority-key" });
+			if (msg.type === "ext_surface_token") this.emit({ type: "ext_surface_token_result", requestId: msg.requestId, ok: true, token: "background-token" });
+		}
+		close(): void { this.readyState = MockWebSocket.CLOSED; }
+		private emit(message: unknown): void { setTimeout(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent), 0); }
+	}
+	registerSurfaceTokenMinter("sess-stale-minter", async () => { throw new Error("pack surface-token mint: WebSocket not connected"); });
+	localStorage.setItem("gateway.url", "https://gateway.test");
+	localStorage.setItem("gateway.token", "gateway-token");
+	window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = String(input);
+		if (url.includes("/api/ext/store/stats")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			storeToken = body.surfaceToken;
+			return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		return new Response("not found", { status: 404 });
+	};
+	(window as any).WebSocket = MockWebSocket;
+	try {
+		const h: any = getHostApi("sess-stale-minter", undefined, { kind: "pack", packId: "terminal", contributionKind: "panel", contributionId: "terminal" } as any);
+		await h.store.stats();
+		return { storeToken, sentTypes: sent.map((msg) => msg.type) };
+	} finally {
+		window.fetch = originalFetch;
+		window.WebSocket = OriginalWebSocket;
+		unregisterSurfaceTokenMinter("sess-stale-minter");
+		localStorage.removeItem("gateway.url");
+		localStorage.removeItem("gateway.token");
+	}
+};
+
 (window as any).__packSurfaceTokenMintUsesTrustedBridge = async () => {
 	const originalFetch = window.fetch;
 	let fetchMinted = false;
