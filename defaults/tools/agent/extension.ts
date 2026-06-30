@@ -9,7 +9,7 @@
  * allowed cross-session prompt/steer) for every session.
  *
  * All verbs are agent-process tools: they call the gateway over authenticated
- * REST using on-disk credentials (`_shared/gateway.ts`) and hit the
+ * REST using on-disk credentials (`agent/gateway.js`) and hit the
  * server-side `/api/sessions/:id/orchestrate/*` routes, which invoke the
  * in-process `OrchestrationCore`. There is NO inlined creds logic and NO
  * client-side spawn/wait loop — the server owns the child lifecycle.
@@ -22,7 +22,7 @@
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
+import { readGatewayCreds, apiCall } from "./gateway.js";
 
 // ── Types ──
 
