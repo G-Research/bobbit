@@ -347,14 +347,28 @@ interface ArchivedWorktreeScanContext {
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
+export type RestartRedriveSnapshot = {
+	status: SessionStatus;
+	/**
+	 * Set only while restoreSession() is recreating a persisted session. During
+	 * that restore-startup window, `starting` is a lifecycle state, not proof of
+	 * an interrupted turn; the persisted pre-restore value stays authoritative.
+	 */
+	restoreStartupWasStreaming?: boolean;
+};
+
 /**
  * Durable restart re-drive marker for every active/busy session state.
  * The persisted field is still named `wasStreaming` for compatibility, but
- * restart recovery must cover all non-idle, non-terminal statuses — not only
- * the exact `streaming` state.
+ * restart recovery must cover real non-idle/non-terminal work — not cold
+ * restore-startup of a previously idle session.
  */
-export function sessionNeedsRestartRedrive(status: SessionStatus): boolean {
-	return status !== "idle" && status !== "terminated";
+export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedriveSnapshot): boolean {
+	const status = typeof snapshot === "string" ? snapshot : snapshot.status;
+	const restoreStartupWasStreaming = typeof snapshot === "string" ? undefined : snapshot.restoreStartupWasStreaming;
+	if (status === "idle" || status === "terminated") return false;
+	if (status === "starting" && restoreStartupWasStreaming !== undefined) return restoreStartupWasStreaming;
+	return true;
 }
 
 /**
@@ -555,6 +569,12 @@ export interface SessionInfo {
 	recoveredPromptDispatchQueueIds?: string[];
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
+	/**
+	 * Persisted wasStreaming value captured while restoreSession() is in its
+	 * startup window. Prevents rapid shutdown during cold restore from converting
+	 * a previously idle interactive session into a false interrupted-turn prompt.
+	 */
+	restoreStartupWasStreaming?: boolean;
 	/**
 	 * True for a DORMANT entry (restored delegate/kinded child whose agent process
 	 * is NOT running — placeholder RpcBridge). Used by `isSessionLive` so the
@@ -5289,6 +5309,7 @@ export class SessionManager {
 			allowedTools: restoredAllowedNames,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
+			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			spawnPinnedModel: bridgeOptions.initialModel,
@@ -9306,7 +9327,7 @@ export class SessionManager {
 			// This is authoritative — the in-memory status is always correct,
 			// and we write it here to handle the case where shutdown() races
 			// with a pending lifecycle event that hasn't flushed to disk yet.
-			const needsRestartRedrive = sessionNeedsRestartRedrive(session.status);
+			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
 			this.resolveStoreForSession(id).update(id, {
 				wasStreaming: needsRestartRedrive,
 				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? Date.now()) : undefined,
