@@ -51,6 +51,7 @@ import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-desce
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
+import { deliverSessionPrompt, parseSessionPromptMode, SessionPromptDeliveryError } from "./agent/session-prompt-delivery.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
@@ -10201,6 +10202,7 @@ async function handleApiRoute(
 	};
 	const denyOwnChild = () => json({ error: "Caller session is not the owner of this child agent", code: "NOT_OWNER" }, 403);
 	const ocStatusForTeamFallback = (err: unknown): number => {
+		if (err instanceof SessionPromptDeliveryError) return err.status;
 		if (err instanceof OrchestrationCoreError) {
 			if (err.code === "NOT_STREAMING") return 409;
 			if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
@@ -10585,18 +10587,28 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/prompt — send a prompt to a team agent (queued or immediate)
+	// POST /api/goals/:id/team/prompt — prompt or steer a team agent, direct-child lead, or owned helper.
 	const teamPromptMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/prompt$/);
 	if (teamPromptMatch && req.method === "POST") {
 		const goalId = teamPromptMatch[1];
 		const body = await readBody(req);
-		if (!body?.sessionId || !body?.message) {
+		if (typeof body?.sessionId !== "string" || typeof body?.message !== "string") {
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent OR a direct-child team-lead
+		let mode: "prompt" | "steer";
+		try {
+			mode = parseSessionPromptMode(body.mode, "steer");
+		} catch (err) {
+			if (err instanceof SessionPromptDeliveryError) json({ error: err.message, code: err.code }, err.status);
+			else jsonError(500, err);
+			return;
+		}
+
+		// Validate target is a team agent OR a direct-child team-lead OR an owned helper child.
 		const agents = teamManager.listAgents(goalId);
 		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
+		let ownChildOwner: string | undefined;
 		if (!allowed) {
 			const targetSession = sessionManager.getSession(body.sessionId);
 			if (targetSession?.role === "team-lead" && targetSession.goalId) {
@@ -10610,14 +10622,11 @@ async function handleApiRoute(
 			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
 			if (ownerResult) {
 				if ("denied" in ownerResult) { denyOwnChild(); return; }
-				try {
-					const result = await orchestrationCore.prompt(ownerResult.owner, body.sessionId, body.message as string);
-					json({ ok: true, status: result.status });
-				} catch (err) {
-					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
-				}
-				return;
+				ownChildOwner = ownerResult.owner;
+				allowed = true;
 			}
+		}
+		if (!allowed) {
 			json({
 				error: "Session is not a member of this team and is not a direct-child team-lead",
 				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
@@ -10629,11 +10638,8 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
-		if (session.nonInteractive) {
-			json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
-			return;
-		}
-		// Enforce gate dependency check for team/prompt
+
+		// Enforce gate dependency check for team/prompt.
 		const wfGateId = typeof body.workflowGateId === "string" ? body.workflowGateId : undefined;
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
@@ -10650,7 +10656,7 @@ async function handleApiRoute(
 			}
 		}
 		try {
-			// Resolve workflow gate context and prepend to message if provided
+			// Resolve workflow gate context and prepend to message if provided.
 			let message = body.message as string;
 			if (wfGateId || inputIds?.length) {
 				const ctx = teamManager.buildDependencyContext(goalId, wfGateId, inputIds);
@@ -10658,10 +10664,20 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
-			const result = await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: result.status });
+			const result = ownChildOwner
+				? await orchestrationCore.prompt(ownChildOwner, body.sessionId, message, { mode })
+				: await deliverSessionPrompt({
+					getSession: (id) => sessionManager.getSession(id),
+					enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
+					deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+				}, body.sessionId, message, { mode, defaultMode: "steer" });
+			json(result);
 		} catch (err) {
-			jsonError(500, err);
+			if (err instanceof SessionPromptDeliveryError || err instanceof OrchestrationCoreError) {
+				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof Error ? (err as { code?: string }).code : undefined }, ocStatusForTeamFallback(err));
+			} else {
+				jsonError(500, err);
+			}
 		}
 		return;
 	}
@@ -11027,7 +11043,49 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/wait — block until session becomes idle
+	// POST /api/sessions/:id/prompt — prompt or steer any live session by id.
+	const sessionPromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt$/);
+	if (sessionPromptMatch && req.method === "POST") {
+		const targetSessionId = sessionPromptMatch[1];
+		const body = await readBody(req);
+		if (typeof body?.message !== "string") {
+			json({ error: "Missing message" }, 400);
+			return;
+		}
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const secretHeader = h["x-bobbit-session-secret"];
+		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+		const callerSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+		const callerSession = callerSessionId ? sessionManager.getSession(callerSessionId) : undefined;
+		if (!callerSession || callerSession.status === "terminated") {
+			json({ error: "Valid caller session secret is required", code: "SESSION_SECRET_REQUIRED" }, 403);
+			return;
+		}
+		const callerAllowedTools = callerSession.allowedTools ?? [];
+		if (!callerAllowedTools.some((tool) => tool.toLowerCase() === "session_prompt")) {
+			json({ error: 'Tool "session_prompt" is not allowed for this session', code: "SESSION_PROMPT_NOT_ALLOWED" }, 403);
+			return;
+		}
+		try {
+			const result = await deliverSessionPrompt({
+				getSession: (id) => sessionManager.getSession(id),
+				enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
+				deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
+			json(result);
+		} catch (err) {
+			if (err instanceof SessionPromptDeliveryError) {
+				json({ error: err.message, code: err.code }, err.status);
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/wait — block until session becomes idle.
 	// Uses chunked transfer with periodic heartbeat newlines to prevent
 	// HTTP client body-timeout (undici defaults to 300s between chunks).
 	const waitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/wait$/);
@@ -11110,6 +11168,7 @@ async function handleApiRoute(
 
 		// Map OrchestrationCore error codes → HTTP status.
 		const ocStatus = (err: unknown): number => {
+			if (err instanceof SessionPromptDeliveryError) return err.status;
 			if (err instanceof OrchestrationCoreError) {
 				if (err.code === "NOT_STREAMING") return 409;
 				if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
@@ -11156,11 +11215,11 @@ async function handleApiRoute(
 				return;
 			}
 
-			// POST /orchestrate/prompt — run-if-idle / queue.
+			// POST /orchestrate/prompt — default steer delivery; mode:"prompt" preserves queue semantics.
 			if (verb === "prompt") {
 				if (!body?.childSessionId || typeof body?.message !== "string") { json({ error: "Missing childSessionId or message" }, 400); return; }
-				const result = await orchestrationCore.prompt(ownerId, body.childSessionId, body.message);
-				json({ ok: true, status: result.status });
+				const result = await orchestrationCore.prompt(ownerId, body.childSessionId, body.message, { mode: body.mode });
+				json(result);
 				return;
 			}
 
@@ -11311,7 +11370,7 @@ async function handleApiRoute(
 			json({ error: `Unknown orchestrate verb: ${verb}` }, 404);
 		} catch (err) {
 			const status = ocStatus(err);
-			json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, status);
+			json({ error: String(err instanceof Error ? err.message : err), code: err instanceof Error ? (err as { code?: string }).code : undefined }, status);
 		}
 		return;
 	}

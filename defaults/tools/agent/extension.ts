@@ -5,7 +5,8 @@
  * blocking one-shot by default, `non_blocking` opt-in) plus the orchestration
  * verbs (`team_wait`, `team_prompt`, `team_dismiss`, `team_steer`,
  * `team_abort`) that operate over the caller's OWN child sessions. Also
- * registers `read_session` (transcript reader) for every session.
+ * registers `read_session` (transcript reader) and `session_prompt` (explicitly
+ * allowed cross-session prompt/steer) for every session.
  *
  * All verbs are agent-process tools: they call the gateway over authenticated
  * REST using on-disk credentials (`_shared/gateway.ts`) and hit the
@@ -146,6 +147,14 @@ interface ReadSessionParams {
 	verbose?: boolean;
 }
 
+type SessionPromptMode = "prompt" | "steer";
+
+interface SessionPromptParams {
+	session_id: string;
+	message: string;
+	mode?: SessionPromptMode;
+}
+
 async function callReadSessionEndpoint(
 	params: ReadSessionParams,
 ): Promise<{ ok: boolean; status: number; body: any }> {
@@ -175,6 +184,26 @@ async function callReadSessionEndpoint(
 	let body: any = undefined;
 	try { body = await resp.json(); } catch { body = undefined; }
 	return { ok: resp.ok, status: resp.status, body };
+}
+
+async function callSessionPromptEndpoint(params: SessionPromptParams): Promise<unknown> {
+	const credsResult = readGatewayCreds();
+	if ("error" in credsResult) {
+		throw new Error(credsResult.error);
+	}
+	const extraHeaders: Record<string, string> = {};
+	const caller = getCallerSessionId();
+	if (caller) extraHeaders["x-bobbit-session-id"] = caller;
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+	if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+	const body: Record<string, unknown> = { message: params.message, mode: params.mode ?? "prompt" };
+	return apiCall(
+		credsResult,
+		"POST",
+		`/api/sessions/${encodeURIComponent(params.session_id)}/prompt`,
+		body,
+		{ extraHeaders },
+	);
 }
 
 // ── Extension registration ──
@@ -263,6 +292,31 @@ const extension: ExtensionFactory = (pi) => {
 					messages: envelope?.messages,
 				},
 			};
+		},
+	});
+
+	// ── session_prompt (registered for every session; grantPolicy: never in YAML) ──
+	pi.registerTool({
+		name: "session_prompt",
+		label: "Prompt Session",
+		description: "Prompt or steer any live agent session by id. Default mode is prompt.",
+		promptSnippet:
+			"session_prompt - Prompt any live session by id, or set mode:'steer' to redirect a running turn. Not exposed unless explicitly allowed.",
+		promptGuidelines: [
+			"Default mode is prompt: starts or queues a normal user prompt for interactive sessions",
+			"Use mode:'steer' to inject into a streaming session, or queue a steered prompt for non-streaming sessions",
+			"Targets any live, non-archived session by id when this tool is explicitly enabled",
+			"Normal prompt mode rejects non-interactive/reviewer sessions; steer mode may redirect them while streaming",
+		],
+		parameters: Type.Object({
+			session_id: Type.String(),
+			message: Type.String(),
+			mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default prompt.", default: "prompt" })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				return ok(JSON.stringify(await callSessionPromptEndpoint(params as SessionPromptParams), null, 2));
+			} catch (e: any) { return fail(e?.message ?? String(e)); }
 		},
 	});
 
@@ -453,15 +507,17 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_prompt",
 			label: "Prompt Child Agent",
-			description: "Prompt one of your child agents. Runs immediately if idle, else queues.",
-			promptSnippet: "team_prompt - Send a prompt to your child agent (immediate if idle, queued if busy).",
+			description: "Prompt or steer one of your child agents. Default mode is steer; use mode:'prompt' for next-turn queue semantics.",
+			promptSnippet: "team_prompt - Prompt/steer your child agent. Default mode:'steer'; use mode:'prompt' to run/queue a normal next-turn prompt.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 				message: Type.String(),
+				mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default steer.", default: "steer" })),
 			}),
 			async execute(_id, params) {
 				try {
-					return ok(JSON.stringify(await orchestrate("POST", "prompt", { childSessionId: params.session_id, message: params.message }), null, 2));
+					const body: Record<string, unknown> = { childSessionId: params.session_id, message: params.message, mode: params.mode ?? "steer" };
+					return ok(JSON.stringify(await orchestrate("POST", "prompt", body), null, 2));
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});
@@ -469,8 +525,8 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_steer",
 			label: "Steer Child Agent",
-			description: "Send an urgent mid-turn redirect to a streaming child. Fails if idle; use team_prompt.",
-			promptSnippet: "team_steer - Steer a running child agent with an urgent message (mid-turn only).",
+			description: "Backward-compatible mid-turn redirect for a streaming child. Fails if idle; prefer team_prompt(mode:'steer') for routine nudges.",
+			promptSnippet: "team_steer - Legacy steer for a running child (mid-turn only); prefer team_prompt(mode:'steer') unless you need compatibility.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 				message: Type.String(),

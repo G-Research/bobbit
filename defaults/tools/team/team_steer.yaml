@@ -1,6 +1,6 @@
 name: team_steer
-description: "Inject a user message into agent's current turn"
-summary: "Mid-turn redirect to a running agent"
+description: "Backward-compatible streaming-only mid-turn redirect; prefer team_prompt(mode=\"steer\") for routine nudges"
+summary: "Legacy mid-turn redirect to a running agent"
 params: [session_id, message]
 provider:
   type: bobbit-extension
@@ -11,7 +11,7 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  The agent sees it as a user message interleaved with its current work. Use sparingly — prefer letting agents finish their turn first.
+  Backward-compatible streaming-only steer. The agent sees it as a user message interleaved with its current work, and the call fails if the target is idle. Prefer `team_prompt(mode="steer")` for routine nudges because it also handles idle/non-streaming targets with steered queue semantics.
 detail_docs: >-
   ## Purpose
 
@@ -22,9 +22,11 @@ detail_docs: >-
   current turn to finish.
 
 
-  This is the "course correction" tool — use it when you can see an agent
-  heading in the wrong direction and want to redirect it immediately rather than
-  waiting for it to finish and then giving feedback.
+  This tool is kept for backward compatibility with older workflows that need
+  the legacy streaming-only behavior. For routine nudges and current-turn
+  redirection, prefer `team_prompt(mode="steer")` (or omit `mode`, since steer
+  is the default) because it also handles idle/non-streaming targets by queuing
+  a steered prompt.
 
 
   ## Parameters
@@ -45,6 +47,9 @@ detail_docs: >-
   ## When to Use
 
 
+  - **Compatibility with streaming-only steer** — use when you specifically
+  need the legacy behavior that fails unless the target is actively streaming.
+
   - **Agent is going the wrong direction** — it's implementing the wrong
   approach, editing the wrong files, or misunderstanding the task.
 
@@ -58,11 +63,15 @@ detail_docs: >-
   ## When NOT to Use
 
 
-  - **Agent is idle** — use `team_prompt` for agents that have finished their
-  turn. `team_steer` fails with an error if the agent is not actively streaming.
+  - **Routine nudges** — use `team_prompt(mode="steer")` or omit `mode`; it is
+  the default and works for both streaming and non-streaming targets.
+
+  - **Agent is idle** — use `team_prompt(mode="steer")` for steered queue
+  semantics, or `team_prompt(mode="prompt")` for a normal next-turn prompt.
+  `team_steer` fails with an error if the agent is not actively streaming.
 
   - **Routine follow-up tasks** — if the agent finished correctly and you want
-  to assign more work, use `team_prompt`.
+  to assign more work, use `team_prompt(mode="prompt")`.
 
   - **Non-urgent feedback** — if the agent is on the right track and you just
   have minor suggestions, wait for it to finish and use `team_prompt`.
@@ -103,9 +112,9 @@ detail_docs: >-
   any owner steers its own `team_delegate` children. Own-child scoping is
   enforced server-side; you cannot steer a foreign session.
 
-  - **Agent must be active** — steering an idle agent fails with an error.
-  Confirm the target's status is `streaming` before steering (via `team_list`
-  for team agents, or the child's status for `team_delegate` children).
+  - **Agent must be active** — legacy steering an idle agent fails with an
+  error. Prefer `team_prompt(mode="steer")` if you want idle/non-streaming
+  targets to receive a queued steered prompt instead.
 
   - **Injected as system message** — the steer message has high priority in the
   agent's context. The agent should see and respond to it promptly.
