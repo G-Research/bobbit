@@ -80,7 +80,7 @@ the wire protocol below the model changes:
 |---|---|
 | `<stateDir>/mcp-tool-docs/<server>.md` auto-docs | Unchanged — already per-server. |
 | `/api/internal/mcp-call` dispatcher | Unchanged — body is still `{ tool: "mcp__<server>__<op>", args }`. |
-| `tool-group-policies.yaml` keys (`mcp__<server>` and `mcp__<server>__<sub>`) | Unchanged mechanics. Defaults ship no `mcp__*` denials; users opt out per-server via the user/project YAML or the Tools page. |
+| `tool-group-policies.yaml` keys (`mcp__<server>`, `mcp__<server>__<sub>`, and `mcp__<server>__<sub>__<op>`) | Unchanged mechanics with a richer hierarchy. Defaults ship no `mcp__*` denials; users opt out per server, package/sub-namespace, or operation via YAML or the Tools page. |
 | `McpManager._toolNameMap` and `_parseToolName` | Unchanged. |
 | `GET /api/mcp-servers` | Extended additively — each operation entry now also carries `subNamespace?` and `op` (parsed via `parseMcpToolName`) so the Tools page can group by sub-namespace client-side without re-parsing. |
 | `tests/grant-policy.test.ts` cascade fixtures (`mcp__pw__snap` etc.) | Unchanged — all 25 cases pass as-is. |
@@ -97,16 +97,17 @@ Marketplace MCP changes discovery and lifecycle, not the model-facing shape. Ins
 
 Key rules:
 
-- Marketplace activation toggles server/sub-namespace ownership, not raw operations. `DisabledRefs.mcp` is keyed by the pack-local `contents.mcp` basename (`listName`).
-- MCP Gateway sources (`type: "mcp-gateway"`) materialize one provider pack per namespace. Read providers use `server: gr` + `subNamespace: <provider>`; write-capable providers add a second pack-local MCP entry using `server: gr-write` with the same sub-namespace.
+- Marketplace activation has two levels. `DisabledRefs.mcp` disables a whole installed MCP contribution; gateway contributions use a stable source-qualified contribution id. `DisabledRefs.mcpOperations[contributionId]` disables individual operations while keeping them visible in the installed package catalogue.
+- MCP Gateway sources (`type: "mcp-gateway"`) materialize one source-qualified provider pack per namespace. Read providers use public `server: gr` + `subNamespace: <provider>`; write-capable providers add a second pack-local MCP entry using public `server: gr-write` with the same sub-namespace.
+- Gateway runtime identity is source-qualified. Public policy/model names stay readable (`mcp__gr__confluence__op`), but runtime client keys include source/install/fingerprint identity so two gateways can expose a union of operations without one `gr` config replacing another.
 - Flat contributions own a whole server. Contributions with `subNamespace` own one `mcp_<server>__<sub>` meta-tool; identical-config sub-namespaces may share one client.
-- Existing Tools-page policy keys still decide `allow` / `ask` / `never`: `mcp__<server>` for a whole server and `mcp__<server>__<sub>` for one sub-namespace. Per-operation `never` still works at dispatch time, but Market does not expose per-operation toggles.
-- Manual MCP config discovery remains additive and higher priority. If `.mcp.json` or Claude-compatible config defines the same runtime server name, that manual definition overrides the Marketplace group.
+- Tools policy keys decide `allow` / `ask` / `never` at server (`mcp__<server>`), package/sub-namespace (`mcp__<server>__<sub>`), and operation (`mcp__<server>__<sub>__<op>`) levels. Operation activation is a harder boundary: disabled operations are omitted before policy resolution and cannot be reintroduced by role policy.
+- Manual MCP config discovery remains compatible and higher priority for route conflicts. `.mcp.json` and Claude-compatible configs keep `runtimeServerKey === serverName`, retain flat tool names like `mcp__playwright__click`, and win over Marketplace when the same public operation name exists.
 - Managers are contextual. The default manager covers server/global context; scoped managers are keyed by project id or cwd and own clients, status, tool docs, and external ToolManager registrations for that context.
-- `GET /api/mcp-servers` is status only. Market toggles must come from `GET /api/marketplace/pack-activation`, because disabled Marketplace MCP rows would disappear from runtime status and become impossible to re-enable.
+- `GET /api/mcp-servers` is status/policy-key data only. Market toggles must come from `GET /api/marketplace/pack-activation`, because disabled Marketplace MCP rows and disabled/stale operations would disappear from runtime status and become impossible to re-enable.
 - Status payloads redact secret values: env/header values become `<redacted>`, args are redacted, and URL credentials/query/fragment are removed.
 
-Marketplace install/update/uninstall and activation changes reload affected managers, disconnect removed servers, keep unchanged connections where possible, and refresh external MCP tools without a full app restart. If a reload exceeds the response budget, the response can report `mcpReload.status: "pending"`; the background reload still refreshes external tools when it settles.
+Marketplace install/update/uninstall, pack order, whole-contribution activation, and operation activation reload affected managers, disconnect removed servers, keep unchanged connections where possible, rebuild route maps, and refresh external MCP tools without a full app restart. If a reload exceeds the response budget, the response can report `mcpReload.status: "pending"`; the background reload still refreshes external tools when it settles.
 
 ## Failure isolation
 
@@ -180,29 +181,31 @@ string — the meta-tool layer is purely the model-facing surface.
 ### Policy keys
 
 The single source of truth is `mcpPolicyKeys(toolName)` in
-`src/server/agent/tool-activation.ts`, which returns `{group, tool}` for
-any of the four name shapes the gateway encounters:
+`src/server/agent/tool-activation.ts`, which returns server/group,
+package/tool, and operation keys for the name shapes the gateway encounters:
 
-| Tool name                              | group              | tool                          |
-|----------------------------------------|--------------------|-------------------------------|
-| `mcp__gr__ai-adoption__list-articles`  | `mcp__gr`          | `mcp__gr__ai-adoption`        |
-| `mcp__playwright__click` (flat per-op) | `mcp__playwright`  | `mcp__playwright`             |
-| `mcp_gr__ai-adoption` (meta + sub)     | `mcp__gr`          | `mcp__gr__ai-adoption`        |
-| `mcp_playwright` (meta flat)           | `mcp__playwright`  | `mcp__playwright`             |
+| Tool name                              | server/group       | package/tool                  | operation                                |
+|----------------------------------------|--------------------|-------------------------------|------------------------------------------|
+| `mcp__gr__ai-adoption__list-articles`  | `mcp__gr`          | `mcp__gr__ai-adoption`        | `mcp__gr__ai-adoption__list-articles`   |
+| `mcp__playwright__click` (flat per-op) | `mcp__playwright`  | `mcp__playwright`             | `mcp__playwright__click`                 |
+| `mcp_gr__ai-adoption` (meta + sub)     | `mcp__gr`          | `mcp__gr__ai-adoption`        | —                                        |
+| `mcp_playwright` (meta flat)           | `mcp__playwright`  | `mcp__playwright`             | —                                        |
 
 `mcpPolicyPrefix(toolName)` is preserved as a thin wrapper returning the
 `group` key, so existing callers keep working.
 
-Both keys may appear in `tool-group-policies.yaml` and per-role
-`toolPolicies`. Most-specific wins (tool > group), and role overrides
-project — same precedence rules as built-in tools, no MCP-specific
-logic.
+These keys may appear in `tool-group-policies.yaml` and per-role
+`toolPolicies`. Within a source, most-specific wins (operation > package >
+server > wildcard); role policies are checked before persisted group policies.
 
-| Scope                       | Key                       | Covers                                   |
-|-----------------------------|---------------------------|------------------------------------------|
-| Group (whole server)        | `mcp__gr`                 | every `mcp_gr__<sub>` meta-tool          |
-| Tool (one sub-namespace)    | `mcp__gr__ai-adoption`    | `mcp_gr__ai-adoption` only               |
-| Flat server                 | `mcp__playwright`         | `mcp_playwright` (= group = tool)        |
+| Scope                       | Key                                      | Covers                                      |
+|-----------------------------|------------------------------------------|---------------------------------------------|
+| Wildcard                    | `mcp__`                                  | all MCP tools                               |
+| Server                      | `mcp__gr`                                | every `mcp_gr__<sub>` meta-tool             |
+| Package/sub-namespace       | `mcp__gr__ai-adoption`                   | `mcp_gr__ai-adoption` only                  |
+| Operation                   | `mcp__gr__ai-adoption__list-articles`    | one operation under that package            |
+| Flat server                 | `mcp__playwright`                        | `mcp_playwright` (= group = tool)           |
+| Flat operation              | `mcp__playwright__click`                 | one operation on a flat server              |
 
 **Backward compatibility.** Existing single-segment `mcp__<server>`
 entries keep working — they now act as **group keys**, applying to every
@@ -248,22 +251,21 @@ built-in tool group:
   (`data-testid="mcp-tool-toggle"`). Flat servers render exactly one tool row
   whose name matches the server.
 - **Operation rows** (deepest level, `data-testid="mcp-server-ops"`):
-  read-only listing with description. Operation is a parameter, not a tool —
-  no policy dropdown at this depth.
+  one row per concrete internal operation (`mcp__<server>__<op>` or
+  `mcp__<server>__<sub>__<op>`), with description and its own policy selector.
+  The selector writes the canonical operation policy key supplied by
+  `/api/mcp-servers` when available.
 
-Both the server and tool selects route through `updateGroupPolicy(key, value)`
-(no backend change — the endpoint already accepts arbitrary keys). This means
-top-level tool count visible to the user matches the model's view, with the
-option to drill into any server when needed.
+Server, package/sub-namespace, and operation selectors all route through
+`updateGroupPolicy(key, value)` (the endpoint accepts arbitrary policy keys).
+This means the top-level tool count visible to the user matches the model's
+view, with the option to drill into any server when needed.
 
-Sub-namespace rows mirror the runtime MCP policy cascade for display: when
-`mcp__<server>` is explicitly set and `mcp__<server>__<sub>` is unset, the row
+Sub-namespace and operation rows mirror the runtime MCP policy cascade for display. When
+`mcp__<server>` is explicitly set and `mcp__<server>__<sub>` is unset, the sub row
 shows the inherited parent policy (for example, `Never (inherited from mcp__gr)`)
-while the select value remains empty. Empty still means "no stored
-sub-key". Selecting Allow, Ask, or Never writes an explicit sub-namespace key;
-clearing the select sends `policy: null`, removes that key, and returns the row
-to the inherited parent display. Flat servers keep using only `mcp__<server>`
-and do not show a synthetic inherited sub-policy.
+while the select value remains empty. Operation rows inherit from operation → package/sub-namespace → server → wildcard/system. Empty still means "no stored key". Selecting Allow, Ask, or Never writes an explicit key; clearing the select sends `policy: null`, removes that key, and returns the row
+to the inherited parent display. Flat servers keep using only `mcp__<server>` for the package row and use `mcp__<server>__<op>` for operation rows.
 
 Access-tab effective policy and source hints use the same MCP keys for MCP
 operation and meta-tool rows before falling back to generic display group
@@ -288,10 +290,13 @@ mcp__nano-banana: never
 ```
 
 Both legacy per-op tool names (`mcp__playwright__snapshot`) and the new
-meta-tool name (`mcp_playwright`) are mapped to the same prefix
+meta-tool name (`mcp_playwright`) are mapped to the same server prefix
 (`mcp__playwright`) by `mcpPolicyPrefix()` in
-`src/server/agent/tool-activation.ts`. The regex was extended to match BOTH
-forms, so a single YAML key blocks the meta-tool **and** every per-op call.
+`src/server/agent/tool-activation.ts`. `mcpPolicyKeys()` also returns package and
+operation keys. Within the same policy source, specificity wins in this order:
+operation → package/sub-namespace → server → wildcard `mcp__`. Role policies are
+checked before persisted group policies; installed-package activation remains a
+harder boundary because disabled gateway operations never reach `getToolInfos()`.
 
 Per-operation gating uses two enforcement layers:
 
