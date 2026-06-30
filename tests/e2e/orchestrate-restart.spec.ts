@@ -21,10 +21,10 @@ import { pollUntil } from "./test-utils/cleanup.js";
 
 test.describe.configure({ mode: "serial" });
 
-async function spawnChild(ownerId: string, instructions: string): Promise<string> {
+async function spawnChild(ownerId: string, instructions: string, readOnly = false): Promise<string> {
 	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/spawn`, {
 		method: "POST",
-		body: JSON.stringify({ instructions }),
+		body: JSON.stringify({ instructions, read_only: readOnly }),
 	});
 	expect(resp.status).toBe(201);
 	return (await resp.json()).childSessionId as string;
@@ -34,6 +34,24 @@ async function listChildren(ownerId: string): Promise<string[]> {
 	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/children`);
 	expect(resp.status).toBe(200);
 	return ((await resp.json()).children ?? []).map((c: any) => c.sessionId);
+}
+
+async function promptSectionsText(sessionId: string): Promise<string> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/prompt-sections`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	expect(Array.isArray(body.sections)).toBe(true);
+	return body.sections
+		.map((section: any) => `${section.label ?? ""}\n${section.source ?? ""}\n${section.content ?? ""}`)
+		.join("\n\n---\n\n");
+}
+
+async function refreshPromptSections(sessionId: string): Promise<void> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
+		method: "POST",
+		body: JSON.stringify({ prompt: "refresh restored delegate prompt sections" }),
+	});
+	expect(resp.status).toBe(200);
 }
 
 function messageText(m: WsMsg): string {
@@ -162,7 +180,8 @@ test.describe("orchestration restart survival", () => {
 		const sm = gateway.sessionManager;
 		const parent = await createSession();
 		// Distinctive marker so we can assert it lands in the rebuilt system prompt.
-		const child = await spawnChild(parent, "restart-live-survivor-MARKER helper task");
+		const marker = "restart-live-survivor-MARKER";
+		const child = await spawnChild(parent, `${marker} helper task`);
 		try {
 			// Drive the child's spawn prompt to completion (mock agent → "OK") so a
 			// persisted transcript + agentSessionFile exist before the reboot.
@@ -206,8 +225,21 @@ test.describe("orchestration restart survival", () => {
 				try { promptText = readFileSync(promptPath, "utf-8"); } catch { /* file gone */ }
 			}
 			const ps = sm.getPersistedSession(child) as any;
-			expect(promptText).toContain("restart-live-survivor-MARKER");
-			expect(`${ps?.instructions ?? ""}`).toContain("restart-live-survivor-MARKER");
+			expect(promptText).toContain(marker);
+			expect(`${ps?.instructions ?? ""}`).toContain(marker);
+
+			const restoredSections = await promptSectionsText(child);
+			expect(
+				restoredSections,
+				"Restored delegate prompt sections should expose the durable task instructions",
+			).toContain(marker);
+
+			await refreshPromptSections(child);
+			const refreshedSections = await promptSectionsText(child);
+			expect(
+				refreshedSections,
+				"before-prompt refresh should retain restored delegate task instructions in prompt sections",
+			).toContain(marker);
 		} finally {
 			await deleteSession(child).catch(() => {});
 			await deleteSession(parent).catch(() => {});
