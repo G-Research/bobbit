@@ -71,12 +71,20 @@ Three boot-recovery paths use this helper:
 
 ## Mid-turn re-prompt path
 
-`SessionManager.restoreSession` detects a session that was mid-turn at shutdown
-(`wasStreaming`) and re-prompts it with a "the server restarted, continue where
-you left off" system message. It dispatches through `rpcClient.promptWhenReady(...)`
-(fire-and-forget with a `.catch()` so a failure is logged and never throws), so a
-cold agent is woken before the prompt is sent and the prompt itself gets the
-generous timeout.
+`SessionManager.shutdown` snapshots restart re-drive need before killing agent
+processes. The durable field is still named `wasStreaming`, but it now means
+"this session was active/busy enough to need restart re-drive": idle and
+terminated sessions are false; active states such as streaming, preparing,
+aborting, and fresh starting are true. During a restore-startup window,
+`sessionNeedsRestartRedrive()` keeps the pre-restore persisted bit authoritative
+so a quick second shutdown does not turn a previously idle restored session into a
+false interrupted-turn prompt.
+
+`SessionManager.restoreSession` then re-prompts interrupted interactive sessions
+with a "the server restarted, continue where you left off" system message. It
+dispatches through `rpcClient.promptWhenReady(...)` (fire-and-forget with a
+`.catch()` so a failure is logged and never throws), so a cold agent is woken
+before the prompt is sent and the prompt itself gets the generous timeout.
 
 `nonInteractive` reviewer / QA sessions are **excluded** here — they are re-driven
 exclusively by the verification harness (`resumeInterruptedVerifications` →
