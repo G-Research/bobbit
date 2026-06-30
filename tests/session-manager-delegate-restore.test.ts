@@ -32,9 +32,9 @@ type PersistedSession = import("../src/server/agent/session-store.ts").Persisted
 initPromptDirs(path.join(tmpRoot, "state"));
 
 /**
- * Verbatim copy of restoreSession()'s delegate-branch taskSpec assembly
- * (and session-setup.ts::_resolvePrompt mode === "delegate"). Kept in lock-step
- * with the production branch by the source guard below.
+ * Verbatim copy of the durable delegate taskSpec assembly used by
+ * session-manager.ts::buildDelegatePromptParts and session-setup.ts::_resolvePrompt
+ * mode === "delegate". Kept in lock-step with production by the source guard below.
  */
 function buildDelegateTaskSpec(ps: Pick<PersistedSession, "instructions" | "context">): string {
 	let taskSpec = ps.instructions || "";
@@ -105,12 +105,15 @@ describe("delegate restore — source guards", () => {
 		const delegateBranchIdx = window.indexOf("} else if (ps.delegateOf && !ps.goalId) {");
 		assert.ok(delegateBranchIdx > 0, "restoreSession must have an `else if (ps.delegateOf && !ps.goalId)` branch");
 
-		// The delegate branch builds the task spec from instructions + context.
-		const branchWindow = window.slice(delegateBranchIdx, delegateBranchIdx + 1200);
-		assert.match(branchWindow, /let taskSpec = ps\.instructions \|\| ""/);
-		assert.match(branchWindow, /for \(const \[key, value\] of Object\.entries\(ps\.context\)\)/);
+		// The delegate branch rebuilds prompt parts from durable instructions + context.
+		const branchWindow = window.slice(delegateBranchIdx, delegateBranchIdx + 1400);
+		assert.match(branchWindow, /this\.buildDelegatePromptParts\(\{/);
+		assert.match(branchWindow, /cwd: ps\.cwd/);
 		assert.match(branchWindow, /projectRoot: ps\.repoPath/);
-		assert.match(branchWindow, /goalSpec: taskSpec/);
+		assert.match(branchWindow, /instructions: ps\.instructions \|\| ""/);
+		assert.match(branchWindow, /context: ps\.context/);
+		assert.match(branchWindow, /allowedTools: restoredAllowedNames/);
+		assert.match(branchWindow, /sectionOrder: restoreSectionOrder/);
 
 		// It must precede the goal/role else branch (which resolves goal?.spec).
 		const goalElseIdx = window.indexOf("const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;");
