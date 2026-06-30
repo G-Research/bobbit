@@ -253,7 +253,7 @@ type InstalledMcpContributionId = string; // e.g. hash(sourceId-or-sourceUrl + i
 
 Identity requirements:
 
-- Gateway activation contribution ids must include stable logical ownership only: persisted source id when available (falling back to source URL for older/hand-authored metadata), installed/materialized pack name, gateway provider id, MCP `listName`, and public `serverName`/`subNamespace`. They must not include gateway catalogue/provider fingerprints or runtime server keys, so operation preferences survive gateway refreshes.
+- Gateway activation contribution ids must include stable logical ownership only: persisted source id when available (falling back to source URL for older/hand-authored metadata), installed/materialized pack name, gateway provider id, MCP `listName`, and public `serverName`/`subNamespace`. They must not include runtime server keys, `entry.meta.commit`, or gateway catalogue/provider fingerprints, so whole-contribution and operation preferences survive gateway refreshes.
 - Manual MCP contribution ids can remain compatible aliases based on existing server/list refs; manual behavior must not change.
 - Model-facing policy keys stay readable (`mcp__gr__confluence__op`), but they are never storage ownership keys because the same public key can exist in multiple gateway installs before precedence is applied.
 
@@ -478,7 +478,7 @@ For manual JSON MCPs:
 
 For MCP gateway packages:
 
-- Generate a stable runtime key from public server + source/install identity, e.g. `gr@<shortHash(sourceUrl or sourceId)>` or `gr@<packId>`.
+- Generate a runtime key from public server plus source/install/fingerprint material, e.g. `gr@<shortHash(sourceUrl or sourceId)>` or `gr@<packId>`, for connection/cache separation. Runtime keys are not activation or authorization storage keys.
 - Keep public `serverName` as `gr` / `gr-write` so policy keys stay readable (`mcp__gr`, `mcp__gr__confluence`).
 - Group connections by `runtimeServerKey`, not public `serverName`.
 
