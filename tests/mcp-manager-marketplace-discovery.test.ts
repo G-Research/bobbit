@@ -9,7 +9,7 @@ const {
 } = await import("../src/server/mcp/mcp-manager.ts");
 const { parseMcpToolName } = await import("../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
-const { gatewayMcpRuntimeKey } = await import("../src/server/agent/mcp-gateway-runtime-identity.ts");
+const { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } = await import("../src/server/agent/mcp-gateway-runtime-identity.ts");
 const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
 const { ProjectContextManager } = await import("../src/server/agent/project-context-manager.ts");
 const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
@@ -124,6 +124,73 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.notEqual(first, second);
     assert.match(first, /^gateway_gr_jira_mcp-gateway-a_[a-f0-9]{12}_[a-f0-9]{12}$/);
     assert.match(second, /^gateway_gr_jira_mcp-gateway-b_[a-f0-9]{12}_[a-f0-9]{12}$/);
+  });
+
+  it("keeps gateway operation activation ids stable across catalogue fingerprint changes", () => {
+    const mcp = { listName: "jira", serverName: "gr", subNamespace: "jira" };
+    const firstEntry = {
+      manifest: { name: "mcp-jira-gateway" },
+      meta: { commit: "fingerprint-v1", packName: "mcp-jira-gateway", sourceUrl: "https://gateway.example.test/readonly/mcp" },
+    } as any;
+    const secondEntry = {
+      manifest: { name: "mcp-jira-gateway" },
+      meta: { commit: "fingerprint-v2", packName: "mcp-jira-gateway", sourceUrl: "https://gateway.example.test/readonly/mcp" },
+    } as any;
+    const firstMeta = {
+      sourceType: "mcp-gateway",
+      sourceId: "gateway-source-1",
+      sourceUrl: "https://gateway.example.test/readonly/mcp",
+      gatewayProviderId: "jira",
+      gatewayFingerprint: "fingerprint-v1",
+    };
+    const secondMeta = {
+      ...firstMeta,
+      gatewayFingerprint: "fingerprint-v2",
+    };
+
+    const firstActivationId = gatewayMcpActivationContributionId(firstEntry, mcp, firstMeta);
+    const secondActivationId = gatewayMcpActivationContributionId(secondEntry, mcp, secondMeta);
+
+    assert.equal(secondActivationId, firstActivationId);
+    assert.notEqual(gatewayMcpRuntimeKey(firstEntry, mcp, firstMeta), gatewayMcpRuntimeKey(secondEntry, mcp, secondMeta));
+
+    const disabledOperations: Record<string, string[]> = { [firstActivationId]: ["jira_search"] };
+    const selected = ["jira_search", "jira_get_issue"].filter((opName) => !disabledOperations[secondActivationId]?.includes(opName));
+    assert.deepEqual(selected, ["jira_get_issue"]);
+  });
+
+  it("uses persisted source id for activation identity and URL fallback only when needed", () => {
+    const entry = {
+      manifest: { name: "mcp-jira-gateway" },
+      meta: { commit: "fingerprint", packName: "mcp-jira-gateway", sourceUrl: "https://old.example.test/readonly/mcp" },
+    } as any;
+    const mcp = { listName: "jira", serverName: "gr", subNamespace: "jira" };
+
+    const withSourceId = gatewayMcpActivationContributionId(entry, mcp, {
+      sourceType: "mcp-gateway",
+      sourceId: "gateway-source-1",
+      sourceUrl: "https://new.example.test/readonly/mcp",
+      gatewayProviderId: "jira",
+      gatewayFingerprint: "new-fingerprint",
+    });
+    const sameSourceDifferentUrl = gatewayMcpActivationContributionId(entry, mcp, {
+      sourceType: "mcp-gateway",
+      sourceId: "gateway-source-1",
+      sourceUrl: "https://other.example.test/readonly/mcp",
+      gatewayProviderId: "jira",
+      gatewayFingerprint: "other-fingerprint",
+    });
+    assert.equal(sameSourceDifferentUrl, withSourceId);
+
+    const fallbackUrlA = gatewayMcpActivationContributionId({ ...entry, meta: { ...entry.meta, sourceUrl: "https://a.example.test/readonly/mcp" } }, mcp, {
+      sourceType: "mcp-gateway",
+      gatewayProviderId: "jira",
+    });
+    const fallbackUrlB = gatewayMcpActivationContributionId({ ...entry, meta: { ...entry.meta, sourceUrl: "https://b.example.test/readonly/mcp" } }, mcp, {
+      sourceType: "mcp-gateway",
+      gatewayProviderId: "jira",
+    });
+    assert.notEqual(fallbackUrlA, fallbackUrlB);
   });
 
   it("groups MCP gateway read/write provider namespaces and preserves canonical call names", async () => {
