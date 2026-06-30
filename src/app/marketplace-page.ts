@@ -1035,12 +1035,6 @@ function renderSourcesPanel(): TemplateResult {
 	`;
 }
 
-function browseOnlySource(sourceId: string): void {
-	enabledBrowseSourceIds = new Set([sourceId]);
-	activeTab = "browse";
-	renderApp();
-}
-
 function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	const syncing = busy.has(`sync:${src.id}`);
 	const isBuiltin = src.builtin === true;
@@ -1070,7 +1064,6 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 							? html`<div class="text-[10px] text-muted-foreground/80">${src.unsupportedReason || "Legacy MCP registry sources are unsupported. Remove and re-add as an MCP Gateway source."}</div>`
 							: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
 			</div>
-			<button class="market-btn" data-testid="market-browse-source" @click=${() => browseOnlySource(src.id)}>Browse</button>
 			${isBuiltin
 				? ""
 				: html`
