@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance } from "./api.js";
+import { fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError } from "./dialogs.js";
@@ -246,6 +246,7 @@ type View = "list" | "edit";
 
 let currentView: View = "list";
 let tools: ToolInfo[] = [];
+let toolDiagnostics: ToolDiagnostic[] = [];
 let roles: RoleData[] = [];
 let groupPolicies: Record<string, string> = {};
 let mcpServers: McpServerInfo[] = [];
@@ -398,20 +399,9 @@ function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Re
 // ============================================================================
 
 async function fetchToolsScoped(): Promise<ToolInfo[]> {
-	const projectId = getConfigProjectId();
-	const url = projectId ? `/api/tools?projectId=${encodeURIComponent(projectId)}` : "/api/tools";
-	try {
-		const res = await gatewayFetch(url);
-		if (!res.ok) return [];
-		const data = await res.json();
-		const toolsList = data.tools || data || [];
-		if (toolsList.length > 0 && typeof toolsList[0] === "string") {
-			return toolsList.map((name: string) => ({ name, description: "", group: "Other" }));
-		}
-		return toolsList;
-	} catch {
-		return [];
-	}
+	const response = await fetchToolsResponse(getConfigProjectId());
+	toolDiagnostics = response.diagnostics;
+	return response.tools;
 }
 
 export async function loadToolPageData(): Promise<void> {
@@ -439,6 +429,7 @@ export async function loadToolPageData(): Promise<void> {
 export function clearToolPageState(): void {
 	currentView = "list";
 	selectedTool = null;
+	toolDiagnostics = [];
 	loading = true;
 	saving = false;
 }
@@ -921,6 +912,104 @@ async function handleScopeChange(scope: string): Promise<void> {
 	renderApp();
 }
 
+function firstDiagnosticString(diagnostic: ToolDiagnostic, keys: string[]): string | undefined {
+	for (const key of keys) {
+		const value = diagnostic[key];
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	return undefined;
+}
+
+function shortDiagnosticText(text: string, max = 360): string {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function diagnosticMessage(diagnostic: ToolDiagnostic): string {
+	const message = firstDiagnosticString(diagnostic, ["message", "reason", "invalidReason", "error", "detail", "details"]);
+	if (message) return shortDiagnosticText(message);
+	try {
+		return shortDiagnosticText(JSON.stringify(diagnostic));
+	} catch {
+		return "Tool override was reported invalid.";
+	}
+}
+
+function diagnosticSeverity(diagnostic: ToolDiagnostic): "error" | "warning" | "info" {
+	const raw = firstDiagnosticString(diagnostic, ["severity", "level", "type"])?.toLowerCase() ?? "";
+	if (raw.includes("error") || raw.includes("fail") || raw.includes("invalid")) return "error";
+	if (raw.includes("info") || raw.includes("ok")) return "info";
+	return "warning";
+}
+
+function diagnosticTitle(diagnostic: ToolDiagnostic): string {
+	const subject = firstDiagnosticString(diagnostic, ["toolName", "tool", "name", "groupDir", "group", "providerKey"]);
+	const status = firstDiagnosticString(diagnostic, ["status", "action"])?.toLowerCase() ?? "";
+	const skipped = diagnostic.skipped === true || status.includes("skip");
+	const label = skipped ? "Skipped tool override" : diagnosticSeverity(diagnostic) === "error" ? "Invalid tool override" : "Tool diagnostic";
+	return subject ? `${label}: ${subject}` : label;
+}
+
+function toolDiagnosticEntries(tool: ToolInfo): ToolDiagnostic[] {
+	const diagnostics = [
+		...normalizeToolDiagnostics(tool.invalidReason),
+		...normalizeToolDiagnostics(tool.diagnostics),
+	];
+	if ((tool.invalid === true || tool.valid === false) && diagnostics.length === 0) {
+		diagnostics.push({ severity: "error", message: "This tool was reported invalid by /api/tools." });
+	}
+	return diagnostics;
+}
+
+function renderDiagnosticChips(diagnostic: ToolDiagnostic): TemplateResult | typeof nothing {
+	const chips: Array<[string, string | undefined]> = [
+		["Code", firstDiagnosticString(diagnostic, ["code", "type"])],
+		["Group", firstDiagnosticString(diagnostic, ["groupDir", "group"])],
+		["Tool", firstDiagnosticString(diagnostic, ["toolName", "tool", "name"])],
+		["Source", firstDiagnosticString(diagnostic, ["sourcePath", "path", "file"])],
+		["Fallback", firstDiagnosticString(diagnostic, ["fallbackTool", "fallbackProvider", "fallback"])],
+	];
+	const visible = chips.filter(([, value]) => Boolean(value));
+	if (!visible.length) return nothing;
+	return html`
+		<div class="flex flex-wrap gap-1 mt-2">
+			${visible.map(([label, value]) => html`
+				<span class="text-[11px] px-1.5 py-0.5 rounded border border-border text-muted-foreground" title=${value!}>${label}: ${shortDiagnosticText(value!, 90)}</span>
+			`)}
+		</div>
+	`;
+}
+
+function renderToolDiagnosticsPanel(diagnostics: ToolDiagnostic[], title = "Tool diagnostics"): TemplateResult | typeof nothing {
+	if (!diagnostics.length) return nothing;
+	return html`
+		<div class="tools-section" data-testid="tool-diagnostics" style="max-width:900px;margin:0 auto 16px;border-color:color-mix(in oklch, var(--warning) 55%, var(--border));background:color-mix(in oklch, var(--warning) 10%, transparent);">
+			<h2 class="tools-section-title">${title}</h2>
+			<p class="tools-note">Invalid config-level tool overrides are skipped before agent launch. Bobbit will use a lower-priority fallback when one is available.</p>
+			<div class="flex flex-col gap-2 mt-3">
+				${diagnostics.map((diagnostic) => {
+					const severity = diagnosticSeverity(diagnostic);
+					return html`
+						<div data-testid="tool-diagnostic" class="rounded border border-border bg-card px-3 py-2">
+							<div class="flex items-center gap-2 text-sm font-semibold">
+								<span class="uppercase text-[10px] tracking-wide text-muted-foreground">${severity}</span>
+								<span>${diagnosticTitle(diagnostic)}</span>
+							</div>
+							<div class="tools-note mt-1">${diagnosticMessage(diagnostic)}</div>
+							${renderDiagnosticChips(diagnostic)}
+						</div>
+					`;
+				})}
+			</div>
+		</div>
+	`;
+}
+
+function renderToolDiagnosticBadge(tool: ToolInfo): TemplateResult | typeof nothing {
+	const diagnostics = toolDiagnosticEntries(tool);
+	if (!diagnostics.length) return nothing;
+	return html`<span class="config-readonly-note" data-testid="tool-diagnostic-badge" title=${diagnostics.map(diagnosticMessage).join("\n")}>Diagnostic</span>`;
+}
+
 function renderToolRow(tool: ToolInfo): TemplateResult {
 	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
 	const inherited = isInherited(origin);
@@ -928,7 +1017,7 @@ function renderToolRow(tool: ToolInfo): TemplateResult {
 		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)}</span>
+			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)} ${renderToolDiagnosticBadge(tool)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -951,8 +1040,11 @@ function renderListView(): TemplateResult {
 		`;
 	}
 
+	const diagnosticsPanel = renderToolDiagnosticsPanel(toolDiagnostics);
+
 	if (tools.length === 0) {
 		return html`
+			${diagnosticsPanel}
 			<div class="tools-empty">
 				<p class="tools-empty-title">No tools found</p>
 				<p class="tools-empty-desc">Tools are registered by the agent runtime and appear here automatically.</p>
@@ -982,6 +1074,7 @@ function renderListView(): TemplateResult {
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 
 	return html`
+		${diagnosticsPanel}
 		<p class="text-sm text-muted-foreground mb-6" style="max-width: 700px; margin-inline: auto;">Tools are the capabilities available to agents \u2014 file editing, shell commands, web search, and more. This page lets you view and document them.</p>
 		<div class="tools-list">
 			${sortedGroups.map((groupName) => {
@@ -1190,6 +1283,7 @@ function renderEditView(): TemplateResult {
 				<div class="tools-identity-section">
 					${selectedTool.origin || isPiExtensionTool(selectedTool) ? html`<div class="mb-1 inline-flex items-center gap-2">${renderToolOriginBadges(selectedTool)}${renderCustomizeRevertButtons()}</div>` : ""}
 					${renderPiExtensionProvenance(selectedTool)}
+					${renderToolDiagnosticsPanel(toolDiagnosticEntries(selectedTool), "Tool diagnostics")}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
