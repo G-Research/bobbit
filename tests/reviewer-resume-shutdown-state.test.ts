@@ -16,8 +16,19 @@ function shutdownBody(source: string): string {
 }
 
 test("shutdown does not persist only exact streaming sessions as interrupted", () => {
-	const body = shutdownBody(sessionManagerSource());
+	const source = sessionManagerSource();
+	const body = shutdownBody(source);
 
+	assert.match(
+		source,
+		/export function sessionNeedsRestartRedrive\(status: SessionStatus\): boolean \{\s*return status !== "idle" && status !== "terminated";\s*\}/,
+		"SessionManager must centralize the restart re-drive status predicate so future busy states are not missed.",
+	);
+	assert.match(
+		body,
+		/wasStreaming:\s*needsRestartRedrive\s*[,}]/,
+		"shutdown must persist the centralized restart re-drive predicate into the legacy wasStreaming field.",
+	);
 	assert.doesNotMatch(
 		body,
 		/wasStreaming:\s*session\.status\s*===\s*["']streaming["']\s*[,}]/,

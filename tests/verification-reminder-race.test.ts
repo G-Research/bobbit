@@ -261,6 +261,51 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		);
 	});
 
+	it("resumed idle reviewers are reminded immediately without waiting for the long busy window", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const start = source.indexOf("private async _tryResumeFromSession");
+		assert.ok(start >= 0, "_tryResumeFromSession should exist");
+		const reminder = source.indexOf("No verification_result from resumed session", start);
+		assert.ok(reminder > start, "resumed reminder path should exist");
+		const preReminder = source.slice(start, reminder);
+
+		assert.match(
+			preReminder,
+			/const idleResult = session\.status === "idle"\s*\? \(\{ type: "idle" as const \}\)\s*:\s*await Promise\.race/,
+			"A restored reviewer that is already idle must go straight to the reminder instead of waiting for the 180s busy-session window.",
+		);
+		assert.match(
+			preReminder,
+			/waitForIdle\(step\.sessionId, 180_000\)/,
+			"Busy resumed reviewers should still wait for actual idle before the reminder; the long wait must be explicit.",
+		);
+	});
+
+	it("resume boot surfaces nonInteractive reviewers with no active verification context", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const resumeStart = source.indexOf("async resumeInterruptedVerifications(): Promise<void>");
+		assert.ok(resumeStart >= 0, "resumeInterruptedVerifications should exist");
+		const findStepStart = source.indexOf("private async _resumeOneVerification", resumeStart);
+		assert.ok(findStepStart > resumeStart, "resumeInterruptedVerifications should be bounded");
+		const resumeBody = source.slice(resumeStart, findStepStart);
+
+		assert.doesNotMatch(
+			resumeBody,
+			/if \(persisted\.length === 0\) return;/,
+			"Boot resume must not silently return when there is no active verification context; orphaned nonInteractive reviewers must be surfaced deterministically.",
+		);
+		assert.match(
+			resumeBody,
+			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);/,
+			"Boot resume must surface orphaned nonInteractive reviewer sessions deterministically.",
+		);
+		assert.match(
+			source,
+			/listOrphanedNonInteractiveSessions\(\)/,
+			"Orphan surfacing should use SessionManager's active-verification-aware orphan detector.",
+		);
+	});
+
 	it("live llm-review checks errored-turn recovery after post-reminder idle before declaring the reminder ignored", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
 		const livePathStart = source.indexOf("private async runLlmReviewViaSession");
