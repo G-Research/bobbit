@@ -1052,19 +1052,31 @@ export class McpManager {
 
     // Gateway sub-namespace contributions may expose raw, unprefixed operation
     // names. Publish them under Bobbit's package namespace while preserving the
-    // raw MCP call name. Already-prefixed operations for other namespaces remain
-    // filtered out as before.
+    // raw MCP call name. A shared gateway endpoint can list sibling package
+    // operations, so gateway packages must prove ownership by selected operation
+    // metadata or the sub-namespace naming heuristic even when only one package
+    // is installed. Non-gateway sub-namespace contributions keep the legacy
+    // single-owner fallback for backwards compatibility.
     if (!rawToolName.includes("__")) {
-      if (
-        ownerCount <= 1
-        || contribution.selectedOperations?.includes(rawToolName)
-        || this._rawToolNameLooksOwnedBySubNamespace(subNamespace, rawToolName)
-      ) {
+      const selectedByContribution = contribution.selectedOperations?.includes(rawToolName) ?? false;
+      const looksOwnedBySubNamespace = this._rawToolNameLooksOwnedBySubNamespace(subNamespace, rawToolName);
+      const legacySingleOwnerFallback = ownerCount <= 1 && !this._isGatewaySubNamespaceContribution(contribution);
+      if (legacySingleOwnerFallback || selectedByContribution || looksOwnedBySubNamespace) {
         return `${subNamespace}__${rawToolName}`;
       }
     }
 
     return undefined;
+  }
+
+  private _isGatewaySubNamespaceContribution(contribution: ResolvedMcpContribution): boolean {
+    return Boolean(
+      contribution.subNamespace
+      && contribution.contributionId
+      && contribution.contributionId !== contribution.listName
+      && contribution.runtimeServerKey
+      && contribution.runtimeServerKey !== contribution.serverName,
+    );
   }
 
   private _rawToolNameLooksOwnedBySubNamespace(subNamespace: string, rawToolName: string): boolean {

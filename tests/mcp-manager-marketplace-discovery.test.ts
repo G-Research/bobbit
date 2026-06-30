@@ -264,6 +264,62 @@ describe("McpManager marketplace discovery primitives", () => {
     );
   });
 
+  it("scopes a single gateway sub-namespace contribution without operation metadata to owned-looking raw tools", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const config = { url: "https://gateway.example.test/mcp" };
+    const resolver: MarketplaceMcpResolver = () => [
+      contrib("jira", "gr", config, "jira", {
+        runtimeServerKey: "gw-gr",
+        contributionId: "source:jira",
+      }),
+    ];
+    const stub = new StubMcpClient("gw-gr", {
+      tools: [
+        op("confluence_add_comment"),
+        op("jira_search"),
+        op("page_read"),
+      ],
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([["gw-gr", stub]]), { marketplaceResolver: resolver }) as any;
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => ({ name: t.name, mcpToolName: t.mcpToolName })), [
+      { name: "mcp__gr__jira__jira_search", mcpToolName: "jira_search" },
+    ]);
+    assert.deepEqual(mgr.getToolRouteSnapshots().map((t: any) => ({ name: t.name, op: parseMcpToolName(t.name)?.op, subNamespace: t.subNamespace })), [
+      { name: "mcp__gr__jira__jira_search", op: "jira_search", subNamespace: "jira" },
+    ]);
+
+    await mgr.callTool("mcp__gr__jira__jira_search", { q: "BUG-1" });
+    assert.deepEqual(stub.calls, [{ toolName: "jira_search", args: { q: "BUG-1" } }]);
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr__jira__confluence_add_comment", {}),
+      /not available or is disabled/,
+    );
+    await assert.rejects(
+      () => mgr.callTool("mcp__gr__jira__page_read", {}),
+      /not available or is disabled/,
+    );
+  });
+
+  it("preserves legacy single-owner unprefixed routing for non-gateway sub-namespace contributions", async () => {
+    const { cwd, stateDir } = tmpDirs();
+    const config = { command: "legacy" };
+    const resolver: MarketplaceMcpResolver = () => [contrib("jira", "legacy", config, "jira")];
+    const stub = new StubMcpClient("legacy", {
+      tools: [op("confluence_add_comment"), op("jira_search")],
+    });
+    const mgr = new TestMcpManager(cwd, stateDir, new Map([["legacy", stub]]), { marketplaceResolver: resolver }) as any;
+
+    const result = await mgr.reloadDiscoveredServers({ force: true, timeoutMs: 0 });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(mgr.getToolInfos().map((t: any) => ({ name: t.name, mcpToolName: t.mcpToolName })).sort((a: any, b: any) => a.name.localeCompare(b.name)), [
+      { name: "mcp__legacy__jira__confluence_add_comment", mcpToolName: "confluence_add_comment" },
+      { name: "mcp__legacy__jira__jira_search", mcpToolName: "jira_search" },
+    ]);
+  });
+
   it("groups same-config subNamespace contributions and filters tool infos", async () => {
     const { cwd, stateDir } = tmpDirs();
     const config = { command: "stub" };
