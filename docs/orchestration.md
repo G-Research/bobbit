@@ -115,15 +115,16 @@ child settles** (not when all are done), so you can process that result eagerly 
 
 For non-blocking children you spawned, these verbs work over the child's session id:
 
-- **`team_prompt`** — run-if-idle / queue-if-busy a follow-up prompt (re-task the child).
-- **`team_steer`** — mid-turn redirect; requires the child to be `streaming` (else `409`).
+- **`team_prompt`** — default-steered follow-up. It injects into a streaming child, or queues a steered prompt when the child is idle/non-streaming. Use `mode: "prompt"` for normal run-if-idle / queue-if-busy next-turn semantics.
+- **`team_steer`** — backward-compatible mid-turn redirect; requires the child to be `streaming` (else `409`). Prefer `team_prompt(mode="steer")` for routine nudges because it also handles idle targets.
 - **`team_abort`** — force-abort a stuck child.
 - **`team_dismiss`** — terminate and archive the child.
 - **`read_session`** — read the child's full transcript (unchanged).
 
 The team-lead's goal-scoped versions of these verbs (plus `team_spawn`, `team_list`,
-`team_complete`) keep their existing behaviour, signatures, and worktree/role/gate
-semantics — `team_delegate` and `team_wait` are *added* alongside them.
+`team_complete`) keep their worktree/role/gate semantics. `team_prompt` also preserves
+`workflowGateId` / `inputGateIds` dependency context injection in both prompt and steer
+modes. `team_delegate` and `team_wait` are *added* alongside the goal-scoped tools.
 
 ### Recursion is fully blocked at all depths
 
@@ -332,6 +333,7 @@ child belongs to the calling owner; it is not client-trusted.
 ## Related docs
 
 - [docs/design/orchestration-core.md](design/orchestration-core.md) — the design record (the HOW).
+- [docs/session-prompt-tools.md](session-prompt-tools.md) — `session_prompt`, `team_prompt` delivery modes, authorization, and tests.
 - [docs/extension-host-authoring.md](extension-host-authoring.md) — `host.agents` for packs.
 - [docs/goals-workflows-tasks.md](goals-workflows-tasks.md) — goal teams and `team_spawn`.
 - [docs/rest-api.md](rest-api.md) — session and orchestration endpoints.
