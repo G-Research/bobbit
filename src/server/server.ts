@@ -545,7 +545,7 @@ import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, P
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
-import { gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
+import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -595,10 +595,6 @@ function safeString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function stableGatewayContributionId(fields: Record<string, unknown>): string {
-	return `mcp:${createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 16)}`;
-}
-
 type McpOperationMetadataEntry = { name: string; label?: string; description?: string; inputSchema?: unknown };
 
 function normaliseMcpOperationMetadata(raw: unknown): McpOperationMetadataEntry[] {
@@ -643,15 +639,7 @@ function activationMcpContributionId(
 	fallbackSourceId?: string,
 ): string {
 	if (metaDetails.sourceType === "mcp-gateway") {
-		return stableGatewayContributionId({
-			sourceId: safeString(metaDetails.sourceId) ?? fallbackSourceId ?? safeString(entry.meta?.sourceUrl) ?? "unknown-source",
-			installedPackName: entry.manifest?.name ?? entry.meta?.packName,
-			gatewayProviderId: safeString(metaDetails.gatewayProviderId) ?? mcp.subNamespace,
-			listName: mcp.listName,
-			serverName: mcp.serverName,
-			subNamespace: mcp.subNamespace,
-			runtimeKey: gatewayMcpRuntimeKey(entry, mcp, metaDetails),
-		});
+		return gatewayMcpActivationContributionId(entry, mcp, metaDetails, fallbackSourceId);
 	}
 	return mcp.listName;
 }
