@@ -18,7 +18,7 @@ Scope: unify installable pack entities into one pack model, add the Market surfa
   - **Market packs** — installed from a source into a scope's `market-packs/<pack-name>/`.
   - **Legacy-implicit packs** — the hard-coded skill scan dirs and user-registered `config_directories` mapped into list entries (back-compat).
 - **Install** = copy a pack dir into a scope's `market-packs/` + write `.pack-meta.yaml`. **Uninstall** = delete the dir. **Update** = re-copy/re-pull.
-- **MCP is now additive:** schema-2 packs may ship `mcp/<name>.yaml|yml|json`, and official MCP Registry API sources browse as virtual packs that materialize to the same layout. Manual `.mcp.json` and Claude-compatible MCP config remain supported and override Marketplace by runtime server name. AGENTS/CLAUDE.md prompt assembly remains out of scope.
+- **MCP is now additive:** schema-2 packs may ship `mcp/<name>.yaml|yml|json`, and MCP Gateway sources (`type: "mcp-gateway"`) browse provider namespaces as virtual packs that materialize to the same layout. New `mcp-registry` source creation is rejected; persisted legacy registry rows are tolerated only as unsupported/removable compatibility rows. Manual `.mcp.json` and Claude-compatible MCP config remain supported and override Marketplace by runtime server name. AGENTS/CLAUDE.md prompt assembly remains out of scope.
 
 The reframe must produce **byte-for-byte identical resolution** for roles/tools/skills versus today's `ConfigCascade` + `slash-skills.ts` + `config_directories`. The existing tests pin this.
 
@@ -46,7 +46,7 @@ A pack is a directory containing a **required `pack.yaml`** manifest plus an ent
 
 ### 1.2 Marketplace source repo layout
 
-A pack source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs. Official MCP Registry API sources are a second source type: they browse `https://registry.modelcontextprotocol.io/v0/servers`-style JSON as virtual schema-2 packs and materialize selected supported servers into normal installed pack directories.
+A pack source is a git repo (or local dir) whose **top level is a collection of pack directories** — never a flat `defaults/` mirror. One repo may hold many packs. MCP Gateway sources are the supported non-pack source type: they discover provider namespaces from a streamable-HTTP MCP endpoint and materialize selected providers into normal installed pack directories. Official MCP Registry API URLs are legacy-only in Bobbit; new `mcp-registry` sources are rejected.
 
 ```
 <source-repo-root>/
@@ -538,7 +538,7 @@ Steps (low→high):
 
 ### 7.1 Persistence
 
-Marketplace **source URLs** are a small registry. Sources are **global** to the server (not per-project): a registered source can be browsed and installed into any scope. A source is either a pack source (git/local pack collection) or an official MCP Registry API source. Persist in a new store file:
+Marketplace **source URLs** are a small registry. Sources are **global** to the server (not per-project): a registered source can be browsed and installed into any scope. A source is either a pack source (git/local pack collection) or an MCP Gateway endpoint. Persisted legacy `mcp-registry` rows are loaded only so old config files remain removable; they are unsupported for sync/browse/install/update.
 
 ```
 <server-cwd>/.bobbit/config/marketplace-sources.yaml
@@ -554,36 +554,30 @@ sources:
     addedAt: 2026-06-03T10:00:00Z
     lastSyncedAt: 2026-06-03T10:05:00Z
     lastCommit: 9f3c1a8            # pack git sources only
-  - id: official-mcp-registry
-    type: mcp-registry
-    url: https://registry.modelcontextprotocol.io/v0/servers
+  - id: mcp-local-t3-zone-readonly-mcp
+    type: mcp-gateway
+    url: http://mcp-local.t3.zone/readonly/mcp
+    displayName: mcp-local.t3.zone/readonly/mcp
+    normalizedName: mcp-local.t3.zone/readonly/mcp
     addedAt: 2026-06-03T10:10:00Z
     lastSyncedAt: 2026-06-03T10:11:00Z
-    registry:
-      fingerprint: sha256:...
-      serverCount: 4
-      skippedCount: 1
-      diagnostics:
-        - skipped server "example/legacy": unsupported remote transport: sse (Bobbit currently supports streamable-http)
 ```
 
 ```ts
-export type MarketplaceSourceType = "pack" | "mcp-registry";
-export interface MarketplaceRegistryDiagnostics {
-  fingerprint?: string;
-  serverCount?: number;
-  skippedCount?: number;
-  diagnostics?: string[];
-}
+export type MarketplaceSourceType = "pack" | "mcp-gateway";
+export type StoredMarketplaceSourceType = MarketplaceSourceType | "mcp-registry"; // legacy unsupported rows only
 export interface MarketplaceSource {
   id: string;
-  type?: MarketplaceSourceType; // omitted = "pack" for backward compatibility
-  url: string;                  // pack: git remote/absolute local dir; registry: HTTP(S) JSON URL
-  ref?: string;                 // pack sources only
+  type?: StoredMarketplaceSourceType; // omitted = "pack" for backward compatibility
+  url: string;                       // pack: git/local; gateway: HTTP(S) MCP endpoint
+  displayName?: string;              // MCP Gateway readable name, with deterministic duplicate suffix
+  normalizedName?: string;           // MCP Gateway authority/path before duplicate suffixing
+  ref?: string;                      // pack sources only
   addedAt: string;
+  trustedAt?: string;
   lastSyncedAt?: string;
-  lastCommit?: string;          // pack git sources only
-  registry?: MarketplaceRegistryDiagnostics; // MCP registry sources only
+  lastCommit?: string;               // pack git sources only
+  unsupportedReason?: string;        // response-only for legacy mcp-registry rows
   lastError?: string;
 }
 export class MarketplaceSourceStore { /* CRUD + load/save YAML, mirrors RoleStore patterns */ }
@@ -597,16 +591,18 @@ export class MarketplaceSourceStore { /* CRUD + load/save YAML, mirrors RoleStor
   ```
 - **Local-dir pack sources** (`type: "pack"`, `url` is an absolute path): no clone; read directly. `commit` recorded as empty.
 - **Git pack sources:** **shallow clone** (`git clone --depth 1 --branch <ref> <url> <cache-dir>`); re-sync via `git fetch --depth 1 && git reset --hard origin/<ref>` (or re-clone if the cache is dirty/missing). Resolve and record `lastCommit` via `git rev-parse HEAD`.
-- **MCP registry sources:** bounded HTTP(S) JSON fetch; validate the official MCP Registry API response shape with `servers[].server`; compute/store a content fingerprint plus `serverCount`, `skippedCount`, and human-readable diagnostics. Invalid official registry documents fail sync/browse. Invalid individual server candidates are skipped and reported in diagnostics, including unsupported transports, secret-marked remote headers, non-default npm registry URLs, missing/ranged npm versions, variables/templates, prompts, and unsafe package arguments. The old flat Bobbit `schemaVersion: 1` registry format is unsupported.
-- **Private repos:** rely on the user's ambient git credentials (credential helper / SSH agent) exactly as Bobbit's worktree/clone code does today. No credential storage in the marketplace. Registry sources must not persist secrets in diagnostics.
-- Sync is invoked on: add-source, explicit "re-sync", and implicitly before browse if the cache/fingerprint is missing. Surface source-specific errors to the UI (`git` stderr for pack git sources; registry validation/fetch errors for MCP registry sources).
+- **MCP Gateway sources:** bounded HTTP(S) streamable-MCP discovery (`initialize` + `tools/list`) against the configured endpoint; compute/store source sync state and materialization fingerprints from discovered provider/operation metadata. Gateway URLs are named from normalized authority + path, excluding protocol/query/hash and trimming trailing slashes. Invalid gateways fail sync/browse for that source only.
+- **Legacy `mcp-registry` rows:** new creation is rejected. Persisted rows may be listed with `unsupportedReason`, but sync/browse/install/update fail safely with an unsupported-source error.
+- **Private repos:** rely on the user's ambient git credentials (credential helper / SSH agent) exactly as Bobbit's worktree/clone code does today. No credential storage in the marketplace. Gateway sources must not persist secrets in diagnostics.
+- Sync is invoked on: add-source, explicit "re-sync", and implicitly before browse if the cache/fingerprint is missing. Surface source-specific errors to the UI (`git` stderr for pack git sources; gateway discovery errors for MCP Gateway sources).
 
 ### 7.3 Browsing
 
 `browsePacks(sourceId)`: sync (if needed), then branch by source type:
 
 - **Pack sources:** scan the cache/source root one level deep → for each subdir with a `pack.yaml`, parse the manifest → return `BrowsePackWire[]` with `dirName` equal to the source directory name. Directories without `pack.yaml` are ignored.
-- **MCP registry sources:** map each supported official registry candidate to a virtual `BrowsePackWire` with `dirName = "mcp-<id>"`, a generated schema-2 manifest whose `contents.mcp = [id]`, and registry diagnostics attached to the source/browse response. Installing that row materializes a normal pack directory before copying it into the target scope.
+- **MCP Gateway sources:** map each supported provider namespace to a virtual `BrowsePackWire` with a source-qualified `dirName`, generated schema-2 manifest entries in `contents.mcp`, and gateway diagnostics/provenance attached to the row/source response. Installing that row materializes a normal pack directory before copying it into the target scope.
+- **Legacy `mcp-registry` rows:** return an unsupported-source error/status rather than virtual packs.
 
 ---
 
@@ -616,15 +612,15 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 
 ### 8.1 Install
 
-`installPack(sourceId, dirName, scope)` — **atomic**: build a complete staged dir, then a single rename publishes it. The client sends the `dirName` returned by browse; for registry rows this is the virtual pack name `mcp-<id>`.
+`installPack(sourceId, dirName, scope)` — **atomic**: build a complete staged dir, then a single rename publishes it. The client sends the `dirName` returned by browse; for gateway rows this is the source-qualified virtual pack name.
 1. Sync source (§7.2).
 2. Resolve install input by source type:
    - Pack source: `src = <cache-or-local-source>/<dirName>` (must contain a valid `pack.yaml` — else 422).
-   - MCP registry source: `dirName` must match a valid browsed virtual pack `mcp-<id>`; materialize a temporary schema-2 pack containing `pack.yaml`, `mcp/<id>.yaml`, and registry provenance metadata.
+   - MCP Gateway source: `dirName` must match a valid browsed provider virtual pack; materialize a temporary schema-2 pack containing `pack.yaml`, `mcp/<listName>.yaml`, and gateway provenance/operation metadata.
 3. Resolve `dest = <marketPacksRoot>/<dirName>` where `marketPacksRoot = scopePaths(scope, base).marketPacksRoot` (§1.3.1) — i.e. `<base>/.bobbit/config/market-packs` with `base` = `~` | `<server-cwd>` | `<project root>`. Same derivation `buildPackList` uses, so install and resolution never diverge. Reject unsafe `dirName` (path-traversal guard) before any fs op.
 4. Reject if `dest` already exists (require explicit update/uninstall) → 409.
 5. **Copy `src` / materialized pack → a staging dir** `<marketPacksRoot>/.tmp-<dirName>-<rand>` verbatim (entire subtree: `pack.yaml`, `roles/`, `tools/` incl. `extension.ts` + `_shared`, `skills/`, `mcp/`, and other schema-2 contribution dirs). Skip `.git`.
-6. Write `<staging>/.pack-meta.yaml` (§1.5) with `sourceUrl`, `sourceRef`, resolved `commit` or registry fingerprint, `packName`/`version` from manifest, `installedAt = updatedAt = now`, `scope`, and registry id/version metadata when applicable.
+6. Write `<staging>/.pack-meta.yaml` (§1.5) with `sourceUrl`, `sourceRef`, resolved `commit` or gateway fingerprint, `packName`/`version` from manifest, `installedAt = updatedAt = now`, `scope`, and gateway provider/operation metadata when applicable.
 7. **Atomically rename** staging → `dest` (`fs.rename`). Only after the meta is written does the pack become visible at its final path. On any failure before the rename, `fs.rm` the staging dir and surface the error — `dest` never half-exists.
 8. Append `dirName` to that scope's `pack_order`.
 9. Trigger a resolver/MCP reload for the affected scope so entities appear immediately.
@@ -643,9 +639,9 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 
 `updatePack(scope, packName)`:
 1. Read `dest/.pack-meta.yaml` for `sourceUrl`/`sourceRef` and source type/provenance.
-2. Re-sync the source (§7.2); re-resolve the pack source `commit` or registry fingerprint/materialized entry.
-3. **Replace** `dest` atomically: copy the fresh `src` subtree or materialized registry pack into a `.tmp-*` staging dir, write the updated `.pack-meta.yaml` into staging, then swap (rename old `dest` aside → rename staging → `dest` → `fs.rm` the old). Preserve nothing stale; on failure the original `dest` is left intact.
-4. Updated `.pack-meta.yaml` carries new `commit`/registry fingerprint, `version`, and `updatedAt = now` (keep original `installedAt`, copied from the old meta).
+2. Re-sync the source (§7.2); re-resolve the pack source `commit` or gateway fingerprint/materialized entry.
+3. **Replace** `dest` atomically: copy the fresh `src` subtree or materialized gateway pack into a `.tmp-*` staging dir, write the updated `.pack-meta.yaml` into staging, then swap (rename old `dest` aside → rename staging → `dest` → `fs.rm` the old). Preserve nothing stale; on failure the original `dest` is left intact.
+4. Updated `.pack-meta.yaml` carries new `commit`/gateway fingerprint, `version`, and `updatedAt = now` (keep original `installedAt`, copied from the old meta).
 5. Reload resolver/MCP state. Re-syncing + re-installing reflects upstream changes.
 
 > Implement copy via a shared recursive copy helper (reuse/extend whatever `continue-archived.ts`'s copy utilities or a `fs.cp(src, dest, {recursive:true})` wrapper provides). Guard all destination paths with `isSafeRelPath`-style checks against `..`/absolute/UNC.
@@ -658,12 +654,13 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/marketplace/sources` | List registered sources (`MarketplaceSource[]`) including `type`, pack sync metadata, and registry diagnostics where applicable. |
-| `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` → syncs + returns the created source. Omitted/`"pack"` means git/local pack source; `"mcp-registry"` means official MCP Registry API URL. |
-| `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir / registry cache). |
-| `POST /api/marketplace/sources/:id/sync` | Re-sync (clone/fetch/read for pack sources; bounded JSON fetch/fingerprint update for MCP registries); returns updated source metadata. |
-| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: BrowsePackWire[], diagnostics? }`. Pack sources return authored pack dirs; MCP registry sources return virtual packs with `dirName = "mcp-<id>"`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. `descriptions?` carries optional one-line per-entity copy (§9.1/§10.4 R3). |
-| `POST /api/marketplace/install` | Body `{ sourceId, dirName, scope, projectId? }` → installs an authored pack or materializes a registry virtual pack; returns `.pack-meta.yaml`. |
+| `GET /api/marketplace/sources` | List registered sources (`MarketplaceSource[]`) including `type`, pack sync metadata, gateway display metadata, and unsupported legacy registry rows where applicable. |
+| `POST /api/marketplace/sources` | Add a source `{ url, ref?, type? }` → syncs + returns the created source. Omitted/`"pack"` means git/local pack source; `"mcp-gateway"` means URL-only MCP Gateway endpoint. New `"mcp-registry"` requests are rejected as legacy/unsupported. |
+| `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir). |
+| `POST /api/marketplace/sources/:id/sync` | Re-sync (clone/fetch/read for pack sources; MCP Gateway discovery/fingerprint update for gateways); returns updated source metadata. |
+| `GET /api/marketplace/sources/:id/packs` | Compatibility browse: `{ packs: BrowsePackWire[], diagnostics? }`. Pack sources return authored pack dirs; MCP Gateway sources return provider virtual packs. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. `descriptions?` carries optional one-line per-entity copy (§9.1/§10.4 R3). |
+| `GET /api/marketplace/browse?projectId=` | Browse the all-source union with per-source status plus pack rows that retain source provenance and stable `browseKey`. |
+| `POST /api/marketplace/install` | Body `{ sourceId, dirName, scope, projectId? }` → installs an authored pack or materializes a gateway virtual pack; returns `.pack-meta.yaml`. |
 | `POST /api/marketplace/update` | Body `{ scope, packName, projectId? }` → updates; returns new meta. |
 | `DELETE /api/marketplace/installed` | Body `{ scope, packName, projectId? }` → uninstall. |
 | `GET /api/marketplace/installed?projectId=` | List installed packs across all scopes with provenance (`PackMeta` + manifest + scope), plus `updateAvailable` + `sourceStatus` (sync-free update gating) per row (§9.1/§10.4 R2). |
@@ -678,26 +675,24 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 
 ### 9.1 Request/response contracts
 
-All responses are JSON. `scope` values use the wire form `"global-user" | "server" | "project"`. **Installed-pack addressing** is the tuple `(scope, packName)` — there is no separate install id; `packName` is the installed directory name and is unique within a scope's `market-packs/`. **Source install addressing** uses the browsed `dirName`; for MCP registry virtual packs this is `mcp-<id>` and becomes the installed `packName` after materialization.
+All responses are JSON. `scope` values use the wire form `"global-user" | "server" | "project"`. **Installed-pack addressing** is the tuple `(scope, packName)` — there is no separate install id; `packName` is the installed directory name and is unique within a scope's `market-packs/`. **Source install addressing** uses the browsed `dirName`; for MCP Gateway virtual packs this is a source-qualified provider pack name and becomes the installed `packName` after materialization.
 
 ```ts
 // Shared wire types
-type SourceType = "pack" | "mcp-registry";
-interface SourceRegistryDiagnostics {
-  fingerprint?: string;
-  serverCount?: number;
-  skippedCount?: number;
-  diagnostics?: string[];
-}
+type SourceType = "pack" | "mcp-gateway";
+type StoredSourceType = SourceType | "mcp-registry"; // legacy unsupported rows only
 interface SourceWire {
   id: string;
-  type?: SourceType;              // omitted = "pack"
+  type?: StoredSourceType;        // omitted = "pack"
   url: string;
+  displayName?: string;           // gateway readable name after duplicate suffixing
+  normalizedName?: string;        // gateway authority/path before suffixing
   ref?: string;                   // pack sources only
   addedAt: string;
+  trustedAt?: string;
   lastSyncedAt?: string;
   lastCommit?: string;            // pack git sources only
-  registry?: SourceRegistryDiagnostics; // MCP registry sources only
+  unsupportedReason?: string;     // legacy mcp-registry rows only
   lastError?: string;
 }
 // One-line, per-entity descriptions sourced from the pack DIR (not the runtime
@@ -713,9 +708,11 @@ interface PackEntityDescriptions {
   entrypoints?: Record<string, string>;
 }
 interface BrowsePackWire extends PackManifest {
-  dirName: string;                // source dir for pack sources; "mcp-<id>" for registry virtual packs
-  sourceType?: SourceType;
-  virtual?: boolean;              // true for registry rows materialized on install
+  dirName: string;                // source dir for pack sources; source-qualified name for gateway virtual packs
+  sourceType?: StoredSourceType;
+  virtual?: boolean;              // true for gateway rows materialized on install
+  source?: { id: string; name: string; type: "builtin" | SourceType; builtin?: boolean };
+  browseKey?: string;
   hasTools: boolean;
   descriptions?: PackEntityDescriptions;   // §10.4 R3
 }
@@ -744,11 +741,12 @@ interface ConflictWire {
 | Endpoint | Request body | Success | Errors |
 |---|---|---|---|
 | `GET /api/marketplace/sources` | — | `200 { sources: SourceWire[] }` | — |
-| `POST /api/marketplace/sources` | `{ url: string, ref?: string, type?: SourceType }` | `201 { source: SourceWire }` (sync runs; `lastCommit` for pack git sources or `registry` diagnostics for MCP registries populated) | `400` missing/invalid url/type/ref; `409` duplicate `(type,url,ref)`; `502 { error }` pack sync or registry fetch/validation failed |
-| `DELETE /api/marketplace/sources/:id` | — | `204` (also removes cache dir / registry cache) | `404` unknown id |
-| `POST /api/marketplace/sources/:id/sync` | — | `200 { source: SourceWire }` | `404` unknown id; `502 { error }` source-specific sync failure |
-| `GET /api/marketplace/sources/:id/packs` | — | `200 { packs: BrowsePackWire[], diagnostics?: string[] }` (pack dirs without valid `pack.yaml` omitted; invalid registry entries skipped with diagnostics) | `404` unknown id; `502` sync/fetch failure or invalid registry document |
-| `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` | `201 { installed: InstalledPackWire }` | `400` bad scope / missing `projectId` for project scope / unsafe `dirName`; `404` unknown source or browsed pack/virtual pack; `409` already installed at that scope; `422` invalid `pack.yaml`, schema-2 MCP contribution, or registry entry materialization; `502` source sync failure |
+| `POST /api/marketplace/sources` | `{ url: string, ref?: string, type?: SourceType }` | `201 { source: SourceWire }` (sync runs; `lastCommit` for pack git sources or gateway metadata for MCP Gateway sources populated) | `400` missing/invalid url/type/ref, including new `mcp-registry` requests; `409` duplicate `(type,url,ref)`; `502 { error }` pack sync or gateway discovery failed |
+| `DELETE /api/marketplace/sources/:id` | — | `204` (also removes cache dir) | `404` unknown id |
+| `POST /api/marketplace/sources/:id/sync` | — | `200 { source: SourceWire }` | `404` unknown id; `502 { error }` source-specific sync failure; unsupported for legacy registry rows |
+| `GET /api/marketplace/sources/:id/packs` | — | `200 { packs: BrowsePackWire[], diagnostics?: string[] }` (pack dirs without valid `pack.yaml` omitted; gateway providers returned as virtual packs) | `404` unknown id; `502` sync/discovery failure; unsupported for legacy registry rows |
+| `GET /api/marketplace/browse?projectId=` | — | `200 { sources: MarketplaceBrowseSourceState[], packs: BrowsePackWire[] }` | Per-source errors appear in `sources[]`; the union keeps rows from other sources. |
+| `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` | `201 { installed: InstalledPackWire }` | `400` bad scope / missing `projectId` for project scope / unsafe `dirName`; `404` unknown source or browsed pack/virtual pack; `409` already installed at that scope; `422` invalid `pack.yaml`, schema-2 MCP contribution, or gateway entry materialization; `502` source sync failure |
 | `POST /api/marketplace/update` | `{ scope, packName, projectId? }` | `200 { installed: InstalledPackWire }` | `400`/`404` as above; `409` not installed; `502` sync failure |
 | `DELETE /api/marketplace/installed` | `{ scope, packName, projectId? }` | `204` | `400` bad scope/missing projectId; `404` not installed |
 | `GET /api/marketplace/installed?projectId=` | — | `200 { installed: InstalledPackWire[] }` (all scopes; `corrupt` entries included) | `400` project scope requested without projectId |
@@ -756,8 +754,8 @@ interface ConflictWire {
 
 - **No per-pack install gate.** Trust is handled once at the source-add boundary via a blanket warning + "Why?" disclosure (§10.2); the client POSTs `install` directly with no executable-code confirmation. The server never required a confirmation flag, and install of any pack is unrestricted. `hasTools` in the browse payload is now informational only.
 - **Reload/cache behavior:** install/update/uninstall invalidate the affected scope's resolver cache (and the `slash-skills.ts` TTL cache) synchronously before returning, so a subsequent `GET /api/roles|tools|skills` reflects the change immediately (no client reload required). `pack_order` mutations do the same.
-- **Update detection is sync-free (§10.4 R2).** `GET /api/marketplace/installed` enriches each row with `updateAvailable` + `sourceStatus`, but **never triggers a network sync** — it reads only existing local source state (a pack git source's already-cloned cache dir, a local-dir source read in place, or an MCP registry's last fetched fingerprint/materialization metadata). The list endpoint is hit on every Market-page open, so a network sync per pack would be slow and could fail offline; the cheap local-state read is good enough because explicit "Re-sync" / Update already refresh the source when the user wants live data. A miss (source unregistered, never synced, cache absent, pack/registry entry not found, or no source version/fingerprint) yields `sourceStatus: "unknown"` rather than a false "up to date", letting the UI disambiguate the two.
-- **Browse descriptions:** `GET /api/marketplace/sources/:id/packs` adds an optional `descriptions` map per pack (§10.4 R3), read from the synced source's pack dir or generated from registry display metadata for MCP virtual packs.
+- **Update detection is sync-free (§10.4 R2).** `GET /api/marketplace/installed` enriches each row with `updateAvailable` + `sourceStatus`, but **never triggers a network sync** — it reads only existing local source state (a pack git source's already-cloned cache dir, a local-dir source read in place, or an MCP Gateway's last discovery/materialization metadata). The list endpoint is hit on every Market-page open, so a network sync per pack would be slow and could fail offline; the cheap local-state read is good enough because explicit "Re-sync" / Update already refresh the source when the user wants live data. A miss (source unregistered, never synced, cache absent, pack/gateway entry not found, or no source version/fingerprint) yields `sourceStatus: "unknown"` rather than a false "up to date", letting the UI disambiguate the two.
+- **Browse descriptions:** `GET /api/marketplace/sources/:id/packs` adds an optional `descriptions` map per pack (§10.4 R3), read from the synced source's pack dir or generated from gateway provider display metadata for MCP virtual packs.
 - **Idempotency / concurrency:** install is rejected (`409`) if `dest` exists; the atomic-rename (§8.1) makes concurrent installs of the same `(scope, dirName)` safe — the loser sees `EEXIST`/`409`.
 
 ### 9.2 `pack-order` contract (the sole conflict-resolution wire path)
@@ -853,18 +851,18 @@ This is read from the **same authoritative pack dir** the activation catalogue r
 The design is additive along three axes:
 - **Entity-type set:** add a loader/registry path for each contribution type while keeping ordering and activation centralized. `mcp/` now loads through the Marketplace MCP resolver rather than the role/tool/skill name-merging resolver; panels/providers/entrypoints load through pack-scoped contribution registries.
 - **Pack/source format:** `pack.yaml`/`.pack-meta.yaml` parsers ignore unknown keys; new layouts add a `PackEntry.layout` variant + loader support.
-- **Install pipeline:** install/update/uninstall remain directory-based. Git/local sources copy authored pack dirs; MCP registry sources materialize virtual server rows into normal pack dirs before the same install semantics apply.
+- **Install pipeline:** install/update/uninstall remain directory-based. Git/local sources copy authored pack dirs; MCP Gateway sources materialize virtual provider rows into normal pack dirs before the same install semantics apply.
 
 **Future UI-panel/plugin bundle (the headline future use case):** a panel pack would ship a `panels/<name>/` subtree (manifest + entry HTML/JS + a panel descriptor). The seam: (a) a `PanelLoader` plugged into the resolver, (b) `PackManifest.contents.panels`, (c) a panel host that mounts resolved panels (PR-Walkthrough generalised). Nothing is built now, but the resolver and pack format already accommodate it without redesign.
 
 ### Deferred (explicit seams left)
 
-- **MCP registry search and secret parameterization** — MCP registry URLs are supported, but there is no hosted searchable catalogue or first-class secret-binding UI. MCP contribution files may reference environment/header placeholders; users must still manage the actual secrets out of band.
+- **MCP Gateway auth and secret parameterization** — Gateway URLs are supported as trusted streamable-HTTP MCP endpoints, but there is no first-class secret-binding UI for gateway credentials. MCP contribution files may reference environment/header placeholders; users must still manage the actual secrets out of band.
 - **AGENTS/CLAUDE.md installs** — not installable; `system-prompt.ts::readAllAgentFiles` untouched. Existing AGENTS.md resolution preserved.
 - **Portable/parameterised workflow bundles** — workflows stay project-scoped inline in `project.yaml`; note what'd change (decouple from component/command pairs) but build nothing.
 - **Staff templates** as exportable packs — gap noted.
 - **Trust / sandboxing / signing** of code-bearing packs — MVP copies tool code as-is with a UI warning; sketch where a permission/trust gate slots into `installPack`.
-- **Hosted pack registry with search** — generic pack sources remain git/local. Official MCP Registry API URLs are a specific MCP source type, not a general hosted pack marketplace.
+- **Hosted pack registry with search** — generic pack sources remain git/local. MCP Gateway sources are provider discovery endpoints, not a general hosted pack marketplace.
 - **Per-conflict pinning (`pack_conflicts`)** — deferred; MVP resolves same-name conflicts solely via `pack_order` (§3.3) plus user-pack customization (§3.2). The future schema (additive, no migration needed) would be a `pack_conflicts` list in `project.yaml`/server config:
   ```yaml
   pack_conflicts:
@@ -948,7 +946,8 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 - `src/server/agent/pack-resolver.ts` — `PackResolver` pipeline + the Role/Tool/Skill `EntityLoader`s (delegating parse to extracted helpers below).
 - `src/server/agent/pack-list.ts` — `buildPackList(opts)` (§6.5): the legacy→unified mapping (cascade layers + skill scan dirs + `config_directories` + `disabled_config_directories`).
 - `src/server/agent/marketplace-source-store.ts` — `MarketplaceSourceStore` (sources YAML CRUD).
-- `src/server/agent/marketplace-install.ts` — pack-source sync, MCP registry fetch/materialization, `installPack`/`uninstallPack`/`updatePack`, atomic staging, recursive copy helper.
+- `src/server/agent/mcp-gateway-source.ts` — MCP Gateway discovery, provider-row shaping, diagnostics, and materialization helpers.
+- `src/server/agent/marketplace-install.ts` — pack-source sync, MCP Gateway materialization, `installPack`/`uninstallPack`/`updatePack`, atomic staging, recursive copy helper.
 
 **Edited (server):**
 - `src/server/agent/config-cascade.ts` — `resolveRoles`/`resolveTools` become adapters over `PackResolver`; **`resolveWorkflows`/`resolveToolGroupPolicies` untouched** (§2.2 note).
@@ -977,7 +976,7 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 1. **Types + parsers** — `PackManifest`/`PackMeta`/`PackEntry`/loader interfaces; `pack.yaml`/`.pack-meta.yaml` read-write; unit tests #1.
 2. **PackResolver + loaders** — pipeline + Role/Tool/Skill loaders; unit tests #2–3.
 3. **`buildPackList`** — the legacy mapping (§6); A/B equivalence tests #5; keep `ConfigCascade`/`discoverSlashSkills` as adapters delegating to the resolver; run full §12.1 suite green.
-4. **Source store + source sync + file ops** — pack-source sync, registry fetch/materialization, install/uninstall/update; unit tests #7–8.
+4. **Source store + source sync + file ops** — pack-source sync, MCP Gateway discovery/materialization, install/uninstall/update; unit tests #7–8.
 5. **REST endpoints** (§9).
 6. **UI** — Market button + marketplace page reusing config-scope conventions; E2E suite #12.3.
 7. **Conflict surfacing + `pack_order`** persistence (per-conflict pinning deferred).
