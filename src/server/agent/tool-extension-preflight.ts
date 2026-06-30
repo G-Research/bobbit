@@ -157,8 +157,16 @@ function validateImportGraph(entryPath: string): ImportGraphError | undefined {
 			if (isNodeBuiltinSpecifier(specifier)) continue;
 			try {
 				createRequire(resolvedFile).resolve(specifier);
-			} catch (err) {
-				return { code: "module-load-failed", message: `cannot resolve module import ${JSON.stringify(specifier)} from ${resolvedFile}: ${formatFsError(err)}` };
+			} catch (localErr) {
+				try {
+					// Config-level tool groups are often copied into isolated project
+					// directories without their own node_modules. Bare imports should
+					// still resolve against Bobbit's installed dependencies, matching
+					// how bundled tool extensions run from the app installation.
+					createRequire(import.meta.url).resolve(specifier);
+				} catch {
+					return { code: "module-load-failed", message: `cannot resolve module import ${JSON.stringify(specifier)} from ${resolvedFile}: ${formatFsError(localErr)}` };
+				}
 			}
 		}
 	}
