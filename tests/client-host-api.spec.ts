@@ -22,13 +22,15 @@ const FIXTURE = path.resolve("tests/fixtures/client-host-api.html");
 const BUNDLE = path.resolve("tests/fixtures/client-host-api-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/client-host-api-entry.ts");
 const HOST_SRC = path.resolve("src/app/host-api.ts");
+const SURFACE_TOKEN_BRIDGE_SRC = path.resolve("src/app/surface-token-bridge.ts");
+const CHANNEL_BRIDGE_SRC = path.resolve("src/app/channel-bridge.ts");
 const SHARED_SRC = path.resolve("src/shared/extension-host/host-api.ts");
 
 test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, HOST_SRC, SHARED_SRC],
+		deps: [ENTRY, HOST_SRC, SURFACE_TOKEN_BRIDGE_SRC, CHANNEL_BRIDGE_SRC, SHARED_SRC],
 	});
 });
 
@@ -89,6 +91,26 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 			bridgeMinted: true,
 			fetchMinted: false,
 		});
+	});
+
+	test("pack-bound surface tokens fall back to a background trusted WebSocket for inactive sessions", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__packSurfaceTokenMintFallsBackToBackgroundWebSocket());
+		expect(result.storeToken).toBe("background-token");
+		expect(result.sentTypes).toEqual(["auth", "ext_surface_token"]);
+		expect(result.mint).toMatchObject({
+			type: "ext_surface_token",
+			surfaceTokenKey: "authority-key",
+			packId: "terminal",
+			contributionKind: "panel",
+			contributionId: "terminal",
+		});
+	});
+
+	test("stale registered surface-token minters fall back to a background trusted WebSocket", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__staleRegisteredSurfaceTokenMinterFallsBackToBackgroundWebSocket());
+		expect(result).toEqual({ storeToken: "background-token", sentTypes: ["auth", "ext_surface_token"] });
 	});
 
 	test("host.channels.open does not require user activation", async ({ page }) => {

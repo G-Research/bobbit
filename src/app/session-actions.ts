@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2, Zap } from "lucide";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, refreshAgentSession, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
-import { listLauncherEntrypoints, runLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
+import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
 import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -240,7 +240,7 @@ function buildSessionMenuLauncherActions(sessionId: string, onRefreshStateChange
 				event.stopPropagation();
 				if (isSpawn) emitLauncherFeedback("pending", `Starting ${launcher.label}…`);
 				try {
-					runLauncherEntrypoint(launcher.key, (result) => {
+					runResolvedLauncherEntrypoint(launcher, (result) => {
 						if (result.ok) return;
 						emitLauncherFeedback("error", launcherFailureMessage(launcher.label, result));
 						onRefreshStateChanged?.();

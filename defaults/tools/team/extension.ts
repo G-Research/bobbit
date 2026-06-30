@@ -118,8 +118,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_steer",
 		label: "Steer Team Agent",
-		description: "Send an urgent mid-turn redirect to a streaming agent. Fails if idle; use team_prompt.",
-		promptSnippet: "Steer a running team agent with an urgent message (mid-turn only).",
+		description: "Backward-compatible mid-turn redirect for a streaming agent. Fails if idle; prefer team_prompt(mode:'steer') for routine nudges.",
+		promptSnippet: "Legacy steer for a running team agent (mid-turn only); prefer team_prompt(mode:'steer') unless you need compatibility.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 			message: Type.String(),
@@ -149,17 +149,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_prompt",
 		label: "Prompt Team Agent",
-		description: "Prompt a team agent or direct-child team-lead. Runs immediately if idle, else queues.",
-		promptSnippet: "Send a prompt to a team agent (immediate if idle, queued if busy).",
+		description: "Prompt or steer a team agent or direct-child team-lead. Default mode is steer; use mode:'prompt' for next-turn queue semantics.",
+		promptSnippet: "Send a prompt/steer to a team agent. Default mode:'steer'; use mode:'prompt' to run/queue a normal next-turn prompt.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 			message: Type.String(),
+			mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default steer.", default: "steer" })),
 			workflowGateId: Type.Optional(Type.String({ description: "Gate the agent works toward; auto-injects upstream gate content." })),
 			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Override DAG: gate IDs whose content to inject as context." })),
 		}),
 		async execute(_id, params) {
 			try {
-				const body: Record<string, unknown> = { sessionId: params.session_id, message: params.message };
+				const body: Record<string, unknown> = { sessionId: params.session_id, message: params.message, mode: params.mode ?? "steer" };
 				if (params.workflowGateId) body.workflowGateId = params.workflowGateId;
 				if (params.inputGateIds?.length) body.inputGateIds = params.inputGateIds;
 				return ok(await api("POST", `/api/goals/${goalId}/team/prompt`, body));
