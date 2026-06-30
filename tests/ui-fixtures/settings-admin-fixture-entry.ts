@@ -9,7 +9,7 @@ import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 type FetchLogEntry = { url: string; method: string; body: any };
 type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
-type ArchivedWorktreeFixture = Record<string, any>;
+type WorktreeInventoryFixture = Record<string, any>;
 
 const STORE_PREFIX = "bobbit-settings-admin-fixture";
 const PREFS_KEY = `${STORE_PREFIX}:prefs`;
@@ -82,34 +82,30 @@ function defaultStructuredProjects(): Record<string, StructuredProject> {
 	};
 }
 
-function defaultArchivedWorktreeScan(): ArchivedWorktreeFixture {
+function defaultWorktreeInventory(): WorktreeInventoryFixture {
 	return {
-		sessions: [],
 		items: [],
 		counts: {
-			archivedSessions: 0,
-			sessionsWithWorktrees: 0,
-			removableWorktrees: 0,
-			skippedWorktrees: 0,
-			alreadyCleanedWorktrees: 0,
-			totalItems: 0,
+			total: 0,
 			readyToClean: 0,
-			defaultSelected: 0,
+			protectedInUse: 0,
+			archivedOwned: 0,
+			unownedGitWorktrees: 0,
+			poolEntries: 0,
 			alreadyCleaned: 0,
-			ineligible: 0,
 			needsAttention: 0,
-			failed: 0,
-			byDisposition: {},
+			scanErrors: 0,
+			defaultSelected: 0,
+			byClassification: {},
 			byReason: {},
-			bySelectionCategory: {},
+			bySource: {},
 		},
-		groups: [],
-		selectionPresets: [],
 		generatedAt: Date.now(),
+		scanned: { projects: 1, repos: 1, worktreeRoots: 1 },
 	};
 }
 
-function defaultArchivedWorktreeCleanup(): ArchivedWorktreeFixture {
+function defaultWorktreeCleanup(): WorktreeInventoryFixture {
 	return {
 		counts: { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0 },
 		results: [],
@@ -127,9 +123,9 @@ let oauthStatus: OAuthStatus = {
 	anthropic: { authenticated: true },
 	"openai-codex": { authenticated: false },
 };
-let archivedWorktreeScan: ArchivedWorktreeFixture = defaultArchivedWorktreeScan();
-let archivedWorktreeCleanup: ArchivedWorktreeFixture = defaultArchivedWorktreeCleanup();
-let archivedWorktreeNextScan: ArchivedWorktreeFixture | null = null;
+let worktreeInventory: WorktreeInventoryFixture = defaultWorktreeInventory();
+let worktreeCleanup: WorktreeInventoryFixture = defaultWorktreeCleanup();
+let worktreeNextInventory: WorktreeInventoryFixture | null = null;
 let fetchLog: FetchLogEntry[] = [];
 
 function readJson<T>(key: string, fallback: T): T {
@@ -311,12 +307,12 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (pathname === "/api/sandbox-status") return response({ available: false, configured: false });
 	if (pathname === "/api/worktree-pool") return response({ enabled: false });
 	if (pathname === "/api/sandbox/host-tokens") return response([]);
-	if (pathname === "/api/maintenance/archived-session-worktrees" && method === "GET") return response(archivedWorktreeScan);
-	if (pathname === "/api/maintenance/cleanup-archived-session-worktrees" && method === "POST") {
-		const cleanup = archivedWorktreeCleanup;
-		if (archivedWorktreeNextScan) {
-			archivedWorktreeScan = archivedWorktreeNextScan;
-			archivedWorktreeNextScan = null;
+	if (pathname === "/api/maintenance/worktrees" && method === "GET") return response(worktreeInventory);
+	if (pathname === "/api/maintenance/cleanup-worktrees" && method === "POST") {
+		const cleanup = worktreeCleanup;
+		if (worktreeNextInventory) {
+			worktreeInventory = worktreeNextInventory;
+			worktreeNextInventory = null;
 		}
 		return response(cleanup);
 	}
@@ -365,9 +361,9 @@ updatePlayFinishDataset();
 		"openai-codex": { authenticated: false },
 		...(opts.oauthStatus || {}),
 	};
-	archivedWorktreeScan = defaultArchivedWorktreeScan();
-	archivedWorktreeCleanup = defaultArchivedWorktreeCleanup();
-	archivedWorktreeNextScan = null;
+	worktreeInventory = defaultWorktreeInventory();
+	worktreeCleanup = defaultWorktreeCleanup();
+	worktreeNextInventory = null;
 	fetchLog = [];
 	setConfigScope("system");
 	persistStores();
@@ -408,10 +404,10 @@ updatePlayFinishDataset();
 (window as any).__getSettingsAdminPrefs = () => ({ ...prefs });
 (window as any).__getSettingsAdminRoles = () => roles.map((r) => ({ ...r }));
 (window as any).__getSettingsAdminStructured = (projectId = "proj-1") => JSON.parse(JSON.stringify(structuredProjects[projectId] || null));
-(window as any).__setArchivedWorktreeScan = (scan: ArchivedWorktreeFixture) => { archivedWorktreeScan = scan; };
-(window as any).__setArchivedWorktreeCleanup = (cleanup: ArchivedWorktreeFixture, nextScan?: ArchivedWorktreeFixture) => {
-	archivedWorktreeCleanup = cleanup;
-	archivedWorktreeNextScan = nextScan || null;
+(window as any).__setWorktreeInventory = (scan: WorktreeInventoryFixture) => { worktreeInventory = scan; };
+(window as any).__setWorktreeCleanup = (cleanup: WorktreeInventoryFixture, nextScan?: WorktreeInventoryFixture) => {
+	worktreeCleanup = cleanup;
+	worktreeNextInventory = nextScan || null;
 };
 (window as any).__getSettingsAdminFetchLog = () => fetchLog.slice();
 (window as any).__clearSettingsAdminFetchLog = () => { fetchLog = []; };

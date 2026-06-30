@@ -1,8 +1,10 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import type { Socket } from "node:net";
 import { parse } from "yaml";
 
 const {
@@ -27,6 +29,113 @@ function source(url = SOURCE_URL): any {
 	return { id: "gateway", type: "mcp-gateway", url, addedAt: "2026-01-01T00:00:00.000Z" };
 }
 
+type MockGatewayRequest = { method?: string; path?: string; rpcMethod?: string; sessionIdHeader?: string };
+type MockGatewayOptions = { toolsListError?: { code: number; message: string; data?: unknown }; requiredSessionId?: string };
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+	return Array.isArray(value) ? value.join(", ") : value;
+}
+
+async function withStreamableMcpGateway(fn: (ctx: { url: string; requests: MockGatewayRequest[] }) => Promise<void>, opts: MockGatewayOptions = {}): Promise<void> {
+	const requests: MockGatewayRequest[] = [];
+	const sockets = new Set<Socket>();
+	const server = http.createServer(async (req, res) => {
+		res.setHeader("connection", "close");
+		const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		requests.push({ method: req.method, path, sessionIdHeader: headerValue(req.headers["mcp-session-id"]) });
+		if (path === "/signin/aigateway") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (path !== "/readonly/mcp") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (req.method === "GET") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+		if (req.method !== "POST") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		const message = JSON.parse(body || "{}");
+		requests[requests.length - 1].rpcMethod = message.method;
+		if (opts.requiredSessionId && message.method !== "initialize" && headerValue(req.headers["mcp-session-id"]) !== opts.requiredSessionId) {
+			res.writeHead(400, { "content-type": "application/json" });
+			res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: "missing MCP session header" } }));
+			return;
+		}
+		if (message.method === "notifications/initialized") {
+			res.writeHead(202, { "content-type": "application/json", "content-length": "0" });
+			res.end();
+			return;
+		}
+		if (message.method === "initialize") {
+			res.writeHead(200, { "content-type": "application/json", ...(opts.requiredSessionId ? { "Mcp-Session-Id": opts.requiredSessionId } : {}) });
+			res.end(JSON.stringify({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					protocolVersion: "2024-11-05",
+					capabilities: { tools: {} },
+					serverInfo: { name: "mcp-gateway", version: "0.0.0-test" },
+				},
+			}));
+			return;
+		}
+		if (message.method === "tools/list") {
+			res.writeHead(200, { "content-type": "application/json" });
+			if (opts.toolsListError) {
+				res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: opts.toolsListError }));
+				return;
+			}
+			res.end(JSON.stringify({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					tools: [
+						{ name: "jira__jira_search", description: "Search Jira issues", inputSchema: { type: "object", properties: {} } },
+						{ name: "jira__jira_get_issue", description: "Get a Jira issue", inputSchema: { type: "object", properties: {} } },
+						{ name: "confluence__confluence_get_page", description: "Get a Confluence page", inputSchema: { type: "object", properties: {} } },
+					],
+				},
+			}));
+			return;
+		}
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
+	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const port = (server.address() as { port: number }).port;
+	try {
+		await fn({ url: `http://127.0.0.1:${port}/readonly/mcp`, requests });
+	} finally {
+		server.closeIdleConnections?.();
+		await new Promise<void>((resolve, reject) => {
+			const forceCloseTimer = setTimeout(() => {
+				server.closeAllConnections?.();
+				for (const socket of sockets) socket.destroy();
+			}, 1000);
+			server.close((err) => {
+				clearTimeout(forceCloseTimer);
+				err ? reject(err) : resolve();
+			});
+		});
+	}
+}
+
 describe("MCP gateway catalogue primitives", () => {
 	let dir: string;
 	beforeEach(() => { dir = fs.mkdtempSync(path.join(TMP, "case-")); });
@@ -38,35 +147,30 @@ describe("MCP gateway catalogue primitives", () => {
 		assert.equal(isLegacyMcpRegistrySource({ id: "reg", type: "mcp-registry", url: SOURCE_URL, addedAt: "now" } as any), true);
 	});
 
-	it("derives catalogue URL candidates from read and write MCP endpoints", () => {
-		assert.deepEqual(candidateGatewayCatalogueUrls("http://mcp-local.t3.zone/readonly/mcp/"), [
-			"http://mcp-local.t3.zone/signin/aigateway",
-			"http://mcp-local.t3.zone/readonly/mcp",
-		]);
-		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/write/mcp"), [
-			"https://mcp.example.com/signin/aigateway",
-			"https://mcp.example.com/write/mcp",
-		]);
+	it("keeps catalogue fallback candidates on the provided URL only", () => {
+		assert.deepEqual(candidateGatewayCatalogueUrls("http://mcp-local.t3.zone/readonly/mcp/"), ["http://mcp-local.t3.zone/readonly/mcp"]);
+		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/write/mcp"), ["https://mcp.example.com/write/mcp"]);
 		assert.deepEqual(candidateGatewayCatalogueUrls("https://mcp.example.com/catalogue"), ["https://mcp.example.com/catalogue"]);
 		assert.throws(() => candidateGatewayCatalogueUrls("https://user:pass@mcp.example.com/readonly/mcp"), /must not contain credentials/);
 		assert.throws(() => candidateGatewayCatalogueUrls("file:///tmp/catalogue.json"), /must use http or https/);
 	});
 
-	it("fetches bounded JSON, falls back from derived candidate to original, and reports malformed responses", async () => {
+	it("fetches bounded JSON only in explicit catalogue discovery mode", async () => {
 		const fetched: string[] = [];
 		const parsed = await fetchMcpGatewayWithDiagnostics(source(), {
+			discoveryMode: "catalogue",
 			fetchFn: async (input: RequestInfo | URL) => {
 				const url = String(input);
 				fetched.push(url);
-				if (url.endsWith("/signin/aigateway")) return new Response(JSON.stringify({ unsupported: true }));
 				return new Response(JSON.stringify({ providers: [{ id: "jira", label: "Jira" }] }));
 			},
 		});
-		assert.deepEqual(fetched, ["http://mcp-local.t3.zone/signin/aigateway", SOURCE_URL]);
+		assert.deepEqual(fetched, [SOURCE_URL]);
 		assert.deepEqual(parsed.providers.map((p: any) => p.id), ["jira"]);
 
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				maxBodyBytes: 10,
 				fetchFn: async () => new Response("{}", { headers: { "content-length": "11" } }),
 			}),
@@ -74,6 +178,7 @@ describe("MCP gateway catalogue primitives", () => {
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				maxBodyBytes: 20,
 				fetchFn: async () => new Response(JSON.stringify({ providers: [] }).repeat(3)),
 			}),
@@ -81,12 +186,14 @@ describe("MCP gateway catalogue primitives", () => {
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				fetchFn: async () => new Response("not json"),
 			}),
 			/not valid JSON/,
 		);
 		await assert.rejects(
 			() => fetchMcpGatewayWithDiagnostics(source("https://mcp.example.com/catalogue"), {
+				discoveryMode: "catalogue",
 				timeoutMs: 1,
 				fetchFn: (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
 					init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
@@ -94,6 +201,45 @@ describe("MCP gateway catalogue primitives", () => {
 			}),
 			/timed out after 1ms/,
 		);
+	});
+
+	it("discovers providers from streamable HTTP MCP tools/list when no JSON catalogue exists", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			const parsed = await fetchMcpGatewayWithDiagnostics(source(url));
+			assert.deepEqual(parsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
+			const jira = parsed.providers.find((p: any) => p.id === "jira");
+			assert.deepEqual(jira.operations.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
+			const confluence = parsed.providers.find((p: any) => p.id === "confluence");
+			assert.deepEqual(confluence.operations.map((op: any) => op.name), ["confluence_get_page"]);
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "initialize"));
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
+			assert.equal(requests.some((r) => r.path === "/signin/aigateway"), false);
+		});
+	});
+
+	it("carries streamable HTTP MCP session id from initialize into later discovery requests", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			const parsed = await fetchMcpGatewayWithDiagnostics(source(url));
+			assert.deepEqual(parsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
+			assert.equal(requests.find((r) => r.rpcMethod === "initialize")?.sessionIdHeader, undefined);
+			assert.equal(requests.find((r) => r.rpcMethod === "notifications/initialized")?.sessionIdHeader, "session-123");
+			assert.equal(requests.find((r) => r.rpcMethod === "tools/list")?.sessionIdHeader, "session-123");
+		}, { requiredSessionId: "session-123" });
+	});
+
+	it("rejects streamable HTTP MCP tools/list JSON-RPC errors", async () => {
+		await withStreamableMcpGateway(async ({ url, requests }) => {
+			await assert.rejects(
+				() => fetchMcpGatewayWithDiagnostics(source(url)),
+				(err: unknown) => {
+					assert.ok(err instanceof McpGatewayError);
+					assert.match((err as Error).message, /gateway MCP tools\/list failed: .*permission denied/);
+					return true;
+				},
+			);
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "initialize"));
+			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
+		}, { toolsListError: { code: -32000, message: "permission denied" } });
 	});
 
 	it("parses provider catalogues while skipping unsafe, duplicate, and non-HTTP entries", () => {

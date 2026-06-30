@@ -229,30 +229,16 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 }
 
+/** Preserve declared channel capabilities for installed/enabled packs.
+ *  `sessionPty` authorization is the explicit channel declaration itself;
+ *  runtime session restrictions remain in ChannelPtyService. */
+function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContribution[]): ChannelContribution[] {
+	return channels;
+}
+
 /** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
  *  flat config — every required key present and, for a string, non-empty after
  *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
-function authorizeChannelCapabilities(entry: PackEntry, channels: ChannelContribution[]): ChannelContribution[] {
-	const firstParty = entry.kind === "builtin" || entry.id.startsWith("builtin-pack:") || entry.meta?.sourceUrl === "builtin:";
-	let changed = false;
-	const out = channels.map((channel) => {
-		const caps = channel.capabilities;
-		if (!caps?.includes("sessionPty") || firstParty) return channel;
-		changed = true;
-		console.warn(
-			`[pack-contributions] channel '${channel.name}' in pack "${packIdFromRoot(entry.path)}" declares unauthorized sessionPty; capability ignored`,
-		);
-		const nextCaps = caps.filter((cap) => cap !== "sessionPty");
-		if (nextCaps.length === 0) {
-			const rest: ChannelContribution = { ...channel };
-			delete rest.capabilities;
-			return rest;
-		}
-		return { ...channel, capabilities: nextCaps };
-	});
-	return changed ? out : channels;
-}
-
 function providerActivationSatisfied(provider: ProviderContribution): boolean {
 	const required = provider.activation?.requiresConfig;
 	if (!required || required.length === 0) return true;

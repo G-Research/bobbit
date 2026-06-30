@@ -148,56 +148,94 @@ describe("#8 MarketplaceSourceStore CRUD + YAML persistence", () => {
 	});
 });
 
-async function withJsonServer(body: unknown, fn: (url: string, setBody: (next: unknown) => void) => Promise<void>): Promise<void> {
-	let currentBody = body;
-	const server = http.createServer((req, res) => {
-		if (req.url === "/signin/aigateway" || req.url === "/readonly/mcp") {
-			const text = JSON.stringify(currentBody);
-			res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
-			res.end(text);
+async function withStreamableMcpGateway(tools: unknown[], fn: (url: string, setTools: (next: unknown[]) => void) => Promise<void>): Promise<void> {
+	let currentTools = tools;
+	const server = http.createServer(async (req, res) => {
+		const requestPath = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		if (requestPath === "/signin/aigateway") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
 			return;
 		}
-		res.writeHead(404, { "content-type": "text/plain" });
-		res.end("not found");
+		if (requestPath !== "/readonly/mcp") {
+			res.writeHead(404, { "content-type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		if (req.method === "GET") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+		if (req.method !== "POST") {
+			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
+			res.end("method not allowed");
+			return;
+		}
+
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		const message = JSON.parse(body || "{}");
+		if (message.method === "notifications/initialized") {
+			res.writeHead(202, { "content-type": "application/json" });
+			res.end();
+			return;
+		}
+		if (message.method === "initialize") {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					protocolVersion: "2024-11-05",
+					capabilities: { tools: {} },
+					serverInfo: { name: "mcp-gateway", version: "0.0.0-test" },
+				},
+			}));
+			return;
+		}
+		if (message.method === "tools/list") {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: currentTools } }));
+			return;
+		}
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
 	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	try {
 		const address = server.address();
 		assert.ok(address && typeof address === "object");
-		await fn(`http://127.0.0.1:${address.port}/readonly/mcp`, (next) => { currentBody = next; });
+		await fn(`http://127.0.0.1:${address.port}/readonly/mcp`, (next) => { currentTools = next; });
 	} finally {
 		await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
 	}
 }
 
-function gatewayBody(opts: { description?: string; includeUnsupported?: boolean; includeWrite?: boolean } = {}): Record<string, unknown> {
-	return {
-		version: "1.0.0",
-		providers: [
-			{
-				id: "jira",
-				label: "Jira",
-				description: opts.description ?? "Jira issue tools",
-				version: "1.0.0",
-				operations: [{ name: "jira_search", description: "Search issues" }],
-				...(opts.includeWrite ? { writeUrl: "https://gateway.example.com/write/mcp" } : {}),
-			},
-			{
-				id: "confluence",
-				label: "Confluence",
-				description: "Confluence docs tools",
-				version: "1.0.0",
-				operations: [{ name: "confluence_search" }],
-			},
-			...(opts.includeUnsupported ? [{ id: "bad/id", label: "Bad Provider", description: "Unsafe id" }] : []),
-		],
-	};
+function gatewayTools(opts: { description?: string; includeUnsupported?: boolean } = {}): unknown[] {
+	return [
+		{
+			name: "jira__jira_search",
+			description: "Search issues",
+			providerLabel: "Jira",
+			providerDescription: opts.description ?? "Jira issue tools",
+			inputSchema: { type: "object", properties: {} },
+		},
+		{
+			name: "confluence__confluence_search",
+			description: "Search docs",
+			providerLabel: "Confluence",
+			providerDescription: "Confluence docs tools",
+			inputSchema: { type: "object", properties: {} },
+		},
+		...(opts.includeUnsupported ? [{ name: "bad/id__bad_search", providerLabel: "Bad Provider", providerDescription: "Unsafe id" }] : []),
+	];
 }
 
 describe("Marketplace MCP gateway integration", () => {
 	it("browses gateway providers and surfaces skipped-provider diagnostics", async () => {
 		const root = fs.mkdtempSync(path.join(TMP, "mcp-diag-"));
-		await withJsonServer(gatewayBody({ includeUnsupported: true }), async (url) => {
+		await withStreamableMcpGateway(gatewayTools({ includeUnsupported: true }), async (url) => {
 			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
 			const source = store.add({ url, type: "mcp-gateway" });
 			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
@@ -248,7 +286,7 @@ describe("Marketplace MCP gateway integration", () => {
 
 	it("installs and updates gateway provider packs while preserving materialized metadata", async () => {
 		const root = fs.mkdtempSync(path.join(TMP, "mcp-gateway-list-"));
-		await withJsonServer(gatewayBody(), async (url, setBody) => {
+		await withStreamableMcpGateway(gatewayTools(), async (url, setTools) => {
 			const store = new MarketplaceSourceStore(path.join(root, "cfg"));
 			const source = store.add({ url, type: "mcp-gateway" });
 			const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
@@ -273,7 +311,7 @@ describe("Marketplace MCP gateway integration", () => {
 			assert.equal(mcp.server, "gr");
 			assert.equal(mcp.subNamespace, "jira");
 
-			setBody(gatewayBody({ description: "Jira issue tools v2" }));
+			setTools(gatewayTools({ description: "Jira issue tools v2" }));
 			await inst.syncMarketplaceSource(source.id);
 			row = inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === pack.name);
 			assert.equal(row?.sourceStatus, "ok");
@@ -290,8 +328,8 @@ describe("Marketplace MCP gateway integration", () => {
 
 	it("rejects installing the same provider pack name from two gateway sources", async () => {
 		const root = fs.mkdtempSync(path.join(TMP, "mcp-cross-source-"));
-		await withJsonServer(gatewayBody(), async (url1) => {
-			await withJsonServer(gatewayBody(), async (url2) => {
+		await withStreamableMcpGateway(gatewayTools(), async (url1) => {
+			await withStreamableMcpGateway(gatewayTools(), async (url2) => {
 				const store = new MarketplaceSourceStore(path.join(root, "cfg"));
 				const source1 = store.add({ url: url1, type: "mcp-gateway" });
 				const source2 = store.add({ url: url2, type: "mcp-gateway" });

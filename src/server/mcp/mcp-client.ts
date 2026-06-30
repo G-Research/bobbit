@@ -1,5 +1,8 @@
+import * as http from 'node:http';
+import * as https from 'node:https';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import type { IncomingHttpHeaders } from 'node:http';
 import type {
   McpServerConfig,
   JsonRpcRequest,
@@ -36,6 +39,30 @@ function expandEnvRecord(env: Record<string, string>): Record<string, string> {
   return result;
 }
 
+function jsonRpcErrorMessage(error: JsonRpcResponse['error']): string {
+  if (!error) return 'unknown JSON-RPC error';
+  return error.message || JSON.stringify(error);
+}
+
+function responseHeader(headers: IncomingHttpHeaders, name: string): string {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value.join(', ');
+  return value ?? '';
+}
+
+class HttpRequestTimeoutError extends Error {
+  constructor(serverName: string, method: string) {
+    super(`[mcp:${serverName}] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${method}`);
+    this.name = 'HttpRequestTimeoutError';
+  }
+}
+
+type NativeHttpResponse = {
+  statusCode: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+};
+
 type PendingRequest = {
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
@@ -54,6 +81,7 @@ export class McpClient {
   private _process: ChildProcess | null = null;
   private _readline: ReadlineInterface | null = null;
   private _pendingRequests = new Map<number, PendingRequest>();
+  private _httpSessionId: string | null = null;
 
   constructor(private serverName: string) {}
 
@@ -65,6 +93,7 @@ export class McpClient {
   /** Connect to MCP server. Spawns process (stdio) or validates URL (HTTP). Sends initialize handshake. */
   async connect(config: McpServerConfig): Promise<void> {
     this._config = config;
+    this._httpSessionId = null;
 
     if (config.command) {
       await this._connectStdio(config);
@@ -79,6 +108,9 @@ export class McpClient {
   async listTools(): Promise<McpToolDef[]> {
     this._assertConnected();
     const response = await this._sendRequest('tools/list', {});
+    if (response.error) {
+      throw new Error(`[mcp:${this.serverName}] tools/list failed: ${jsonRpcErrorMessage(response.error)}`);
+    }
     const result = response.result as { tools?: McpToolDef[] } | undefined;
     return result?.tools ?? [];
   }
@@ -136,6 +168,7 @@ export class McpClient {
     }
 
     this._config = null;
+    this._httpSessionId = null;
     this._log('Disconnected');
   }
 
@@ -320,37 +353,99 @@ export class McpClient {
     this._log('Connected (HTTP)');
   }
 
-  private async _sendHttpRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
-    const url = this._config!.url!;
-    const headers: Record<string, string> = {
+  private _postHttpJson(url: string, headers: Record<string, string>, body: string, method: string): Promise<NativeHttpResponse> {
+    return new Promise((resolve, reject) => {
+      const endpoint = new URL(url);
+      const requestFn = endpoint.protocol === 'https:'
+        ? https.request
+        : endpoint.protocol === 'http:'
+          ? http.request
+          : null;
+      if (!requestFn) {
+        reject(new Error(`Unsupported HTTP protocol: ${endpoint.protocol}`));
+        return;
+      }
+
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const settle = (fn: typeof resolve | typeof reject, value: NativeHttpResponse | Error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        (fn as (value: NativeHttpResponse | Error) => void)(value);
+      };
+
+      const req = requestFn(endpoint, {
+        method: 'POST',
+        headers,
+        agent: false,
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on('end', () => {
+          settle(resolve, {
+            statusCode: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+        res.on('error', (err) => settle(reject, err));
+        res.on('aborted', () => settle(reject, new Error('HTTP response aborted')));
+      });
+
+      timer = setTimeout(() => {
+        req.destroy(new HttpRequestTimeoutError(this.serverName, method));
+      }, REQUEST_TIMEOUT_MS);
+      timer.unref?.();
+
+      req.on('error', (err) => settle(reject, err));
+      req.end(body);
+    });
+  }
+
+  private _hasConfiguredHttpSessionHeader(): boolean {
+    const headers = this._config?.headers;
+    return !!headers && Object.keys(headers).some((name) => name.toLowerCase() === 'mcp-session-id');
+  }
+
+  private _httpRequestHeaders(): Record<string, string> {
+    const configuredSessionHeader = this._hasConfiguredHttpSessionHeader();
+    return {
       'Content-Type': 'application/json',
       // Streamable HTTP transport spec: client MUST advertise both response shapes.
       Accept: 'application/json, text/event-stream',
+      // Server-assigned streamable-HTTP sessions are used only when the caller did not explicitly configure one.
+      ...(this._httpSessionId && !configuredSessionHeader ? { 'Mcp-Session-Id': this._httpSessionId } : {}),
       ...this._config!.headers,
     };
+  }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  private _captureHttpSessionHeader(headers: IncomingHttpHeaders): void {
+    if (this._hasConfiguredHttpSessionHeader()) return;
+    const sessionId = responseHeader(headers, 'mcp-session-id').trim();
+    if (sessionId) this._httpSessionId = sessionId;
+  }
+
+  private async _sendHttpRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+    const url = this._config!.url!;
+    const headers = this._httpRequestHeaders();
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
+      const response = await this._postHttpJson(url, headers, JSON.stringify(request), request.method);
+      this._captureHttpSessionHeader(response.headers);
 
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(`HTTP ${response.status}: ${body.slice(0, 500)}`);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`HTTP ${response.statusCode}: ${response.body.slice(0, 500)}`);
       }
 
-      const contentType = response.headers.get('content-type') || '';
+      const contentType = responseHeader(response.headers, 'content-type');
       if (contentType.includes('text/event-stream')) {
         // SSE response — parse data: lines for JSON-RPC result
-        const text = await response.text();
         let lastData: string | undefined;
-        for (const line of text.split('\n')) {
+        for (const line of response.body.split('\n')) {
           if (line.startsWith('data:')) {
             lastData = line.slice(5).trim();
           }
@@ -365,32 +460,22 @@ export class McpClient {
         return { jsonrpc: '2.0', id: request.id, error: { code: -1, message: 'Empty SSE response' } } as any;
       }
 
-      return await response.json() as JsonRpcResponse;
+      return JSON.parse(response.body) as JsonRpcResponse;
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`[mcp:${this.serverName}] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${request.method}`);
+      if (err instanceof HttpRequestTimeoutError) {
+        throw err;
       }
       throw new Error(`[mcp:${this.serverName}] HTTP request failed: ${err}`);
-    } finally {
-      clearTimeout(timer);
     }
   }
 
   private async _sendHttpNotification(notification: JsonRpcNotification): Promise<void> {
     const url = this._config!.url!;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-      ...this._config!.headers,
-    };
+    const headers = this._httpRequestHeaders();
 
-    // Fire and forget — notifications don't expect responses
     try {
-      await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(notification),
-      });
+      const response = await this._postHttpJson(url, headers, JSON.stringify(notification), notification.method);
+      this._captureHttpSessionHeader(response.headers);
     } catch {
       // Ignore errors for notifications
     }

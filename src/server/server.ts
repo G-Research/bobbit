@@ -31,6 +31,7 @@ import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -268,6 +269,73 @@ async function mintExtensionChannelOpenGrant(openPermits: unknown, binding: {
 	if (result && typeof result.openGrant === "string") return result.openGrant;
 	if (result && typeof result.token === "string") return result.token;
 	throw new Error("channel open-permit service returned no grant");
+}
+
+function authorizePackBoundScopedChannelOpenRequest(
+	headerSid: string | undefined,
+	bodySid: unknown,
+	resolveSession: (id: string) => ActionGuardSession | undefined,
+): { ok: true; sessionId: string } | { ok: false; status: number; error: string } {
+	if (!headerSid) return { ok: false, status: 403, error: "missing session" };
+	if (bodySid !== undefined && bodySid !== null && bodySid !== headerSid) {
+		return { ok: false, status: 403, error: "session mismatch" };
+	}
+	if (!resolveSession(headerSid)) return { ok: false, status: 403, error: "unknown session" };
+	return { ok: true, sessionId: headerSid };
+}
+
+export type ScopedExtensionChannelOpenPermitResult =
+	| { ok: true; openGrant: string; sessionId: string; packId: string; contributionId: string; channelName: string; singletonKey?: string }
+	| { ok: false; status: number; error: string };
+
+export async function mintScopedExtensionChannelOpenPermit(input: {
+	openPermits: unknown;
+	packContributionRegistry: PackContributionRegistry;
+	projectId?: string;
+	resolver: any;
+	headerSessionId: string | undefined;
+	rawHeaderSessionId?: string | string[] | undefined;
+	bodySessionId?: unknown;
+	surfaceToken: unknown;
+	name: unknown;
+	init?: unknown;
+	singletonKey?: unknown;
+	resolveSession: (id: string) => ActionGuardSession | undefined;
+}): Promise<ScopedExtensionChannelOpenPermitResult> {
+	const surf = resolveSurfaceIdentity({
+		token: input.surfaceToken,
+		headerSessionId: input.headerSessionId,
+		resolver: input.resolver,
+		contributions: input.packContributionRegistry,
+		projectId: input.projectId,
+	});
+	if (!surf.ok) return { ok: false, status: surf.status, error: surf.error };
+	if (surf.tool !== undefined) {
+		return { ok: false, status: 403, error: "channel open permits require a pack-bound surface token" };
+	}
+	const guard = authorizePackBoundScopedChannelOpenRequest(input.headerSessionId, input.bodySessionId, input.resolveSession);
+	if (!guard.ok) return { ok: false, status: guard.status, error: guard.error };
+	const name = typeof input.name === "string" ? input.name.trim() : "";
+	if (!name) return { ok: false, status: 400, error: "missing channel name" };
+	const init = input.init;
+	const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
+		? (init as { singletonKey: string }).singletonKey
+		: typeof input.singletonKey === "string" ? input.singletonKey : undefined;
+	if (!resolveChannelContributionForGrant(input.packContributionRegistry, input.projectId, surf.packId, name)) {
+		return { ok: false, status: 404, error: "channel is not declared by this pack" };
+	}
+	try {
+		const openGrant = await mintExtensionChannelOpenGrant(input.openPermits, {
+			sessionId: guard.sessionId,
+			packId: surf.packId,
+			contributionId: surf.contributionId,
+			channelName: name,
+			...(singletonKey !== undefined ? { singletonKey } : {}),
+		});
+		return { ok: true, openGrant, sessionId: guard.sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
+	} catch (err) {
+		return { ok: false, status: 400, error: err instanceof Error ? err.message : String(err) };
+	}
 }
 
 async function disposeExtensionChannelServices(services: ExtensionChannelServices | undefined, reason: string): Promise<void> {
@@ -2885,10 +2953,11 @@ export function createGateway(config: GatewayConfig) {
 			// unreachable for many seconds on installs with stale worktrees.
 			//
 			// Concurrency note: the sweeper and the pool init operate on DISJOINT
-			// branch sets — `worktree-sweeper.ts` explicitly skips pool branches
-			// (`isPoolBranch`), and `WorktreePool.reclaimOrphaned` only inspects
-			// pool branches. So the two phases are run concurrently via
-			// `Promise.all`, and project-level pool init is also parallelised
+			// branch sets — `worktree-sweeper.ts` explicitly skips Bobbit pool
+			// branches using the shared inventory classifier helpers, and
+			// `WorktreePool.reclaimOrphaned` only inspects pool branches. So the two
+			// phases are run concurrently via `Promise.all`, and project-level pool
+			// init is also parallelised
 			// across projects (each project's pool is independent). This avoids
 			// the previous serial chain that left the pool empty for minutes on
 			// installs with many stale worktrees, forcing every new session
@@ -2920,18 +2989,26 @@ export function createGateway(config: GatewayConfig) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepTeams: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
 							const repoNames = ctx.projectConfigStore.repoNames();
+							const components = ctx.projectConfigStore.getComponents();
+							const isMultiRepoProject = components.some(c => c.repo !== ".");
+							let sweepRootPath = ctx.project.rootPath;
+							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath).catch(() => false)) {
+								sweepRootPath = await getRepoRoot(ctx.project.rootPath);
+							}
 							sweepProjects.push({
 								id: ctx.project.id,
-								rootPath: ctx.project.rootPath,
+								rootPath: sweepRootPath,
 								repos: repoNames.length > 0 ? repoNames : undefined,
+								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});
 							for (const g of ctx.goalStore.getAll()) {
 								sweepGoals.push({
@@ -2944,6 +3021,25 @@ export function createGateway(config: GatewayConfig) {
 									id: s.id, branch: s.branch, worktreePath: s.worktreePath, cwd: s.cwd, archived: !!s.archived,
 									repoWorktrees: s.repoWorktrees,
 								});
+							}
+							for (const team of ctx.teamStore.getAll()) {
+								for (const agent of team.agents) {
+									sweepTeams.push({
+										id: agent.sessionId,
+										branch: agent.branch,
+										worktreePath: agent.worktreePath,
+									});
+								}
+								const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+								if (lead) {
+									sweepTeams.push({
+										id: lead.id,
+										branch: lead.branch,
+										worktreePath: lead.worktreePath,
+										cwd: lead.cwd,
+										repoWorktrees: lead.repoWorktrees,
+									});
+								}
 							}
 							for (const st of ctx.staffStore.getAll()) {
 								sweepStaff.push({
@@ -2960,6 +3056,7 @@ export function createGateway(config: GatewayConfig) {
 							projects: sweepProjects,
 							goals: sweepGoals,
 							sessions: sweepSessions,
+							teams: sweepTeams,
 							staff: sweepStaff,
 						});
 						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
@@ -3003,7 +3100,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -4300,7 +4397,7 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -6919,45 +7016,16 @@ async function handleApiRoute(
 		};
 		const contributionKind = (body as { contributionKind?: unknown }).contributionKind;
 
-		// ── Pack-bound surface (panel / entrypoint / route) — pack-schema-v1 §6.5.
-		//    No carrier tool, so NO allowedTools gate; the trust boundary is
-		//    installed + active in the session's scope + caller's own session (§4.5).
+		// ── Pack-bound surfaces (panel / entrypoint / route) are deliberately NOT
+		// minted from this public REST body: a same-session caller could choose another
+		// active pack's id. The trusted app mints these over the session WebSocket it
+		// owns; pack code receives only the resulting HostApi closure.
 		if (typeof contributionKind === "string") {
 			if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") {
 				json({ error: "invalid contributionKind" }, 400);
 				return;
 			}
-			const bodySid = (body as { sessionId?: unknown }).sessionId;
-			if (!mintHeaderSid || typeof bodySid !== "string" || bodySid !== mintHeaderSid) {
-				json({ error: "session mismatch" }, 403);
-				return;
-			}
-			if (!resolveSession(mintHeaderSid)) {
-				json({ error: "unknown session" }, 403);
-				return;
-			}
-			const packId = typeof (body as { packId?: unknown }).packId === "string" ? (body as { packId: string }).packId : "";
-			const contributionRef = typeof (body as { contributionId?: unknown }).contributionId === "string" ? (body as { contributionId: string }).contributionId : "";
-			if (!packId || !contributionRef) {
-				json({ error: "packId and contributionId are required" }, 400);
-				return;
-			}
-			// Validate the pack is installed + active in scope AND the contribution exists.
-			const pack = packContributionRegistry.getPack(mintSessionProjectId, packId);
-			let exists = false;
-			if (pack) {
-				if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(mintSessionProjectId, packId, contributionRef);
-				else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(mintSessionProjectId, packId, contributionRef);
-				else exists = packContributionRegistry.hasRoute(mintSessionProjectId, packId, contributionRef);
-			}
-			if (!pack || !exists) {
-				json({ error: "surface tokens are available only to installed, active pack contributions" }, 403);
-				return;
-			}
-			const contributionId = `${contributionKind}:${contributionRef}`;
-			const token = mintSurfaceToken({ sessionId: mintHeaderSid, packId, contributionId });
-			console.log(`[ext-surface-token] kind=${contributionKind} contribution=${contributionRef} packId=${packId} session=${mintHeaderSid} outcome=ok`);
-			json({ token });
+			json({ error: "pack-bound surface tokens must be minted over the trusted session WebSocket" }, 403);
 			return;
 		}
 
@@ -6989,8 +7057,8 @@ async function handleApiRoute(
 	}
 
 	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
-	// `ext_channel_open`. This is a typed, scoped server path: identity is derived
-	// from the surface token and channel name is resolved inside that pack only.
+	// `ext_channel_open`. This scoped path accepts only pack-bound surface tokens
+	// (panel / entrypoint / route); channel name is resolved inside that pack only.
 	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
 		if (!extensionChannelServices?.openPermits) {
 			json({ error: "extension channels are not available" }, 503);
@@ -7014,54 +7082,27 @@ async function handleApiRoute(
 			toolManager,
 			channelSessionProjectId ? projectContextManager.getOrCreate(channelSessionProjectId)?.toolManager : undefined,
 		);
-		const surf = resolveSurfaceIdentity({ token: (body as { surfaceToken?: unknown }).surfaceToken, headerSessionId: channelHeaderSid, resolver: channelToolManager, contributions: packContributionRegistry, projectId: channelSessionProjectId });
-		if (!surf.ok) {
-			json({ error: surf.error }, surf.status);
+		const result = await mintScopedExtensionChannelOpenPermit({
+			openPermits: extensionChannelServices.openPermits,
+			packContributionRegistry,
+			projectId: channelSessionProjectId,
+			resolver: channelToolManager,
+			headerSessionId: channelHeaderSid,
+			rawHeaderSessionId: headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			surfaceToken: (body as { surfaceToken?: unknown }).surfaceToken,
+			name: (body as { name?: unknown }).name,
+			init: (body as { init?: unknown }).init,
+			singletonKey: (body as { singletonKey?: unknown }).singletonKey,
+			resolveSession,
+		});
+		if (!result.ok) {
+			console.warn(`[ext-channel-grant] outcome=error: ${result.error}`);
+			json({ error: result.error }, result.status);
 			return;
 		}
-		const guard = surf.tool !== undefined
-			? authorizeScopedRequest({ tool: surf.tool, headerSessionId, bodySessionId: (body as { sessionId?: unknown }).sessionId, resolveSession })
-			: packBoundScopedGuard(channelHeaderSid, (body as { sessionId?: unknown }).sessionId, resolveSession);
-		if (!guard.ok) {
-			json({ error: guard.error }, guard.status);
-			return;
-		}
-		const name = typeof (body as { name?: unknown }).name === "string" ? (body as { name: string }).name : "";
-		if (!name) {
-			json({ error: "channel name is required" }, 400);
-			return;
-		}
-		const init = (body as { init?: unknown }).init;
-		const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
-			? (init as { singletonKey: string }).singletonKey
-			: typeof (body as { singletonKey?: unknown }).singletonKey === "string" ? (body as { singletonKey: string }).singletonKey : undefined;
-		if (!resolveChannelContributionForGrant(packContributionRegistry, channelSessionProjectId, surf.packId, name)) {
-			json({ error: `pack "${surf.packId}" declares no channel "${name}"` }, 404);
-			return;
-		}
-		const permitsAny = extensionChannelServices.openPermits as any;
-		const activationBinding = { sessionId: guard.sessionId, packId: surf.packId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
-		if (surf.contributionId.startsWith("entrypoint:")) {
-			permitsAny.markTrustedLauncherActivation?.(activationBinding);
-		} else if (permitsAny.hasTrustedLauncherActivation?.(activationBinding) !== true) {
-			json({ error: "channel open requires a trusted launcher activation" }, 403);
-			return;
-		}
-		try {
-			const openGrant = await mintExtensionChannelOpenGrant(extensionChannelServices.openPermits, {
-				sessionId: guard.sessionId,
-				packId: surf.packId,
-				contributionId: surf.contributionId,
-				channelName: name,
-				...(singletonKey !== undefined ? { singletonKey } : {}),
-			});
-			console.log(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=ok`);
-			json({ openGrant });
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			console.warn(`[ext-channel-grant] channel=${name} packId=${surf.packId} session=${guard.sessionId} outcome=error: ${message}`);
-			json({ error: message }, 400);
-		}
+		console.log(`[ext-channel-grant] channel=${result.channelName} packId=${result.packId} session=${result.sessionId} outcome=ok`);
+		json({ openGrant: result.openGrant });
 		return;
 	}
 
@@ -14707,12 +14748,23 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
+
+	// GET /api/maintenance/worktrees
+	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
+		const include = url.searchParams.get("include");
+		if (include && include !== "all" && include !== "actionable" && include !== "troubleshooting") {
+			json({ error: "include must be all, actionable, or troubleshooting" }, 400);
+			return;
+		}
+		json(await worktreeInventory().scan({ include: (include as any) || "all" }));
+		return;
+	}
 
 	// GET /api/maintenance/archived-session-worktrees
 	if (url.pathname === "/api/maintenance/archived-session-worktrees" && req.method === "GET") {
 		const includeAlreadyCleaned = url.searchParams.get("includeAlreadyCleaned") === "1";
-		const result = await sessionManager.listArchivedSessionWorktrees(includeAlreadyCleaned);
-		json(result);
+		json(await worktreeInventory().legacyArchivedSessionWorktrees(includeAlreadyCleaned));
 		return;
 	}
 
@@ -14731,158 +14783,85 @@ async function handleApiRoute(
 		const hasPresetId = Object.prototype.hasOwnProperty.call(body, "presetId");
 		const hasProjectId = Object.prototype.hasOwnProperty.call(body, "projectId");
 		const hasRepoPath = Object.prototype.hasOwnProperty.call(body, "repoPath");
-		const cleanup = async (request: any) => {
-			try {
-				const result = await sessionManager.cleanupArchivedSessionWorktrees(request);
-				json(result);
-			} catch (err) {
-				if (err instanceof Error && (err.name === "CleanupArchivedSessionWorktreesRequestError" || (err as any).statusCode === 400)) {
-					json({ error: err.message }, 400);
-					return;
-				}
-				throw err;
-			}
-		};
-		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") {
-			json({ error: "Invalid cleanup mode" }, 400);
-			return;
-		}
-		if (mode === "all") {
-			if (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath) {
-				json({ error: "mode=all does not accept selectors" }, 400);
-				return;
-			}
-			await cleanup({ mode: "all" });
-			return;
-		}
+		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") { json({ error: "Invalid cleanup mode" }, 400); return; }
+		if (mode === "all" && (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath)) { json({ error: "mode=all does not accept selectors" }, 400); return; }
 		if (mode === "selected") {
-			if (hasCategories || hasPresetId) {
-				json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400);
-				return;
-			}
-			if (hasSessionIds && hasWorktrees) {
-				json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400);
-				return;
-			}
-			if (hasSessionIds) {
-				const sessionIds = rec.sessionIds;
-				if (!Array.isArray(sessionIds) || sessionIds.some((id: unknown) => typeof id !== "string")) {
-					json({ error: "sessionIds must be an array of strings" }, 400);
-					return;
-				}
-				await cleanup({ mode: "selected", sessionIds });
-				return;
-			}
-			if (hasWorktrees) {
-				const worktrees = rec.worktrees;
-				if (!Array.isArray(worktrees) || worktrees.some((wt: unknown) => {
-					if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
-					const selector = wt as Record<string, unknown>;
-					return typeof selector.sessionId !== "string"
-						|| (selector.repo !== undefined && typeof selector.repo !== "string")
-						|| (selector.path !== undefined && typeof selector.path !== "string")
-						|| (selector.key !== undefined && typeof selector.key !== "string");
-				})) {
-					json({ error: "worktrees must be an array of selector objects with string fields" }, 400);
-					return;
-				}
-				await cleanup({ mode: "selected", worktrees });
-				return;
-			}
-			await cleanup({ mode: "selected" });
-			return;
+			if (hasCategories || hasPresetId) { json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400); return; }
+			if (hasSessionIds && hasWorktrees) { json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400); return; }
+			if (hasSessionIds && (!Array.isArray(rec.sessionIds) || rec.sessionIds.some((id: unknown) => typeof id !== "string"))) { json({ error: "sessionIds must be an array of strings" }, 400); return; }
+			if (hasWorktrees && (!Array.isArray(rec.worktrees) || rec.worktrees.some((wt: unknown) => {
+				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
+				const selector = wt as Record<string, unknown>;
+				return typeof selector.sessionId !== "string" || (selector.repo !== undefined && typeof selector.repo !== "string") || (selector.path !== undefined && typeof selector.path !== "string") || (selector.key !== undefined && typeof selector.key !== "string");
+			}))) { json({ error: "worktrees must be an array of selector objects with string fields" }, 400); return; }
 		}
 		if (mode === "category") {
-			if (hasSessionIds || hasWorktrees || hasPresetId) {
-				json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400);
-				return;
-			}
-			const categories = rec.categories;
 			const validCategories = new Set(["archived-session", "goal-session", "team-session", "delegate-session", "child-session", "single-repo", "multi-repo"]);
-			if (!Array.isArray(categories) || categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) {
-				json({ error: "categories must be an array of supported category strings" }, 400);
-				return;
-			}
-			if (rec.projectId !== undefined && typeof rec.projectId !== "string") {
-				json({ error: "projectId must be a string" }, 400);
-				return;
-			}
-			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") {
-				json({ error: "repoPath must be a string" }, 400);
-				return;
-			}
-			await cleanup({ mode: "category", categories, projectId: rec.projectId, repoPath: rec.repoPath });
-			return;
+			if (hasSessionIds || hasWorktrees || hasPresetId) { json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400); return; }
+			if (!Array.isArray(rec.categories) || rec.categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) { json({ error: "categories must be an array of supported category strings" }, 400); return; }
+			if (rec.projectId !== undefined && typeof rec.projectId !== "string") { json({ error: "projectId must be a string" }, 400); return; }
+			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") { json({ error: "repoPath must be a string" }, 400); return; }
 		}
-		if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) {
-			json({ error: "mode=preset accepts presetId only" }, 400);
-			return;
+		if (mode === "preset") {
+			if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) { json({ error: "mode=preset accepts presetId only" }, 400); return; }
+			if (typeof rec.presetId !== "string") { json({ error: "presetId must be a string" }, 400); return; }
 		}
-		if (typeof rec.presetId !== "string") {
-			json({ error: "presetId must be a string" }, 400);
-			return;
-		}
-		await cleanup({ mode: "preset", presetId: rec.presetId });
+		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
+		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
 		return;
 	}
 
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
-		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
-		// Hidden contexts (synthetic system project) have no worktrees and
-		// resolving their repoPath can leak into an unrelated host repo.
-		for (const ctx of projectContextManager.visible()) {
-			try {
-				const repoPath = ctx.project.rootPath;
-				if (await isGitRepo(repoPath)) {
-					const orphans = await sessionManager.listOrphanedSessionWorktrees(repoPath);
-					for (const o of orphans) {
-						allOrphans.push({ ...o, repoPath });
-					}
-				}
-			} catch { /* best-effort */ }
-		}
-		json({ worktrees: allOrphans });
+		json(await worktreeInventory().legacyOrphanedWorktrees());
 		return;
 	}
 
 	// POST /api/maintenance/cleanup-worktrees
 	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
 		const body = await readBody(req);
-		let cleaned = 0;
-		if (body?.worktrees && Array.isArray(body.worktrees)) {
-			// Clean specific worktrees — validate each against registered projects and orphan list
-			const validRepoPaths = new Set([...projectContextManager.visible()].map(ctx => ctx.project.rootPath));
-			for (const wt of body.worktrees) {
-				if (wt.path && wt.branch && wt.repoPath) {
-					// Validate repoPath is a registered project
-					if (!validRepoPaths.has(wt.repoPath)) continue;
-					// Validate this worktree is actually orphaned
-					try {
-						const orphans = await sessionManager.listOrphanedSessionWorktrees(wt.repoPath);
-						const isOrphan = orphans.some(o => o.path === wt.path && o.branch === wt.branch);
-						if (!isOrphan) continue;
-					} catch { continue; }
-					try {
-						const { cleanupWorktree } = await import("./skills/git.js");
-						await cleanupWorktree(wt.repoPath, wt.path, wt.branch, true);
-						cleaned++;
-					} catch { /* best-effort */ }
+		const contentLengthHeader = Array.isArray(req.headers["content-length"]) ? req.headers["content-length"][0] : req.headers["content-length"];
+		const hasRequestBody = contentLengthHeader !== undefined
+			? Number(contentLengthHeader) > 0
+			: req.headers["transfer-encoding"] !== undefined;
+		const isPlainObjectBody = body !== null && typeof body === "object" && !Array.isArray(body);
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "mode")) {
+			const mode = (body as any).mode;
+			if (mode !== "all-safe" && mode !== "selected") {
+				json({ error: "mode must be all-safe or selected" }, 400);
+				return;
+			}
+			if (mode === "all-safe") {
+				if (Object.prototype.hasOwnProperty.call(body, "itemIds") || Object.prototype.hasOwnProperty.call(body, "worktrees")) {
+					json({ error: "mode=all-safe does not accept selectors" }, 400);
+					return;
 				}
+			} else if (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string")) {
+				json({ error: "itemIds must be an array of strings" }, 400);
+				return;
 			}
-		} else {
-			// Clean all orphans across all projects (hidden contexts excluded).
-			for (const ctx of projectContextManager.visible()) {
-				try {
-					const repoPath = ctx.project.rootPath;
-					if (await isGitRepo(repoPath)) {
-						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
-						cleaned++; // count projects cleaned, not individual worktrees
-					}
-				} catch { /* best-effort */ }
-			}
+			json(await worktreeInventory().cleanup(body as any));
+			return;
 		}
-		json({ cleaned });
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
+			json({ error: "mode is required when itemIds is provided" }, 400);
+			return;
+		}
+		if ((body === null && hasRequestBody) || (body !== null && !isPlainObjectBody)) {
+			json({ error: "cleanup-worktrees body must be an object" }, 400);
+			return;
+		}
+		const legacyBodyKeys = isPlainObjectBody ? Object.keys(body as Record<string, unknown>) : [];
+		if (legacyBodyKeys.some(key => key !== "worktrees")) {
+			json({ error: "legacy cleanup-worktrees body accepts worktrees only" }, 400);
+			return;
+		}
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
+			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
+			return;
+		}
+		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: isPlainObjectBody ? (body as any).worktrees : undefined });
+		json({ cleaned: result.counts.cleaned });
 		return;
 	}
 

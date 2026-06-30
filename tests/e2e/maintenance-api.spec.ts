@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId, registerProject } from "./e2e-setup.js";
 
 let token: string;
 
@@ -326,6 +326,31 @@ async function getArchivedWorktreeScan(query = ""): Promise<any> {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/maintenance/worktrees
+// ---------------------------------------------------------------------------
+test("GET /api/maintenance/worktrees returns canonical inventory shape", async () => {
+	const resp = await apiFetch("/api/maintenance/worktrees");
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	expect(Array.isArray(body.items)).toBe(true);
+	expectNumberCounts(body, ["total", "readyToClean", "protectedInUse", "archivedOwned", "unownedGitWorktrees", "poolEntries", "alreadyCleaned", "needsAttention", "scanErrors", "defaultSelected"]);
+	expectNumberMap(body.counts.byClassification, "counts.byClassification");
+	expectNumberMap(body.counts.byReason, "counts.byReason");
+	expectNumberMap(body.counts.bySource, "counts.bySource");
+	expect(typeof body.generatedAt).toBe("number");
+	for (const item of body.items as any[]) {
+		expect(typeof item.id).toBe("string");
+		expect(typeof item.classification).toBe("string");
+		expect(Array.isArray(item.sources)).toBe(true);
+		expect(Array.isArray(item.owners)).toBe(true);
+		expect(typeof item.reason).toBe("string");
+		expect(typeof item.detail).toBe("string");
+		expect(typeof item.actionable).toBe("boolean");
+		expect(typeof item.defaultSelected).toBe("boolean");
+	}
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/maintenance/orphaned-worktrees
 // ---------------------------------------------------------------------------
 test("GET /api/maintenance/orphaned-worktrees returns list", async () => {
@@ -349,6 +374,120 @@ test("POST /api/maintenance/cleanup-worktrees returns cleaned count", async () =
 	const body = await resp.json();
 	expect(body).toHaveProperty("cleaned");
 	expect(typeof body.cleaned).toBe("number");
+});
+
+test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanup bodies", async () => {
+	const invalidMode = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ mode: "all" }),
+	});
+	expect(invalidMode.status).toBe(400);
+
+	const selectedWithLegacyShape = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ mode: "selected", worktrees: [] }),
+	});
+	expect(selectedWithLegacyShape.status).toBe(400);
+
+	const legacyShape = await apiFetch("/api/maintenance/cleanup-worktrees", {
+		method: "POST",
+		body: JSON.stringify({ worktrees: [] }),
+	});
+	expect(legacyShape.status).toBe(200);
+	expect(await legacyShape.json()).toHaveProperty("cleaned");
+});
+
+test("POST /api/maintenance/cleanup-worktrees rejects itemIds without mode without cleaning legacy orphans", async () => {
+	test.slow();
+	const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-cleanup-itemids-"));
+	const repoPath = join(baseDir, "repo");
+	const worktreePath = join(baseDir, "orphan-worktree");
+	const branch = `session/malformed-itemids-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+	let projectId: string | undefined;
+	try {
+		initGitRepo(repoPath);
+		const project = await registerProject({ name: `cleanup itemIds ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
+		projectId = project.id;
+		git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+
+		const beforeResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(beforeResp.status).toBe(200);
+		const before = await beforeResp.json();
+		const beforeItem = (before.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(beforeItem).toMatchObject({ branch, repoPath });
+
+		const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
+			method: "POST",
+			body: JSON.stringify({ itemIds: ["canonical-selector-without-mode"] }),
+		});
+		expect(malformed.status).toBe(400);
+
+		expect(existsSync(worktreePath)).toBe(true);
+		expect(branchExists(repoPath, branch)).toBe(true);
+		expect(listedWorktreePaths(repoPath)).toContain(normalizeTestPath(worktreePath));
+
+		const afterResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(afterResp.status).toBe(200);
+		const after = await afterResp.json();
+		const afterItem = (after.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(afterItem).toMatchObject({ branch, repoPath });
+	} finally {
+		tryRemoveWorktree(repoPath, worktreePath);
+		tryDeleteBranch(repoPath, branch);
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		rmSync(baseDir, { recursive: true, force: true });
+	}
+});
+
+test("POST /api/maintenance/cleanup-worktrees rejects non-object bodies without cleaning legacy orphans", async () => {
+	test.slow();
+	const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-cleanup-body-"));
+	const repoPath = join(baseDir, "repo");
+	const worktreePath = join(baseDir, "orphan-worktree");
+	const branch = `session/malformed-body-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+	let projectId: string | undefined;
+	try {
+		initGitRepo(repoPath);
+		const project = await registerProject({ name: `cleanup body ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
+		projectId = project.id;
+		git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+
+		const beforeResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(beforeResp.status).toBe(200);
+		const before = await beforeResp.json();
+		const beforeItem = (before.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(beforeItem).toMatchObject({ branch, repoPath });
+
+		const invalidBodies = [
+			{ label: "array", value: [] },
+			{ label: "string", value: "legacy-orphaned" },
+			{ label: "number", value: 1 },
+			{ label: "boolean", value: true },
+			{ label: "null", value: null },
+		] as const;
+
+		for (const invalidBody of invalidBodies) {
+			const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
+				method: "POST",
+				body: JSON.stringify(invalidBody.value),
+			});
+			expect(malformed.status, invalidBody.label).toBe(400);
+			expect(existsSync(worktreePath), invalidBody.label).toBe(true);
+			expect(branchExists(repoPath, branch), invalidBody.label).toBe(true);
+			expect(listedWorktreePaths(repoPath), invalidBody.label).toContain(normalizeTestPath(worktreePath));
+		}
+
+		const afterResp = await apiFetch("/api/maintenance/orphaned-worktrees");
+		expect(afterResp.status).toBe(200);
+		const after = await afterResp.json();
+		const afterItem = (after.worktrees as any[]).find(item => item.branch === branch && normalizeTestPath(item.path) === normalizeTestPath(worktreePath));
+		expect(afterItem).toMatchObject({ branch, repoPath });
+	} finally {
+		tryRemoveWorktree(repoPath, worktreePath);
+		tryDeleteBranch(repoPath, branch);
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		rmSync(baseDir, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------

@@ -287,27 +287,53 @@ async function expectRuntimePrwTools(enabled: readonly string[], disabled: reado
 	}, { timeout: 10_000 }).toBe(PRW_TOOL_NAMES.map((name) => `${name}:${expected.get(name) ? "on" : "off"}`).join(","));
 }
 
-/** Mint a server-minted pack-bound surface token for the pack's PANEL (no carrier
- *  tool). Used only by the path-traversal probe below. */
+/**
+ * The path-traversal probe calls the production `bundle` route directly, outside
+ * the pack panel. That route still needs a real scoped Host API token. Normal UI
+ * sessions intentionally do not carry the reviewer-only bundle tool, so the test
+ * grants it only for this probe and restores the original live allowlist after the
+ * route returns. Pack-bound panel tokens remain app-WS-only; this uses the public
+ * REST mint path solely for a tool-bound surface that is valid for the probe.
+ */
+async function withBundleRouteProbeTool<T>(gateway: any, sid: string, fn: () => Promise<T>): Promise<T> {
+	const session = gateway?.sessionManager?.getSession?.(sid) as { allowedTools?: string[] } | undefined;
+	expect(session, "route probe requires the UI-created session to still be live").toBeTruthy();
+	if (!session) return fn();
+	if (!Array.isArray(session.allowedTools)) return fn();
+	const originalAllowedTools = [...session.allowedTools];
+	if (!session.allowedTools.some((name) => name.toLowerCase() === "read_pr_walkthrough_bundle")) {
+		session.allowedTools = [...session.allowedTools, "read_pr_walkthrough_bundle"];
+	}
+	try {
+		return await fn();
+	} finally {
+		session.allowedTools = originalAllowedTools;
+	}
+}
+
+/** Mint a server-minted tool-bound surface token for the pack. Used only by the
+ *  path-traversal probe below; pack-bound panel tokens are app-WS-only. */
 async function mintSurfaceToken(sid: string): Promise<string> {
 	const res = await apiFetch("/api/ext/surface-token", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
-		body: JSON.stringify({ sessionId: sid, packId: PACK, contributionKind: "panel", contributionId: PANEL_ID }),
+		body: JSON.stringify({ sessionId: sid, tool: "read_pr_walkthrough_bundle" }),
 	});
 	const body = await res.text();
 	expect(res.status, `surface-token mint failed: ${body}`).toBe(200);
 	return JSON.parse(body).token as string;
 }
 
-async function callBundleRoute(sid: string, query: Record<string, string>): Promise<{ status: number; text: string }> {
-	const surfaceToken = await mintSurfaceToken(sid);
-	const res = await apiFetch("/api/ext/route/bundle", {
-		method: "POST",
-		headers: { "x-bobbit-session-id": sid },
-		body: JSON.stringify({ sessionId: sid, surfaceToken, init: { query } }),
+async function callBundleRoute(gateway: any, sid: string, query: Record<string, string>): Promise<{ status: number; text: string }> {
+	return withBundleRouteProbeTool(gateway, sid, async () => {
+		const surfaceToken = await mintSurfaceToken(sid);
+		const res = await apiFetch("/api/ext/route/bundle", {
+			method: "POST",
+			headers: { "x-bobbit-session-id": sid },
+			body: JSON.stringify({ sessionId: sid, surfaceToken, init: { query } }),
+		});
+		return { status: res.status, text: await res.text() };
 	});
-	return { status: res.status, text: await res.text() };
 }
 
 function liveDeepLink(): string {
@@ -368,7 +394,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 
 		// ── Step 3b: PATH-TRAVERSAL PROBE — a caller-supplied repoDir cannot exfiltrate
 		// another repo's diff (the route ignores it; the outside SHAs fail closed). ──
-		const attack = await callBundleRoute(sid!, { baseSha: outsideBaseSha, headSha: outsideHeadSha, repoDir: outsideRepoDir! });
+		const attack = await callBundleRoute(gateway, sid!, { baseSha: outsideBaseSha, headSha: outsideHeadSha, repoDir: outsideRepoDir! });
 		expect(attack.text, "the other repo's secret must NEVER leak through repoDir").not.toContain(OUTSIDE_SECRET_MARKER);
 		expect(attack.text).not.toContain(OUTSIDE_SECRET_FILE);
 		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status})`).not.toBe(200);

@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "../gateway-harness.js";
+import { expect, test } from "../gateway-harness.js";
+import type { Locator, Page } from "@playwright/test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { apiFetch } from "../e2e-setup.js";
@@ -50,6 +51,24 @@ async function waitForAgentDirResponse(page: Page, pathSuffix: string, method: s
 	);
 }
 
+async function fillAgentDirPath(section: Locator, path: string) {
+	const input = section.locator(tid("agent-dir-path-input"));
+	await expect(input).toBeVisible({ timeout: 10_000 });
+	await expect(input).toBeEnabled({ timeout: 10_000 });
+	await input.fill(path);
+	await expect(input).toHaveValue(path);
+	await expect(section.locator(tid("agent-dir-validate"))).toBeEnabled({ timeout: 10_000 });
+}
+
+async function clickAndWaitForAgentDirResponse(page: Page, button: Locator, pathSuffix: string, method: string) {
+	await expect(button).toBeEnabled({ timeout: 10_000 });
+	const [response] = await Promise.all([
+		waitForAgentDirResponse(page, pathSuffix, method),
+		button.click(),
+	]);
+	return response;
+}
+
 function seedMigrationFiles(activeDir: string, pendingDir: string) {
 	mkdirSync(join(activeDir, "sessions"), { recursive: true });
 	mkdirSync(join(activeDir, "bin"), { recursive: true });
@@ -87,17 +106,12 @@ test.describe("Settings → Maintenance agent directory", () => {
 			await expect(section.locator(tid("agent-dir-next-start"))).toContainText(nextStartDir);
 			await expect(section.locator(tid("agent-dir-persisted"))).toContainText("—");
 
-			const input = section.locator(tid("agent-dir-path-input"));
-			await input.fill(insideWorktreeDir);
-			const validation = waitForAgentDirResponse(page, "/api/agent-dir/validate", "POST");
-			await section.locator(tid("agent-dir-validate")).click();
-			await validation;
+			await fillAgentDirPath(section, insideWorktreeDir);
+			await clickAndWaitForAgentDirResponse(page, section.locator(tid("agent-dir-validate")), "/api/agent-dir/validate", "POST");
 			await expect(section.locator(tid("agent-dir-validation-result"))).toContainText(/INSIDE_WORKTREE|inside (the )?(git )?worktree|inside (the )?project/i);
 
-			await input.fill(pendingDir);
-			const save = waitForAgentDirResponse(page, "/api/agent-dir/pending", "PUT");
-			await section.locator(tid("agent-dir-save")).click();
-			await save;
+			await fillAgentDirPath(section, pendingDir);
+			await clickAndWaitForAgentDirResponse(page, section.locator(tid("agent-dir-save")), "/api/agent-dir/pending", "PUT");
 
 			await expect(section.locator(tid("agent-dir-persisted"))).toContainText(pendingDir, { timeout: 10_000 });
 			await expect(section.locator(tid("agent-dir-restart-guidance"))).toContainText(activeDir);
@@ -109,18 +123,14 @@ test.describe("Settings → Maintenance agent directory", () => {
 			await expect(migrationCard).toContainText(/copy/i);
 			await expect(migrationCard).toContainText(/skip existing/i);
 
-			let migrate = waitForAgentDirResponse(page, "/api/agent-dir/migrate", "POST");
-			await migrationCard.locator(tid("agent-dir-migrate-start")).click();
-			await migrate;
+			await clickAndWaitForAgentDirResponse(page, migrationCard.locator(tid("agent-dir-migrate-start")), "/api/agent-dir/migrate", "POST");
 			let report = migrationCard.locator(tid("agent-dir-migration-report"));
 			await expect(report).toBeVisible({ timeout: 10_000 });
 			await expect(migrationCard.locator(tid("agent-dir-migrate-skipped"))).toContainText(/Skipped:\s*[1-9]/);
 			expect(readFileSync(join(pendingDir, "models.json"), "utf-8")).toContain("destination-existing-models");
 
 			await migrationCard.locator(tid("agent-dir-migrate-overwrite")).check();
-			migrate = waitForAgentDirResponse(page, "/api/agent-dir/migrate", "POST");
-			await migrationCard.locator(tid("agent-dir-migrate-start")).click();
-			await migrate;
+			await clickAndWaitForAgentDirResponse(page, migrationCard.locator(tid("agent-dir-migrate-start")), "/api/agent-dir/migrate", "POST");
 			report = migrationCard.locator(tid("agent-dir-migration-report"));
 			await expect(report).toBeVisible({ timeout: 10_000 });
 			await expect(migrationCard.locator(tid("agent-dir-migrate-overwritten"))).toContainText(/Overwritten:\s*[1-9]/);

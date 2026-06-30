@@ -31,8 +31,10 @@ freezes the contribution-point manifest, the full Host API, and proves (on paper
 types.
 
 **Durability principle (the whole point of v1).** Every host capability is a **typed,
-named, versioned, capability-scoped method**. There is **no raw transport and no escape
-hatch**: the Host API is a contract Bobbit *serves*, not a window into Bobbit internals.
+named, versioned, capability-scoped method**. The sanctioned Host API exposes no raw
+transport or untyped passthrough: it is a contract Bobbit *serves*, not a window into
+Bobbit internals. This is a contract/durability boundary, not a browser-realm
+anti-spoofing claim against installed/enabled pack code with the session bearer.
 Consequences encoded throughout this doc:
 
 - **No `gateway.fetch`.** A raw authenticated fetch against the live REST surface would
@@ -85,7 +87,7 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 3. **Host API (Phase-1 surface).** `host.invokeAction(tool, action, args)` (plus the
    client-only `host.requestRender()`) — exposed to renderers via a new optional
    `ToolRenderContext.host?: HostApi`. **There is no `gateway.fetch`:** `invokeAction` is
-   the sole pack→server path and is authorized exactly like a tool call. Built-in
+   the sole Phase-1 pack action path and is authorized exactly like a tool call. Built-in
    renderers are unchanged (they ignore the field). The full `host.session.*` /
    `host.ui.*` / `host.store.*` namespace — plus the pack-scoped, typed `host.callRoute`
    (the durable replacement for raw fetch) — is frozen as interfaces but **not**
@@ -99,7 +101,8 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 ## 1. Overview & two-host architecture
 
 VS Code-shaped: declarative **contribution points** in the tool/pack manifest, two
-**extension hosts**, one **Host API** that is the single security choke point.
+**extension hosts**, one **Host API** as the typed authorization choke point for sanctioned
+pack capabilities.
 
 ```
                           ┌───────────────────────────── Bobbit gateway (server host) ─────────────┐
@@ -111,15 +114,15 @@ VS Code-shaped: declarative **contribution points** in the tool/pack manifest, t
   │  ToolRenderContext│──▶┼──   │  guard (allowedTools) ─ verify toolUseId ─ load actions.js ─ run    │
   │     .host: HostApi│   │     └── ctx: ServerHostApi (scoped, audited, timeout)                     │
   └───────────────────┘   │                                                                          │
-        ▲   host.invokeAction (Phase 1, the ONLY pack→server path; tool-authorized)                  │
-        ┄   host.callRoute / host.session.* / host.ui.* / host.store.* (Phase 2, typed + scoped)     │
+        ▲   host.invokeAction (Phase 1, tool-authorized action path)                                │
+        ┄   host.callRoute / host.session.* / host.ui.* / host.store.* / host.channels.* (scoped)    │
         └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 There is no raw-fetch arrow: every sanctioned arrow is a typed, named, authorized method.
-The Phase-1 arrow is `host.invokeAction`; the Phase-2 arrows (`host.callRoute` against the
-pack's OWN `routes:` namespace, `host.session.*`, `host.ui.*`, `host.store.*`) are all
-typed and scoped, never a raw passthrough.
+The Phase-1 arrow is `host.invokeAction`; the scoped arrows (`host.callRoute` against the
+pack's OWN `routes:` namespace, `host.session.*`, `host.ui.*`, `host.store.*`, and
+`host.channels.*` for declared channels) are all typed and scoped, never a raw passthrough.
 
 - **Client host** (browser, this app's Vite bundle): lazy-loads a pack's UI module and
   registers it as a tool renderer. Lives in `src/ui/tools/` + a new bootstrap in
@@ -311,9 +314,10 @@ Committed as interfaces in a shared module `src/shared/extension-host/host-api.t
 (importable by both `src/ui` and `src/server`). Phase 1 implemented only `invokeAction`
 and the client-only `requestRender`; **Phase 2 implemented every remaining member to its
 exact v1 signature** — `callRoute`, `session.{readTranscript,readToolCall,postMessage,
-subscribe}`, `ui.{openPanel,navigate}`, `store.{get,put,list}`. The additive-only promise
-held: the interfaces below are byte-identical, `HOST_API_VERSION` is still `1`, and a
-client `host.capabilities` now reports **all flags `true`** (`src/app/host-api.ts`). The
+subscribe}`, `ui.{openPanel,navigate}`, `store.{get,put,list}`. Later additive work added
+`host.channels` and server-side `host.agents` without changing `HOST_API_VERSION`. The additive-only
+promise held: the interfaces below are byte-identical, `HOST_API_VERSION` is still `1`, and a
+client `host.capabilities` now reports implemented flags `true` (`src/app/host-api.ts`). The
 inline `PHASE 2` notes in the interface block below now read **IMPLEMENTED**; the
 per-method status is summarized here:
 
@@ -384,12 +388,11 @@ export interface HostApi {
 	 * The SINGLE SOURCE OF TRUTH for which capabilities are actually IMPLEMENTED on this
 	 * host. Authors MUST feature-detect via `host.capabilities.<name>` (or
 	 * `host.capabilities.has(name)`), NOT via member-presence checks: every namespace
-	 * (`callRoute`/`session`/`ui`/`store`) is ALWAYS present on the object for type
-	 * stability, so `if (host.callRoute)` / `if (host.store)` would succeed even on a host
-	 * that has the capability gated off. On a current host every flag is
-	 * `true`: `{ invokeAction: true, requestRender: true,
-	 * callRoute: true, session: true, ui: true, store: true }`. The flags exist so a host
-	 * can additively gate a capability on/off without signature or version churn. */
+	 * (`callRoute`/`session`/`ui`/`store`, plus additive namespaces such as `channels`) is
+	 * ALWAYS present on the object for type stability, so `if (host.callRoute)` /
+	 * `if (host.store)` would succeed even on a host that has the capability gated off. On a
+	 * current host implemented flags are `true` (including additive `channels`). The flags exist so
+	 * a host can additively gate a capability on/off without signature or version churn. */
 	readonly capabilities: HostCapabilities;
 
 	/**
@@ -589,7 +592,7 @@ export interface ToolRenderContext {
 
 	/** NEW: Phase-1 Host API. Present for ALL renderers (built-in + pack). Built-in
 	 *  renderers ignore it; pack renderers use it for invokeAction / requestRender
-	 *  (there is no gateway.fetch — invokeAction is the sole pack→server path).
+	 *  (there is no gateway.fetch — invokeAction is the sole pack action path).
 	 *  Optional so unit fixtures that construct a bare ctx keep compiling. */
 	host?: HostApi;
 }
@@ -1158,8 +1161,8 @@ import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostApi } from "../shared
  *  identity fields in `args`. Every Phase-2 namespace is now IMPLEMENTED, so
  *  `capabilities` reports them all `true`; authors still feature-detect via
  *  `capabilities.has(name)` rather than member presence. There is NO gateway member
- *  — invokeAction is the only pack→server action path; the scoped capabilities
- *  (`callRoute`/`store`/`session`) ride server-minted surface tokens (§3.2).
+ *  — invokeAction is the only pack action path; the scoped capabilities
+ *  (`callRoute`/`store`/`session`/`channels`) ride server-minted surface tokens (§3.2).
  *
  *  This is the CLIENT-side construction; the server analogue is the internal
  *  `createHostApi({ sessionId, toolUseId, packId, contributionId })` contract (§3.2),
@@ -1168,7 +1171,7 @@ import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostApi } from "../shared
 export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
 	// Every capability is implemented. `capabilities` is the single source of truth;
 	// authors feature-detect with `capabilities.has(name)`, never member presence.
-	const flags = { invokeAction: true, requestRender: true, callRoute: true, session: true, ui: true, store: true };
+	const flags = { invokeAction: true, requestRender: true, callRoute: true, session: true, ui: true, store: true /* additive: channels */ };
 	return {
 		version: HOST_API_VERSION,
 		contractVersion: HOST_CONTRACT_VERSION,
@@ -1234,9 +1237,9 @@ in exactly one place.
 | ii | **Input validation / no traversal** | `:tool`/`:action` matched against resolved tool + `actions.names`; `module`/`renderer` paths re-validated to stay within `baseDir/groupDir` (no `..`, no abs); `args` passed to the handler as opaque JSON — never `eval`/`exec`/`require`-d; `sessionId`/`toolUseId` treated as untrusted strings, never used to build filesystem/session paths beyond a store `get`. | **Yes — unit** |
 | iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the **header-bound** session's transcript via `projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
 | iii-b | **Single-sourced session identity** | The `x-bobbit-session-id` HEADER is the canonical identity. The request body's `sessionId` is accepted only to fail fast on a mismatch — `body.sessionId === headerSessionId` is required (403 otherwise) BEFORE any allowedTools/toolUseId check; every downstream check uses the header-bound session. Prevents authorizing with one session and inspecting/acting on another's transcript. | **Yes — unit** |
-| iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Action handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is the separate, user-gesture-gated `host.session.*` capability (§3.2 / Slice C2). | **Yes — E2E** |
+| iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Action handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is the separate `host.session.postMessage` capability, which keeps a user-gesture + one-time permit as a user-provenance/UX guard for driving the active transcript. | **Yes — E2E** |
 | iv | **Blast radius** | Pack server modules (actions + routes) run in a confined `worker_threads` **worker**, NOT the gateway process — the parent only resolves + validates the module path and never imports pack code. The worker is **terminate-on-timeout** (true cancellation of a runaway handler — also the CPU-exhaustion control, since `worker_threads` has no per-core throttle), with **memory/stack caps**, **spawned-child SIGKILL**, **empty env** (no gateway token/secret), and **module-import containment to the pack root**. On top of it the dispatcher keeps its controls: per-call **timeout** (default 30s) spanning BOTH module load+eval AND handler execution; global **concurrency cap** (semaphore, default 8 in-flight, permit held until the work settles); **error isolation** so a throw or worker crash becomes a 500, never process death; per-session **rate-limit** (token bucket). This is Model A — **stability/resource/crash isolation, NOT a security sandbox against trusted pack code** (§3.4 / [phase-2 design §9](extension-host-phase2.md)); isolation is unconditional (no in-process fallback to gate). | **Yes — unit (worker terminate-on-timeout + resource caps; dispatcher timeout, concurrency cap, isolation, rate-limit)** |
-| v | **UI thread** | Renderers run on the main thread over LLM-influenced data. Preserve existing iframe `sandbox` attributes (artifacts/preview unchanged). Pack renderers **must NOT auto-invoke actions on render** — `invokeAction` is only called from a user gesture (click). The litmus sample's Retry button enforces this; reviewers reject render-time invocation. | **Yes — E2E asserts no call before click** |
+| v | **UI thread** | Renderers run on the main thread over LLM-influenced data. Preserve existing iframe `sandbox` attributes (artifacts/preview unchanged). Pack renderers **should not auto-invoke actions on render** — call `invokeAction` from visible user actions for UX/provenance. The server-enforced boundary remains session header binding, `allowedTools`, action allowlist, and `toolUseId` ownership. | **Yes — E2E asserts no call before click** |
 | vi | **Audit** | Every action invocation logs `{ tool, action, sessionId, toolUseId, caller, outcome, durationMs }` via the existing logger. | recommended |
 
 **What is NOT a new risk:** arbitrary gateway access / code execution — the LLM already
@@ -1248,42 +1251,48 @@ has the token + shell. We are not widening that; we are adding *typed* entry poi
 had to resolve a *trusted base URL* (the `resolveTrustedGatewayBaseUrl` machinery,
 Host-header–derived), which is itself a token-leak surface — a forged/poisoned Host header
 could steer the injected admin bearer at an attacker-chosen origin. Removing `gateway.fetch`
-deletes that entire concern: the only endpoint the client Host API calls in Phase 1 is the
-same-origin action endpoint, and the durable Phase-2 replacement (`host.callRoute`) is
-scoped to the pack's OWN `/api/ext/<pack>/*` namespace and authorized like a tool call.
-There is no raw-fetch capability to misdirect, so the trusted-base-URL surface is gone.
+deletes that contract-level concern: the Phase-1 client Host API builds the same-origin
+action request itself, and the durable Phase-2 replacement (`host.callRoute`) is scoped to
+the caller's validated pack identity and authorized through the scoped Host API guard. No
+Host API method accepts a caller-supplied URL or `Authorization` header, so the
+trusted-base-URL surface is gone.
 
 ### 5.1 The single choke point — `invokeAction` + scoped Phase-2 capabilities
 
-The boundary is now exactly the set of NEW typed entry points the extension host
-introduces; there is no raw escape hatch to reason around.
+The sanctioned boundary is the set of typed entry points the extension host introduces,
+combined with gateway bearer/session auth, scoped surface identity, declarations, quotas,
+audit, and sandbox/read-only policy.
 
 - **`invokeAction` is the only Phase-1 pack→server path, and it is authorized like a tool
   call.** The action endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈
   the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call`
   (control i). The LLM can `curl` the endpoint, so this guard — not the agent layer's
   `allowedTools` — is the real gate.
-- **Phase-2 capabilities inherit the same rule by construction.** `host.callRoute` (the
-  pack-scoped route capability), `host.store.*`, and `host.session.*` all route through the
-  one `allowedTools`-gated guard. `callRoute` additionally constrains the target to the
-  calling pack's OWN `/api/ext/<thisPack>/*` namespace — a pack can never address another
-  pack's routes or an arbitrary gateway path. This is the durable replacement for the
-  removed raw fetch: dynamic pack data comes from typed, pack-owned, authorized routes.
+- **Phase-2 capabilities inherit scoped authorization by construction.** `host.callRoute`
+  (the pack-scoped route capability), `host.store.*`, `host.session.*`, and later
+  `host.channels.*` route through validated surface identity plus the header-bound session.
+  Tool-bound surfaces layer `allowedTools`; pack-bound surfaces are gated by
+  installed+active+own-session. `callRoute` additionally constrains the target to the
+  calling pack's own declared routes — dynamic pack data comes from typed, pack-owned,
+  authorized routes rather than a caller-supplied gateway path.
 - **The renderer-module endpoint is not a capability entry point.** `GET
   /api/tools/:tool/renderer` serves trusted pack module bytes (a static-asset-equivalent),
   so it is bearer-only — EXEMPT from the `allowedTools` check (§4a, control i). Path
   traversal on the renderer file is still re-validated.
-- **The injected bearer never leaves same-origin.** With no `gateway.fetch`, there is no
-  caller-supplied URL or `Authorization` header to sanitize on the client: `host-api.ts`
-  builds the single action-endpoint request itself (same-origin, `withSession` adds only
-  `x-bobbit-session-id`; `gatewayFetch` adds the bearer). The previous
+- **The Host API has no caller-supplied transport target.** With no `gateway.fetch`, there
+  is no caller-supplied URL or `Authorization` header to sanitize in the Host API contract:
+  `host-api.ts` builds same-origin endpoint requests itself (`withSession` adds only
+  `x-bobbit-session-id`; `gatewayFetch` adds the bearer where needed). The previous
   `stripAuthorizationHeaders` / trusted-base-URL defenses are unnecessary because the
-  capability that required them no longer exists.
+  capability that required them no longer exists. This does not make same-origin code a
+  separate security principal; bearer/session auth and sandbox/token custody remain the
+  gateway boundary.
 - **The single choke point, stated accurately:** every capability entry point created by
-  the extension host (the action endpoint today; `callRoute`/`stores`/`session` in Phase 2)
-  routes through one `allowedTools`-gated guard; the renderer-module endpoint serves
-  trusted bytes and is bearer-only. There is exactly one un-typed surface in the whole
-  design — none — which is the property that makes v1 durable.
+  the extension host routes through the appropriate server guard: `invokeAction` uses the
+  full tool/action/`toolUseId` guard; scoped capabilities use validated surface identity,
+  header-bound session, declarations/namespaces, quotas, and audit. The renderer-module
+  endpoint serves trusted bytes and is bearer-only. There are no untyped capability entry
+  points in the Host API contract, which is the property that makes v1 durable.
 
 ---
 
@@ -1388,8 +1397,8 @@ when a host gates the capability off), and
 read `host.version` / `host.contractVersion` only to identify the contract revision.
 Deprecation policy: a member may be
 marked `@deprecated` (kept working) for at least one MAJOR `HOST_API_VERSION` before
-removal, and removal is the ONLY thing that bumps the major. The load-bearing rule: **no
-member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
+removal, and removal is the ONLY thing that bumps the major. The load-bearing contract rule:
+**no member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
 un-typed passthrough makes the abstraction a fiction, which is exactly why `gateway.fetch`
 was removed rather than retained "just in case."
 
