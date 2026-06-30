@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -164,7 +165,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
@@ -281,6 +282,25 @@ function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 /** Test/maintenance hook: drop the scan cache. */
 export function __resetToolScanCache(): void {
 	_scanCache.clear();
+	__resetToolExtensionPreflightDiagnostics();
+}
+
+function invalidConfigToolDiagnostic(tool: BaseToolInfo): ToolExtensionDiagnostic | undefined {
+	return preflightConfigBobbitExtension({
+		toolName: tool.name,
+		groupDir: tool.groupDir,
+		baseDir: tool.baseDir,
+		provider: tool.provider,
+	});
+}
+
+function filterInvalidConfigTools(tools: BaseToolInfo[]): BaseToolInfo[] {
+	return tools.filter((tool) => {
+		const diagnostic = invalidConfigToolDiagnostic(tool);
+		if (!diagnostic) return true;
+		logToolExtensionDiagnostic(diagnostic);
+		return false;
+	});
 }
 
 /**
@@ -332,7 +352,10 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
 	const userIdx = layers.length - 1;
 
-	const scanned = layers.map((l) => scanToolsDirCached(l.dir, l.dir));
+	const scanned = layers.map((l, idx) => {
+		const tools = scanToolsDirCached(l.dir, l.dir);
+		return idx === userIdx ? filterInvalidConfigTools(tools) : tools;
+	});
 
 	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
 	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
@@ -406,6 +429,18 @@ export class ToolManager {
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
 	}
 
+	private configGroupHasInvalidBobbitExtension(groupDir: string): boolean {
+		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
+		let invalid = false;
+		for (const tool of tools) {
+			const diagnostic = invalidConfigToolDiagnostic(tool);
+			if (!diagnostic) continue;
+			logToolExtensionDiagnostic(diagnostic);
+			invalid = true;
+		}
+		return invalid;
+	}
+
 	/**
 	 * Late-bind the installed market-pack `tools/` roots provider (design §3.2).
 	 * A root may be a bare `dir` string (no activation filtering) or a
@@ -442,10 +477,11 @@ export class ToolManager {
 	 * Config-level (toolsDir) takes priority over builtins.
 	 */
 	getToolGroupBaseDir(groupDir: string): string {
-		// Check config-level first
+		// Check config-level first. Archived/disabled groups and groups with broken
+		// config-level bobbit-extension providers must not shadow bundled tools.
 		const configGroup = path.join(this.toolsDir, groupDir);
 		try {
-			if (fs.statSync(configGroup).isDirectory()) return this.toolsDir;
+			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidBobbitExtension(groupDir)) return this.toolsDir;
 		} catch { /* not found */ }
 
 		// Check builtins
@@ -619,7 +655,7 @@ export class ToolManager {
 	 */
 	getLocalTools(): ToolInfo[] {
 		// Scan only the config-level tools dir — no builtins
-		const tools = scanToolsDir(this.toolsDir, this.toolsDir);
+		const tools = filterInvalidConfigTools(scanToolsDir(this.toolsDir, this.toolsDir));
 		return tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
