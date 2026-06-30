@@ -2736,7 +2736,6 @@ export class SessionManager {
 	getPromptParts(sessionId: string): PromptParts | undefined {
 		const session = this.sessions.get(sessionId);
 		if (!session) return undefined;
-		if (session.promptParts) return session.promptParts;
 
 		let persisted: PersistedSession | undefined;
 		try { persisted = this.resolveStoreForId(session.id)?.get(session.id); }
@@ -2744,12 +2743,13 @@ export class SessionManager {
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
 
-		// Rebuild on demand for dormant / restored sessions missing cached parts
-		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
-		let parts: PromptParts;
-
-		if ((session.delegateOf || persisted?.delegateOf) && persisted?.instructions?.trim()) {
-			parts = this.buildDelegatePromptParts({
+		// Delegate task instructions are durable store data, not ordinary cached prompt
+		// state. A provider hook can run after an early incomplete cache was created;
+		// for delegates, always rebuild from persisted instructions/context so the
+		// refresh path cannot overwrite the inspector snapshot with a task-less prompt.
+		const isDelegate = !!(session.delegateOf || persisted?.delegateOf);
+		if (isDelegate && persisted?.instructions?.trim()) {
+			const parts = this.buildDelegatePromptParts({
 				cwd: session.cwd,
 				projectRoot: persisted.repoPath,
 				instructions: persisted.instructions,
@@ -2757,7 +2757,33 @@ export class SessionManager {
 				allowedTools: session.allowedTools ?? persisted.allowedTools,
 				sectionOrder,
 			});
-		} else if (assistantDef) {
+			parts.dynamicContext = session.promptParts?.dynamicContext;
+			if (this.toolManager && !parts.toolDocs) {
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			}
+			if (!parts.skillsCatalog) {
+				parts.skillsCatalog = this.computeSkillsCatalog(
+					parts.allowedTools,
+					parts.projectRoot || parts.cwd,
+					parts.projectConfigStore,
+					session.projectId ?? persisted.projectId,
+				);
+			}
+			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+				const pref = this.preferencesStore.get("skillsCatalogBudget");
+				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
+			}
+			session.promptParts = parts;
+			return parts;
+		}
+
+		if (session.promptParts) return session.promptParts;
+
+		// Rebuild on demand for dormant / restored sessions missing cached parts
+		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
+		let parts: PromptParts;
+
+		if (assistantDef) {
 			const assistantTemplate = this.resolveRolePromptTemplate("assistant", session.projectId);
 			let assistantGoalSpec = "";
 			if (assistantTemplate) {
