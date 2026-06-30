@@ -182,7 +182,7 @@ is keyed by those concrete tool names, and the runtime filters compare against t
 `/api/tools`, prompt docs, role effective-tool resolution, and extension/action/surface-token
 resolution. Disabling one tool in a group does not disable its siblings.
 
-**MCP toggle keys and granularity.** `DisabledRefs.mcp` disables a whole installed MCP contribution. For authored packs this remains the pack-local `contents.mcp` basename (`listName`). For MCP Gateway installs, the key is a stable installed contribution id derived from source id, installed pack name, gateway provider id, list name, public server/sub-namespace, and runtime identity. That source-qualified id prevents two gateways with the same provider/list name from sharing activation state.
+**MCP toggle keys and granularity.** `DisabledRefs.mcp` disables a whole installed MCP contribution. For authored packs this remains the pack-local `contents.mcp` basename (`listName`). For MCP Gateway installs, the key is a stable installed contribution id derived from logical ownership only: persisted source id when available, source URL as a fallback for older/hand-authored metadata, installed/materialized pack name, gateway provider id, MCP `listName`, public `serverName`, and `subNamespace`. It intentionally excludes runtime keys, `entry.meta.commit`, and gateway/provider fingerprints, so disabled whole-contribution and operation refs survive catalogue refreshes while still not leaking across gateways with the same provider/list name.
 
 Gateway packages also expose operation activation in `DisabledRefs.mcpOperations`, keyed by the same contribution id with values of disabled operation names. Operation rows are rendered from the installed package catalogue and gateway metadata, not from runtime-filtered status, so disabled operations and stale/retired disabled operation names remain visible and can be re-enabled. New operations discovered after an update default enabled because Bobbit stores disabled names rather than an enabled-only allowlist.
 
@@ -357,7 +357,7 @@ contents:
   mcp: [github]
 ```
 
-Each basename loads exactly one `mcp/<listName>.yaml`, `.yml`, or `.json` file. The `listName` is the stable pack-local identity used by `contents.mcp`, authored-pack activation, gateway materialization, and source metadata. Gateway installs derive a source-qualified contribution id from that list name plus source/install/runtime identity for `DisabledRefs.mcp` and `DisabledRefs.mcpOperations`. The list name is intentionally separate from the public MCP `server` name, which forms policy keys/model-facing meta-tools.
+Each basename loads exactly one `mcp/<listName>.yaml`, `.yml`, or `.json` file. The `listName` is the stable pack-local identity used by `contents.mcp`, authored-pack activation, gateway materialization, and source metadata. Gateway installs derive a stable contribution id from source ownership, installed/materialized pack name, gateway provider id, `listName`, and public `serverName`/`subNamespace` for `DisabledRefs.mcp` and `DisabledRefs.mcpOperations`. Runtime keys and gateway fingerprints are deliberately not activation storage keys. The list name is intentionally separate from the public MCP `server` name, which forms policy keys/model-facing meta-tools.
 
 ```yaml
 # mcp/github.yaml
@@ -457,7 +457,7 @@ transport:
   url: http://mcp-local.t3.zone/write/mcp
 ```
 
-This is still one provider pack. The Installed tab toggles pack-local MCP entries (`jira`, and `jira-write` when present) and, for gateway packages, individual operations under each entry. Operation toggles persist in `disabled.mcpOperations[contributionId]`; disabling the whole MCP entry does not erase the operation subset, so re-enabling restores the previous operation selection. Stale disabled operations remain visible as disabled rows labelled as no longer provided or disabled by name.
+This is still one provider pack. The Installed tab toggles pack-local MCP entries (`jira`, and `jira-write` when present) and, for gateway packages, individual operations under each entry. Operation toggles persist in `disabled.mcpOperations[contributionId]`; disabling the whole MCP entry does not erase the operation subset, so re-enabling restores the previous operation selection. Because the gateway `contributionId` excludes runtime keys, `entry.meta.commit`, and gateway/provider fingerprints, those operation selections survive catalogue/provider fingerprint refreshes. Stale disabled operations remain visible as disabled rows labelled as no longer provided or disabled by name.
 
 `McpManager` separates public policy/model identity from runtime client identity. Gateway contributions keep public server names such as `gr` / `gr-write` and package sub-namespaces such as `jira`, but their runtime client key includes source/install/fingerprint identity. This lets multiple gateway sources expose a union of selected operations without one `gr` config replacing another. Identical runtime config can still share a client; write providers group separately under `gr-write`. The model-facing tools stay sub-namespace meta-tools such as `mcp_gr__jira`, and the internal route id remains `mcp__gr__jira__<operation>`.
 
@@ -809,7 +809,7 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
-- An MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
+- An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 
 These REST shapes are **purely additive** — a schema-1 pack produces a byte-identical
