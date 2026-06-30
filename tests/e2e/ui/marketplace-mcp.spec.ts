@@ -62,11 +62,11 @@ function providerPack(provider: Provider) {
 	};
 }
 
-async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSource: unknown[]; activation: unknown[] } }> {
+async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSource: unknown[]; activation: unknown[]; syncSource: unknown[]; removeSource: unknown[] } }> {
 	let sourceAdded = false;
 	let installed = false;
 	let disabled: Disabled = { mcp: [], mcpOperations: { [JIRA_REF]: ["retired_op"] } };
-	const posts = { addSource: [] as unknown[], activation: [] as unknown[] };
+	const posts = { addSource: [] as unknown[], activation: [] as unknown[], syncSource: [] as unknown[], removeSource: [] as unknown[] };
 
 	const source = (): Source => ({
 		id: SOURCE_ID,
@@ -149,6 +149,17 @@ async function installMarketplaceMcpMocks(page: Page): Promise<{ posts: { addSou
 			return fulfillJson(route, { source: source() }, 201);
 		}
 		return route.fallback();
+	});
+	await page.route(new RegExp(`/api/marketplace/sources/${SOURCE_ID}/sync(?:\\?.*)?$`), async (route) => {
+		if (route.request().method() !== "POST") return route.fallback();
+		posts.syncSource.push({ id: SOURCE_ID });
+		return fulfillJson(route, { source: source() });
+	});
+	await page.route(new RegExp(`/api/marketplace/sources/${SOURCE_ID}(?:\\?.*)?$`), async (route) => {
+		if (route.request().method() !== "DELETE") return route.fallback();
+		posts.removeSource.push({ id: SOURCE_ID });
+		sourceAdded = false;
+		return route.fulfill({ status: 204 });
 	});
 	await page.route(/\/api\/marketplace\/browse(?:\?.*)?$/, async (route) => {
 		if (route.request().method() !== "GET") return route.fallback();
@@ -238,8 +249,19 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect(posts.addSource[0]).toMatchObject({ url: GATEWAY_URL, type: "mcp-gateway" });
 	await expect(JSON.stringify(posts.addSource[0])).not.toContain('"ref"');
 	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+	let sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
+	await expect(sourceRow).toBeVisible({ timeout: 15_000 });
+	await expect(sourceRow.locator('[data-testid="market-browse-source"]')).toHaveCount(0);
+	await sourceRow.locator('[data-testid="market-sync-source"]').click();
+	await expect.poll(() => posts.syncSource.length, { timeout: 10_000 }).toBe(1);
+	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
 
 	await goToTab(page, "browse");
+	await expect(page.locator('[data-testid="market-browse-source-chips"]')).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('[data-testid="market-source-chip"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" })).toBeVisible({ timeout: 15_000 });
+	await page.locator('[data-testid="market-source-chip-none"]').click();
+	await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
+	await page.locator('[data-testid="market-source-chip"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" }).click();
 	for (const provider of PROVIDERS) {
 		await expect(page.locator(`[data-testid="market-browse-pack"][data-pack-name="mcp-${provider.id}-${SOURCE_ID}"]`), provider.label).toBeVisible({ timeout: 15_000 });
 	}
@@ -251,7 +273,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await browseCard.locator('[data-testid="market-install-pack"]').click();
 
 	await goToTab(page, "sources");
-	const sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
+	sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
 	await expect(sourceRow.locator('[data-testid="market-source-type-chip"]')).toHaveText("MCP gateway");
 	await expect(sourceRow).toContainText(`Gateway URL: ${GATEWAY_URL}`);
 	await expect(sourceRow).toContainText("3 providers discovered");
@@ -306,4 +328,14 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect(page.getByText(/disconnects its MCP server/i)).toBeVisible({ timeout: 10_000 });
 	await page.keyboard.press("Enter");
 	await expect(page.locator(`[data-testid="market-installed-pack"][data-pack-name="${JIRA_PACK}"]`)).toHaveCount(0, { timeout: 15_000 });
+
+	await goToTab(page, "sources");
+	sourceRow = page.locator('[data-testid="market-source-row"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
+	await expect(sourceRow).toBeVisible({ timeout: 15_000 });
+	await sourceRow.locator('[data-testid="market-remove-source"]').click();
+	await expect(page.getByText(/Remove this marketplace source/i)).toBeVisible({ timeout: 10_000 });
+	await page.keyboard.press("Enter");
+	await expect.poll(() => posts.removeSource.length, { timeout: 10_000 }).toBe(1);
+	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+	await expect(sourceRow).toHaveCount(0);
 });
