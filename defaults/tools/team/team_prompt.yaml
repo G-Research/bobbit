@@ -1,7 +1,7 @@
 name: team_prompt
-description: "Queued or immediate follow-up to a team agent, your own team_delegate child, or a direct-child goal's team-lead."
-summary: "Send prompt to a team agent"
-params: [session_id, message, workflowGateId?, inputGateIds?]
+description: "Default-steered follow-up to a team agent, your own team_delegate child, or a direct-child goal's team-lead. Use mode: prompt for normal next-turn queue semantics."
+summary: "Prompt or steer a team agent"
+params: [session_id, message, mode?, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -15,19 +15,25 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Send a follow-up user message to an existing agent. Use for additional tasks after initial work completes, or to provide feedback/corrections. Supports `workflowGateId`/`inputGateIds` for context injection.
+  Send a follow-up user message to an existing agent. Default delivery mode is `steer`: inject into the current turn when streaming, or queue a steered prompt when not streaming. Use `mode: "prompt"` for normal next-turn prompt semantics. Supports `workflowGateId`/`inputGateIds` for context injection.
 detail_docs: >-
   ## Purpose
 
 
-  Send a new prompt to a team agent to start a follow-up turn. If the agent is
-  currently idle (finished its previous turn), the prompt is sent immediately.
-  If the agent is still active (streaming/processing), the prompt is **queued**
-  and delivered automatically when the current turn finishes.
+  Send a follow-up message to a team agent, a direct-child goal's team-lead, or
+  your own `team_delegate` child. By default, `team_prompt` uses **steered**
+  delivery: it injects into the current turn when the target is streaming, and
+  otherwise queues a steered prompt so existing steered recovery semantics apply.
 
 
-  This is the standard way to give an agent additional tasks, ask questions, or
-  provide feedback after it completes a turn.
+  Use `mode: "prompt"` when you explicitly want normal prompt behavior: if the
+  agent is idle the prompt starts a new turn immediately; if it is busy the
+  prompt is queued and delivered when the current turn finishes.
+
+
+  This is the standard way to give an agent additional tasks, ask questions,
+  provide feedback/corrections, or nudge a running turn without falling back to
+  the legacy `team_steer` tool.
 
 
   ## Parameters
@@ -38,36 +44,48 @@ detail_docs: >-
   |------|------|----------|-------------|
 
   | `session_id` | string | **Yes** | Session ID of the agent to prompt (from
-  `team_list`). |
+  `team_list`, `team_wait`, or a direct child goal lead). |
 
-  | `message` | string | **Yes** | The prompt message to send. Treated as a user
-  message that starts a new agent turn. |
+  | `message` | string | **Yes** | Message to deliver. |
+
+  | `mode` | `"prompt" \| "steer"` | No | Delivery mode. Default is
+  `"steer"`. Use `"prompt"` for normal next-turn queue semantics. |
+
+  | `workflowGateId` | string | No | Gate the agent works toward;
+  auto-injects upstream gate content. |
+
+  | `inputGateIds` | string[] | No | Override DAG: gate IDs whose content to
+  inject as context. |
 
 
   ## When to Use
 
 
-  - **Follow-up tasks** — assigning additional work after the agent completes
-  its initial task.
+  - **Routine nudges while active** — default `mode: "steer"` redirects a
+  running turn without needing `team_steer`.
 
-  - **Requesting changes** — asking an agent to revise its work based on review
+  - **Follow-up tasks** — use `mode: "prompt"` when you want a fresh next turn
+  after the current work finishes.
+
+  - **Requesting changes** — ask an agent to revise its work based on review
   feedback.
 
-  - **Status checks** — asking an agent what it has accomplished and whether
-  it's blocked.
+  - **Status checks** — ask an agent what it has accomplished and whether it's
+  blocked.
 
-  - **Providing information** — giving an agent additional context or answers to
+  - **Providing information** — give an agent additional context or answers to
   questions it raised.
 
-  - **Queuing work** — sending a prompt to a busy agent so it picks up the task
-  when its current turn ends.
+  - **Context injection** — attach workflow gate context with
+  `workflowGateId`/`inputGateIds` in either mode.
 
 
   ## When NOT to Use
 
 
-  - **Agent is actively going wrong** — use `team_steer` for urgent mid-turn
-  corrections. `team_prompt` waits for the current turn to finish.
+  - **Compatibility-only mid-turn steering** — `team_steer` remains available
+  for older workflows that require the legacy streaming-only behavior, but
+  routine nudges should use `team_prompt(mode="steer")` or omit `mode`.
 
   - **Agent should be terminated** — use `team_dismiss` to remove agents you no
   longer need.
@@ -76,11 +94,11 @@ detail_docs: >-
   ## Your own `team_delegate` children
 
 
-  `team_prompt` also queues/sends to a **non-goal owner's OWN `team_delegate`
-  child** (the non-goal verb is registered by `defaults/tools/agent/extension.ts`
-  and routed through `/orchestrate/*`). Own-child scoping is enforced server-side
-  — you can only prompt children you spawned. Same run-if-idle / queue-if-busy
-  semantics as for team agents.
+  `team_prompt` also sends to a **non-goal owner's OWN `team_delegate` child**
+  (the non-goal verb is registered by `defaults/tools/agent/extension.ts` and
+  routed through `/orchestrate/*`). Own-child scoping is enforced server-side —
+  you can only prompt children you spawned. The same `mode` defaults and
+  semantics apply.
 
 
   ## Direct-child team-leads
@@ -88,16 +106,16 @@ detail_docs: >-
 
   In addition to your own team's sessions, `team_prompt` accepts the team-lead
   session of a **direct child goal** of your own goal. This lets a parent
-  team-lead send a queued message to a subgoal's team-lead without falling back
-  to raw `/api/sessions/:id/notify`.
+  team-lead send a message to a subgoal's team-lead without falling back to raw
+  session APIs.
 
 
   Scope is **direct children only** — grandchildren and arbitrary descendants
-  return 403 `NOT_TEAM_MEMBER_OR_DIRECT_CHILD`. The asymmetry with `team_steer`
-  / `team_abort` / `team_dismiss` (which act on your own team agents and your
-  own `team_delegate` children, but never on a child goal's team) is
-  intentional: destructive operations on a subgoal go through `goal_pause` /
-  `goal_archive_child`, not direct session manipulation.
+  return 403 `NOT_TEAM_MEMBER_OR_DIRECT_CHILD`. The asymmetry with
+  `team_steer` / `team_abort` / `team_dismiss` (which act on your own team
+  agents and your own `team_delegate` children, but never on a child goal's
+  team) is intentional: destructive operations on a subgoal go through
+  `goal_pause` / `goal_archive_child`, not direct session manipulation.
 
 
   ## Examples
@@ -105,31 +123,19 @@ detail_docs: >-
 
   ```
 
-  # Give a coder a follow-up task
+  # Default: steer/nudge a running coder, or queue a steered prompt if idle
 
-  team_prompt(session_id="abc123", message="Good work on the API endpoints. Now
-  add input validation — tool names should be alphanumeric + hyphens only, max
-  50 chars. Return 400 for invalid input.")
+  team_prompt(session_id="abc123", message="Before continuing, make sure the new endpoint validates mode strictly.")
 
 
-  # Ask for a status update
+  # Normal next-turn prompt semantics
 
-  team_prompt(session_id="abc123", message="What's your current status? Have you
-  finished the implementation? Any blockers?")
-
-
-  # Send revision feedback from a review
-
-  team_prompt(session_id="abc123", message="The reviewer found an issue: the PUT
-  endpoint doesn't validate the request body. Add schema validation and return
-  400 for malformed requests. Check the code-review gate for details.")
+  team_prompt(session_id="abc123", mode="prompt", message="When you're done, add JSDoc comments to exported functions.")
 
 
-  # Queue a task for a busy agent
+  # Send revision feedback with workflow context
 
-  team_prompt(session_id="abc123", message="When you're done with the current
-  task, also add JSDoc comments to all exported functions in the tool-store
-  module.")
+  team_prompt(session_id="abc123", mode="prompt", workflowGateId="implementation", inputGateIds=["review-findings"], message="Address the reviewer findings and summarize the fixes.")
 
   ```
 
@@ -141,16 +147,11 @@ detail_docs: >-
   goal's team-lead); any owner (goal or non-goal) can prompt its own
   `team_delegate` children. Server-enforced scoping applies in both cases.
 
-  - **Queued if busy** — if the agent is mid-turn, the prompt is queued and
-  delivered automatically when the turn ends. The agent will process it as its
-  next task.
+  - **Default is steer** — omitting `mode` is equivalent to `mode: "steer"`.
+  Use `mode: "prompt"` only when you want a normal next-turn prompt.
 
-  - **Starts a new turn** — unlike `team_steer` which injects into the current
-  turn, `team_prompt` starts a fresh turn with the message as user input.
-
-  - **Check status first** — use `team_list` to see if the agent is active or
-  idle. This helps you decide between `team_prompt` (idle or queue for later)
-  and `team_steer` (redirect now).
+  - **Prompt mode starts a new turn** — unlike steered delivery, prompt mode
+  does not inject into the current turn.
 
   - **Be specific** — include file paths, gate references, and clear acceptance
   criteria. The agent may have compacted earlier context and lost details.

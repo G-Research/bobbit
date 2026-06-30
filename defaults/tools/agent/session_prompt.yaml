@@ -1,0 +1,79 @@
+name: session_prompt
+description: "Prompt or steer any live agent session by id; default mode is prompt"
+summary: "Prompt or steer any live session"
+params: [session_id, message, mode?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Agent
+grantPolicy: never
+docs: |-
+  Prompt or steer any live, non-archived agent session by id when this tool is explicitly enabled. Default `mode` is `prompt`, which sends a normal user prompt. Use `mode: "steer"` to redirect a streaming session or enqueue a steered prompt for later recovery semantics.
+detail_docs: >-
+  ## Purpose
+
+
+  Send a user message to any live Bobbit agent session by session id. Unlike
+  `team_prompt`, this tool is not limited to your team members, direct child
+  goal leads, or your own `team_delegate` children. Because it can target any
+  live session, it has `grantPolicy: never` and is hidden unless a role,
+  project, or user policy explicitly enables it.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `session_id` | string | **Yes** | Target live session id. Archived,
+  terminated, or missing sessions are rejected. |
+
+  | `message` | string | **Yes** | User message to deliver. |
+
+  | `mode` | `"prompt" \| "steer"` | No | Delivery mode. Default is
+  `"prompt"`. |
+
+
+  ## Modes
+
+
+  - **`prompt` (default)** — enqueue/run a normal user prompt using standard
+  prompt queue semantics. This starts a new turn and does not start new work on
+  non-interactive/reviewer sessions.
+
+  - **`steer`** — use live steer when the target is actively streaming. If the
+  target is not streaming, enqueue a steered prompt so existing steered queue and
+  recovery behavior applies. Steer mode may redirect actively streaming
+  non-interactive/reviewer sessions.
+
+
+  ## Examples
+
+
+  ```
+
+  # Prompt an interactive session
+
+  session_prompt(session_id="abc123", message="Please summarize your current status.")
+
+
+  # Redirect a streaming session
+
+  session_prompt(session_id="abc123", mode="steer", message="Stop the current approach and inspect src/server/router.ts first.")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Not exposed by default** — this tool is disabled by default policy. Enable
+  it only for trusted roles or sessions.
+
+  - **Live sessions only** — archived, terminated, dormant, or unknown sessions
+  are rejected.
+
+  - **Prompt vs steer** — use `prompt` for normal next-turn work; use `steer`
+  when you need current-turn redirection or steered recovery semantics.

@@ -53,6 +53,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
@@ -446,9 +447,9 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/steer` | Steer a team agent mid-turn (`{ sessionId, message }`) |
+| `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
+| `POST` | `/api/goals/:id/team/prompt` | Prompt or steer a team agent, owned helper child, or direct-child goal team lead. Body `{ sessionId, message, mode?: "prompt" | "steer", workflowGateId?, inputGateIds? }`; default mode is `"steer"`. See [Session prompt tools](session-prompt-tools.md). |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
@@ -468,8 +469,8 @@ client-trusted). All call the shared `OrchestrationCore` in-process. See
 | `GET` | `/api/sessions/:id/orchestrate/children` | List the owner's tracked child agents |
 | `POST` | `/api/sessions/:id/orchestrate/spawn` | Non-blocking spawn (single or `parallel`); child inherits the owner's current model unless overridden |
 | `POST` | `/api/sessions/:id/orchestrate/delegate` | Blocking one-shot: spawn → wait for **all** → auto-dismiss; drop-in `delegate` parity. Always 2xx; per-child `status` carries success/timeout/failure |
-| `POST` | `/api/sessions/:id/orchestrate/prompt` | Run-if-idle / queue a prompt to an owned child (`{ childSessionId, message }`) |
-| `POST` | `/api/sessions/:id/orchestrate/steer` | Mid-turn steer an owned child (`409` if the child is not streaming) |
+| `POST` | `/api/sessions/:id/orchestrate/prompt` | Prompt or steer an owned child (`{ childSessionId, message, mode?: "prompt" | "steer" }`); default mode is `"steer"` for current tool callers |
+| `POST` | `/api/sessions/:id/orchestrate/steer` | Backward-compatible mid-turn steer for an owned child (`409` if the child is not streaming) |
 | `POST` | `/api/sessions/:id/orchestrate/abort` | Force-abort an owned child |
 | `POST` | `/api/sessions/:id/orchestrate/wait` | Wait for the **first** awaited child to settle (chunked heartbeat, like `/wait`) |
 | `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child |
