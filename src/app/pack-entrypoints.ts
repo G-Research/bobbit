@@ -103,7 +103,7 @@ export interface PackRouteEntry {
  *  the registry is addressed by — entrypoint ids are only PACK-unique, so two
  *  packs may validly declare the same launcher id and BOTH must be addressable.
  *  Surfaces dispatch with `key` (never the bare `id`). */
-interface RegisteredLauncher {
+export interface RegisteredLauncher {
 	key: string;
 	id: string;
 	packId: string;
@@ -300,6 +300,14 @@ export function runLauncherEntrypoint(
 			return;
 		}
 	}
+	runResolvedLauncherEntrypoint(l, onResult, options);
+}
+
+export function runResolvedLauncherEntrypoint(
+	l: RegisteredLauncher,
+	onResult?: (r: LauncherDispatchResult) => void,
+	options?: LauncherDispatchOptions,
+): void {
 	// Action launchers FIRST (they also carry a `panelId`, so an `action`-first
 	// check keeps them from being mis-routed to `openPackPanel`).
 	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult, options); return; }

@@ -1210,12 +1210,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
 
-	// Fast path: reuse cached session (instant switch-back)
+	// Fast path: reuse cached session (instant switch-back). If the cached agent's
+	// WebSocket is no longer open, drop it and fall through to a fresh connect so
+	// pack-bound Host API surfaces can re-register their trusted WS minter.
 	const cached = getCachedSession(sessionId);
-	if (cached && isExisting) {
+	if (cached && isExisting && !cached.remoteAgent.connected) {
+		sessionCache.delete(sessionId);
+		cached.remoteAgent.disconnect();
+	}
+	if (cached && isExisting && cached.remoteAgent.connected) {
 		sessionCache.delete(sessionId); // Take ownership
 		state.chatPanel = cached.chatPanel;
 		state.remoteAgent = cached.remoteAgent;
+		state.remoteAgent.registerHostApiTransports();
 		state.connectionStatus = "connected";
 		state.connectingSessionId = null;
 
