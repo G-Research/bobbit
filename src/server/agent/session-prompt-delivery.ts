@@ -6,6 +6,7 @@ export interface DeliverableSessionLike {
 	id: string;
 	status: string;
 	nonInteractive?: boolean;
+	title?: string;
 }
 
 export interface DeliverSessionPromptDeps {
@@ -25,9 +26,14 @@ export interface DeliverSessionPromptOptions {
 	source?: PromptSource;
 }
 
+export interface DeliverSessionPromptTarget {
+	sessionId: string;
+	title?: string;
+}
+
 export type DeliverSessionPromptResult =
-	| { ok: true; mode: SessionPromptMode; status: "dispatched" | "queued" }
-	| { ok: true; mode: SessionPromptMode; dispatched: true };
+	| { ok: true; mode: SessionPromptMode; status: "dispatched" | "queued"; target: DeliverSessionPromptTarget }
+	| { ok: true; mode: SessionPromptMode; dispatched: true; target: DeliverSessionPromptTarget };
 
 export class SessionPromptDeliveryError extends Error {
 	constructor(message: string, readonly code: string, readonly status: number) {
@@ -56,6 +62,10 @@ export async function deliverSessionPrompt(
 	if (session.status === "terminated") {
 		throw new SessionPromptDeliveryError(`Session ${sessionId} is terminated.`, "SESSION_TERMINATED", 409);
 	}
+	const target: DeliverSessionPromptTarget = { sessionId: session.id };
+	if (typeof session.title === "string" && session.title.trim()) {
+		target.title = session.title;
+	}
 
 	if (mode === "prompt") {
 		if (session.nonInteractive && !opts.allowPromptNonInteractive) {
@@ -66,12 +76,12 @@ export async function deliverSessionPrompt(
 			);
 		}
 		const result = await deps.enqueuePrompt(sessionId, message, { source: opts.source });
-		return { ok: true, mode, status: result.status };
+		return { ok: true, mode, status: result.status, target };
 	}
 
 	if (session.status === "streaming") {
 		await deps.deliverLiveSteer(sessionId, message, { source: opts.source });
-		return { ok: true, mode, dispatched: true };
+		return { ok: true, mode, dispatched: true, target };
 	}
 
 	if (session.nonInteractive) {
@@ -83,5 +93,5 @@ export async function deliverSessionPrompt(
 	}
 
 	const result = await deps.enqueuePrompt(sessionId, message, { isSteered: true, source: opts.source });
-	return { ok: true, mode, status: result.status };
+	return { ok: true, mode, status: result.status, target };
 }
