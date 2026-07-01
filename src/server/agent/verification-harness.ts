@@ -979,6 +979,7 @@ export class VerificationHarness {
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
+	private surfacedOrphanedNonInteractiveSessionIds = new Set<string>();
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
@@ -1227,7 +1228,14 @@ export class VerificationHarness {
 	 */
 	async resumeInterruptedVerifications(): Promise<void> {
 		const persisted = this._loadActive();
-		if (persisted.length === 0) return;
+		// Surface orphaned reviewers before resuming unrelated active verifications.
+		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
+		// absent from active verification context should not be hidden behind that
+		// sequential recovery path.
+		await this._surfaceOrphanedNonInteractiveReviewers();
+		if (persisted.length === 0) {
+			return;
+		}
 
 		const running = persisted.filter(v => v.overallStatus === "running");
 		if (running.length === 0) {
@@ -1317,7 +1325,37 @@ export class VerificationHarness {
 
 		// Clear persisted file after all verifications finalized
 		try { fs.unlinkSync(this._persistPath); } catch {}
+		await this._surfaceOrphanedNonInteractiveReviewers();
 		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
+	}
+
+	/**
+	 * Surface live nonInteractive reviewer sessions that are not covered by any
+	 * active verification context. They cannot accept user prompts, and any late
+	 * `verification_result` would be ignored because no pending result resolver
+	 * exists, so boot must make them visible deterministically instead of leaving
+	 * them to a long timeout path.
+	 */
+	private async _surfaceOrphanedNonInteractiveReviewers(): Promise<void> {
+		const sm = this.sessionManager as any;
+		if (!sm?.listOrphanedNonInteractiveSessions) return;
+		let orphans: Array<{ id: string; title: string; createdAt: number }> = [];
+		try {
+			orphans = await sm.listOrphanedNonInteractiveSessions();
+		} catch (err) {
+			console.warn("[verification] Failed to inspect orphaned nonInteractive reviewer sessions:", err);
+			return;
+		}
+		orphans = orphans.filter(o => !this.surfacedOrphanedNonInteractiveSessionIds.has(o.id));
+		if (orphans.length === 0) return;
+		for (const orphan of orphans) this.surfacedOrphanedNonInteractiveSessionIds.add(orphan.id);
+		const summary = orphans
+			.map(o => `${o.title || "Untitled"} (${o.id}, created ${new Date(o.createdAt).toISOString()})`)
+			.join("; ");
+		console.warn(
+			`[verification] Found ${orphans.length} live nonInteractive reviewer session(s) without active verification context: ${summary}. ` +
+			"They are not harness-resumable; use maintenance orphan cleanup to terminate them if they are stale.",
+		);
 	}
 
 	/**
@@ -1596,11 +1634,16 @@ export class VerificationHarness {
 		});
 
 		try {
-			// Wait for the agent to finish if it was mid-turn
-			const idleResult = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
-			]).catch(() => ({ type: "idle" as const }));
+			// If restoreSession already revived the reviewer to idle, remind it
+			// immediately. Otherwise wait for the active turn to finish before sending
+			// a reminder, so the harness remains the only driver for nonInteractive
+			// reviewers and never races the generic restoreSession boot prompt.
+			const idleResult = session.status === "idle"
+				? ({ type: "idle" as const })
+				: await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
+				]).catch(() => ({ type: "idle" as const }));
 
 			if (idleResult.type === "result") {
 				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});

@@ -100,13 +100,23 @@ The `waitForStreaming()` guard is important. Without it, `waitForIdle()` can res
 
 ## Restart resume and rerun
 
-In-flight reviewer steps persist in active verification state. After a gateway restart, `resumeInterruptedVerifications()` tries to recover them through `_tryResumeFromSession()`:
+Reviewer and QA sessions are `nonInteractive`: normal user prompts are blocked, and only the verification harness should drive them. Restart recovery therefore has two owners:
+
+- `SessionManager.shutdown()` records restart re-drive need in the legacy `wasStreaming` field using `sessionNeedsRestartRedrive()`. The predicate is false for `idle` and `terminated`, true for active/busy states such as `streaming`, `preparing`, `aborting`, and fresh `starting`, and preserves the prior persisted bit during the restore-startup window so a rapid shutdown does not invent a false interrupted turn.
+- `SessionManager.restoreSession()` revives the process but deliberately does **not** send the generic mid-turn boot prompt to `nonInteractive` sessions. It clears the persisted marker and leaves reviewer/QA re-drive to `VerificationHarness.resumeInterruptedVerifications()` so two prompts cannot race into the same cold reviewer.
+
+In-flight reviewer steps also persist in active verification state. After a gateway restart, `resumeInterruptedVerifications()` tries to recover them through `_tryResumeFromSession()`:
 
 - If the reviewer session still exists, it is re-registered with the team store and wired to a fresh `verification_result` resolver.
-- If the reviewer is cold after restart, the resume path waits for readiness and uses a generous prompt timeout via `promptWhenReady()` before sending the reminder.
+- If the restored reviewer is already `idle`, the harness sends the reminder immediately instead of waiting for the long busy-session window.
+- If the restored reviewer is still busy, the harness waits for either `verification_result` or actual idle before reminding it. This keeps the harness from interrupting an active turn while making the waiting behavior explicit.
+- Reminder dispatch to a cold restored reviewer uses `promptWhenReady()` so the agent has time to load before the prompt timeout starts.
+- After a reminder is accepted, the harness waits for `waitForStreaming()` before racing against post-reminder idle, so an already-idle status cannot instantly fail and terminate the reviewer before it reads the reminder.
 - If the resume reminder cannot reach the reviewer because of a cold-agent timeout or process/runtime transient, the result is marked as transient and restart-interrupted, not as a hard review failure.
 - `_resumeOneVerification()` then re-runs the original `llm-review` step from the workflow definition when context is available.
 - If the restart interruption cannot be safely re-run, the gate is left pending so it can be re-signaled instead of being marked failed for an infrastructure interruption.
+
+Live `nonInteractive` sessions that are not referenced by active verification state are surfaced deterministically during boot resume. The harness asks `SessionManager.listOrphanedNonInteractiveSessions()` before any long resume wait and logs the orphaned reviewers; operators can inspect and terminate stale records through Settings → Maintenance or the `/api/maintenance/orphaned-sessions` and `/api/maintenance/cleanup-sessions` routes. A late `verification_result` from these orphaned sessions has no pending resolver, so surfacing is safer than silently waiting for timeout cleanup.
 
 This preserves the distinction between "the reviewed work is bad" and "the reviewer was interrupted by the gateway/runtime."
 

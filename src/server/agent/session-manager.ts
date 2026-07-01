@@ -347,6 +347,30 @@ interface ArchivedWorktreeScanContext {
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
+export type RestartRedriveSnapshot = {
+	status: SessionStatus;
+	/**
+	 * Set only while restoreSession() is recreating a persisted session. During
+	 * that restore-startup window, `starting` is a lifecycle state, not proof of
+	 * an interrupted turn; the persisted pre-restore value stays authoritative.
+	 */
+	restoreStartupWasStreaming?: boolean;
+};
+
+/**
+ * Durable restart re-drive marker for every active/busy session state.
+ * The persisted field is still named `wasStreaming` for compatibility, but
+ * restart recovery must cover real non-idle/non-terminal work — not cold
+ * restore-startup of a previously idle session.
+ */
+export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedriveSnapshot): boolean {
+	const status = typeof snapshot === "string" ? snapshot : snapshot.status;
+	const restoreStartupWasStreaming = typeof snapshot === "string" ? undefined : snapshot.restoreStartupWasStreaming;
+	if (status === "idle" || status === "terminated") return false;
+	if (status === "starting" && restoreStartupWasStreaming !== undefined) return restoreStartupWasStreaming;
+	return true;
+}
+
 /**
  * Max consecutive errored agent turns before an incoming prompt/steer is
  * parked instead of implicitly unsticking the session. Counter increments on
@@ -545,6 +569,12 @@ export interface SessionInfo {
 	recoveredPromptDispatchQueueIds?: string[];
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
+	/**
+	 * Persisted wasStreaming value captured while restoreSession() is in its
+	 * startup window. Prevents rapid shutdown during cold restore from converting
+	 * a previously idle interactive session into a false interrupted-turn prompt.
+	 */
+	restoreStartupWasStreaming?: boolean;
 	/**
 	 * True for a DORMANT entry (restored delegate/kinded child whose agent process
 	 * is NOT running — placeholder RpcBridge). Used by `isSessionLive` so the
@@ -5279,6 +5309,7 @@ export class SessionManager {
 			allowedTools: restoredAllowedNames,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
+			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			spawnPinnedModel: bridgeOptions.initialModel,
@@ -9281,8 +9312,10 @@ export class SessionManager {
 		}
 
 		// Don't remove from store on shutdown — sessions should survive restart.
-		// Persist the streaming state for each session so interrupted agents
-		// can be re-prompted on the next startup.
+		// Persist the active/busy state for each session so interrupted agents
+		// can be re-driven on the next startup. The durable field is still named
+		// `wasStreaming` for store compatibility, but it means "restart re-drive
+		// needed" for every non-idle, non-terminal session status.
 		const ids = Array.from(this.sessions.keys());
 		for (const id of ids) {
 			const session = this.sessions.get(id);
@@ -9290,11 +9323,15 @@ export class SessionManager {
 
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
-			// Snapshot the current streaming state before we kill the process.
+			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
 			// and we write it here to handle the case where shutdown() races
-			// with a pending agent_end that hasn't flushed to disk yet.
-			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
+			// with a pending lifecycle event that hasn't flushed to disk yet.
+			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
+			this.resolveStoreForSession(id).update(id, {
+				wasStreaming: needsRestartRedrive,
+				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? Date.now()) : undefined,
+			});
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are

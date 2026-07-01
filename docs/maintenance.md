@@ -96,6 +96,12 @@ These compatibility calls also re-scan through the unified inventory and clean o
 
 `POST /api/maintenance/cleanup-archived-session-worktrees` still accepts its legacy modes (`all`, `selected`, `category`, and `preset`). These requests are compatibility filters over the fresh unified scan and preserve archived session rows, transcripts, proposals, prompt records, search records, and archive visibility.
 
+## Orphaned non-interactive sessions
+
+Verification reviewer and QA sessions are non-interactive: users cannot safely prompt them directly, and `verification_result` only matters while the verification harness has a pending resolver for that session. If a live non-interactive session is no longer referenced by active verification state, Bobbit treats it as an orphaned session.
+
+Gateway boot surfaces these orphans deterministically before the verification harness enters any long reviewer-resume wait. The maintenance scan is still explicit and preview-first: `GET /api/maintenance/orphaned-sessions` lists candidates, and `POST /api/maintenance/cleanup-sessions` terminates only sessions that are still orphaned at cleanup time.
+
 ## REST API
 
 See [REST API — Maintenance](rest-api.md#maintenance) and [REST API — Agent directory](rest-api.md#agent-directory) for request and response shapes.
