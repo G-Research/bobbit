@@ -65,8 +65,9 @@ test.describe("SessionPromptRenderer", () => {
 		await expect(page.locator("#container")).toContainText("dispatched");
 		await expect(page.locator("#container")).toContainText("Please review the queued work.");
 		await expect(page.locator(`#container a[href="#/session/${TARGET_ID}"]`)).toHaveCount(1);
-		await expect(page.locator("#container svg.lucide-message-square")).toHaveCount(1);
-		await expect(page.locator("#container svg.lucide-zap")).toHaveCount(0);
+		const headerIconPath = page.locator("#container button svg").first().locator("path").first();
+		await expect(headerIconPath).toHaveAttribute("d", /M22 17/);
+		await expect(page.locator("#container button svg").first()).toBeVisible();
 		await expect(page.locator("#container")).not.toContainText('"ok"');
 	});
 
@@ -86,8 +87,9 @@ test.describe("SessionPromptRenderer", () => {
 		await expect(page.locator("#container")).toContainText("Live Agent");
 		await expect(page.locator("#container")).toContainText("live steer dispatched");
 		await expect(page.locator("#container")).toContainText("Redirect now.");
-		await expect(page.locator("#container svg.lucide-zap")).toHaveCount(1);
-		await expect(page.locator("#container svg.lucide-message-square")).toHaveCount(0);
+		const headerIconPath = page.locator("#container button svg").first().locator("path").first();
+		await expect(headerIconPath).toHaveAttribute("d", /l9\.9-10\.2/);
+		await expect(page.locator("#container button svg").first()).toBeVisible();
 	});
 
 	test("multiline prompt body preserves line breaks and escapes message content", async ({ page }) => {
@@ -139,6 +141,6 @@ test.describe("SessionPromptRenderer", () => {
 
 		await expect(page.locator("#container")).toContainText("Steer failed");
 		await expect(page.locator("#container")).toContainText(errorText);
-		await expect(page.locator("#container .text-destructive")).toContainText(errorText);
+		await expect(page.locator("#container .text-destructive").filter({ hasText: errorText })).toHaveCount(1);
 	});
 });
