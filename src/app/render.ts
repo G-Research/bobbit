@@ -32,7 +32,7 @@ import {
 	submitReviewDecision,
 } from "./review-sources.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
-import { buildSessionActions, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
+import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureHeaderSessionActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 // Lazy wrapper for the proposal-panels chunk. Static import here keeps
@@ -810,24 +810,30 @@ function renderHeaderSessionActions(input: {
 	staffName?: string;
 	mobile: boolean;
 }) {
-	const buildActions = () => buildSessionActions({
-		session: input.session,
-		displayTitle: input.displayTitle,
-		staffId: input.staffId,
-		staffName: input.staffName,
-		goalId: input.session.goalId || input.session.teamGoalId,
-		onRefreshStateChanged: refreshOpenHeaderSessionActionsPopover,
-	}).slice().sort((a, b) => a.priority - b.priority);
+	const archivedActions = isArchivedSessionActionSource(input.session);
+	const buildActions = () => (archivedActions
+		? buildArchivedSessionActions({
+			session: input.session,
+			displayTitle: input.displayTitle,
+		})
+		: buildSessionActions({
+			session: input.session,
+			displayTitle: input.displayTitle,
+			staffId: input.staffId,
+			staffName: input.staffName,
+			goalId: input.session.goalId || input.session.teamGoalId,
+			onRefreshStateChanged: refreshOpenHeaderSessionActionsPopover,
+		})).slice().sort((a, b) => a.priority - b.priority);
 	const actions = buildActions();
 	if (!actions.length) return html``;
 	const { directActions, overflowActions } = partitionHeaderSessionActions(actions, input.mobile);
-	const showOverflow = input.mobile || overflowActions.length > 0;
+	const showOverflow = input.mobile || archivedActions || overflowActions.length > 0;
 	const openFromTrigger = (event: Event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		const trigger = event.currentTarget as HTMLElement;
 		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
-		resetSessionForkNewWorktree();
+		if (!archivedActions) resetSessionForkNewWorktree();
 		const currentMenuActions = () => buildActions();
 		void openHeaderSessionActionsPopover({
 			sessionId: input.session.id,
@@ -1949,11 +1955,11 @@ export function doRenderApp(): void {
 	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
 	const headerTitle = activeStaffAgent?.name ?? sessionTitle;
-	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid) : undefined;
 	const hasHeaderSessionActions = Boolean(connected && state.remoteAgent && activeSession);
 	const headerSessionActions = hasHeaderSessionActions && activeSession ? renderHeaderSessionActions({
 		session: activeSession,
-		displayTitle: sessionTitle,
+		displayTitle: sessionTitle || activeSession.title,
 		staffId: activeStaffAgent?.id ?? activeSession.staffId,
 		staffName: activeStaffAgent?.name,
 		mobile: !desktop,

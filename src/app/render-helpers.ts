@@ -27,7 +27,7 @@ import { statusBobbit } from "./session-colors.js";
 import { connectToSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
-import { buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
+import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -615,6 +615,10 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 	}).map(toSidebarActionItem);
 }
 
+function buildArchivedSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
+	return buildArchivedSessionActions({ session, displayTitle }).map(toSidebarActionItem);
+}
+
 function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
 	return buildSessionActions({
 		session,
@@ -1005,10 +1009,16 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = SESSION_ROW_PY;
+	const btnPad = mobile ? "p-1" : "p-0.5";
+	const actions = buildArchivedSessionSidebarActions(session, displayTitle);
+	const actionRefresh = () => buildArchivedSessionSidebarActions(session, displayTitle);
+	const buttons = renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh });
+	const archivedTime = session.archivedAt ? html`<span class="shrink-0 text-muted-foreground" style="${mobile ? "font-size: 1em;" : "font-size: 0.8333em;"}">${terseRelativeTime(session.archivedAt)}</span>` : "";
 	const archivedNavId = `session:${session.id}`;
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-sidebar-actions-row-root
 			data-nav-id=${archivedNavId}
 			data-nav-active=${active ? "true" : "false"}
 			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -1025,7 +1035,13 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory, false, false, true)}
 			</div>
 			<div class="flex-1 min-w-0 font-normal truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderHighlightedText(displayTitle, state.searchQuery)}</div>
-			${session.archivedAt ? html`<span class="shrink-0 text-muted-foreground" style="${mobile ? "font-size: 1em;" : "font-size: 0.8333em;"}">${terseRelativeTime(session.archivedAt)}</span>` : ""}
+			${mobile
+				? html`${archivedTime}${buttons}`
+				: html`
+					<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">${archivedTime}</span>
+					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+						${buttons}
+					</div>`}
 		</div>
 	`;
 }
