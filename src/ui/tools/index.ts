@@ -74,6 +74,11 @@ registerLazyClass("team_steer", loadTeamRenderers, "TeamSteerRenderer");
 registerLazyClass("team_prompt", loadTeamRenderers, "TeamPromptRenderer");
 registerLazyClass("team_abort", loadTeamRenderers, "TeamAbortRenderer");
 
+registerLazyToolRenderer("session_prompt", async () => {
+	const { SessionPromptRenderer } = await import("./renderers/SessionPromptRenderer.js");
+	return new SessionPromptRenderer();
+});
+
 const loadTaskRenderers = () => import("./renderers/TaskToolRenderers.js");
 registerLazyClass("task_list", loadTaskRenderers, "TaskListRenderer");
 registerLazyClass("task_create", loadTaskRenderers, "TaskCreateRenderer");
