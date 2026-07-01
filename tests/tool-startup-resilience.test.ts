@@ -187,13 +187,12 @@ describe("tool startup resilience", () => {
 		assert.match(diagnostics[0].message, /missing-local-gateway|agent[\\/]extension\.ts/i);
 	});
 
-	it("catches module-load failures before activating a config override", () => {
+	it("catches TypeScript module-load failures before activating a config override", () => {
 		const fixture = makeAgentFixture();
-		const configExtension = path.join(fixture.configToolsDir, "agent", "extension.mjs");
+		const configExtension = path.join(fixture.configToolsDir, "agent", "extension.ts");
 		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
 			name: "session_prompt",
 			description: "throwing config session prompt override",
-			provider: "provider:\n  type: bobbit-extension\n  extension: extension.mjs",
 		});
 		writeFile(configExtension, "throw new Error('boom during module load');\nexport default function extension() { return {}; }\n");
 
@@ -205,11 +204,105 @@ describe("tool startup resilience", () => {
 		assert.equal(tm.getToolByName("session_prompt")?.description, "bundled session prompt");
 		assert.equal(diagnostics.length, 1);
 		assert.equal(diagnostics[0].code, "module-load-failed");
-		assert.match(diagnostics[0].message, /boom during module load|extension\.js/i);
+		assert.match(diagnostics[0].message, /boom during module load|extension\.ts/i);
 		assert.ok(
 			!nonBuiltinExtensionPaths(result.args).some((p) => path.resolve(p) === path.resolve(configExtension)),
 			"throwing config extension must not become runtime activation",
 		);
+	});
+
+	it("falls back from invalid config _builtins and shell extension files before launch", () => {
+		const fixture = makeAgentFixture();
+		const builtinBuiltinsExtension = path.join(fixture.builtinToolsDir, "_builtins", "extension.ts");
+		const configBuiltinsExtension = path.join(fixture.configToolsDir, "_builtins", "extension.ts");
+		const builtinShellExtension = path.join(fixture.builtinToolsDir, "shell", "extension.ts");
+		const configShellExtension = path.join(fixture.configToolsDir, "shell", "extension.ts");
+
+		writeTool(fixture.builtinToolsDir, "shell", "bash.yaml", {
+			name: "bash",
+			description: "bundled bash",
+			provider: "provider:\n  type: builtin\n  tool: bash",
+		});
+		writeFile(builtinBuiltinsExtension, "export default function extension() { return {}; }\n");
+		writeFile(builtinShellExtension, "export default function extension() { return {}; }\n");
+		writeFile(configBuiltinsExtension, "throw new Error('broken config builtins');\nexport default function extension() { return {}; }\n");
+		writeTool(fixture.configToolsDir, "shell", "bash.yaml", {
+			name: "bash",
+			description: "config bash with broken extension",
+			provider: "provider:\n  type: builtin\n  tool: bash",
+		});
+		writeFile(configShellExtension, "throw new Error('broken config shell');\nexport default function extension() { return {}; }\n");
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const result = computeToolActivationArgs([{ kind: "yaml", name: "bash" }], tm);
+		const activeExtensions = extensionPaths(result.args);
+		const diagnostics = tm.getToolDiagnostics();
+
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(builtinBuiltinsExtension)));
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(builtinShellExtension)));
+		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(configBuiltinsExtension)));
+		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(configShellExtension)));
+		assert.ok(diagnostics.some((d) => d.groupDir === "_builtins" && /broken config builtins/.test(d.message)));
+		assert.ok(diagnostics.some((d) => d.groupDir === "shell" && /broken config shell/.test(d.message)));
+		assert.equal(tm.getToolByName("bash")?.description, "bundled bash");
+	});
+
+	it("keeps valid same-group overrides while falling back only invalid tools", () => {
+		const fixture = makeAgentFixture();
+		const validExtension = path.join(fixture.configToolsDir, "agent", "valid-extension.ts");
+		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
+			name: "session_prompt",
+			description: "broken config session prompt override",
+		});
+		writeTool(fixture.configToolsDir, "agent", "valid_agent_tool.yaml", {
+			name: "valid_agent_tool",
+			description: "valid config agent tool",
+			provider: "provider:\n  type: bobbit-extension\n  extension: valid-extension.ts",
+		});
+		writeFile(fixture.configAgentExtension, [
+			"import './missing-local-gateway.js';",
+			"export default function extension() { return {}; }",
+			"",
+		].join("\n"));
+		writeFile(validExtension, "export default function extension() { return {}; }\n");
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const result = computeToolActivationArgs([
+			{ kind: "yaml", name: "session_prompt" },
+			{ kind: "yaml", name: "valid_agent_tool" },
+		], tm);
+		const activeExtensions = nonBuiltinExtensionPaths(result.args);
+
+		assert.equal(tm.getToolByName("session_prompt")?.description, "bundled session prompt");
+		assert.equal(tm.getToolByName("valid_agent_tool")?.description, "valid config agent tool");
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.builtinAgentExtension)));
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(validExtension)));
+		assert.ok(!activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
+	});
+
+	it("preserves valid copied TypeScript overrides that import Bobbit dependencies", () => {
+		const fixture = makeAgentFixture();
+		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
+			name: "session_prompt",
+			description: "valid copied config session prompt override",
+		});
+		writeFile(fixture.configAgentExtension, [
+			"import { Type } from '@sinclair/typebox';",
+			"const schema = Type.Object({ ok: Type.Boolean() });",
+			"export default function extension() { return { schema }; }",
+			"",
+		].join("\n"));
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
+		const activeExtensions = nonBuiltinExtensionPaths(result.args);
+
+		assert.deepEqual(tm.getToolDiagnostics(), []);
+		assert.equal(tm.getToolByName("session_prompt")?.description, "valid copied config session prompt override");
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
 	});
 
 	it("omits and diagnoses a broken config-only extension instead of activating it", () => {

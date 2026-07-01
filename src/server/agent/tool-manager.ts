@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
-import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
+import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -296,6 +296,38 @@ function invalidConfigToolDiagnostic(tool: BaseToolInfo): ToolExtensionDiagnosti
 	});
 }
 
+function groupHasBobbitProviderForExtension(tools: BaseToolInfo[], groupDir: string, extension: string): boolean {
+	return tools.some((tool) => tool.groupDir === groupDir && tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === extension);
+}
+
+function invalidConfigGroupExtensionDiagnostic(toolsDir: string, groupDir: string, extension = "extension.ts", groupTools?: BaseToolInfo[]): ToolExtensionDiagnostic | undefined {
+	if (groupTools && groupHasBobbitProviderForExtension(groupTools, groupDir, extension)) return undefined;
+	const extensionPath = path.join(toolsDir, groupDir, extension);
+	try {
+		if (!fs.statSync(extensionPath).isFile()) return undefined;
+	} catch {
+		return undefined;
+	}
+	return preflightConfigExtensionFile({
+		toolName: `${groupDir}/${extension}`,
+		groupDir,
+		baseDir: toolsDir,
+		extension,
+	});
+}
+
+function collectInvalidConfigGroupExtensionDiagnostics(toolsDir: string, tools: BaseToolInfo[] = scanToolsDirCached(toolsDir, toolsDir)): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	try {
+		for (const entry of fs.readdirSync(toolsDir, { withFileTypes: true })) {
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
+			const diagnostic = invalidConfigGroupExtensionDiagnostic(toolsDir, entry.name, "extension.ts", tools);
+			if (diagnostic) diagnostics.push(diagnostic);
+		}
+	} catch { /* config tools dir absent */ }
+	return diagnostics;
+}
+
 function collectInvalidConfigToolDiagnostics(tools: BaseToolInfo[]): ToolExtensionDiagnostic[] {
 	const diagnostics: ToolExtensionDiagnostic[] = [];
 	const seen = new Set<string>();
@@ -310,13 +342,20 @@ function collectInvalidConfigToolDiagnostics(tools: BaseToolInfo[]): ToolExtensi
 	return diagnostics;
 }
 
-function filterInvalidConfigTools(tools: BaseToolInfo[]): BaseToolInfo[] {
+function filterInvalidConfigTools(tools: BaseToolInfo[], invalidGroupExtensions: Set<string> = new Set()): BaseToolInfo[] {
 	const invalidNames = new Set<string>();
 	for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) {
 		logToolExtensionDiagnostic(diagnostic);
 		invalidNames.add(diagnostic.toolName);
 	}
-	return tools.filter((tool) => !invalidNames.has(tool.name));
+	return tools.filter((tool) => !invalidNames.has(tool.name) && !toolDependsOnInvalidGroupExtension(tool, invalidGroupExtensions));
+}
+
+function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExtensions: Set<string>): boolean {
+	if (!tool.groupDir || !invalidGroupExtensions.has(tool.groupDir)) return false;
+	if (tool.provider?.type === "builtin" && tool.provider.tool === "bash") return true;
+	if (tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === "extension.ts") return true;
+	return false;
 }
 
 /**
@@ -368,17 +407,28 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
 	const userIdx = layers.length - 1;
 
+	const invalidUserGroupExtensions = new Set<string>();
+	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidUserGroupExtensions.add(diagnostic.groupDir);
+	}
+	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
 	const scanned = layers.map((l, idx) => {
 		const tools = scanToolsDirCached(l.dir, l.dir);
-		return idx === userIdx ? filterInvalidConfigTools(tools) : tools;
+		if (idx !== userIdx) return tools;
+		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
+		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
 	});
 
 	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
 	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
 	// Market layers neither own nor are shadowed by groups — they overlay by
-	// tool NAME only (design §3.2 / finding #1).
+	// tool NAME only (design §3.2 / finding #1). If any config tool/extension in
+	// the group failed preflight, disable whole-group shadowing so lower-priority
+	// builtins can still provide per-tool fallbacks while valid config tools keep
+	// winning by name.
 	const userGroups = new Set<string>();
-	for (const t of scanned[userIdx]) if (t.groupDir) userGroups.add(t.groupDir);
+	for (const t of scanned[userIdx]) if (t.groupDir && !invalidUserToolGroups.has(t.groupDir)) userGroups.add(t.groupDir);
 
 	// Resolve the winner per tool name (higher layer wins — matches the
 	// PackResolver), but emit in first-seen low→high order so prompt/doc output
@@ -445,9 +495,14 @@ export class ToolManager {
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
 	}
 
-	private configGroupHasInvalidBobbitExtension(groupDir: string): boolean {
-		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
+	private configGroupHasInvalidExtension(groupDir: string): boolean {
 		let invalid = false;
+		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
+		const groupDiagnostic = invalidConfigGroupExtensionDiagnostic(this.toolsDir, groupDir, "extension.ts", tools);
+		if (groupDiagnostic) {
+			logToolExtensionDiagnostic(groupDiagnostic);
+			invalid = true;
+		}
 		for (const tool of tools) {
 			const diagnostic = invalidConfigToolDiagnostic(tool);
 			if (!diagnostic) continue;
@@ -497,7 +552,7 @@ export class ToolManager {
 		// config-level bobbit-extension providers must not shadow bundled tools.
 		const configGroup = path.join(this.toolsDir, groupDir);
 		try {
-			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidBobbitExtension(groupDir)) return this.toolsDir;
+			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidExtension(groupDir)) return this.toolsDir;
 		} catch { /* not found */ }
 
 		// Check builtins
@@ -688,9 +743,19 @@ export class ToolManager {
 
 	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
 	getToolDiagnostics(): ToolExtensionDiagnostic[] {
-		const diagnostics = collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir));
-		for (const diagnostic of diagnostics) logToolExtensionDiagnostic(diagnostic);
-		return diagnostics;
+		const diagnostics = [
+			...collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir),
+			...collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir)),
+		];
+		const seen = new Set<string>();
+		const unique = diagnostics.filter((diagnostic) => {
+			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+		for (const diagnostic of unique) logToolExtensionDiagnostic(diagnostic);
+		return unique;
 	}
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
