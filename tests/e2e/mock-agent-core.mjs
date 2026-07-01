@@ -52,6 +52,9 @@
  *  PI_EXTENSION_TOOL:<name>::<json>
  *                           Invoke a tool registered by a loaded --extension
  *                           in the in-process mock runtime.
+ *  SESSION_PROMPT_TOOL:<targetSessionId>::<message>
+ *                           Simulate ask-gated session_prompt: request a tool
+ *                           grant, then POST the message to the target session.
  *
  * Proposals (assistant-driven)
  * ----------------------------
@@ -197,6 +200,11 @@ export class MockAgentCore {
 
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
+
+		const sessionPromptToolMatch = text.match(/SESSION_PROMPT_TOOL:([\w-]+)::([\s\S]+)/);
+		if (sessionPromptToolMatch) {
+			return { sessionPromptTool: { targetSessionId: sessionPromptToolMatch[1], message: sessionPromptToolMatch[2].trim() } };
+		}
 
 		const piExtensionToolMatch = text.match(/PI_EXTENSION_TOOL:([^:\s]+)(?:::(\{[\s\S]*\}))?/);
 		if (piExtensionToolMatch) {
@@ -979,6 +987,8 @@ export class MockAgentCore {
 
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
+		} else if (toolAction && toolAction.sessionPromptTool) {
+			await this._handleSessionPromptTool(toolAction.sessionPromptTool.targetSessionId, toolAction.sessionPromptTool.message);
 		} else if (toolAction && toolAction.piExtensionTool) {
 			await this._handlePiExtensionTool(toolAction.piExtensionTool.name, toolAction.piExtensionTool.input);
 		} else if (toolAction && toolAction.askUserChoices) {
@@ -1785,6 +1795,101 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	async _gatewayJson(method, pathname, body, extraHeaders = {}) {
+		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		const gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+		const token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		const payload = body === undefined ? "" : JSON.stringify(body);
+		const url = new URL(gwUrl + pathname);
+		return new Promise((resolve, reject) => {
+			const headers = {
+				"Authorization": "Bearer " + token,
+				...extraHeaders,
+			};
+			if (payload) {
+				headers["Content-Type"] = "application/json";
+				headers["Content-Length"] = Buffer.byteLength(payload);
+			}
+			const req = http.request(url, { method, headers, timeout: 30_000 }, (res) => {
+				let data = "";
+				res.on("data", (chunk) => data += chunk);
+				res.on("end", () => {
+					let json;
+					try { json = JSON.parse(data); } catch { json = {}; }
+					resolve({ status: res.statusCode || 0, body: json, raw: data });
+				});
+			});
+			req.on("timeout", () => { req.destroy(); resolve({ status: 0, body: { error: "timeout" }, raw: "" }); });
+			req.on("error", reject);
+			if (payload) req.write(payload);
+			req.end();
+		});
+	}
+
+	async _postGatewayJson(pathname, body, extraHeaders = {}) {
+		return this._gatewayJson("POST", pathname, body, extraHeaders);
+	}
+
+	async _getGatewayJson(pathname) {
+		return this._gatewayJson("GET", pathname);
+	}
+
+	async _deliverSessionPromptTool(targetSessionId, message) {
+		return this._postGatewayJson(
+			"/api/sessions/" + encodeURIComponent(targetSessionId) + "/prompt",
+			{ message, mode: "prompt" },
+			{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+		);
+	}
+
+	async _isSessionPromptPersistentlyAllowed() {
+		try {
+			const session = await this._getGatewayJson("/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID));
+			const roleName = session.body?.role || session.body?.roleId || "general";
+			const role = await this._getGatewayJson("/api/roles/" + encodeURIComponent(roleName));
+			return role.body?.toolPolicies?.session_prompt === "allow";
+		} catch {
+			return false;
+		}
+	}
+
+	async _handleSessionPromptTool(targetSessionId, message) {
+		const toolName = "session_prompt";
+		const toolId = `tool_${Date.now()}`;
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: { targetSessionId, message } });
+
+		try {
+			if (!(await this._isSessionPromptPersistentlyAllowed())) {
+				const grant = await this._postGatewayJson(
+					"/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID) + "/tool-grant-request",
+					{ toolName, toolGroup: "Agent" },
+				);
+				if (!grant.body?.granted) {
+					this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+					const deniedMsg = { role: "assistant", content: [{ type: "text", text: "I tried to use session_prompt but permission was denied." }] };
+					this.conversationMessages.push(deniedMsg);
+					this.emit({ type: "message_end", message: deniedMsg });
+					return;
+				}
+			}
+
+			const delivery = await this._deliverSessionPromptTool(targetSessionId, message);
+			const ok = delivery.status >= 200 && delivery.status < 300 && delivery.body?.ok !== false;
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: !ok });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: ok ? `session_prompt delivered: ${message}` : `session_prompt failed: ${delivery.status} ${JSON.stringify(delivery.body)}` }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		} catch (err) {
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+			const assistantMsg = { role: "assistant", content: [{ type: "text", text: `session_prompt error: ${err.message}` }] };
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		}
 	}
 
 	async _handleToolDenied(deniedTool) {
