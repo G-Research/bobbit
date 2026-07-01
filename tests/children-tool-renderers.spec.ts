@@ -21,6 +21,8 @@ const RENDERER_FILES = [
 	"src/ui/tools/renderers/GoalDecideMutationRenderer.ts",
 	"src/ui/tools/renderers/GoalSetPolicyRenderer.ts",
 	"src/ui/tools/renderers/children-renderer-helpers.ts",
+	"src/ui/tools/renderers/DefaultRenderer.ts",
+	"src/ui/components/ExpandableSection.ts",
 	"src/ui/lazy/children-mutation-approval.ts",
 	"src/ui/lazy/children-goal-state-pill.ts",
 ].map(f => path.resolve(f));
@@ -241,7 +243,7 @@ test.describe("remaining children tool success outputs", () => {
 });
 
 test.describe("feature flag off → falls through to DefaultRenderer", () => {
-	test("goal_spawn_child renders raw JSON code-block when flag off", async ({ page }) => {
+	test("goal_spawn_child keeps DefaultRenderer fallback payloads collapsed", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(() => {
 			(window as any).__setFlag(false);
@@ -251,8 +253,9 @@ test.describe("feature flag off → falls through to DefaultRenderer", () => {
 					isError: false, content: [{ type: "text", text: JSON.stringify({ id: "g-1" }) }], timestamp: 0 },
 				false);
 		});
-		// DefaultRenderer emits a <code-block> for the JSON payload.
-		await expect(page.locator("#container code-block")).toHaveCount(2);
+		await expect(page.locator("#container")).toContainText("Goal Spawn Child");
+		await expect(page.locator("#container").getByRole("button", { name: /input/i })).toBeVisible();
+		await expect(page.locator("#container").getByRole("button", { name: /output/i })).toBeVisible();
 		await expect(page.locator('[data-testid="children-spawn-title"]')).toHaveCount(0);
 	});
 });
