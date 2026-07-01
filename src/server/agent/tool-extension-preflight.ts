@@ -182,105 +182,36 @@ function sanitizeModuleLoadOutput(value: unknown): string {
 	return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
 }
 
-function moduleLoadPreflightScript(extensionPath: string): string {
-	// Bundle first, then import the bundle in the child process. This lets the
-	// executable preflight cover TypeScript config extensions while preserving
-	// copied overrides that import Bobbit-installed dependencies (for example
-	// @sinclair/typebox) from isolated project config directories.
+function bobbitInstallRoot(): string {
 	const bobbitRequire = createRequire(import.meta.url);
-	const esbuildPath = bobbitRequire.resolve("esbuild");
 	const esbuildPackageJson = bobbitRequire.resolve("esbuild/package.json");
-	const bobbitRoot = path.dirname(path.dirname(path.dirname(esbuildPackageJson)));
-	return `
-import fs from "node:fs";
-import path from "node:path";
-import { builtinModules } from "node:module";
-import { pathToFileURL } from "node:url";
-import { build } from ${JSON.stringify(pathToFileURL(esbuildPath).href)};
+	return path.dirname(path.dirname(path.dirname(esbuildPackageJson)));
+}
 
-const entry = ${JSON.stringify(extensionPath)};
-const bobbitRoot = ${JSON.stringify(bobbitRoot)};
-const builtins = new Set([...builtinModules, ...builtinModules.map((name) => "node:" + name)]);
-function isBuiltin(specifier) {
-	if (builtins.has(specifier)) return true;
-	if (specifier.startsWith("node:")) return builtins.has(specifier.slice(5));
-	const head = specifier.split("/")[0];
-	return builtins.has(head);
+function bundleForModuleLoadPreflight(extensionPath: string): string {
+	// Bundle in the parent process, then import only the generated bundle in the
+	// child process. This keeps executable preflight fast enough for startup while
+	// still covering TypeScript config extensions and preserving copied overrides
+	// that import Bobbit-installed dependencies (for example @sinclair/typebox).
+	const bobbitRequire = createRequire(import.meta.url);
+	const esbuild = bobbitRequire("esbuild") as typeof import("esbuild");
+	const result = esbuild.buildSync({
+		entryPoints: [extensionPath],
+		bundle: true,
+		write: false,
+		platform: "node",
+		format: "esm",
+		target: "node20",
+		logLevel: "silent",
+		packages: "external",
+	});
+	const source = result.outputFiles?.[0]?.text;
+	if (!source) throw new Error("esbuild produced no output");
+	return source;
 }
-function candidateFiles(candidate) {
-	const ext = path.extname(candidate);
-	if (ext) {
-		const base = candidate.slice(0, -ext.length);
-		const aliases = ext === ".js"
-			? [candidate, base + ".ts", base + ".tsx", base + ".mts", base + ".cts", base + ".jsx", base + ".mjs", base + ".cjs"]
-			: ext === ".mjs"
-				? [candidate, base + ".mts", base + ".ts"]
-				: ext === ".cjs"
-					? [candidate, base + ".cts", base + ".ts"]
-					: [candidate];
-		return [...new Set(aliases)];
-	}
-	return [
-		candidate,
-		candidate + ".ts",
-		candidate + ".tsx",
-		candidate + ".mts",
-		candidate + ".cts",
-		candidate + ".js",
-		candidate + ".jsx",
-		candidate + ".mjs",
-		candidate + ".cjs",
-		candidate + ".json",
-		path.join(candidate, "index.ts"),
-		path.join(candidate, "index.tsx"),
-		path.join(candidate, "index.mts"),
-		path.join(candidate, "index.cts"),
-		path.join(candidate, "index.js"),
-		path.join(candidate, "index.jsx"),
-		path.join(candidate, "index.mjs"),
-		path.join(candidate, "index.cjs"),
-	];
-}
-function resolveLocalImport(resolveDir, specifier) {
-	const candidate = path.resolve(resolveDir, specifier);
-	for (const file of candidateFiles(candidate)) {
-		try { if (fs.statSync(file).isFile()) return file; } catch {}
-	}
-	return undefined;
-}
-const result = await build({
-	entryPoints: [entry],
-	bundle: true,
-	write: false,
-	platform: "node",
-	format: "esm",
-	target: "node20",
-	logLevel: "silent",
-	packages: "external",
-	plugins: [{
-		name: "bobbit-tool-preflight-resolve",
-		setup(build) {
-			build.onResolve({ filter: /.*/ }, (args) => {
-				if (args.kind === "entry-point") return undefined;
-				if (args.path.startsWith("./") || args.path.startsWith("../")) {
-					const resolved = resolveLocalImport(args.resolveDir, args.path);
-					if (resolved) return { path: resolved };
-					return undefined;
-				}
-				if (isBuiltin(args.path)) return { path: args.path, external: true };
-				return { path: args.path, external: true };
-			});
-		},
-	}],
-});
-const outFile = path.join(bobbitRoot, ".bobbit-tool-preflight-" + process.pid + "-" + Date.now() + ".mjs");
-try {
-	fs.writeFileSync(outFile, result.outputFiles[0].text, "utf-8");
-	await import(pathToFileURL(outFile).href);
-} finally {
-	try { fs.rmSync(outFile, { force: true }); } catch {}
-}
-`;
+
+function moduleLoadPreflightScript(bundlePath: string): string {
+	return `await import(${JSON.stringify(pathToFileURL(bundlePath).href)});`;
 }
 
 function moduleLoadFailure(extensionPath: string): string | undefined {
@@ -294,20 +225,26 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	const cached = moduleLoadCache.get(extensionPath);
 	if (cached?.fingerprint === fingerprint) return cached.error;
 
-	let script: string;
+	let bundlePath: string | undefined;
+	let result: ReturnType<typeof spawnSync>;
 	try {
-		script = moduleLoadPreflightScript(extensionPath);
+		bundlePath = path.join(bobbitInstallRoot(), `.bobbit-tool-preflight-${process.pid}-${Date.now()}.mjs`);
+		fs.writeFileSync(bundlePath, bundleForModuleLoadPreflight(extensionPath), "utf-8");
+		result = spawnSync(process.execPath, ["--input-type=module", "--eval", moduleLoadPreflightScript(bundlePath)], {
+			cwd: path.dirname(extensionPath),
+			env: { ...process.env, BOBBIT_TOOL_PREFLIGHT: "1" },
+			encoding: "utf-8",
+			windowsHide: true,
+			timeout: MODULE_LOAD_TIMEOUT_MS,
+			maxBuffer: MODULE_LOAD_MAX_OUTPUT_BYTES,
+		});
 	} catch (err) {
 		return `module load failed: cannot prepare preflight: ${formatFsError(err)}`;
+	} finally {
+		if (bundlePath) {
+			try { fs.rmSync(bundlePath, { force: true }); } catch { /* ignore */ }
+		}
 	}
-	const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
-		cwd: path.dirname(extensionPath),
-		env: { ...process.env, BOBBIT_TOOL_PREFLIGHT: "1" },
-		encoding: "utf-8",
-		windowsHide: true,
-		timeout: MODULE_LOAD_TIMEOUT_MS,
-		maxBuffer: MODULE_LOAD_MAX_OUTPUT_BYTES,
-	});
 	let error: string | undefined;
 	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal === "SIGTERM") {
 		error = `module load timed out after ${MODULE_LOAD_TIMEOUT_MS}ms`;
