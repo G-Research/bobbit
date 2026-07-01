@@ -1,11 +1,13 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import {
 	__getCachedPrStatusForTests,
 	__resetPrStatusCachesForTests,
 	__setGhExecFileForPrStatusTests,
 	buildGhBranchRulesArgs,
+	buildGhPrMergeArgs,
 	buildGhPrMergePermissionsArgs,
 	buildGhPrViewArgs,
 	buildGhRulesetArgs,
@@ -49,6 +51,15 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.equal(args[0], "api");
 		assert.equal(args[1], `repos/acme/widget/rules/branches/${encodeURIComponent(branch)}`);
 		assert.ok(!args.includes(branch));
+	});
+
+	it("builds PR merge as execFile-safe argv", () => {
+		const branch = "feature/ok && node -e \"throw new Error('shell executed')\"";
+		assert.deepEqual(buildGhPrMergeArgs(branch, "squash", true), ["pr", "merge", branch, "--squash", "--admin"]);
+		assert.deepEqual(buildGhPrMergeArgs(undefined, "merge", false), ["pr", "merge", "--merge"]);
+
+		const source = fs.readFileSync(new URL("../src/server/server.ts", import.meta.url), "utf-8");
+		assert.ok(!source.includes("execAsync(`gh pr merge"));
 	});
 
 	it("returns viewerCanMergeAsAdmin from GraphQL without probing rulesets", async () => {

@@ -968,6 +968,10 @@ export function buildGhRulesetArgs(owner: string, name: string, rulesetId: numbe
 	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
 }
 
+export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
+	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
+}
+
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
 	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
 	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
@@ -10921,12 +10925,10 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const goalAdminFlag = body?.admin ? " --admin" : "";
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
-		const goalMergeBranch = resolvedGoalBranch ? ` ${resolvedGoalBranch}` : "";
 		try {
-			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -13372,18 +13374,16 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const sessAdminFlag = body?.admin ? " --admin" : "";
 		// Prefer the client-provided branch (headRefName from PR status) so the merge
 		// targets the exact PR the widget displayed — avoids mismatches when the session's
 		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
 		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
-		const sessMergeBranchArg = sessMergeBranch ? ` ${sessMergeBranch}` : "";
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execAsync(`gh pr merge${sessMergeBranchArg} --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
