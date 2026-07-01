@@ -19,6 +19,7 @@ import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import { parseContributions, computeRendererKind } from "./tool-contributions.js";
+import { isIgnoredToolGroupDir } from "./tool-extension-preflight.js";
 
 // ── Shared parse helpers (single source of truth) ───────────────
 //
@@ -116,7 +117,7 @@ export function parseToolsDir(toolsDir: string): ToolInfo[] {
 
 	// First pass: grouped subdirectories (tools/<group>/*.yaml)
 	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
+		if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 		const groupPath = path.join(toolsDir, entry.name);
 		try {
 			const files = fs.readdirSync(groupPath, { withFileTypes: true });

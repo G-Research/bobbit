@@ -7,6 +7,8 @@ Bobbit has two agent-facing ways to send a message to an existing session:
 
 Both surfaces feed the same server-side delivery helper, which chooses between normal prompt queue delivery and live steering. Keeping mode selection centralized ensures prompt/steer recovery, queue persistence, and `bash_bg wait` interruption stay consistent across tools.
 
+For startup, restart, and broken override fallback behavior, see [Tool override startup resilience](tool-startup-resilience.md).
+
 ## Delivery modes
 
 | Mode | Streaming target | Idle / non-streaming target | Typical use |

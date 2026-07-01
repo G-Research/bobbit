@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -111,6 +112,8 @@ export interface ToolInfo {
 	originPackId?: string;
 	sourcePath?: string;
 	providers?: PiExtensionToolProviderInfo[];
+	/** Invalid config-level override diagnostics related to this tool, when a lower-priority fallback won. */
+	diagnostics?: ToolExtensionDiagnostic[];
 }
 
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
@@ -164,7 +167,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
@@ -281,6 +284,78 @@ function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 /** Test/maintenance hook: drop the scan cache. */
 export function __resetToolScanCache(): void {
 	_scanCache.clear();
+	__resetToolExtensionPreflightDiagnostics();
+}
+
+function invalidConfigToolDiagnostic(tool: BaseToolInfo): ToolExtensionDiagnostic | undefined {
+	return preflightConfigBobbitExtension({
+		toolName: tool.name,
+		groupDir: tool.groupDir,
+		baseDir: tool.baseDir,
+		provider: tool.provider,
+	});
+}
+
+function groupHasBobbitProviderForExtension(tools: BaseToolInfo[], groupDir: string, extension: string): boolean {
+	return tools.some((tool) => tool.groupDir === groupDir && tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === extension);
+}
+
+function invalidConfigGroupExtensionDiagnostic(toolsDir: string, groupDir: string, extension = "extension.ts", groupTools?: BaseToolInfo[]): ToolExtensionDiagnostic | undefined {
+	if (groupTools && groupHasBobbitProviderForExtension(groupTools, groupDir, extension)) return undefined;
+	const extensionPath = path.join(toolsDir, groupDir, extension);
+	try {
+		if (!fs.statSync(extensionPath).isFile()) return undefined;
+	} catch {
+		return undefined;
+	}
+	return preflightConfigExtensionFile({
+		toolName: `${groupDir}/${extension}`,
+		groupDir,
+		baseDir: toolsDir,
+		extension,
+	});
+}
+
+function collectInvalidConfigGroupExtensionDiagnostics(toolsDir: string, tools: BaseToolInfo[] = scanToolsDirCached(toolsDir, toolsDir)): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	try {
+		for (const entry of fs.readdirSync(toolsDir, { withFileTypes: true })) {
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
+			const diagnostic = invalidConfigGroupExtensionDiagnostic(toolsDir, entry.name, "extension.ts", tools);
+			if (diagnostic) diagnostics.push(diagnostic);
+		}
+	} catch { /* config tools dir absent */ }
+	return diagnostics;
+}
+
+function collectInvalidConfigToolDiagnostics(tools: BaseToolInfo[]): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	const seen = new Set<string>();
+	for (const tool of tools) {
+		const diagnostic = invalidConfigToolDiagnostic(tool);
+		if (!diagnostic) continue;
+		const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		diagnostics.push(diagnostic);
+	}
+	return diagnostics;
+}
+
+function filterInvalidConfigTools(tools: BaseToolInfo[], invalidGroupExtensions: Set<string> = new Set()): BaseToolInfo[] {
+	const invalidNames = new Set<string>();
+	for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidNames.add(diagnostic.toolName);
+	}
+	return tools.filter((tool) => !invalidNames.has(tool.name) && !toolDependsOnInvalidGroupExtension(tool, invalidGroupExtensions));
+}
+
+function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExtensions: Set<string>): boolean {
+	if (!tool.groupDir || !invalidGroupExtensions.has(tool.groupDir)) return false;
+	if (tool.provider?.type === "builtin" && tool.provider.tool === "bash") return true;
+	if (tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === "extension.ts") return true;
+	return false;
 }
 
 /**
@@ -332,14 +407,28 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
 	const userIdx = layers.length - 1;
 
-	const scanned = layers.map((l) => scanToolsDirCached(l.dir, l.dir));
+	const invalidUserGroupExtensions = new Set<string>();
+	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidUserGroupExtensions.add(diagnostic.groupDir);
+	}
+	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
+	const scanned = layers.map((l, idx) => {
+		const tools = scanToolsDirCached(l.dir, l.dir);
+		if (idx !== userIdx) return tools;
+		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
+		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
+	});
 
 	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
 	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
 	// Market layers neither own nor are shadowed by groups — they overlay by
-	// tool NAME only (design §3.2 / finding #1).
+	// tool NAME only (design §3.2 / finding #1). If any config tool/extension in
+	// the group failed preflight, disable whole-group shadowing so lower-priority
+	// builtins can still provide per-tool fallbacks while valid config tools keep
+	// winning by name.
 	const userGroups = new Set<string>();
-	for (const t of scanned[userIdx]) if (t.groupDir) userGroups.add(t.groupDir);
+	for (const t of scanned[userIdx]) if (t.groupDir && !invalidUserToolGroups.has(t.groupDir)) userGroups.add(t.groupDir);
 
 	// Resolve the winner per tool name (higher layer wins — matches the
 	// PackResolver), but emit in first-seen low→high order so prompt/doc output
@@ -406,6 +495,23 @@ export class ToolManager {
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
 	}
 
+	private configGroupHasInvalidExtension(groupDir: string): boolean {
+		let invalid = false;
+		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
+		const groupDiagnostic = invalidConfigGroupExtensionDiagnostic(this.toolsDir, groupDir, "extension.ts", tools);
+		if (groupDiagnostic) {
+			logToolExtensionDiagnostic(groupDiagnostic);
+			invalid = true;
+		}
+		for (const tool of tools) {
+			const diagnostic = invalidConfigToolDiagnostic(tool);
+			if (!diagnostic) continue;
+			logToolExtensionDiagnostic(diagnostic);
+			invalid = true;
+		}
+		return invalid;
+	}
+
 	/**
 	 * Late-bind the installed market-pack `tools/` roots provider (design §3.2).
 	 * A root may be a bare `dir` string (no activation filtering) or a
@@ -442,10 +548,11 @@ export class ToolManager {
 	 * Config-level (toolsDir) takes priority over builtins.
 	 */
 	getToolGroupBaseDir(groupDir: string): string {
-		// Check config-level first
+		// Check config-level first. Archived/disabled groups and groups with broken
+		// config-level bobbit-extension providers must not shadow bundled tools.
 		const configGroup = path.join(this.toolsDir, groupDir);
 		try {
-			if (fs.statSync(configGroup).isDirectory()) return this.toolsDir;
+			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidExtension(groupDir)) return this.toolsDir;
 		} catch { /* not found */ }
 
 		// Check builtins
@@ -618,8 +725,16 @@ export class ToolManager {
 	 * Used by the config cascade to determine which tools are server/project overrides.
 	 */
 	getLocalTools(): ToolInfo[] {
-		// Scan only the config-level tools dir — no builtins
-		const tools = scanToolsDir(this.toolsDir, this.toolsDir);
+		// Scan only the config-level tools dir — no builtins. Apply the same
+		// invalid direct group-extension filtering as runtime resolution so the
+		// config cascade and /api/tools do not advertise overrides that launch will skip.
+		const scanned = scanToolsDir(this.toolsDir, this.toolsDir);
+		const invalidGroupExtensions = new Set<string>();
+		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
+			logToolExtensionDiagnostic(diagnostic);
+			invalidGroupExtensions.add(diagnostic.groupDir);
+		}
+		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
 		return tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -632,6 +747,23 @@ export class ToolManager {
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
 		}));
+	}
+
+	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
+	getToolDiagnostics(): ToolExtensionDiagnostic[] {
+		const diagnostics = [
+			...collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir),
+			...collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir)),
+		];
+		const seen = new Set<string>();
+		const unique = diagnostics.filter((diagnostic) => {
+			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+		for (const diagnostic of unique) logToolExtensionDiagnostic(diagnostic);
+		return unique;
 	}
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */

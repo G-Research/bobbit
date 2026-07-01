@@ -2504,6 +2504,32 @@ export interface ToolProviderProvenance {
 	sourcePath?: string;
 }
 
+export interface ToolDiagnostic {
+	severity?: "error" | "warning" | "info" | string;
+	level?: "error" | "warning" | "info" | string;
+	code?: string;
+	message?: string;
+	reason?: string;
+	tool?: string;
+	toolName?: string;
+	name?: string;
+	group?: string;
+	groupDir?: string;
+	sourcePath?: string;
+	path?: string;
+	providerKey?: string;
+	origin?: string;
+	fallback?: string;
+	fallbackTool?: string;
+	skipped?: boolean;
+	[key: string]: unknown;
+}
+
+export interface ToolsResponse {
+	tools: ToolInfo[];
+	diagnostics: ToolDiagnostic[];
+}
+
 export interface ToolInfo {
 	name: string;
 	description: string;
@@ -2532,6 +2558,57 @@ export interface ToolInfo {
 	originPackId?: string | null;
 	sourcePath?: string;
 	providers?: ToolProviderProvenance[];
+	/** Optional backend diagnostics for invalid/skipped config-level tool overrides. */
+	diagnostics?: Array<ToolDiagnostic | string> | ToolDiagnostic | string;
+	invalidReason?: ToolDiagnostic | string | Record<string, unknown>;
+	invalid?: boolean;
+	valid?: boolean;
+}
+
+function isToolApiRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeToolDiagnostics(raw: unknown): ToolDiagnostic[] {
+	if (!raw) return [];
+	if (typeof raw === "string") return raw.trim() ? [{ message: raw }] : [];
+	if (Array.isArray(raw)) return raw.flatMap((item) => normalizeToolDiagnostics(item));
+	if (isToolApiRecord(raw)) return [raw as ToolDiagnostic];
+	return [];
+}
+
+function normalizeToolInfo(raw: unknown): ToolInfo | null {
+	if (typeof raw === "string") return { name: raw, description: "", group: "Other" };
+	if (!isToolApiRecord(raw)) return null;
+	const name = typeof raw.name === "string" ? raw.name : undefined;
+	if (!name) return null;
+	return raw as unknown as ToolInfo;
+}
+
+function dedupeToolDiagnostics(diagnostics: ToolDiagnostic[]): ToolDiagnostic[] {
+	const seen = new Set<string>();
+	return diagnostics.filter((diagnostic) => {
+		const key = [diagnostic.toolName, diagnostic.tool, diagnostic.name, diagnostic.extensionPath, diagnostic.path, diagnostic.sourcePath, diagnostic.code, diagnostic.reason, diagnostic.message]
+			.map((value) => typeof value === "string" ? value : "")
+			.join("\0");
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+export function normalizeToolsResponse(data: unknown): ToolsResponse {
+	const root = isToolApiRecord(data) ? data : undefined;
+	const rawTools = Array.isArray(root?.tools) ? root.tools : Array.isArray(data) ? data : [];
+	return {
+		tools: rawTools.map(normalizeToolInfo).filter((tool): tool is ToolInfo => Boolean(tool)),
+		diagnostics: dedupeToolDiagnostics([
+			...normalizeToolDiagnostics(root?.diagnostics),
+			...normalizeToolDiagnostics(root?.toolDiagnostics),
+			...normalizeToolDiagnostics(root?.invalidTools),
+			...normalizeToolDiagnostics(root?.invalidToolDiagnostics),
+		]),
+	};
 }
 
 // ============================================================================
@@ -2594,22 +2671,20 @@ export async function fetchContributions(projectId?: string): Promise<PackContri
 	}
 }
 
-export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
+export async function fetchToolsResponse(projectId?: string): Promise<ToolsResponse> {
 	try {
 		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
-		const data = await res.json();
-		const tools = data.tools || data || [];
-		// Handle legacy string[] format
-		if (tools.length > 0 && typeof tools[0] === "string") {
-			return tools.map((name: string) => ({ name, description: "", group: "Other" }));
-		}
-		return tools;
+		return normalizeToolsResponse(await res.json());
 	} catch (err) {
 		console.error("[role-api] fetchTools failed:", err);
-		return [];
+		return { tools: [], diagnostics: [] };
 	}
+}
+
+export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
+	return (await fetchToolsResponse(projectId)).tools;
 }
 
 export async function fetchToolDetail(name: string, projectId?: string): Promise<ToolInfo | null> {
