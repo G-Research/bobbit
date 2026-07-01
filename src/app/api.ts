@@ -2585,17 +2585,29 @@ function normalizeToolInfo(raw: unknown): ToolInfo | null {
 	return raw as unknown as ToolInfo;
 }
 
+function dedupeToolDiagnostics(diagnostics: ToolDiagnostic[]): ToolDiagnostic[] {
+	const seen = new Set<string>();
+	return diagnostics.filter((diagnostic) => {
+		const key = [diagnostic.toolName, diagnostic.tool, diagnostic.name, diagnostic.extensionPath, diagnostic.path, diagnostic.sourcePath, diagnostic.code, diagnostic.reason, diagnostic.message]
+			.map((value) => typeof value === "string" ? value : "")
+			.join("\0");
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
 export function normalizeToolsResponse(data: unknown): ToolsResponse {
 	const root = isToolApiRecord(data) ? data : undefined;
 	const rawTools = Array.isArray(root?.tools) ? root.tools : Array.isArray(data) ? data : [];
 	return {
 		tools: rawTools.map(normalizeToolInfo).filter((tool): tool is ToolInfo => Boolean(tool)),
-		diagnostics: [
+		diagnostics: dedupeToolDiagnostics([
 			...normalizeToolDiagnostics(root?.diagnostics),
 			...normalizeToolDiagnostics(root?.toolDiagnostics),
 			...normalizeToolDiagnostics(root?.invalidTools),
 			...normalizeToolDiagnostics(root?.invalidToolDiagnostics),
-		],
+		]),
 	};
 }
 

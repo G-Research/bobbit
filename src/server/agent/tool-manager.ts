@@ -725,8 +725,16 @@ export class ToolManager {
 	 * Used by the config cascade to determine which tools are server/project overrides.
 	 */
 	getLocalTools(): ToolInfo[] {
-		// Scan only the config-level tools dir — no builtins
-		const tools = filterInvalidConfigTools(scanToolsDir(this.toolsDir, this.toolsDir));
+		// Scan only the config-level tools dir — no builtins. Apply the same
+		// invalid direct group-extension filtering as runtime resolution so the
+		// config cascade and /api/tools do not advertise overrides that launch will skip.
+		const scanned = scanToolsDir(this.toolsDir, this.toolsDir);
+		const invalidGroupExtensions = new Set<string>();
+		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
+			logToolExtensionDiagnostic(diagnostic);
+			invalidGroupExtensions.add(diagnostic.groupDir);
+		}
+		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
 		return tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,

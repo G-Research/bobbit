@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { builtinModules, createRequire } from "node:module";
+import { tmpdir as osTmpDir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -182,36 +183,82 @@ function sanitizeModuleLoadOutput(value: unknown): string {
 	return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
 }
 
-function bobbitInstallRoot(): string {
-	const bobbitRequire = createRequire(import.meta.url);
-	const esbuildPackageJson = bobbitRequire.resolve("esbuild/package.json");
-	return path.dirname(path.dirname(path.dirname(esbuildPackageJson)));
+function moduleLoadPreflightLoaderScript(): string {
+	// The child imports the original extension path (not a bundle) so bare package
+	// resolution starts from the extension/project directory. The loader only fills
+	// two gaps that Bobbit's runtime supports in practice: TS source files imported
+	// through emitted .js specifiers, and copied config overrides that import a
+	// Bobbit-installed dependency such as @sinclair/typebox.
+	const bobbitModuleUrl = import.meta.url;
+	return `
+import fs from "node:fs";
+import { builtinModules, createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const bobbitRequire = createRequire(${JSON.stringify(bobbitModuleUrl)});
+const nodeBuiltins = new Set([...builtinModules, ...builtinModules.map((name) => "node:" + name)]);
+
+function isRelativeSpecifier(specifier) {
+	return specifier.startsWith("./") || specifier.startsWith("../");
 }
 
-function bundleForModuleLoadPreflight(extensionPath: string): string {
-	// Bundle in the parent process, then import only the generated bundle in the
-	// child process. This keeps executable preflight fast enough for startup while
-	// still covering TypeScript config extensions and preserving copied overrides
-	// that import Bobbit-installed dependencies (for example @sinclair/typebox).
-	const bobbitRequire = createRequire(import.meta.url);
-	const esbuild = bobbitRequire("esbuild") as typeof import("esbuild");
-	const result = esbuild.buildSync({
-		entryPoints: [extensionPath],
-		bundle: true,
-		write: false,
-		platform: "node",
-		format: "esm",
-		target: "node20",
-		logLevel: "silent",
-		packages: "external",
-	});
-	const source = result.outputFiles?.[0]?.text;
-	if (!source) throw new Error("esbuild produced no output");
-	return source;
+function isBareSpecifier(specifier) {
+	return !isRelativeSpecifier(specifier) && !specifier.startsWith("/") && !specifier.match(/^[A-Za-z]:[\\\\/]/) && !specifier.startsWith("file:");
 }
 
-function moduleLoadPreflightScript(bundlePath: string): string {
-	return `await import(${JSON.stringify(pathToFileURL(bundlePath).href)});`;
+function isNodeBuiltinSpecifier(specifier) {
+	if (nodeBuiltins.has(specifier)) return true;
+	if (specifier.startsWith("node:")) return nodeBuiltins.has(specifier.slice(5));
+	const [head] = specifier.split("/");
+	return nodeBuiltins.has(head);
+}
+
+function candidateFiles(candidate) {
+	const ext = path.extname(candidate);
+	if (ext) {
+		const base = candidate.slice(0, -ext.length);
+		if (ext === ".js") return [candidate, base + ".ts", base + ".tsx", base + ".mts", base + ".cts", base + ".jsx", base + ".mjs", base + ".cjs"];
+		if (ext === ".mjs") return [candidate, base + ".mts", base + ".ts"];
+		if (ext === ".cjs") return [candidate, base + ".cts", base + ".ts"];
+		return [candidate];
+	}
+	return [candidate, candidate + ".ts", candidate + ".tsx", candidate + ".mts", candidate + ".cts", candidate + ".js", candidate + ".jsx", candidate + ".mjs", candidate + ".cjs", candidate + ".json", path.join(candidate, "index.ts"), path.join(candidate, "index.tsx"), path.join(candidate, "index.mts"), path.join(candidate, "index.cts"), path.join(candidate, "index.js"), path.join(candidate, "index.jsx"), path.join(candidate, "index.mjs"), path.join(candidate, "index.cjs")];
+}
+
+function resolveLocalImport(parentUrl, specifier) {
+	if (!parentUrl?.startsWith("file:")) return undefined;
+	const parentPath = fileURLToPath(parentUrl);
+	const candidate = path.resolve(path.dirname(parentPath), specifier);
+	for (const file of candidateFiles(candidate)) {
+		try {
+			if (fs.statSync(file).isFile()) return pathToFileURL(file).href;
+		} catch {}
+	}
+	return undefined;
+}
+
+export async function resolve(specifier, context, nextResolve) {
+	try {
+		return await nextResolve(specifier, context);
+	} catch (err) {
+		if (isRelativeSpecifier(specifier)) {
+			const localUrl = resolveLocalImport(context.parentURL, specifier);
+			if (localUrl) return { url: localUrl, shortCircuit: true };
+		}
+		if (isBareSpecifier(specifier) && !isNodeBuiltinSpecifier(specifier)) {
+			try {
+				return { url: pathToFileURL(bobbitRequire.resolve(specifier)).href, shortCircuit: true };
+			} catch {}
+		}
+		throw err;
+	}
+}
+`;
+}
+
+function moduleLoadPreflightScript(extensionPath: string): string {
+	return `await import(${JSON.stringify(pathToFileURL(extensionPath).href)});`;
 }
 
 function moduleLoadFailure(extensionPath: string): string | undefined {
@@ -225,12 +272,13 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	const cached = moduleLoadCache.get(extensionPath);
 	if (cached?.fingerprint === fingerprint) return cached.error;
 
-	let bundlePath: string | undefined;
+	let tempDir: string | undefined;
 	let result: ReturnType<typeof spawnSync>;
 	try {
-		bundlePath = path.join(bobbitInstallRoot(), `.bobbit-tool-preflight-${process.pid}-${Date.now()}.mjs`);
-		fs.writeFileSync(bundlePath, bundleForModuleLoadPreflight(extensionPath), "utf-8");
-		result = spawnSync(process.execPath, ["--input-type=module", "--eval", moduleLoadPreflightScript(bundlePath)], {
+		tempDir = fs.mkdtempSync(path.join(osTmpDir(), "bobbit-tool-preflight-"));
+		const loaderPath = path.join(tempDir, "loader.mjs");
+		fs.writeFileSync(loaderPath, moduleLoadPreflightLoaderScript(), "utf-8");
+		result = spawnSync(process.execPath, ["--no-warnings", "--experimental-loader", pathToFileURL(loaderPath).href, "--input-type=module", "--eval", moduleLoadPreflightScript(extensionPath)], {
 			cwd: path.dirname(extensionPath),
 			env: { ...process.env, BOBBIT_TOOL_PREFLIGHT: "1" },
 			encoding: "utf-8",
@@ -241,8 +289,8 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	} catch (err) {
 		return `module load failed: cannot prepare preflight: ${formatFsError(err)}`;
 	} finally {
-		if (bundlePath) {
-			try { fs.rmSync(bundlePath, { force: true }); } catch { /* ignore */ }
+		if (tempDir) {
+			try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	}
 	let error: string | undefined;
