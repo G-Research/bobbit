@@ -338,7 +338,7 @@ export const state = {
 		}>;
 	}>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
-	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
+	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string; viewerCanMergeAsAdmin?: boolean }>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,

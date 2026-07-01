@@ -107,6 +107,7 @@ export class AgentInterface extends LitElement {
 	@property() prTitle?: string;
 	@property() prMergeable?: string;
 	@property({ type: Boolean }) viewerIsAdmin?: boolean;
+	@property({ type: Boolean }) viewerCanMergeAsAdmin?: boolean;
 	@property() reviewDecision?: string;
 	@property() headRefName?: string;
 	// Background processes for this session
@@ -2232,6 +2233,7 @@ export class AgentInterface extends LitElement {
 								.prTitle=${this.prTitle}
 								.prMergeable=${this.prMergeable}
 								.viewerIsAdmin=${this.viewerIsAdmin ?? false}
+								.viewerCanMergeAsAdmin=${this.viewerCanMergeAsAdmin ?? false}
 								.reviewDecision=${this.reviewDecision}
 								.headRefName=${this.headRefName}
 								@pr-merge=${this._handlePrMerge}
