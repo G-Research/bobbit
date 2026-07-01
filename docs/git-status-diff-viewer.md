@@ -150,6 +150,29 @@ The server uses the commit SHA plus destination path to find rename metadata and
 
 Multi-repo dirty-file rows continue to call the same diff opener with the repo name. URL construction still appends `repo=<repoName>` only when the repo is not `.`. The rich viewer is only a renderer and does not know about repo routing.
 
+### PR bypass merge control
+
+The PR section can show a **Bypass merge** button for users GitHub allows to bypass pull-request requirements. This is separate from the normal **Merge PR** button: normal merge behavior stays tied to GitHub's ordinary mergeability result, while bypass is a narrower capability used when branch protection or ruleset requirements block the PR but GitHub says the viewer may bypass them.
+
+The widget shows **Bypass merge** only when all of the following are true:
+
+- the PR is open;
+- `viewerCanMergeAsAdmin` is `true` in the PR status data;
+- `prMergeable !== "CONFLICTING"`.
+
+`viewerIsAdmin` alone is not enough. Admin users do not see the bypass button unless the PR status capability says bypass is available, and non-admin users may see it when GitHub rulesets grant them bypass permission.
+
+The server computes `viewerCanMergeAsAdmin` from two GitHub signals:
+
+1. `PullRequest.viewerCanMergeAsAdmin` from the GraphQL API.
+2. Matching branch rules/rulesets for the PR base branch when GraphQL is false. A matching rule or ruleset grants bypass when `current_user_can_bypass` is `"always"` or `"pull_requests_only"`.
+
+Ruleset probing is best-effort. If branch-rule or ruleset detail calls fail, PR status still returns using the GraphQL value and the legacy repository-permission fallback instead of failing the whole status refresh.
+
+Clicking **Bypass merge** dispatches the existing `pr-merge` event with `admin: true`. Session and goal handlers forward that to the existing `/pr-merge` endpoints, which invoke `gh pr merge <branch> --<method> --admin` via `execFile` argv arrays. Branch names, repository names, and ruleset paths are never shell-interpolated; branch text remains a single argv argument, and branch-rule lookups URL-encode the base branch path segment.
+
+The capability is part of the PR status payload and cache plumbing. It is carried through the persistent PR status store, session `AgentInterface`, goal dashboard state, and `state.prStatusCache`. Cache comparison includes `viewerCanMergeAsAdmin`, so session and dashboard widgets update when GitHub starts or stops reporting bypass permission without requiring an unrelated PR status change.
+
 ## PR Walkthrough portability boundary
 
 The Git status viewer and PR Walkthrough can share UX ideas, not runtime UI code.
@@ -175,7 +198,8 @@ Coverage for this area is split by responsibility:
 
 - `tests/git-diff-unified-parser.test.ts` covers multi-file parsing, renames, added/deleted files, binary diffs, no-newline markers, truncation, synthetic hunk-only files, and split pairing.
 - `tests/rich-git-diff-viewer.spec.ts` covers collapsible file sections/counts/rename paths, file toggle `aria-expanded`, split/inline `aria-checked`, context expansion, responsive auto mode and explicit override, raw fallback, and truncation warning.
-- `tests/git-status-widget-states.spec.ts` covers the widget modal integration, commit-file rename URL shape, modal ARIA, and preserved modal behavior.
+- `tests/git-status-widget-states.spec.ts` covers the widget modal integration, commit-file rename URL shape, modal ARIA, preserved modal behavior, and bypass-merge button visibility/event details.
+- `tests/pr-status-lookup.test.ts` covers PR status lookup argv construction, GraphQL bypass capability, ruleset-backed bypass capability, best-effort ruleset failures, and malicious branch text staying in one argv argument.
 - `tests/e2e/ui/session-git-status-multi-repo.spec.ts` covers the browser path for multi-repo `repo=` routing and new viewer rendering.
 - `tests/e2e/commit-file-diffs-api.spec.ts` and `tests/e2e/session-git-status-multi-repo.spec.ts` keep server rename and repo routing semantics pinned.
 - `tests/pr-walkthrough-pack-boundary.test.ts` keeps the pack/core boundary explicit.
