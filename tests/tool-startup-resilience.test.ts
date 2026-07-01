@@ -246,6 +246,11 @@ describe("tool startup resilience", () => {
 		assert.ok(diagnostics.some((d) => d.groupDir === "_builtins" && /broken config builtins/.test(d.message)));
 		assert.ok(diagnostics.some((d) => d.groupDir === "shell" && /broken config shell/.test(d.message)));
 		assert.equal(tm.getToolByName("bash")?.description, "bundled bash");
+		assert.equal(
+			tm.getLocalTools().some((tool) => tool.name === "bash"),
+			false,
+			"config cascade local tools must skip direct group-extension failures so /api/tools shows the bundled fallback",
+		);
 	});
 
 	it("keeps valid same-group overrides while falling back only invalid tools", () => {
@@ -303,6 +308,38 @@ describe("tool startup resilience", () => {
 		assert.deepEqual(tm.getToolDiagnostics(), []);
 		assert.equal(tm.getToolByName("session_prompt")?.description, "valid copied config session prompt override");
 		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
+	});
+
+	it("preserves valid TypeScript overrides that import project-local packages", () => {
+		const fixture = makeAgentFixture();
+		const projectRoot = path.dirname(path.dirname(fixture.configDir));
+		const pkgDir = path.join(projectRoot, "node_modules", "project-local-tool-dep");
+		writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ type: "module", exports: "./index.js" }));
+		writeFile(path.join(pkgDir, "index.js"), "export const projectLocalOk = true;\n");
+		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
+			name: "session_prompt",
+			description: "valid project-local package override",
+		});
+		writeFile(fixture.configAgentExtension, [
+			"import { projectLocalOk } from 'project-local-tool-dep';",
+			"if (!projectLocalOk) throw new Error('project local package import failed');",
+			"export default function extension() { return { projectLocalOk }; }",
+			"",
+		].join("\n"));
+
+		__resetToolScanCache();
+		const tm = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
+		const activeExtensions = nonBuiltinExtensionPaths(result.args);
+
+		assert.deepEqual(tm.getToolDiagnostics(), []);
+		assert.equal(tm.getToolByName("session_prompt")?.description, "valid project-local package override");
+		assert.ok(activeExtensions.some((p) => path.resolve(p) === path.resolve(fixture.configAgentExtension)));
+	});
+
+	it("does not depend on dev-only esbuild for runtime preflight", () => {
+		const source = fs.readFileSync(path.resolve("src/server/agent/tool-extension-preflight.ts"), "utf-8");
+		assert.doesNotMatch(source, /\besbuild\b/);
 	});
 
 	it("omits and diagnoses a broken config-only extension instead of activating it", () => {
