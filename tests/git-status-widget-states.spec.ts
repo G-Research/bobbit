@@ -45,6 +45,100 @@ async function mount(
 	await page.waitForTimeout(50);
 }
 
+async function openDropdown(page: any): Promise<void> {
+	await page.locator('git-status-widget button[data-state="ready"]').click();
+	await page.waitForSelector("#git-status-dropdown", { timeout: 2_000 });
+}
+
+const OPEN_PR_PROPS = {
+	loading: false,
+	branch: "feature/pr",
+	primaryBranch: "master",
+	isOnPrimary: false,
+	clean: true,
+	statusFiles: [],
+	prState: "OPEN",
+	prNumber: 905,
+	prTitle: "Needs review",
+	prUrl: "https://github.com/example/repo/pull/905",
+	prMergeable: "MERGEABLE",
+	reviewDecision: "REVIEW_REQUIRED",
+};
+
+test.describe("GitStatusWidget bypass merge action", () => {
+	test("renders Bypass merge when viewerCanMergeAsAdmin is true", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerCanMergeAsAdmin: true,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toBeVisible();
+		await expect(page.locator("#git-status-dropdown")).not.toContainText("Force Merge");
+	});
+
+	test("Bypass merge emits pr-merge with admin true", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerCanMergeAsAdmin: true,
+		});
+		await page.evaluate(() => {
+			(window as any).__prMergeEvents = [];
+			window.addEventListener("pr-merge", (event) => {
+				(window as any).__prMergeEvents.push((event as CustomEvent).detail);
+			});
+		});
+		await openDropdown(page);
+
+		await page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" }).click();
+
+		const events = await page.evaluate(() => (window as any).__prMergeEvents);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ method: "squash", admin: true });
+	});
+
+	test("hides Bypass merge when capability is false even for admins", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerIsAdmin: true,
+			viewerCanMergeAsAdmin: false,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).not.toContainText("Force Merge");
+	});
+
+	test("conflicting PR hides Bypass merge even with bypass capability", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			prMergeable: "CONFLICTING",
+			viewerCanMergeAsAdmin: true,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).toContainText("Has conflicts");
+	});
+
+	test("non-mergeable PR shows status text when bypass is unavailable", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			prMergeable: "UNKNOWN",
+			viewerCanMergeAsAdmin: false,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).toContainText("Not mergeable");
+	});
+});
+
 test.describe("GitStatusWidget render states", () => {
 	test("skeleton renders when loading && !branch", async ({ page }) => {
 		await gotoAndWait(page);
