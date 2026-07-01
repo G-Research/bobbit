@@ -62,6 +62,7 @@ export class GitStatusWidget extends LitElement {
     @property() prTitle?: string;
     @property() prMergeable?: string;
     @property({ type: Boolean }) viewerIsAdmin = false;
+    @property({ type: Boolean }) viewerCanMergeAsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
     @property() headRefName?: string; // The actual branch name the PR targets
 
@@ -450,10 +451,15 @@ export class GitStatusWidget extends LitElement {
         return html`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:${c.color};background:${c.bg}">${c.label}</span>`;
     }
 
+    private _canBypassMerge(): boolean {
+        return this.viewerCanMergeAsAdmin && this.prMergeable !== "CONFLICTING";
+    }
+
     /** PR section for the expanded dropdown */
     private _renderPrSection() {
         if (!this.prState) return nothing;
 
+        const canBypassMerge = this._canBypassMerge();
         const badgeColor = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145)'
             : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300)'
             : 'oklch(0.62 0.14 25)';
@@ -497,14 +503,14 @@ export class GitStatusWidget extends LitElement {
                         >
                             Merge PR
                         </button>
-                        ${this.viewerIsAdmin ? html`<button
+                        ${canBypassMerge ? html`<button
                             style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
                             @click=${() => this._handleForceMerge()}
-                            title="Merge with --admin to bypass branch protection rules"
+                            title="Merge with GitHub's bypass branch protections permission"
                         >
-                            Force Merge
+                            Bypass merge
                         </button>` : nothing}
-                        ${this.prMergeable !== "MERGEABLE" && !this.viewerIsAdmin ? html`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
+                        ${this.prMergeable !== "MERGEABLE" && !canBypassMerge ? html`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
                         `}
                     </div>
                     ${this.mergeError ? html`<div style="font-size:12px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
