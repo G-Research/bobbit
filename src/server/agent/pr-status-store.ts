@@ -9,7 +9,9 @@ export interface PrStatusEntry {
 	reviewDecision?: string | null;
 	mergeable?: string;
 	viewerIsAdmin?: boolean;
+	viewerCanMergeAsAdmin?: boolean;
 	headRefName?: string;
+	baseRefName?: string;
 	updatedAt?: string;
 }
 

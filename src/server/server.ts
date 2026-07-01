@@ -940,13 +940,36 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
-const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
+const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
 
 type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
 let _ghExecFileForTests: GhExecFileForTests | undefined;
 
 export function buildGhPrViewArgs(branch?: string): string[] {
 	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
+	return [
+		"api", "graphql",
+		"-f", `query=${PR_MERGE_PERMISSIONS_QUERY}`,
+		"-F", `owner=${owner}`,
+		"-F", `name=${name}`,
+		"-F", `number=${number}`,
+	];
+}
+
+export function buildGhBranchRulesArgs(owner: string, name: string, branch: string): string[] {
+	return ["api", `repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}`];
+}
+
+export function buildGhRulesetArgs(owner: string, name: string, rulesetId: number): string[] {
+	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
+}
+
+export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
+	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
 }
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
@@ -984,6 +1007,79 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
+function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null {
+	if (typeof url !== "string" || !url) return null;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
+		const [owner, name, pull, number] = parsed.pathname.split("/").filter(Boolean);
+		if (!owner || !name || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
+		return { owner, name };
+	} catch {
+		return null;
+	}
+}
+
+async function getViewerMergePermissions(
+	cwd: string,
+	pr: { url?: string; number?: number; baseRefName?: string },
+): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
+	const repo = parseGithubPrRepo(pr.url);
+	if (repo && typeof pr.number === "number") {
+		try {
+			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
+			const parsed = JSON.parse(stdout);
+			const repository = parsed?.data?.repository;
+			const perm = repository?.viewerPermission ?? "";
+			_repoPermCache.set(cwd, { perm, ts: Date.now() });
+
+			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
+			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
+				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, repo, pr.baseRefName);
+			}
+
+			return { viewerIsAdmin: perm === "ADMIN", viewerCanMergeAsAdmin };
+		} catch {
+			// Fall through to legacy permission probe.
+		}
+	}
+	return { viewerIsAdmin: await getViewerIsAdmin(cwd), viewerCanMergeAsAdmin: false };
+}
+
+async function getViewerCanBypassBranchRules(
+	cwd: string,
+	repo: { owner: string; name: string },
+	branch: string,
+): Promise<boolean> {
+	try {
+		const stdout = await execGh(buildGhBranchRulesArgs(repo.owner, repo.name, branch), cwd);
+		const rules = JSON.parse(stdout);
+		if (!Array.isArray(rules)) return false;
+
+		if (rules.some((rule) => isBypassMode(rule?.current_user_can_bypass))) return true;
+
+		const rulesetIds = [
+			...new Set(rules.map((rule) => rule?.ruleset_id).filter((id): id is number => typeof id === "number")),
+		];
+
+		for (const rulesetId of rulesetIds) {
+			try {
+				const detail = JSON.parse(await execGh(buildGhRulesetArgs(repo.owner, repo.name, rulesetId), cwd));
+				if (isBypassMode(detail?.current_user_can_bypass)) return true;
+			} catch {
+				// Continue checking other matching rulesets.
+			}
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+function isBypassMode(mode: unknown): boolean {
+	return mode === "always" || mode === "pull_requests_only";
+}
+
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const args = buildGhPrViewArgs(branch);
@@ -994,8 +1090,19 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 		try {
 			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
-			const viewerIsAdmin = await getViewerIsAdmin(dir);
-			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
+			const { viewerIsAdmin, viewerCanMergeAsAdmin } = await getViewerMergePermissions(dir, pr);
+			const data = {
+				number: pr.number,
+				url: pr.url,
+				title: pr.title,
+				state: pr.state,
+				mergeable: pr.mergeable,
+				headRefName: pr.headRefName,
+				baseRefName: pr.baseRefName,
+				reviewDecision: pr.reviewDecision || null,
+				viewerIsAdmin,
+				viewerCanMergeAsAdmin,
+			};
 			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
 			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 			return data;
@@ -10818,12 +10925,10 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const goalAdminFlag = body?.admin ? " --admin" : "";
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
-		const goalMergeBranch = resolvedGoalBranch ? ` ${resolvedGoalBranch}` : "";
 		try {
-			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -13269,18 +13374,16 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const sessAdminFlag = body?.admin ? " --admin" : "";
 		// Prefer the client-provided branch (headRefName from PR status) so the merge
 		// targets the exact PR the widget displayed — avoids mismatches when the session's
 		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
 		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
-		const sessMergeBranchArg = sessMergeBranch ? ` ${sessMergeBranch}` : "";
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execAsync(`gh pr merge${sessMergeBranchArg} --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });

@@ -3331,6 +3331,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prTitle = undefined;
 				ai.prMergeable = undefined;
 				ai.viewerIsAdmin = undefined;
+				ai.viewerCanMergeAsAdmin = undefined;
 				ai.reviewDecision = undefined;
 				ai.headRefName = undefined;
 			}
@@ -3344,12 +3345,13 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = data.title;
 			ai.prMergeable = data.mergeable;
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
+			ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin ?? false;
 			ai.reviewDecision = data.reviewDecision ?? undefined;
 			ai.headRefName = data.headRefName ?? undefined;
 		}
 		// Update goal grouping cache so sidebar reflects the new PR state immediately
 		if (goalId && data.state) {
-			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable });
+			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable, viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin ?? false });
 			renderApp();
 		}
 	} catch {
@@ -3360,6 +3362,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = undefined;
 			ai.prMergeable = undefined;
 			ai.viewerIsAdmin = undefined;
+			ai.viewerCanMergeAsAdmin = undefined;
 			ai.reviewDecision = undefined;
 			ai.headRefName = undefined;
 		}

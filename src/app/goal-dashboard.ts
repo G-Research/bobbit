@@ -234,6 +234,7 @@ interface PrStatus {
 	state: "OPEN" | "MERGED" | "CLOSED";
 	mergeable?: string;
 	viewerIsAdmin?: boolean;
+	viewerCanMergeAsAdmin?: boolean;
 	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
 	headRefName?: string;
 }
@@ -2148,6 +2149,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prTitle=${prStatus?.title}
 						.prMergeable=${prStatus?.mergeable}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
+						.viewerCanMergeAsAdmin=${prStatus?.viewerCanMergeAsAdmin ?? false}
 						.reviewDecision=${prStatus?.reviewDecision}
 						.headRefName=${prStatus?.headRefName}
 						@pr-merge=${handlePrMerge}
