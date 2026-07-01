@@ -1,10 +1,11 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect, type GatewayInfo } from "../gateway-harness.js";
+import { test, expect } from "../gateway-harness.js";
 import {
 	apiFetch,
 	base,
+	createGoal,
 	createSession,
-	defaultProjectId,
+	deleteGoal,
 	deleteSession,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
@@ -66,22 +67,20 @@ async function createArchivedSession(): Promise<string> {
 	return sessionId;
 }
 
-async function createIneligibleArchivedSession(gateway: GatewayInfo): Promise<string> {
-	const sessionId = await createSession();
+async function createIneligibleArchivedSession(): Promise<{ sessionId: string; goalId: string }> {
+	const goal = await createGoal({ title: "Archived actions ineligible goal fixture" });
+	const goalId = String(goal.id);
+	const sessionId = await createSession({ goalId });
 	await waitForSessionStatus(sessionId, "idle");
-	const projectId = await defaultProjectId();
-	const live = gateway.sessionManager?.getSession?.(sessionId);
-	if (live) live.nonInteractive = true;
-	gateway.sessionManager?.getSessionStore?.(projectId)?.update?.(sessionId, { nonInteractive: true });
 	const resp = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-	expect(resp.ok, `archive non-interactive session ${sessionId}`).toBe(true);
+	expect(resp.ok, `archive goal-linked session ${sessionId}`).toBe(true);
 	await expect.poll(async () => {
 		const archived = await apiFetch(`/api/sessions/${sessionId}?include=archived`);
 		if (!archived.ok) return false;
-		const body = await archived.json() as { archived?: boolean; nonInteractive?: boolean };
-		return body.archived === true && body.nonInteractive === true;
+		const body = await archived.json() as { archived?: boolean; goalId?: string };
+		return body.archived === true && body.goalId === goalId;
 	}, { timeout: 15_000 }).toBe(true);
-	return sessionId;
+	return { sessionId, goalId };
 }
 
 async function showArchivedInSidebar(page: Page): Promise<void> {
@@ -190,9 +189,11 @@ async function stubWindowOpen(page: Page): Promise<void> {
 
 test.describe("archived session actions", () => {
 	const sessionsToDelete = new Set<string>();
+	const goalsToDelete = new Set<string>();
 
 	test.afterAll(async () => {
 		for (const sessionId of sessionsToDelete) await deleteSession(sessionId).catch(() => {});
+		for (const goalId of goalsToDelete) await deleteGoal(goalId).catch(() => {});
 	});
 
 	test("desktop sidebar and header expose only archived-safe actions", async ({ page }) => {
@@ -256,14 +257,15 @@ test.describe("archived session actions", () => {
 		expect(overflow, "mobile archived header menu must not create horizontal overflow").toBeLessThanOrEqual(1);
 	});
 
-	test("ineligible archived sessions hide Continue but keep read-only actions", async ({ page, gateway }) => {
+	test("ineligible archived sessions hide Continue but keep read-only actions", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 900 });
-		const ineligibleId = await createIneligibleArchivedSession(gateway);
+		const { sessionId: ineligibleId, goalId } = await createIneligibleArchivedSession();
 		sessionsToDelete.add(ineligibleId);
+		goalsToDelete.add(goalId);
 
 		await showArchivedInSidebar(page);
 		await openArchivedSidebarMenu(page, ineligibleId);
 		await expectArchivedSafeMenu(page, ARCHIVED_READ_ONLY_ACTION_IDS);
-		await expect(menuItem(page, "continue-archived"), "non-interactive archived sessions must not offer Continue").toHaveCount(0);
+		await expect(menuItem(page, "continue-archived"), "goal-linked archived sessions must not offer Continue").toHaveCount(0);
 	});
 });
