@@ -44,10 +44,11 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
-import { state as appState, renderApp } from "../../app/state.js";
+import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
+import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
@@ -142,15 +143,31 @@ export class AgentInterface extends LitElement {
 	 * same rules; this is defence-in-depth UX.
 	 */
 	private get canContinueArchived(): boolean {
-		if (!this.readOnly) return false;
-		// These fields live on the REST PersistedSession — threaded via
-		// session-manager's connectToSession, not on the remote-agent _state.
-		if (this.goalId) return false;
-		if (this.delegateOf) return false;
-		if (this.teamGoalId) return false;
-		if (!this.projectId) return false;
-		const known = appState?.projects?.some((p: any) => p.id === this.projectId);
-		return !!known;
+		const record = this._archivedSessionRecord();
+		return !!record && canContinueArchivedSession(record);
+	}
+
+	private _archivedSessionRecord(): GatewaySession | null {
+		const sid = this.session?.sessionId;
+		if (!sid) return null;
+		const fromState = appState.archivedSessions.find((s) => s.id === sid)
+			|| appState.gatewaySessions.find((s) => s.id === sid);
+		if (fromState) return { ...fromState, readOnly: fromState.readOnly || this.readOnly };
+		return {
+			id: sid,
+			title: (this.session as any)?.title || "Archived session",
+			cwd: this.cwd || "",
+			projectId: this.projectId,
+			status: "archived",
+			createdAt: 0,
+			lastActivity: 0,
+			clientCount: 0,
+			goalId: this.goalId,
+			delegateOf: this.delegateOf,
+			teamGoalId: this.teamGoalId,
+			readOnly: this.readOnly,
+			nonInteractive: this.nonInteractive,
+		};
 	}
 
 	/**
@@ -223,58 +240,12 @@ export class AgentInterface extends LitElement {
 	}
 
 	private async _openContinueChooser() {
-		const chooser = document.createElement("continue-session-chooser") as any;
-		chooser.sessionId = this.session?.sessionId ?? "";
-		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
-		chooser.proposalTypes = [...this._archivedProposalTypes];
-		document.body.appendChild(chooser);
-
-		const cleanup = () => {
-			if (chooser.parentElement) chooser.parentElement.removeChild(chooser);
-		};
-
-		chooser.addEventListener("cancel", () => cleanup());
-		chooser.addEventListener("continue", async () => {
-			cleanup();
-			const archivedId = this.session?.sessionId;
-			if (!archivedId) return;
-			try {
-				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({}),
-				});
-				if (!resp.ok) {
-					const text = await resp.text().catch(() => "");
-					console.error("Continue in new session failed:", resp.status, text);
-					this._showContinueError(`Failed to continue (${resp.status}): ${text || resp.statusText}`);
-					return;
-				}
-				const data = await resp.json();
-				const id = data?.id;
-				if (!id) {
-					this._showContinueError("Server returned no session id");
-					return;
-				}
-				setHashRoute("session", id);
-				window.dispatchEvent(new CustomEvent("focus-editor"));
-			} catch (err) {
-				console.error("Continue in new session threw:", err);
-				this._showContinueError(String(err));
-			}
+		const record = this._archivedSessionRecord();
+		if (!record) return;
+		await continueArchivedSession(record, {
+			messageCount: this.session?.state?.messages?.length ?? 0,
+			proposalTypes: [...this._archivedProposalTypes],
 		});
-	}
-
-	private _showContinueError(message: string) {
-		const host = document.createElement("div");
-		host.setAttribute("data-continue-error", "");
-		host.style.cssText =
-			"position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;padding:10px 14px;border-radius:6px;font-size:13px;max-width:90vw;background:var(--destructive,#b91c1c);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.2);";
-		host.textContent = message;
-		document.body.appendChild(host);
-		setTimeout(() => {
-			if (host.parentElement) host.parentElement.removeChild(host);
-		}, 5000);
 	}
 
 	// References

@@ -1,19 +1,27 @@
 import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2, Zap } from "lucide";
 import type { TemplateResult } from "lit";
-import { copySidebarLink, refreshAgentSession, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
-import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
+import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { forkSession, terminateSession } from "./session-manager.js";
-import type { GatewaySession } from "./state.js";
+import { connectToSession, forkSession, terminateSession } from "./session-manager.js";
+import { state, type GatewaySession } from "./state.js";
+import { ensureContinueSessionChooser } from "./lazy-widgets.js";
+import { errorDetails } from "./error-helpers.js";
 
 export type SessionActionId =
 	| "modify"
 	| "terminate"
 	| "refresh-agent"
 	| "fork"
+	| "copy-link"
+	| "view-system-prompt"
+	| "open-new-window";
+
+export type ArchivedSessionActionId =
+	| "continue-archived"
 	| "copy-link"
 	| "view-system-prompt"
 	| "open-new-window";
@@ -49,6 +57,17 @@ export interface BuildSessionActionsInput {
 	onRefreshStateChanged?: () => void;
 }
 
+export interface BuildArchivedSessionActionsInput {
+	session: GatewaySession;
+	displayTitle: string;
+	copyLink?: (url: string, title: SidebarCopyLinkTitle) => Promise<void>;
+}
+
+export interface ContinueArchivedSessionOptions {
+	messageCount?: number;
+	proposalTypes?: string[];
+}
+
 const BUILTIN_PRIORITIES: Record<SessionActionId, number> = {
 	"modify": 10,
 	"terminate": 20,
@@ -57,6 +76,13 @@ const BUILTIN_PRIORITIES: Record<SessionActionId, number> = {
 	"copy-link": 50,
 	"view-system-prompt": 60,
 	"open-new-window": 70,
+};
+
+const ARCHIVED_BUILTIN_PRIORITIES: Record<ArchivedSessionActionId, number> = {
+	"continue-archived": 10,
+	"copy-link": 20,
+	"view-system-prompt": 30,
+	"open-new-window": 40,
 };
 
 // Fork's "New worktree" choice is shared across surfaces. Reset to the default
@@ -95,6 +121,147 @@ export function canForkSession(session: GatewaySession): boolean {
 		&& session.role !== "team-lead"
 		&& !session.teamGoalId
 		&& !session.teamLeadSessionId;
+}
+
+export function isArchivedSessionActionSource(session: GatewaySession): boolean {
+	return session.archived === true
+		|| session.readOnly === true
+		|| session.status === "archived"
+		|| session.status === "terminated";
+}
+
+export function canContinueArchivedSession(session: GatewaySession): boolean {
+	if (!isArchivedSessionActionSource(session)) return false;
+	if (session.goalId) return false;
+	if (session.delegateOf || session.parentSessionId) return false;
+	if (session.teamGoalId || session.teamLeadSessionId) return false;
+	if (session.role === "team-lead") return false;
+	if (session.nonInteractive) return false;
+	if (!session.projectId) return false;
+	if (!state.projects.some((project) => project.id === session.projectId)) return false;
+	const row = session as GatewaySession & Record<string, unknown>;
+	if ("agentSessionFile" in row && !row.agentSessionFile) return false;
+	if ("transcriptAvailable" in row && row.transcriptAvailable === false) return false;
+	return true;
+}
+
+export async function continueArchivedSession(session: GatewaySession, options: ContinueArchivedSessionOptions = {}): Promise<void> {
+	if (!canContinueArchivedSession(session)) return;
+	try {
+		const confirmed = await confirmContinueArchivedSession(session, options);
+		if (!confirmed) return;
+		const resp = await gatewayFetch(`/api/sessions/${encodeURIComponent(session.id)}/continue`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({}),
+		});
+		if (!resp.ok) {
+			const text = await resp.text().catch(() => "");
+			throw new Error(`Failed to continue (${resp.status}): ${text || resp.statusText}`);
+		}
+		const data = await resp.json().catch(() => ({} as any));
+		const id = typeof data?.id === "string" ? data.id : typeof data?.sessionId === "string" ? data.sessionId : "";
+		if (!id) throw new Error("Server returned no session id");
+		await refreshSessions();
+		await connectToSession(id, true, { refetchMessagesOnReady: true });
+		window.dispatchEvent(new CustomEvent("focus-editor"));
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		console.error("Continue in new session failed:", err);
+		showConnectionError("Failed to continue session", message, { code, stack });
+	}
+}
+
+export function buildArchivedSessionActions(input: BuildArchivedSessionActionsInput): SessionActionDescriptor[] {
+	const { session } = input;
+	const copyLink = input.copyLink ?? defaultCopySidebarLink;
+	const actions: SessionActionDescriptor[] = [
+		{
+			id: "continue-archived",
+			label: "Continue in new session",
+			title: "Continue this archived session in a new live session",
+			icon: icon(GitFork, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["continue-archived"],
+			quick: false,
+			visible: canContinueArchivedSession(session),
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void continueArchivedSession(session);
+			},
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			title: "Copy a link to this archived session",
+			icon: icon(Link, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["copy-link"],
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void copyLink(sessionPathDeepLink(session.id), "Copy session link");
+			},
+		},
+		{
+			id: "view-system-prompt",
+			label: "View System Prompt",
+			title: "View System Prompt",
+			icon: icon(FileText, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["view-system-prompt"],
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void import("../ui/dialogs/SystemPromptDialog.js").then(({ SystemPromptDialog }) => SystemPromptDialog.show(session.id));
+			},
+		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			title: "Open this archived session in a new browser window",
+			icon: icon(ExternalLink, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["open-new-window"],
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				openSessionInNewWindow(session.id);
+			},
+		},
+	];
+	return actions
+		.filter((action) => action.visible !== false)
+		.sort((a, b) => a.priority - b.priority);
+}
+
+async function confirmContinueArchivedSession(session: GatewaySession, options: ContinueArchivedSessionOptions): Promise<boolean> {
+	if (typeof document === "undefined") return true;
+	await ensureContinueSessionChooser();
+	return new Promise<boolean>((resolve) => {
+		const chooser = document.createElement("continue-session-chooser") as HTMLElement & {
+			sessionId: string;
+			messageCount: number;
+			proposalTypes: string[];
+		};
+		chooser.sessionId = session.id;
+		chooser.messageCount = options.messageCount ?? 0;
+		chooser.proposalTypes = [...(options.proposalTypes ?? [])];
+		let settled = false;
+		const cleanup = (value: boolean) => {
+			if (settled) return;
+			settled = true;
+			chooser.removeEventListener("cancel", onCancel);
+			chooser.removeEventListener("continue", onContinue);
+			try { chooser.remove(); } catch { /* ignore */ }
+			resolve(value);
+		};
+		const onCancel = () => cleanup(false);
+		const onContinue = () => cleanup(true);
+		chooser.addEventListener("cancel", onCancel);
+		chooser.addEventListener("continue", onContinue);
+		document.body.appendChild(chooser);
+	});
 }
 
 export function buildSessionActions(input: BuildSessionActionsInput): SessionActionDescriptor[] {
