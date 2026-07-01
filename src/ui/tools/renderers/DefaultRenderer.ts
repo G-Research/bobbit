@@ -7,6 +7,7 @@ import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
 const ERROR_PREVIEW_MAX_LENGTH = 500;
+let payloadSectionId = 0;
 
 function truncateErrorPreview(text: string): string {
 	const trimmed = text.trim();
@@ -37,23 +38,35 @@ export class DefaultRenderer implements ToolRenderer {
 
 	private renderPayloadSection(label: string, code: string, language: string) {
 		const payloadType = language === "json" ? "JSON" : "text";
+		const payloadId = `default-payload-${++payloadSectionId}`;
 		const onToggle = (event: Event) => {
-			const details = event.currentTarget as HTMLDetailsElement;
-			details.querySelector('[data-state="collapsed"]')?.toggleAttribute("hidden", details.open);
-			details.querySelector('[data-state="expanded"]')?.toggleAttribute("hidden", !details.open);
+			const button = event.currentTarget as HTMLButtonElement;
+			const section = button.closest("[data-default-payload-section]");
+			const expanded = button.getAttribute("aria-expanded") === "true";
+			const nextExpanded = !expanded;
+			button.setAttribute("aria-expanded", String(nextExpanded));
+			section?.querySelector<HTMLElement>(`[data-payload-region="${payloadId}"]`)?.toggleAttribute("hidden", !nextExpanded);
+			section?.querySelector('[data-state="collapsed"]')?.toggleAttribute("hidden", nextExpanded);
+			section?.querySelector('[data-state="expanded"]')?.toggleAttribute("hidden", !nextExpanded);
 		};
 
 		return html`
-			<details class="rounded-md border border-border bg-muted/20 p-2" data-default-payload-section @toggle=${onToggle}>
-				<summary class="cursor-pointer select-none rounded-sm text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]">
+			<div class="rounded-md border border-border bg-muted/20 p-2" data-default-payload-section>
+				<button
+					type="button"
+					class="cursor-pointer select-none rounded-sm text-left text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+					aria-expanded="false"
+					aria-controls=${payloadId}
+					@click=${onToggle}
+				>
 					${label} ${payloadType} payload
 					<span class="font-normal opacity-80" data-state="collapsed">(collapsed; expand to inspect)</span>
 					<span class="font-normal opacity-80" data-state="expanded" hidden>(expanded)</span>
-				</summary>
-				<div class="mt-2">
+				</button>
+				<div id=${payloadId} data-payload-region=${payloadId} class="mt-2" hidden>
 					<code-block .code=${code} language=${language}></code-block>
 				</div>
-			</details>
+			</div>
 		`;
 	}
 
