@@ -4345,16 +4345,14 @@ export class SessionManager {
 
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
-			session.allowedTools = [...(session.allowedTools || []), ...newTools];
+			session.allowedTools = this.mergeToolNames(session.allowedTools, newTools) ?? [];
 			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
-			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
-			session.allowedTools = [...(session.allowedTools || []), ...newTools];
+			session.allowedTools = this.mergeToolNames(session.allowedTools, newTools) ?? [];
 			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
-			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
 		} else {
@@ -4373,19 +4371,22 @@ export class SessionManager {
 			}
 			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole).map(e => e.name);
 			session.allowedTools = updatedEffective;
-			await this._restartSessionWithUpdatedRole(session);
-
 			resultTools = updatedEffective;
 		}
 
-		// Resolve pending grant request from guard extension
 		if (session.pendingGrantRequest) {
+			// Single-owner grant resumption: the active guard long-poll receives the
+			// grant and lets the original tool call continue. Do not restart first;
+			// stopping the process can kill that blocked call and force duplicate
+			// prompt-level replay elsewhere.
 			clearTimeout(session.pendingGrantRequest.timer);
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
-			pending.resolve({ granted: true, tools: session.allowedTools });
+			pending.resolve({ granted: true, tools: resultTools });
+			return resultTools;
 		}
 
+		await this._restartSessionWithUpdatedRole(session);
 		return resultTools;
 	}
 

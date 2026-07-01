@@ -131,9 +131,14 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
-        // Permission granted — add to in-memory set so future calls pass through
-        grantedTools.add(toolName);
-        grantedToolsLower.add(String(toolName || "").toLowerCase());
+        // Permission granted — add all server-confirmed grants to the in-memory
+        // set so the active process can continue without a grant-triggered
+        // restart or client prompt replay.
+        const newlyGranted = Array.isArray(r.tools) && r.tools.length > 0 ? r.tools : [toolName];
+        for (const granted of newlyGranted) {
+          grantedTools.add(granted);
+          grantedToolsLower.add(String(granted || "").toLowerCase());
+        }
         return { block: false };
       } else {
         const reason = (r && r.reason) ? r.reason : "Permission denied by user";
