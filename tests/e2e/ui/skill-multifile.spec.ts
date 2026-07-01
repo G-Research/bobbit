@@ -43,6 +43,14 @@ function skillChip(page: import("@playwright/test").Page) {
 	return page.locator("skill-chip").first();
 }
 
+async function expandLatestDefaultPayload(page: import("@playwright/test").Page, name: RegExp) {
+	const button = page.getByRole("button", { name }).last();
+	await expect(button).toBeVisible({ timeout: 5_000 });
+	await expect(button).toHaveAttribute("aria-expanded", "false");
+	await button.click();
+	await expect(button).toHaveAttribute("aria-expanded", "true");
+}
+
 test.describe("multi-file skill activation", () => {
 	test("chip renders without activation-header fence; server includes header + resource manifest; reload preserves", async ({ page }) => {
 		const cwd = nonGitCwd();
@@ -130,13 +138,23 @@ test.describe("multi-file skill activation", () => {
 		await expect(
 			page.getByText("Done. Used Read tool.").first(),
 		).toBeVisible({ timeout: 20_000 });
-		await expect(
-			page.getByText("READ_THIS_CONTENT_E2E").first(),
-		).toBeVisible({ timeout: 5_000 });
+		const readInputPayload = page.getByRole("button", { name: /Input JSON payload/i }).last();
+		const readOutputPayload = page.getByRole("button", { name: /Output (?:JSON|text) payload/i }).last();
+		await expect(readInputPayload).toHaveAttribute("aria-expanded", "false");
+		await expect(readOutputPayload).toHaveAttribute("aria-expanded", "false");
+
+		// DefaultRenderer keeps raw payloads collapsed by default; expand them
+		// before asserting the Read input path and output content are inspectable.
+		await expandLatestDefaultPayload(page, /Input JSON payload/i);
 		// Path round-trip: the rendered tool input contains the references/
 		// path the agent resolved against the activation-header skill root.
 		await expect(
 			page.locator("code").filter({ hasText: "references/REFERENCE.md" }).first(),
+		).toBeVisible({ timeout: 5_000 });
+
+		await expandLatestDefaultPayload(page, /Output (?:JSON|text) payload/i);
+		await expect(
+			page.getByText("READ_THIS_CONTENT_E2E").first(),
 		).toBeVisible({ timeout: 5_000 });
 	});
 });
