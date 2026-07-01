@@ -127,9 +127,15 @@ test.describe("session_prompt", () => {
 	test("prompt mode can prompt an arbitrary explicitly enabled live target session", async ({ gateway }) => {
 		const callerId = await createRoleSession(roleName);
 		const targetId = await createSession({ cwd: nonGitCwd() });
+		const targetTitle = `Session prompt target ${Date.now()}`;
 		sessions.push(callerId, targetId);
 		await waitForSessionStatus(callerId, "idle");
 		await waitForSessionStatus(targetId, "idle");
+		const titleResp = await apiFetch(`/api/sessions/${targetId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ title: targetTitle }),
+		});
+		expect(titleResp.status, await titleResp.text()).toBe(200);
 
 		const caller = gateway.sessionManager.getSession(callerId);
 		expect(caller?.allowedTools, "caller role must explicitly expose session_prompt").toContain("session_prompt");
@@ -145,7 +151,11 @@ test.describe("session_prompt", () => {
 			});
 			const data = await resp.json();
 			expect(resp.status, JSON.stringify(data)).toBe(200);
-			expect(data).toMatchObject({ ok: true, mode: "prompt" });
+			expect(data).toMatchObject({
+				ok: true,
+				mode: "prompt",
+				target: { sessionId: targetId, title: targetTitle },
+			});
 			expect(["dispatched", "queued"]).toContain(data.status);
 
 			await expectUserTurn(targetConn, cursor, marker);
@@ -157,9 +167,15 @@ test.describe("session_prompt", () => {
 	test("steer mode uses the live-steer path and interrupts registered bash_bg waits", async ({ gateway }) => {
 		const callerId = await createRoleSession(roleName);
 		const targetId = await createSession({ cwd: nonGitCwd() });
+		const targetTitle = `Session prompt steer target ${Date.now()}`;
 		sessions.push(callerId, targetId);
 		await waitForSessionStatus(callerId, "idle");
 		await waitForSessionStatus(targetId, "idle");
+		const titleResp = await apiFetch(`/api/sessions/${targetId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ title: targetTitle }),
+		});
+		expect(titleResp.status, await titleResp.text()).toBe(200);
 
 		const bgResp = await apiFetch(`/api/sessions/${targetId}/bg-processes`, {
 			method: "POST",
@@ -199,7 +215,12 @@ test.describe("session_prompt", () => {
 			});
 			const data = await resp.json();
 			expect(resp.status, JSON.stringify(data)).toBe(200);
-			expect(data).toMatchObject({ ok: true, mode: "steer", dispatched: true });
+			expect(data).toMatchObject({
+				ok: true,
+				mode: "steer",
+				dispatched: true,
+				target: { sessionId: targetId, title: targetTitle },
+			});
 
 			const waitResult = await waitPromise;
 			expect(liveSteerSeen, "session_prompt(mode=steer) must call deliverLiveSteer for streaming targets").toBe(true);

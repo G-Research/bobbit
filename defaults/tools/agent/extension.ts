@@ -315,7 +315,8 @@ const extension: ExtensionFactory = (pi) => {
 		}),
 		async execute(_toolCallId, params) {
 			try {
-				return ok(JSON.stringify(await callSessionPromptEndpoint(params as SessionPromptParams), null, 2));
+				const response = await callSessionPromptEndpoint(params as SessionPromptParams);
+				return ok(JSON.stringify(response, null, 2), response);
 			} catch (e: any) { return fail(e?.message ?? String(e)); }
 		},
 	});
