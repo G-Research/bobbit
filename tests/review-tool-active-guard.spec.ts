@@ -12,7 +12,8 @@ import path from "node:path";
  * `state.review*` fields. Because `selectSession` keeps the outgoing
  * session's RemoteAgent alive in `sessionCache`, message_end events from the
  * background session still flow into that handler. The fix is to gate every
- * mutation on the agent being the active one (`this === state.remoteAgent`).
+ * mutation on the agent session still matching `state.selectedSessionId`,
+ * including after lazy review-source imports resume.
  */
 
 const FIXTURE = path.resolve("tests/fixtures/review-tool-active-guard.html");
@@ -103,6 +104,30 @@ test.describe("review tool active-session guard", () => {
 		expect(result.docTitles).toEqual(["PR-from-active"]);
 	});
 
+	test("review_open does NOT mutate state after a lazy-import session switch", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(async () => {
+			const w = window as any;
+			const active = w.__makeAgent("active-session");
+			const next = w.__makeAgent("next-session");
+			w.__setActive(active);
+			w.__clearReviewState();
+
+			const pending = w.__deliverReviewToolResult(active, "review_open", {
+				title: "Late-PR",
+				markdown: "# Must not appear after session switch",
+			});
+			w.__setActive(next);
+			await pending;
+
+			return w.__getReviewState();
+		});
+
+		expect(result.open).toBe(false);
+		expect(result.activeTab).toBe("");
+		expect(result.docCount).toBe(0);
+	});
+
 	test("active session's inline review_open also handles structured tool-result payloads", async ({ page }) => {
 		await gotoAndWait(page);
 		const result = await page.evaluate(async () => {
@@ -143,6 +168,36 @@ test.describe("review tool active-session guard", () => {
 
 			// Background session emits review_close — must NOT clear the active doc.
 			await w.__deliverReviewToolResult(background, "review_close", {});
+			const after = w.__getReviewState();
+
+			return { before, after };
+		});
+
+		expect(result.before.open).toBe(true);
+		expect(result.before.docCount).toBe(1);
+		expect(result.after.open).toBe(true);
+		expect(result.after.docCount).toBe(1);
+		expect(result.after.activeTab).toBe("Active-PR");
+	});
+
+	test("review_close does NOT mutate state after a lazy-import session switch", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(async () => {
+			const w = window as any;
+			const active = w.__makeAgent("active-session");
+			const next = w.__makeAgent("next-session");
+			w.__setActive(active);
+			w.__clearReviewState();
+
+			await w.__deliverReviewToolResult(active, "review_open", {
+				title: "Active-PR",
+				markdown: "# Important",
+			});
+			const before = w.__getReviewState();
+
+			const pending = w.__deliverReviewToolResult(active, "review_close", { title: "Active-PR" });
+			w.__setActive(next);
+			await pending;
 			const after = w.__getReviewState();
 
 			return { before, after };
