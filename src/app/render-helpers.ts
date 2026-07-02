@@ -98,8 +98,25 @@ export function effectiveArchivedTeamGoalId(session: GatewaySession): string | u
 	return session.teamGoalId || (isVerifierSessionId(session.id) ? session.goalId : undefined);
 }
 
+function hasRenderableOwningGoal(goalId: string | undefined): boolean {
+	return !!goalId && state.goals.some(goal => goal.id === goalId);
+}
+
+function hasVerifierFallbackContent(session: GatewaySession): boolean {
+	const row = session as GatewaySession & { agentSessionFile?: unknown };
+	const transcript = typeof row.agentSessionFile === "string"
+		? row.agentSessionFile.trim()
+		: row.agentSessionFile;
+	const title = (session.title || "").trim();
+	return !!transcript || (!!title && title !== "New session");
+}
+
 export function isStandaloneArchivedSession(session: GatewaySession): boolean {
-	return !effectiveArchivedTeamGoalId(session) && !isChildSession(session);
+	if (isChildSession(session)) return false;
+	const owningGoalId = effectiveArchivedTeamGoalId(session);
+	if (!owningGoalId) return true;
+	if (!isVerifierSessionId(session.id)) return false;
+	return !hasRenderableOwningGoal(owningGoalId) && hasVerifierFallbackContent(session);
 }
 
 function isFirstClassChildSession(session: GatewaySession): boolean {
