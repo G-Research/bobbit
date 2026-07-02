@@ -241,6 +241,20 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		assert.equal(isPackPathWithinRoot(root, routesAbs), true);
 	});
 
+	it("preserves valid launcher icons and drops invalid icon fields while loading entrypoint files", () => {
+		const root = packRoot("icons", "launchers");
+		w(path.join(root, "pack.yaml"), "name: launchers\n");
+		w(path.join(root, "entrypoints", "terminal.yaml"), "id: terminal.open\nkind: session-menu\nlabel: Open Terminal\nicon: terminal\ntarget:\n  panelId: terminal.panel\n");
+		w(path.join(root, "entrypoints", "bad-icon.yaml"), "id: launchers.bad\nkind: session-menu\nlabel: Bad Icon\nicon: nope\ntarget:\n  route: demo.route\n");
+		w(path.join(root, "entrypoints", "route-icon.yaml"), "id: launchers.route\nkind: route\nrouteId: launchers.route\nicon: terminal\ntarget:\n  panelId: terminal.panel\nparamKeys: []\n");
+
+		const c = loadPackContributions(root, manifest("launchers", { entrypoints: ["terminal", "bad-icon", "route-icon"] }));
+		assert.equal((c.entrypoints.find((e) => e.listName === "terminal") as any)?.icon, "terminal");
+		assert.equal((c.entrypoints.find((e) => e.listName === "bad-icon") as any)?.icon, undefined);
+		assert.equal((c.entrypoints.find((e) => e.listName === "route-icon") as any)?.icon, undefined);
+		assert.deepEqual(c.entrypoints.map((e) => e.listName).sort(), ["bad-icon", "route-icon", "terminal"]);
+	});
+
 	it("drops a malformed panel file (bad id / missing entry) without crashing the scan", () => {
 		const root = packRoot("s1b", "p");
 		w(path.join(root, "pack.yaml"), "name: p\n");
