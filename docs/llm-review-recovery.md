@@ -118,6 +118,8 @@ In-flight reviewer steps also persist in active verification state. After a gate
 
 Live `nonInteractive` sessions that are not referenced by active verification state are surfaced deterministically during boot resume. The harness asks `SessionManager.listOrphanedNonInteractiveSessions()` before any long resume wait and logs the orphaned reviewers; operators can inspect and terminate stale records through Settings → Maintenance or the `/api/maintenance/orphaned-sessions` and `/api/maintenance/cleanup-sessions` routes. A late `verification_result` from these orphaned sessions has no pending resolver, so surfacing is safer than silently waiting for timeout cleanup.
 
+Archived reviewer rows have an additional bucketing contract: verifier sessions are goal-owned even when old persisted metadata only has `goalId`, and transcript-bearing review/QA output must stay reachable while empty failed-startup placeholders stay out of standalone archive lists. See [Reviewer Archive Cleanup](reviewer-archive-cleanup.md) for the SessionStore backfill, sidebar fallback order, and pre-startup metadata stamping rules.
+
 This preserves the distinction between "the reviewed work is bad" and "the reviewer was interrupted by the gateway/runtime."
 
 ## Exhausted recovery diagnostics
@@ -156,11 +158,14 @@ Relevant unit coverage:
 - `tests/verification-reminder-race.test.ts` — reminder `waitForStreaming()` guard and post-reminder transient recovery ordering.
 - `tests/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
 - `tests/verification-resume-restart-recovery.test.ts` — cold reviewer readiness wait and transient resume failure rerun path.
+- `tests/reviewer-archive-metadata.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
+- `tests/ui-fixtures/sidebar-archived-fixture.spec.ts` — archived verifier bucketing and transcript/placeholder fallback visibility.
 
 Focused checks while changing this area:
 
 ```bash
-npx tsx --test tests/verification-logic.test.ts tests/transient-review-error.test.ts tests/verification-reminder-race.test.ts tests/verification-resume-restart-prompt.test.ts tests/verification-resume-restart-recovery.test.ts
+npx tsx --test tests/verification-logic.test.ts tests/transient-review-error.test.ts tests/verification-reminder-race.test.ts tests/verification-resume-restart-prompt.test.ts tests/verification-resume-restart-recovery.test.ts tests/reviewer-archive-metadata.test.ts
+npx playwright test tests/ui-fixtures/sidebar-archived-fixture.spec.ts
 ```
 
 Full required checks for production changes in this area:
