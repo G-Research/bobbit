@@ -636,7 +636,7 @@ export interface SessionInfo {
 	lastPromptSource?: PromptSource;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
-		resolve: (result: { granted: boolean; tools?: string[] }) => void;
+		resolve: (result: { granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string }) => void;
 		reject: (err: Error) => void;
 		toolName: string;
 		toolGroup: string;
@@ -2555,6 +2555,7 @@ export class SessionManager {
 		cwd: string,
 		projectId?: string,
 		effectiveGoalId?: string,
+		grantedTools?: string[],
 	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
@@ -2581,11 +2582,15 @@ export class SessionManager {
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
+		// and layer explicit grant records on top. Ask-gated tools are part of the
+		// effective role surface so the derived diff alone cannot identify that a
+		// session-only/one-time approval should pre-populate the guard after restart.
 		const roleBaseTools = role && this.toolManager
 			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
-		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const derivedSessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const sessionGrants = this.mergeToolNames(derivedSessionGrants, grantedTools) ?? [];
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
@@ -4301,58 +4306,38 @@ export class SessionManager {
 		const role = this.resolveSessionRole(roleName, undefined, session.projectId);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(role).map(e => e.name);
-		const effectiveSet = new Set(effectiveAllowed.map(t => t.toLowerCase()));
-
-		const newTools: string[] = [];
+		const grantScopeTools: string[] = [];
 		if (scope === "group" && group) {
-			// Add all tools from the group (MCP + non-MCP)
+			// Approving a group covers tools in that group only. Do not use the full
+			// effective role surface here: ask-gated tools are registered there so the
+			// model can attempt them, but they are not approved grants yet.
 			if (this.mcpManager) {
-				const infos = this.mcpManager.getToolInfos();
-				for (const info of infos) {
-					if (info.group === group && !effectiveSet.has(info.name.toLowerCase())) {
-						newTools.push(info.name);
-					}
+				for (const info of this.mcpManager.getToolInfos()) {
+					if (info.group === group) grantScopeTools.push(info.name);
 				}
 			}
 			if (this.toolManager) {
-				const allTools = this.toolManager.getAvailableTools();
-				for (const tool of allTools) {
-					if (tool.group === group && !effectiveSet.has(tool.name.toLowerCase()) && !newTools.includes(tool.name)) {
-						newTools.push(tool.name);
-					}
+				for (const tool of this.toolManager.getAvailableTools()) {
+					if (tool.group === group) grantScopeTools.push(tool.name);
 				}
 			}
 		} else {
-			// Add just the single tool
-			if (!effectiveSet.has(toolName.toLowerCase())) {
-				newTools.push(toolName);
-			}
+			grantScopeTools.push(toolName);
 		}
-
-		if (newTools.length === 0) {
-			// Tool is already effectively allowed — still resolve any pending guard request
-			if (session.pendingGrantRequest) {
-				clearTimeout(session.pendingGrantRequest.timer);
-				const pending = session.pendingGrantRequest;
-				session.pendingGrantRequest = undefined;
-				pending.resolve({ granted: true, tools: effectiveAllowed });
-			}
-			return effectiveAllowed;
-		}
+		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
 
 		let resultTools: string[];
 
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
-			session.allowedTools = this.mergeToolNames(session.allowedTools, newTools) ?? [];
-			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
+			session.allowedTools = this.mergeToolNames(session.allowedTools, approvedGrantTools) ?? [];
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, approvedGrantTools);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
-			session.allowedTools = this.mergeToolNames(session.allowedTools, newTools) ?? [];
-			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
+			session.allowedTools = this.mergeToolNames(session.allowedTools, approvedGrantTools) ?? [];
+			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			resultTools = session.allowedTools;
 
 		} else {
@@ -4360,7 +4345,7 @@ export class SessionManager {
 			// role is locally writable. Pack roles are read-only through RoleManager,
 			// so keep the grant effective for this session without writing to the pack.
 			const updatedPolicies = { ...role.toolPolicies };
-			for (const t of newTools) {
+			for (const t of approvedGrantTools) {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
 			const writableRole = this.roleManager.getRole(role.name);
@@ -4368,21 +4353,23 @@ export class SessionManager {
 			if (writableRole) {
 				this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
 				effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+			} else {
+				session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			}
 			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole).map(e => e.name);
-			session.allowedTools = updatedEffective;
-			resultTools = updatedEffective;
+			session.allowedTools = this.mergeToolNames(updatedEffective, writableRole ? undefined : approvedGrantTools) ?? updatedEffective;
+			resultTools = session.allowedTools;
 		}
 
 		if (session.pendingGrantRequest) {
-			// Single-owner grant resumption: the active guard long-poll receives the
-			// grant and lets the original tool call continue. Do not restart first;
-			// stopping the process can kill that blocked call and force duplicate
-			// prompt-level replay elsewhere.
+			// Single-owner grant resumption: the active guard long-poll receives only
+			// the approved grant scope/delta and lets the original tool call continue.
+			// Returning the full effective surface here would let unrelated ask-gated
+			// tools bypass future prompts in the active process.
 			clearTimeout(session.pendingGrantRequest.timer);
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
-			pending.resolve({ granted: true, tools: resultTools });
+			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group });
 			return resultTools;
 		}
 
@@ -4395,7 +4382,7 @@ export class SessionManager {
 	 * grant request, broadcasts to UI clients, and returns a promise that
 	 * resolves when the user grants/denies or after a 5-minute timeout.
 	 */
-	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<{ granted: boolean; tools?: string[] }> {
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<{ granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string }> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
@@ -4416,7 +4403,7 @@ export class SessionManager {
 		const { seq, ts } = session.eventBuffer.pushFrame();
 
 		// Create promise that will be resolved by grantToolPermission
-		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
+		const promise = new Promise<{ granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string }>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
@@ -4494,10 +4481,12 @@ export class SessionManager {
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		const overrideGrantedTools = this.mergeToolNames(savedSessionOnlyGrantedTools, savedOneTimeGrantedTools);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
 				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
 		});
 
@@ -4564,6 +4553,7 @@ export class SessionManager {
 			} finally {
 				delete (ps as any)._restartFrameOfReference;
 				delete (ps as any)._overrideAllowedTools;
+				delete (ps as any)._overrideGrantedTools;
 			}
 			const restored = this.sessions.get(session.id);
 			if (restored) {
@@ -4614,10 +4604,12 @@ export class SessionManager {
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		const overrideGrantedTools = this.mergeToolNames(savedSessionOnlyGrantedTools, savedOneTimeGrantedTools);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
 				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
 		});
 
@@ -5121,6 +5113,7 @@ export class SessionManager {
 		// Restore tool activation. Roleless normal sessions still use the general
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
+		const overrideGrantedTools: string[] | undefined = (ps as any)._overrideGrantedTools;
 		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
 		// from absent (`undefined` = fall back to role defaults). Only a missing /
 		// non-array value falls back; `[]` must survive restore so a restricted
@@ -5159,7 +5152,7 @@ export class SessionManager {
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -7123,7 +7116,7 @@ export class SessionManager {
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools));
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -9206,7 +9199,7 @@ export class SessionManager {
 				? effective
 				: (effective.length > 0 ? effective : undefined);
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools));
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
