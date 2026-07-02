@@ -90,6 +90,18 @@ export function isChildSession(session: GatewaySession): boolean {
 	return !!sessionParentId(session);
 }
 
+export function isVerifierSessionId(id: string | null | undefined): boolean {
+	return !!id && (/^llm-review-/.test(id) || /^agent-qa-/.test(id));
+}
+
+export function effectiveArchivedTeamGoalId(session: GatewaySession): string | undefined {
+	return session.teamGoalId || (isVerifierSessionId(session.id) ? session.goalId : undefined);
+}
+
+export function isStandaloneArchivedSession(session: GatewaySession): boolean {
+	return !effectiveArchivedTeamGoalId(session) && !isChildSession(session);
+}
+
 function isFirstClassChildSession(session: GatewaySession): boolean {
 	return !!session.parentSessionId && !session.delegateOf;
 }
@@ -165,7 +177,7 @@ export function filterArchivedGoalsByQuery(
 	const combined = [...liveSessions, ...archivedSessions];
 	return archivedGoals.filter(goal => {
 		if (goal.title.toLowerCase().includes(q)) return true;
-		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
+		const affiliated = combined.filter(s => (s.goalId === goal.id || effectiveArchivedTeamGoalId(s) === goal.id) && !isChildSession(s));
 		return affiliated.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 	});
 }
@@ -1318,7 +1330,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 
 	// On-demand fetch for expanded goals with no visible children
 	if (isExpanded && isTeamGoal && goalSessions.length === 0 && !_goalChildrenFetched.has(goal.id)) {
-		const archivedChildren = state.archivedSessions.filter(s => s.teamGoalId === goal.id);
+		const archivedChildren = state.archivedSessions.filter(s => effectiveArchivedTeamGoalId(s) === goal.id);
 		if (archivedChildren.length === 0) {
 			_goalChildrenFetched.add(goal.id);
 			gatewayFetch(`/api/goals/${goal.id}/team/agents?include=archived`)
@@ -1406,7 +1418,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		//      render-side fallback covers ambiguous remainders.
 		const archivedForLiveLead = state.showArchived
 			? state.archivedSessions.filter(s =>
-				s.teamGoalId === goal.id
+				effectiveArchivedTeamGoalId(s) === goal.id
 				&& !isChildSession(s)
 				&& s.role !== "team-lead"
 				&& (s.teamLeadSessionId === teamLead.id || !s.teamLeadSessionId)
@@ -1537,7 +1549,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 					</div>` : ""}
 					${teamControls}
 					${state.showArchived ? (() => {
-						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s));
+						const archivedForGoal = state.archivedSessions.filter(s => effectiveArchivedTeamGoalId(s) === goal.id && !isChildSession(s));
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
 
@@ -1593,6 +1605,12 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 
 						return html`
 							${archivedLeads.map((s, i) => renderLeadWithMembers(s, i === archivedLeads.length - 1 && !teamLead))}
+							${!teamLead && archivedLeads.length === 0 && unmapped.length > 0 ? html`
+								${unmapped.map(m => html`
+									${renderArchivedSessionRow(m)}
+									${renderArchivedDelegates(m.id)}
+								`)}
+							` : ""}
 						`;
 					})() : ""}
 				</div>
