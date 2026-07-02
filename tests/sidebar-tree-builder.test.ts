@@ -166,6 +166,32 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "spawned-child" })), true);
 	});
 
+	it("keeps spawned goals in the normal goal forest when their owning team lead is filtered out", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [
+				goal({ id: "parent", team: true, createdAt: 1 }),
+				goal({ id: "spawned", parentGoalId: "parent", spawnedBySessionId: "lead", createdAt: 2 }),
+				goal({ id: "spawned-child", parentGoalId: "spawned", createdAt: 3 }),
+			],
+			sessions: [session({ id: "lead", goalId: "parent", role: "team-lead" })],
+			archivedSessions: [],
+			showArchived: false,
+			filters: { passesSessionFilters: s => s.id !== "lead" },
+		});
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), false);
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned-child"), false);
+		assert.equal(model.spawnedGoalNodesByLeadSessionId.has("lead"), false);
+		const parent = model.projects[0].goalForest.find(n => n.entityId === "parent")!;
+		assert.equal(parent.children.some(n => n.kind === "team-lead"), false);
+		const spawned = parent.children.find(n => n.kind === "goal" && n.entityId === "spawned");
+		assert.equal(spawned?.parentKey, parent.key);
+		assert.equal(spawned?.children.find(n => n.kind === "goal")?.entityId, "spawned-child");
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned").length, 1);
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned-child").length, 1);
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+	});
+
 	it("keeps missing-goal verifier transcripts standalone while nesting renderable-goal verifiers", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
