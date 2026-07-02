@@ -239,15 +239,23 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * depend on settings.json state. See goal: project-trust decision (no `.pi`
  * support).
  *
- * pi parses the trust flags sequentially, last-wins (see pi-coding-agent
- * dist/cli/args.js: `--approve`/`-a` set projectTrustOverride=true,
- * `--no-approve`/`-na` set it false). A caller-supplied `--approve` in
- * `options.args` would therefore re-enable project-local loading. To keep the
- * decline deterministic we STRIP every trust flag spelling from `options.args`
- * and emit exactly one leading `--no-approve` that no caller can override.
+ * `--no-context-files` is also ALWAYS present AND NON-OVERRIDABLE. Bobbit owns
+ * AGENTS.md / CLAUDE.md injection in system-prompt.ts, scoped to the registered
+ * project root and configured agent files; pi's independent upward context-file
+ * discovery must stay disabled so parent-directory context cannot leak into the
+ * runtime system prompt or extension hook events.
+ *
+ * pi parses the trust/context flags sequentially, last-wins (see
+ * pi-coding-agent dist/cli/args.js: `--approve`/`-a` set
+ * projectTrustOverride=true, `--no-approve`/`-na` set it false; context-file
+ * flags similarly enable/disable context loading). Caller-supplied flags in
+ * `options.args` would therefore override Bobbit's policy. To keep the decline
+ * deterministic we STRIP every trust/context flag spelling from `options.args`
+ * and emit exactly one leading `--no-approve` and `--no-context-files` that no
+ * caller can override.
  */
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
-	const args = ["--mode", "rpc", "--no-approve"];
+	const args = ["--mode", "rpc", "--no-approve", "--no-context-files"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
 	if (options.initialModel) {
 		const slash = options.initialModel.indexOf("/");
@@ -263,12 +271,24 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 		}
 	}
 	if (options.args) {
-		// Drop any caller-supplied project-trust flag so the single leading
-		// `--no-approve` above is non-overridable. These flags are valueless
-		// booleans, so filtering the token alone is sufficient (no paired value to
-		// also remove).
-		const TRUST_FLAGS = new Set(["--approve", "-a", "--no-approve", "-na"]);
-		args.push(...options.args.filter((a) => !TRUST_FLAGS.has(a)));
+		// Drop any caller-supplied project-trust/context-file flag so the single
+		// leading `--no-approve` and `--no-context-files` above are
+		// non-overridable. `--context-files`/`-c` may take a following value; remove
+		// that paired value when present without disturbing unrelated flags.
+		const STRIPPED_VALUELESS_FLAGS = new Set(["--approve", "-a", "--no-approve", "-na", "--no-context-files", "-nc"]);
+		const filteredArgs: string[] = [];
+		for (let i = 0; i < options.args.length; i++) {
+			const arg = options.args[i];
+			if (STRIPPED_VALUELESS_FLAGS.has(arg)) continue;
+			if (arg === "--context-files" || arg === "-c") {
+				const next = options.args[i + 1];
+				if (next !== undefined && !next.startsWith("-")) i++;
+				continue;
+			}
+			if (arg.startsWith("--context-files=") || arg.startsWith("-c=")) continue;
+			filteredArgs.push(arg);
+		}
+		args.push(...filteredArgs);
 	}
 	return args;
 }
