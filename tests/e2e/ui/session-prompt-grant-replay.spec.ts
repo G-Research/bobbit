@@ -121,6 +121,7 @@ async function assertGrantDeliversExactlyOnce(opts: {
 		const card = page.locator("tool-permission-card").first();
 		await expect(card).toBeVisible({ timeout: 20_000 });
 		await expect(card.locator("code").first()).toContainText(ASK_SESSION_PROMPT_TOOL);
+		await card.locator("select").selectOption("persistent");
 
 		await card.getByRole("button", { name: /Allow just/i }).click();
 		await expect(card.getByText(/Permission granted/i)).toBeVisible({ timeout: 10_000 });

@@ -244,4 +244,48 @@ describe("generateToolGuardExtension", () => {
 			},
 		);
 	});
+
+	it("blocks granted responses that do not cover the current tool", async () => {
+		const guard = await importGeneratedGuard(
+			generateToolGuardExtension("sess-mismatched-tool", {
+				bash: { policy: "ask", group: "shell" },
+				read: { policy: "ask", group: "fs" },
+			}, []),
+			"mismatched-tool",
+		);
+		await withGrantServer(
+			() => ({ granted: true, mode: "session-only", scope: "tool", tools: ["read"] }),
+			async () => {
+				let onToolCall: ((event: any) => Promise<any>) | undefined;
+				guard({ on: (_event, cb) => { onToolCall = cb; } });
+				assert.ok(onToolCall);
+				assert.deepEqual(await onToolCall!({ toolName: "bash" }), {
+					block: true,
+					reason: "Permission grant did not cover tool bash",
+				});
+			},
+		);
+	});
+
+	it("requires one-time grant responses to cover the blocked invocation", async () => {
+		const guard = await importGeneratedGuard(
+			generateToolGuardExtension("sess-one-time-mismatch", {
+				bash: { policy: "ask", group: "shell" },
+				bash_bg: { policy: "ask", group: "shell" },
+			}, []),
+			"one-time-mismatch",
+		);
+		await withGrantServer(
+			() => ({ granted: true, mode: "one-time", scope: "group", group: "shell", tools: ["bash_bg"] }),
+			async () => {
+				let onToolCall: ((event: any) => Promise<any>) | undefined;
+				guard({ on: (_event, cb) => { onToolCall = cb; } });
+				assert.ok(onToolCall);
+				assert.deepEqual(await onToolCall!({ toolName: "bash" }), {
+					block: true,
+					reason: "Permission grant did not cover tool bash",
+				});
+			},
+		);
+	});
 });

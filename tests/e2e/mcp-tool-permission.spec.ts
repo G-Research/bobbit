@@ -560,6 +560,52 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 		ws.close();
 	});
 
+	test("mismatched grant payload denies the active pending request", async () => {
+		const roleName = `grant-correlation-role-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		let conn: WsConnection | undefined;
+		try {
+			const roleResp = await apiFetch("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({
+					name: roleName,
+					label: "Grant Correlation Role",
+					promptTemplate: "Role with multiple ask-gated tools.",
+					toolPolicies: {
+						[DENIED_TOOL]: "ask",
+						[MCP_ADD_TOOL]: "ask",
+					},
+				}),
+			});
+			expect(roleResp.status).toBe(201);
+
+			const sessionResp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), roleId: roleName }),
+			});
+			expect(sessionResp.status).toBe(201);
+			const { id: scopedSessionId } = await sessionResp.json();
+			sessionId = scopedSessionId;
+			conn = await connectWs(sessionId);
+
+			const cursor = conn.messageCount();
+			const grantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+				method: "POST",
+				body: JSON.stringify({ toolName: DENIED_TOOL, toolGroup: "MCP: mock" }),
+			}).then(r => r.json());
+			await conn.waitForFrom(cursor, (m) => m.type === "tool_permission_needed" && m.toolName === DENIED_TOOL, 10_000);
+
+			conn.send({ type: "grant_tool_permission", toolName: MCP_ADD_TOOL, scope: "tool", mode: "session-only" });
+			const grant = await grantPromise;
+			expect(grant.granted).toBe(false);
+			expect(grant.reason).toMatch(/stale permission grant/i);
+			expect(grant.reason).toContain(DENIED_TOOL);
+		} finally {
+			conn?.close();
+			if (sessionId) { await deleteSession(sessionId).catch(() => {}); sessionId = ""; }
+			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("grant response returns only the approved scope for the active guard", async () => {
 		const roleName = `grant-scope-role-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		let conn: WsConnection | undefined;
