@@ -1,50 +1,59 @@
 # Unified sidebar tree state design
 
-Status: design only. No production code is implemented here.
+Status: design artifact. This document describes the target sidebar tree-state model; the current source still uses the legacy state and storage keys inventoried below.
 
-## Problem
+## Context
 
-Sidebar expansion state is currently split across several module-level sets and localStorage keys. The same visual tree is rendered through multiple paths:
+The sidebar renders one navigation tree through several modules, but expansion state is currently split across unrelated module-level sets and localStorage keys. That makes it easy for refreshes, goal creation, keyboard navigation, and renderer-specific defaults to disagree about whether the same entity is open.
 
-- Desktop sidebar shell and project sections: [`src/app/sidebar.ts::renderSidebar`](../../src/app/sidebar.ts#L1468), [`renderProjectHeader`](../../src/app/sidebar.ts#L1211), [`renderProjectContent`](../../src/app/sidebar.ts#L1356), [`renderNestedNode`](../../src/app/sidebar.ts#L1320).
-- Shared goal/session rows and archived subsections: [`src/app/render-helpers.ts::renderGoalGroup`](../../src/app/render-helpers.ts#L1314), nested `renderTeamGroup` inside it, [`renderProjectArchivedSection`](../../src/app/render-helpers.ts#L878), `renderArchivedSessionRow`, and `renderArchivedDelegates`.
-- Keyboard navigation: [`src/app/sidebar-nav.ts`](../../src/app/sidebar-nav.ts) currently uses string `data-nav-id` values like `goal:<id>` and maps them back to expansion functions.
-- Data refresh and goal creation: [`src/app/api.ts::refreshSessions`](../../src/app/api.ts#L435) and [`createGoal`](../../src/app/api.ts#L1605) mutate `expandedGoals` directly.
-- Tree shape helpers: [`src/app/sidebar-nesting.ts::buildNestedGoalForest`](../../src/app/sidebar-nesting.ts#L145) and [`src/app/sidebar-spawned-children.ts::computeSpawnedClaim`](../../src/app/sidebar-spawned-children.ts#L116).
+This design introduces one typed node-key model and one safe-storage-backed preference layer for sidebar disclosure state. Renderers, keyboard navigation, refresh polling, and create-goal flows should all ask the same API whether a node is expandable or expanded.
 
-The implementation should introduce one typed node-key model and one safe-storage-backed preference layer used by renderers, keyboard navigation, refresh, and create-goal flows.
+## Source map
+
+Later implementers should start with these files and functions:
+
+| Area | Source references | Why it matters |
+|---|---|---|
+| Desktop sidebar shell and project sections | `src/app/sidebar.ts::renderSidebar`, `renderProjectHeader`, `renderProjectContent`, `renderNestedNode`, `isProjectExpanded`, `toggleProjectExpanded`, `_expandedNestedDepthByProject` | Owns project headers, nested goal rendering, project reorder overrides, and the render-local “Show more child goals” depth cap. |
+| Shared goal/session rows and archived subsections | `src/app/render-helpers.ts::renderGoalGroup`, nested `renderTeamGroup`, `renderProjectArchivedSection`, `renderArchivedSessionRow`, `renderArchivedDelegates`, `INDENT` | Owns goal disclosure, team-lead disclosure, archived rows, delegate rows, and shared indentation constants. |
+| Refresh and goal creation | `src/app/api.ts::refreshSessions`, `createGoal` | Currently mutates `expandedGoals` directly when new goals arrive or are created. |
+| Keyboard navigation | `src/app/sidebar-nav.ts::NavKind`, `navIdFor`, `parseNavId`, `isNavItemExpanded`, `setNavItemExpanded`, `getVisibleNavOrder`, `navIdToHash`, `getActiveNavId` | Currently uses string `data-nav-id` values such as `goal:<id>` and switches on legacy nav kinds. |
+| Nested goal forest | `src/app/sidebar-nesting.ts::buildNestedGoalForest`, `NestedGoalNode` | Produces depth, parent/child structure, descendant counts, and truncation metadata for nested goals. |
+| Spawned child ownership | `src/app/sidebar-spawned-children.ts::selectSpawnedChildren`, `computeSpawnedClaim` | Determines which spawned subgoals render under team leads instead of the project-level nested forest. |
+| Current persisted sidebar state | `src/app/state.ts` exported sets/helpers around `expandedGoals`, collapsed project subsections, collapsed team leads, first-class parents, and archived delegate parents | Defines all legacy keys that must migrate. |
+| Plan tab disclosure | `src/app/goal-dashboard-plan-tab.ts::_planCollapsedGoals`, `_isPlanExpanded`, `_togglePlanExpanded`, `computePlanStepsForGoal` | Similar-looking tree state that is explicitly out of scope. |
 
 ## Goals
 
 1. Stable typed node keys that survive reordering, filtering, refreshes, nesting path changes, and archived/live relocation.
-2. Explicit expansion preference precedence so user choices are not undone by polling or create/refresh side effects.
+2. Explicit preference precedence so user choices are not undone by polling or create/refresh side effects.
 3. Versioned safe-storage namespace with deterministic migration from every legacy sidebar expansion key.
 4. Public API small enough for renderers and navigation to consume without knowing storage details.
 
 ## Non-goals
 
-- Do not change production code in this design task.
+- Do not change production code as part of this design artifact.
 - Do not include chat side panels, goal-dashboard gate rows, live verification rows, artifact rows, tree-cost disclosure, or marketplace/proposal disclosures.
 - Do not include goal-dashboard Plan tab nested disclosure state; rationale is below.
 
 ## Current state inventory
 
-| Current storage/state | File reference | Meaning | Default |
+| Current storage/state | Source reference | Meaning | Default |
 |---|---|---|---|
-| `bobbit-expanded-projects` | [`sidebar.ts` lines 53-67](../../src/app/sidebar.ts#L53) | Set values are `collapsed:<projectId>`; absence means project expanded. | expanded |
-| `bobbit-expanded-goals` | [`state.ts` lines 570-574](../../src/app/state.ts#L570) | Set of expanded `goalId`s. | collapsed, except auto rules |
-| `bobbit-collapsed-ungrouped` | [`state.ts` lines 578-595](../../src/app/state.ts#L578) | Collapsed project IDs for Sessions sections. | expanded |
-| `bobbit-collapsed-staff` | [`state.ts` lines 579-605](../../src/app/state.ts#L579) | Collapsed project IDs for Staff sections. | expanded |
-| `bobbit-archived-collapsed-projects` | [`state.ts` lines 608-624](../../src/app/state.ts#L608), [`render-helpers.ts` lines 780-784](../../src/app/render-helpers.ts#L780) | Collapsed project IDs for per-project Archived sections. | expanded when Show Archived is on |
-| `bobbit-collapsed-team-leads` | [`state.ts` lines 627-648](../../src/app/state.ts#L627) | Collapsed team-lead session IDs. | expanded |
-| `bobbit-collapsed-first-class-parents` | [`state.ts` lines 651-667](../../src/app/state.ts#L651) | Collapsed first-class parent session IDs. | expanded |
-| `bobbit-expanded-delegate-parents` | [`state.ts` lines 670-686](../../src/app/state.ts#L670) | Expanded archived delegate parent session IDs. | collapsed |
-| `_expandedNestedDepthByProject` | [`sidebar.ts` lines 1280-1295](../../src/app/sidebar.ts#L1280) | In-memory depth cap for “Show N more child goals”. | 5, not persisted |
-| `bobbit-sidebar-collapsed` | [`state.ts` line 363](../../src/app/state.ts#L363), [`sidebar.ts` lines 831-833](../../src/app/sidebar.ts#L831) | Shell width mode, not tree node expansion. | expanded shell |
+| `bobbit-expanded-projects` | `src/app/sidebar.ts::EXPANDED_PROJECTS_KEY`, `isProjectExpanded`, `toggleProjectExpanded` | Set values are `collapsed:<projectId>`; absence means project expanded. | expanded |
+| `bobbit-expanded-goals` | `src/app/state.ts::EXPANDED_GOALS_KEY`, `expandedGoals`, `saveExpandedGoals` | Set of expanded `goalId`s. | collapsed, except auto rules |
+| `bobbit-collapsed-ungrouped` | `src/app/state.ts::COLLAPSED_UNGROUPED_KEY`, `isUngroupedExpanded`, `setUngroupedExpanded` | Collapsed project IDs for Sessions sections. | expanded |
+| `bobbit-collapsed-staff` | `src/app/state.ts::COLLAPSED_STAFF_KEY`, `isStaffExpanded`, `setStaffSectionExpanded` | Collapsed project IDs for Staff sections. | expanded |
+| `bobbit-archived-collapsed-projects` | `src/app/state.ts::COLLAPSED_ARCHIVED_KEY`, `isArchivedSectionExpanded`, `setArchivedSectionExpanded`; `src/app/render-helpers.ts::renderProjectArchivedSection` | Collapsed project IDs for per-project Archived sections. | expanded when Show Archived is on |
+| `bobbit-collapsed-team-leads` | `src/app/state.ts::COLLAPSED_TEAM_LEADS_KEY`, `isTeamLeadExpanded`, `setTeamLeadExpanded`, `toggleTeamLeadExpanded` | Collapsed team-lead session IDs. | expanded |
+| `bobbit-collapsed-first-class-parents` | `src/app/state.ts::COLLAPSED_FIRST_CLASS_PARENTS_KEY`, `isFirstClassParentExpanded`, `setFirstClassParentExpanded`, `toggleFirstClassParentExpanded` | Collapsed first-class parent session IDs. | expanded |
+| `bobbit-expanded-delegate-parents` | `src/app/state.ts::EXPANDED_DELEGATE_PARENTS_KEY`, `isArchivedParentExpanded`, `setArchivedParentExpanded`, `toggleArchivedParentExpanded` | Expanded archived delegate parent session IDs. | collapsed |
+| `_expandedNestedDepthByProject` | `src/app/sidebar.ts::_expandedNestedDepthByProject` | In-memory depth cap for “Show N more child goals”. | 5, not persisted |
+| `bobbit-sidebar-collapsed` | `src/app/state.ts::state.sidebarCollapsed`, `src/app/sidebar.ts::toggleSidebar`, `renderCollapsedSidebar` | Shell width mode, not tree node expansion. | expanded shell |
 
 ## Node-key model
 
-Use a typed object internally and a canonical serialized string for DOM attributes and storage. Entity identity must not include volatile render location unless the same entity can have multiple independent disclosure states.
+Use a typed object internally and a canonical serialized string for DOM attributes and storage. Entity identity must not include volatile render location unless the same entity intentionally needs multiple independent disclosure states.
 
 ```ts
 export type SidebarTreeNodeKey =
@@ -75,8 +84,8 @@ Rules:
 - Use `encodeURIComponent` for every entity ID. Never split raw IDs on `:` because existing IDs are not guaranteed to avoid punctuation.
 - `goal` is keyed by `goalId` only. A goal may render in the nested forest (`sidebar.ts::renderNestedNode`) or under a team lead (`render-helpers.ts::renderTeamGroup` via `selectSpawnedChildren`); it should have one disclosure preference.
 - `project-archived` is separate from `project` because it is a subsection controlled by the global Show Archived toggle and currently has its own persisted collapsed set.
-- `session-children` includes `childClass` because first-class live child sessions and archived delegate children have different legacy defaults and legacy storage directions.
-- `session` is included as a leaf key for `data-nav-id`/active-row unification, but `isExpandable(session)` returns false.
+- `session-children` includes `childClass` because first-class live child sessions and archived delegate children have different legacy defaults and opposite legacy storage directions.
+- `session` is included as a leaf key for `data-nav-id` and active-row unification, but `isExpandable(session)` returns false.
 
 ## Node kinds and entity/context fields
 
@@ -87,7 +96,7 @@ Rules:
 | `project-staff` | `projectId` | staff count/filter state | yes | `sidebar.ts::renderStaffSidebarSection` |
 | `project-archived` | `projectId` | `state.showArchived`, archived counts | yes | `render-helpers.ts::renderProjectArchivedSection` |
 | `goal` | `goalId` | projectId, parentGoalId, depth, archived flag, descendantCount | yes | `render-helpers.ts::renderGoalGroup`, `sidebar.ts::renderNestedNode` |
-| `team-lead` | `sessionId` | goalId/teamGoalId, live/archived row context | yes | `render-helpers.ts` nested `renderTeamGroup`, archived `renderLeadWithMembers`, collapsed sidebar team rows |
+| `team-lead` | `sessionId` | goalId/teamGoalId, live/archived row context | yes | `render-helpers.ts` nested `renderTeamGroup`, archived lead/member rendering, collapsed sidebar team rows |
 | `session-children` | `sessionId`, `childClass` | parent session role/status | yes | `renderArchivedSessionRow`, `renderArchivedDelegates`, first-class child rows |
 | `session` | `sessionId` | goalId/teamGoalId/projectId | no | `renderSessionRow`, `renderArchivedSessionRow`, keyboard navigation |
 
@@ -102,11 +111,11 @@ Defaults apply only when no stored preference exists.
 | `project` | expanded | `isProjectExpanded()` returns true unless `collapsed:<projectId>` is stored. |
 | `project-sessions` | expanded | `isUngroupedExpanded()` returns true unless project is in `bobbit-collapsed-ungrouped`. |
 | `project-staff` | expanded | `isStaffExpanded()` mirrors Sessions. |
-| `project-archived` | expanded when Show Archived is on | Preserves “See Archived on means items appear immediately”; current `isArchivedSectionExpanded()` defaults true. |
+| `project-archived` | expanded when Show Archived is on | Preserves “Show Archived on means items appear immediately”; current `isArchivedSectionExpanded()` defaults true. |
 | `goal` | collapsed | Existing `expandedGoals` stores positive expansions only. Auto-expansion rules below may create a system preference. |
 | `team-lead` | expanded | Existing `isTeamLeadExpanded()` defaults true. |
 | `session-children:first-class` | expanded | Existing `isFirstClassParentExpanded()` defaults true. |
-| `session-children:archived-delegate` | collapsed | Existing `isArchivedParentExpanded()` defaults false unless session ID is in `bobbit-expanded-delegate-parents`. |
+| `session-children:archived-delegate` | collapsed | Existing `isArchivedParentExpanded()` defaults false unless the session ID is in `bobbit-expanded-delegate-parents`. |
 | `session` | not expandable | Leaf row. |
 
 `_expandedNestedDepthByProject` remains render-local and in-memory. The unified state API should not persist “Show N more” depth unless a later UX explicitly asks for it.
@@ -115,21 +124,21 @@ Defaults apply only when no stored preference exists.
 
 Resolution order for `isExpanded(key, context)`:
 
-1. **Render-forced transient state**, never persisted. Example: project reorder currently renders all project bodies collapsed via `effectiveExpanded = isProjectReordering() ? false : expanded` in [`sidebar.ts` lines 1665-1672](../../src/app/sidebar.ts#L1665). This must stay a render override, not a saved preference.
+1. **Render-forced transient state**, never persisted. Example: project reorder in `sidebar.ts::renderSidebar` computes an `effectiveExpanded` value that collapses project bodies while dragging. This must stay a render override, not a saved preference.
 2. **Explicit user preference** in the new v1 store, including preferences migrated from legacy keys. User toggles always write `source: "user"`; migration writes `source: "migration"` but resolves with the same priority.
-3. **System preference** written by create/refresh auto-expansion rules. These are allowed only when no explicit/migrated preference exists for that key.
+3. **System preference** written by create/refresh auto-expansion rules. These writes are allowed only when no explicit user or migrated preference exists for that key.
 4. **Kind default** from the table above.
 
 Consequences:
 
-- Polling must not re-expand a goal the user has collapsed. This preserves the current comment in [`api.ts::refreshSessions`](../../src/app/api.ts#L562): “never re-expand a goal the user has already seen”.
+- Polling must not re-expand a goal the user has collapsed. This preserves the invariant documented near `api.ts::refreshSessions`: “never re-expand a goal the user has already seen”.
 - A system auto-expansion can be overwritten by the next user toggle.
-- Search/filtering changes do not write preferences.
+- Search and filtering changes do not write preferences.
 - The collapsed sidebar shell (`bobbit-sidebar-collapsed`) is outside this precedence chain.
 
 ## Versioned safe-storage namespace
 
-Use `safeGetJSON`, `safeSetItem`, and `safeRemoveItem` from [`src/app/safe-storage.ts`](../../src/app/safe-storage.ts). Persistence must remain best-effort and never break boot or `refreshSessions()`.
+Use `safeGetJSON`, `safeSetItem`, and `safeRemoveItem` from `src/app/safe-storage.ts`. Persistence must remain best-effort and never break boot or `refreshSessions()`.
 
 Recommended keys:
 
@@ -154,6 +163,7 @@ interface SidebarTreeStateV1 {
 
 interface SidebarTreeLayoutPreferenceV1 {
   version: 1;
+  indentMode?: "compact" | "comfortable" | "spacious";
   baseIndentPx?: number;
   nestedGoalIndentPx?: number;
 }
@@ -161,7 +171,7 @@ interface SidebarTreeLayoutPreferenceV1 {
 
 Storage rules:
 
-- Store every explicit user preference and every migrated legacy preference as a durable node entry, even when `expanded` equals that kind's default. These entries are tombstones as well as preferences; for example, `goal(<id>)` defaults collapsed, but a user collapse still stores `expanded:false` so create/refresh system expansion cannot re-open it later.
+- Store every explicit user preference and every migrated legacy preference as a durable node entry, even when `expanded` equals that kind's default. These entries are tombstones as well as preferences; for example, `goal(<id>)` defaults collapsed, but a user collapse still stores `expanded:false` so create/refresh system expansion cannot reopen it later.
 - Store system entries only for auto-expansions needed to preserve create/refresh behavior. System writes must not overwrite an existing `source:"user"` or `source:"migration"` entry.
 - Absence from `nodes` means “no stored preference”; it does not mean “default deviation absent for this node after comparing to the default table”.
 - Drop entries for entities that no longer exist during opportunistic cleanup, but cleanup must be bounded and best-effort.
@@ -172,7 +182,7 @@ Storage rules:
 
 Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, then sets `bobbit.sidebarTree.migrated.v1 = "true"` only after the merged v1 write succeeds. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
 
-If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed/retried migration is safe and non-destructive.
+If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed or retried migration is safe and non-destructive.
 
 If `bobbit.sidebarTree.v1` is corrupt, treat it as unreadable and fall back to defaults plus legacy recovery. Because the first implementation retains legacy keys, corruption should ignore the migration marker for that boot and attempt the idempotent legacy merge into a fresh v1 object. If the fresh write succeeds, keep or rewrite `bobbit.sidebarTree.migrated.v1`; if it fails, leave the marker state unchanged so the next boot can retry.
 
@@ -249,11 +259,11 @@ Compatibility adapters can keep existing imports stable during incremental rollo
 - `expandedGoals` direct mutation should be replaced by `goal(goalId)` helpers. During transition, avoid exporting mutable `Set`s for new code.
 - `isUngroupedExpanded`, `setUngroupedExpanded`, `isStaffExpanded`, `setStaffSectionExpanded`, `isArchivedSectionExpanded`, `setArchivedSectionExpanded`, `isTeamLeadExpanded`, `setTeamLeadExpanded`, `isFirstClassParentExpanded`, and `isArchivedParentExpanded` become wrappers or are inlined into call sites.
 
-## Refresh and createGoal interaction rules
+## Refresh and `createGoal()` interaction rules
 
 ### `refreshSessions()`
 
-Current behavior in [`api.ts::refreshSessions`](../../src/app/api.ts#L435): when `/api/goals` returns newly discovered goals, it expands goals that have sessions and also expands their parent (`api.ts` lines 562-571).
+Current behavior in `api.ts::refreshSessions`: when `/api/goals` returns newly discovered goals, it expands goals that have sessions and also expands their parent so nested child rows become visible.
 
 New rule:
 
@@ -269,7 +279,7 @@ Do not write a system expansion if the goal has any stored user/migration prefer
 
 ### `createGoal()`
 
-Current behavior in [`api.ts::createGoal`](../../src/app/api.ts#L1605): after POST and `refreshSessions()`, it unconditionally adds the returned goal to `expandedGoals`.
+Current behavior in `api.ts::createGoal`: after POST and `refreshSessions()`, it unconditionally adds the returned goal to `expandedGoals`.
 
 New rule:
 
@@ -287,13 +297,13 @@ for ancestor of newGoal in current goal tree:
 
 ## Keyboard navigation implications
 
-[`src/app/sidebar-nav.ts`](../../src/app/sidebar-nav.ts) currently defines `NavKind`, `navIdFor`, `parseNavId`, `isNavItemExpanded`, and `setNavItemExpanded`. The new tree key should become the DOM/nav ID for sidebar rows:
+`src/app/sidebar-nav.ts` currently defines `NavKind`, `navIdFor`, `parseNavId`, `isNavItemExpanded`, and `setNavItemExpanded`. The new tree key should become the DOM/nav ID for sidebar rows:
 
 - Renderers set `data-nav-id=${sidebarTreeKey(nodeKey)}` and `data-nav-active` as today.
 - `getVisibleNavOrder()` remains DOM-driven; search filters, Show Archived, collapsed sections, and project reordering continue to affect visible navigation naturally.
 - `Ctrl+↑` / `Ctrl+↓` keep using visible DOM order and `openForNavItem` semantics.
 - `Ctrl+→` / `Ctrl+←` call `isSidebarTreeExpandable`, `isSidebarTreeExpanded`, and `setSidebarTreeExpanded` rather than switching on legacy nav kinds.
-- `navIdToHash` keeps mapping leaves/headers to routes: `session` -> session route, `goal` -> goal dashboard, `project` -> settings, staff header -> staff route, project-sessions/project-archived -> landing. Headers without direct routes continue using the keyboard override to retain highlight.
+- `navIdToHash` keeps mapping leaves/headers to routes: `session` to session route, `goal` to goal dashboard, `project` to settings, staff header to staff route, and project-sessions/project-archived to landing. Headers without direct routes continue using the keyboard override to retain highlight.
 - Rows with children should set `aria-expanded` from `isSidebarTreeExpanded(key)`; leaves should omit it.
 
 The existing active override behavior in `getActiveNavId()` and the rapid-keypress guard around authored hashes should remain; only the ID format and expansion API should change.
@@ -304,9 +314,9 @@ Indentation is layout, not node expansion. The tree-state module may expose layo
 
 Current render references:
 
-- Child containers use shared `INDENT` from [`render-helpers.ts`](../../src/app/render-helpers.ts) and imported in `sidebar.ts`.
-- Nested goal rows add `node.depth * 16` in [`sidebar.ts::renderNestedNode`](../../src/app/sidebar.ts#L1320).
-- Header chevron alignment uses `HEADER_CHEVRON_W` / `--sidebar-header-chevron-w`.
+- Child containers use shared `INDENT` from `render-helpers.ts`, imported by `sidebar.ts`.
+- Nested goal rows add `node.depth * 16` in `sidebar.ts::renderNestedNode`.
+- Header chevron alignment uses `HEADER_CHEVRON_W` and `--sidebar-header-chevron-w`.
 
 Recommended model:
 
@@ -330,11 +340,11 @@ Rules:
 
 ## Goal-dashboard Plan tab disclosure is out of scope
 
-Out of scope for this sidebar tree state migration.
+Goal-dashboard Plan tab disclosure state is out of scope for this sidebar tree-state migration.
 
 Rationale:
 
-- Plan tab disclosure state lives in [`src/app/goal-dashboard-plan-tab.ts`](../../src/app/goal-dashboard-plan-tab.ts), not in the sidebar. It uses `_planCollapsedGoals`, `_isPlanExpanded`, and `_togglePlanExpanded` for recursive plan rendering.
+- Plan tab disclosure state lives in `src/app/goal-dashboard-plan-tab.ts`, not in the sidebar. It uses `_planCollapsedGoals`, `_isPlanExpanded`, and `_togglePlanExpanded` for recursive plan rendering.
 - The Plan tab tree is a plan graph/view of child goals, not the sidebar navigation tree. It can synthesize formal plan nodes and child-goal plan steps through `computePlanStepsForGoal`, while the sidebar is an entity navigation tree.
 - The Plan tab state is currently in-memory and defaults expanded. Persisting it would require separate UX decisions about dashboard-local state, not a sidebar storage migration.
 - Keeping it separate prevents a sidebar collapse of `goal(<id>)` from unexpectedly hiding plan details inside a dashboard tab, and vice versa.
@@ -361,6 +371,6 @@ git grep -n -E "bobbit-(expanded-goals|expanded-projects|collapsed-ungrouped|col
 ```
 
 - Confirmed Plan tab disclosure state is separate by checking `goal-dashboard-plan-tab.ts` for `_planCollapsedGoals`, `_isPlanExpanded`, and `_togglePlanExpanded`.
-- Confirmed refresh/createGoal direct expansion mutations in `api.ts` lines 562-571 and 1636-1638.
-- For the design-review fix, reran `git diff --check -- docs/design/sidebar-tree-state.md`.
-- Confirmed the design artifact exists and still references existing source files with a focused Node sanity check.
+- Confirmed refresh/createGoal still directly mutate `expandedGoals` in `api.ts::refreshSessions` and `api.ts::createGoal`.
+- Reran `git diff --check -- docs/design/sidebar-tree-state.md` after polishing.
+- Confirmed the design artifact references existing source files with a focused Node sanity check.
