@@ -404,13 +404,14 @@ function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGo
 	const staffSectionNode = staffRows.length > 0
 		? makeNode<ProjectSectionContext>(ctx, { kind: "project-staff", projectId: project.id }, { project, projectId: project.id, section: "staff", viewport: ctx.viewport }, projectNode.key, 1, 0, 0)
 		: undefined;
-	const archivedGoalForest = buildNestedGoalForest(archivedForestInput, { maxDepth, includeArchived: true })
-		.map(n => convertGoalNode(n, projectNode, "archived-section", project, spawnedCandidates, cycleCutsByParentGoalId, ctx))
-		.filter(isDefined);
 	let archivedSectionNode: SidebarTreeNode<ProjectSectionContext> | undefined;
+	let archivedGoalForest: SidebarTreeNode<GoalContext>[] = [];
 	let archivedSessionNodes: SidebarTreeNode<SessionContext>[] = [];
 	if (ctx.includeArchived) {
 		archivedSectionNode = makeNode<ProjectSectionContext>(ctx, { kind: "project-archived", projectId: project.id }, { project, projectId: project.id, section: "archived", viewport: ctx.viewport }, projectNode.key, 1, 0, 0, false);
+		archivedGoalForest = buildNestedGoalForest(archivedForestInput, { maxDepth, includeArchived: true })
+			.map(n => convertGoalNode(n, archivedSectionNode!, "archived-section", project, spawnedCandidates, cycleCutsByParentGoalId, ctx))
+			.filter(isDefined);
 		archivedSessionNodes = ctx.archivedSessions
 			.filter(s => s.projectId === project.id && isStandaloneArchivedSession(s, renderableGoalIds) && ctx.passesSession(s))
 			.map(s => makeSessionNode(s, archivedSectionNode!, "archived-delegate", ctx));
@@ -548,8 +549,8 @@ function appendTeamLeadNode(
 }
 
 function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal: GoalLike, project: ProjectLike, spawnedCandidates: readonly GoalLike[], ctx: BuildContext): void {
-	const subtreeInput = descendantSubtreeInput(goal, spawnedCandidates, ctx.claimedSpawnedGoalIds);
 	const cycleCutsByParentGoalId = new Map<string, string[]>();
+	const subtreeInput = descendantSubtreeInput(goal, spawnedCandidates, ctx.claimedSpawnedGoalIds, ctx.diagnostics, cycleCutsByParentGoalId);
 	const sanitized = sanitizeGoalForestInput(subtreeInput, project.id, new Map(spawnedCandidates.map(g => [g.id, project.id])), ctx.diagnostics, cycleCutsByParentGoalId);
 	const subtree = buildNestedGoalForest(sanitized, { maxDepth: ctx.input.defaultNestedDepth ?? DEFAULT_NESTED_DEPTH, includeArchived: true })
 		.find(n => n.goal.id === goal.id) ?? { goal, depth: 0, children: [], descendantCount: 0 };
@@ -564,15 +565,17 @@ function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal:
 
 function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: SessionLike, ctx: BuildContext): string[] {
 	const groupKeys: string[] = [];
-	const liveChildren = ctx.liveSessions
-		.filter(s => sessionParentId(s) === parentSession.id
-			&& (ctx.includeArchived || !isArchivedOrTerminalSession(s))
-			&& (isFirstClassChildSession(s) || ctx.passesSession(s)))
+	const childCandidates = dedupeSessionsById([
+		...ctx.liveSessions,
+		...(ctx.includeArchived ? ctx.archivedSessions : []),
+	]).filter(s => sessionParentId(s) === parentSession.id && ctx.passesSession(s));
+	const liveChildren = childCandidates
+		.filter(s => !isArchivedOrTerminalSession(s) && (isFirstClassChildSession(s) || (!ctx.includeArchived && !!s.delegateOf)))
 		.sort(compareSessions);
 	const liveChildIds = new Set(liveChildren.map(s => s.id));
 	const archivedDelegates = ctx.includeArchived
-		? [...ctx.liveSessions, ...ctx.archivedSessions]
-			.filter(s => sessionParentId(s) === parentSession.id && !liveChildIds.has(s.id) && (s.archived || s.status === "terminated" || !!s.delegateOf || ctx.archivedSessions.includes(s)) && ctx.passesSession(s))
+		? childCandidates
+			.filter(s => !liveChildIds.has(s.id) && (isArchivedOrTerminalSession(s) || !!s.delegateOf || ctx.archivedSessions.includes(s)))
 			.sort(compareSessions)
 		: [];
 	for (const [childClass, children] of [["first-class", liveChildren], ["archived-delegate", archivedDelegates]] as const) {
@@ -661,7 +664,13 @@ function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildCon
 	}
 }
 
-function descendantSubtreeInput(root: GoalLike, goals: readonly GoalLike[], claimed: ReadonlySet<string>): GoalLike[] {
+function descendantSubtreeInput(
+	root: GoalLike,
+	goals: readonly GoalLike[],
+	claimed: ReadonlySet<string>,
+	diagnostics?: SidebarTreeDiagnostic[],
+	cycleCutsByParentGoalId?: Map<string, string[]>,
+): GoalLike[] {
 	const byParent = new Map<string, GoalLike[]>();
 	for (const goal of goals) {
 		if (!goal.parentGoalId) continue;
@@ -670,16 +679,38 @@ function descendantSubtreeInput(root: GoalLike, goals: readonly GoalLike[], clai
 		byParent.set(goal.parentGoalId, list);
 	}
 	const out: GoalLike[] = [];
-	const visit = (goal: GoalLike): void => {
-		out.push(goal);
-		for (const child of byParent.get(goal.id) ?? []) {
-			if (child.id !== root.id && claimed.has(child.id)) continue;
-			visit(child);
+	const emitted = new Set<string>();
+	const recordCycle = (parentGoalId: string, repeatedGoalId: string, ancestorGoalIds: readonly string[]): void => {
+		const cuts = cycleCutsByParentGoalId?.get(parentGoalId) ?? [];
+		if (!cuts.includes(repeatedGoalId)) {
+			cuts.push(repeatedGoalId);
+			cycleCutsByParentGoalId?.set(parentGoalId, cuts);
+			diagnostics?.push({ kind: "cycle-cut", goalId: repeatedGoalId, parentGoalId, ancestorGoalIds: [...ancestorGoalIds] });
 		}
 	};
-	visit(root);
+	const visit = (goal: GoalLike, path: string[]): void => {
+		if (path.includes(goal.id)) {
+			recordCycle(path[path.length - 1] ?? goal.id, goal.id, path);
+			return;
+		}
+		if (emitted.has(goal.id)) return;
+		emitted.add(goal.id);
+		out.push(goal);
+		const nextPath = [...path, goal.id];
+		for (const child of byParent.get(goal.id) ?? []) {
+			if (child.id !== root.id && claimed.has(child.id)) continue;
+			if (nextPath.includes(child.id)) {
+				recordCycle(goal.id, child.id, nextPath);
+				continue;
+			}
+			visit(child, nextPath);
+		}
+	};
+	visit(root, []);
 	return sortGoals(out);
 }
+
+export const descendantSubtreeInputForTesting = descendantSubtreeInput;
 
 function sanitizeGoalForestInput(
 	goals: readonly GoalLike[],
@@ -809,6 +840,17 @@ function compareSessions(a: SessionLike, b: SessionLike): number {
 
 function sortSessions<T extends SessionLike>(sessions: readonly T[]): T[] {
 	return [...sessions].sort(compareSessions);
+}
+
+function dedupeSessionsById<T extends SessionLike>(sessions: readonly T[]): T[] {
+	const out: T[] = [];
+	const seen = new Set<string>();
+	for (const session of sessions) {
+		if (seen.has(session.id)) continue;
+		seen.add(session.id);
+		out.push(session);
+	}
+	return out;
 }
 
 function resolveGoalProjectId(goal: GoalLike, goalById: ReadonlyMap<string, GoalLike>, projectIds: ReadonlySet<string>): string | undefined {
