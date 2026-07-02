@@ -5,6 +5,15 @@ import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
 /** 24h in ms — recency threshold for `shouldKeepDespiteOrphan`. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
+
+function isVerifierSessionId(id: string): boolean {
+	return VERIFIER_SESSION_ID_RE.test(id);
+}
+
+function defaultVerifierAccessory(id: string): string {
+	return id.startsWith("agent-qa-") ? "stamp" : "magnifier";
+}
 
 /**
  * Tightened orphan-cleanup gate. Returns true when an apparently-orphaned
@@ -222,7 +231,7 @@ export class SessionStore {
 		this.load();
 	}
 
-	/** Normalise a single PersistedSession-shaped row read from disk (legacy field migration). */
+	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
 	private seedFromArray(rows: unknown[]): void {
 		for (const row of rows) {
 			if (!row || typeof row !== "object") continue;
@@ -247,6 +256,44 @@ export class SessionStore {
 				else if (s.toolAssistant) s.assistantType = "tool";
 			}
 			this.sessions.set(s.id, s);
+		}
+		this.normalizeLegacyVerifierSessions();
+	}
+
+	/**
+	 * Backfill archived verifier rows created before setup metadata was stamped.
+	 * Keep the rows (and any transcripts) intact; only fill ownership/display
+	 * fields so clients stop treating goal-owned verifier placeholders as
+	 * standalone user sessions.
+	 */
+	private normalizeLegacyVerifierSessions(): void {
+		const uniqueTeamLeadByGoal = new Map<string, string | null>();
+		const addTeamLeadCandidate = (goalId: string | undefined, sessionId: string) => {
+			if (!goalId) return;
+			const existing = uniqueTeamLeadByGoal.get(goalId);
+			if (existing === undefined) {
+				uniqueTeamLeadByGoal.set(goalId, sessionId);
+			} else if (existing !== sessionId) {
+				uniqueTeamLeadByGoal.set(goalId, null);
+			}
+		};
+		for (const session of this.sessions.values()) {
+			if (session.role !== "team-lead") continue;
+			addTeamLeadCandidate(session.teamGoalId, session.id);
+			addTeamLeadCandidate(session.goalId, session.id);
+		}
+
+		for (const session of this.sessions.values()) {
+			if (!isVerifierSessionId(session.id) || !session.goalId) continue;
+			if (!session.teamGoalId) session.teamGoalId = session.goalId;
+			if (!session.teamLeadSessionId) {
+				const inferredLead = uniqueTeamLeadByGoal.get(session.teamGoalId ?? session.goalId);
+				if (inferredLead) session.teamLeadSessionId = inferredLead;
+			}
+			if (session.nonInteractive !== true) session.nonInteractive = true;
+			if (!session.accessory || session.accessory === "none") {
+				session.accessory = defaultVerifierAccessory(session.id);
+			}
 		}
 	}
 
