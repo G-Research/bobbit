@@ -161,16 +161,18 @@ interface SidebarTreeLayoutPreferenceV1 {
 
 Storage rules:
 
-- Store only deviations from defaults plus system expansions needed to preserve create/refresh behavior.
+- Store every explicit user preference and every migrated legacy preference as a durable node entry, even when `expanded` equals that kind's default. These entries are tombstones as well as preferences; for example, `goal(<id>)` defaults collapsed, but a user collapse still stores `expanded:false` so create/refresh system expansion cannot re-open it later.
+- Store system entries only for auto-expansions needed to preserve create/refresh behavior. System writes must not overwrite an existing `source:"user"` or `source:"migration"` entry.
+- Absence from `nodes` means “no stored preference”; it does not mean “default deviation absent for this node after comparing to the default table”.
 - Drop entries for entities that no longer exist during opportunistic cleanup, but cleanup must be bounded and best-effort.
 - If JSON is corrupt, ignore it and fall back to migration/defaults; do not delete it synchronously during module import.
 - Keep all writes through the API module, not directly from renderers.
 
 ## Migration behavior
 
-Migration runs once on first load after the new module initializes. It reads legacy keys, writes equivalent v1 node preferences, then sets `bobbit.sidebarTree.migrated.v1 = "true"`. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
+Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, then sets `bobbit.sidebarTree.migrated.v1 = "true"` only after the merged v1 write succeeds. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
 
-If both v1 state and legacy keys exist, v1 wins and migration is skipped unless the migration marker is absent and v1 has no `nodes` entries.
+If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed/retried migration is safe and non-destructive.
 
 Legacy mapping:
 
@@ -232,6 +234,12 @@ export function pruneSidebarTreeState(liveIds: {
   sessionIds?: ReadonlySet<string>;
 }): void;
 ```
+
+API semantics:
+
+- `setSidebarTreeExpanded(..., { source:"user" })` always writes a node entry for expandable keys, including values that equal the kind default.
+- `setSidebarTreeSystemExpandedIfUnset` treats a node as unset only when no stored user/migration preference exists. It must check stored node source, not whether the requested value differs from the default. It returns `false` and writes nothing for `source:"user"` or `source:"migration"` entries; it may create or update `source:"system"` entries and return `true`.
+- `isSidebarTreeExpanded` resolves by precedence: transient render override, stored user/migration entry, stored system entry, then kind default.
 
 Compatibility adapters can keep existing imports stable during incremental rollout:
 
@@ -352,3 +360,5 @@ git grep -n -E "bobbit-(expanded-goals|expanded-projects|collapsed-ungrouped|col
 
 - Confirmed Plan tab disclosure state is separate by checking `goal-dashboard-plan-tab.ts` for `_planCollapsedGoals`, `_isPlanExpanded`, and `_togglePlanExpanded`.
 - Confirmed refresh/createGoal direct expansion mutations in `api.ts` lines 562-571 and 1636-1638.
+- For the design-review fix, reran `git diff --check -- docs/design/sidebar-tree-state.md`.
+- Confirmed the design artifact exists and still references existing source files with a focused Node sanity check.
