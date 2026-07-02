@@ -166,13 +166,15 @@ Storage rules:
 - Absence from `nodes` means “no stored preference”; it does not mean “default deviation absent for this node after comparing to the default table”.
 - Drop entries for entities that no longer exist during opportunistic cleanup, but cleanup must be bounded and best-effort.
 - If JSON is corrupt, ignore it and fall back to migration/defaults; do not delete it synchronously during module import.
-- Keep all writes through the API module, not directly from renderers.
+- Keep all safe-storage reads/writes inside the new `src/app/sidebar-tree-state.ts` module. Renderers and `src/app/api.ts` may call only its exported tree-state API helpers; they must not access storage directly.
 
 ## Migration behavior
 
 Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, then sets `bobbit.sidebarTree.migrated.v1 = "true"` only after the merged v1 write succeeds. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
 
 If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed/retried migration is safe and non-destructive.
+
+If `bobbit.sidebarTree.v1` is corrupt, treat it as unreadable and fall back to defaults plus legacy recovery. Because the first implementation retains legacy keys, corruption should ignore the migration marker for that boot and attempt the idempotent legacy merge into a fresh v1 object. If the fresh write succeeds, keep or rewrite `bobbit.sidebarTree.migrated.v1`; if it fails, leave the marker state unchanged so the next boot can retry.
 
 Legacy mapping:
 
@@ -347,7 +349,7 @@ If persisted Plan tab disclosure is later desired, define a separate `goalDashbo
 4. Replace `sidebar-nav.ts` nav kind parsing with `parseSidebarTreeKey`, while retaining route mapping and active override behavior.
 5. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with system-expansion helpers.
 6. Keep legacy wrapper exports temporarily for tests and out-of-tree imports; mark mutable `expandedGoals` as deprecated and stop adding new call sites.
-7. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, and keyboard `Ctrl+←/→` expansion.
+7. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, and bounded prune behavior.
 
 ## Focused verification performed for this design
 
