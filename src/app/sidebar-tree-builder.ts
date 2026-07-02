@@ -570,12 +570,12 @@ function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: Ses
 		...(ctx.includeArchived ? ctx.archivedSessions : []),
 	]).filter(s => sessionParentId(s) === parentSession.id && ctx.passesSession(s));
 	const liveChildren = childCandidates
-		.filter(s => !isArchivedOrTerminalSession(s) && (isFirstClassChildSession(s) || (!ctx.includeArchived && !!s.delegateOf)))
+		.filter(s => !isArchivedOrTerminalSession(s) && (isFirstClassChildSession(s) || !!s.delegateOf))
 		.sort(compareSessions);
 	const liveChildIds = new Set(liveChildren.map(s => s.id));
 	const archivedDelegates = ctx.includeArchived
 		? childCandidates
-			.filter(s => !liveChildIds.has(s.id) && (isArchivedOrTerminalSession(s) || !!s.delegateOf || ctx.archivedSessions.includes(s)))
+			.filter(s => !liveChildIds.has(s.id) && (isArchivedOrTerminalSession(s) || ctx.archivedSessions.includes(s)))
 			.sort(compareSessions)
 		: [];
 	for (const [childClass, children] of [["first-class", liveChildren], ["archived-delegate", archivedDelegates]] as const) {

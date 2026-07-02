@@ -251,7 +251,7 @@ describe("buildSidebarTree", () => {
 		assert.deepEqual(groups.map(g => g.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId)), [["first"], ["delegate"]]);
 	});
 
-	it("keeps live delegate child sessions visible when archived rows are hidden", () => {
+	it("keeps live delegate child sessions in the first-class group when archived rows are shown", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
 			goals: [],
@@ -260,7 +260,7 @@ describe("buildSidebarTree", () => {
 				session({ id: "live-delegate", delegateOf: "parent", createdAt: 2 }),
 			],
 			archivedSessions: [],
-			showArchived: false,
+			showArchived: true,
 		});
 		const groups = model.sessionChildrenNodesBySessionId.get("parent") ?? [];
 		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["first-class"]);
