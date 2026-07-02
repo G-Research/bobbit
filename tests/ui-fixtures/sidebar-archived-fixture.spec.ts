@@ -114,6 +114,14 @@ async function expectNotProjectStandaloneArchived(page: Page, sessionId: string,
 	).toBe(false);
 }
 
+async function expectArchivedSectionPreference(page: Page, projectId: string, preference: "expanded" | "collapsed"): Promise<void> {
+	await expect.poll(() => page.evaluate((id) => {
+		const raw = localStorage.getItem("bobbit-sidebar-tree-state:v1");
+		if (!raw) return undefined;
+		return JSON.parse(raw).expansion?.[`sidebar-tree/v1/project-archived/${encodeURIComponent(id)}`];
+	}, projectId)).toBe(preference);
+}
+
 async function expandLiveTeamLead(page: Page, teamLeadId: string, teamWorkerId: string): Promise<void> {
 	const lead = page.locator(`[data-session-id="${teamLeadId}"]`).first();
 	await expect(lead, `${VERIFIER_MARK}: live team lead renders`).toBeVisible({ timeout: 10_000 });
@@ -178,7 +186,7 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`), `${MARK}: collapsed project B hides archived goal`).toHaveCount(0, { timeout: 5_000 });
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: project A archived section stays expanded`).toHaveCount(1);
-		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+		await expectArchivedSectionPreference(page, ids.projectB, "collapsed");
 	});
 
 	test("legacy verifier sessions stay out of project-level standalone archive rows", async ({ page }) => {
@@ -217,8 +225,10 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await loadFixture(page, { showArchived: true });
 		const ids = await fixtureIds(page);
 
-		await expect(page.locator(`[data-session-id="${ids.archivedTeamLead}"]`), `${MARK}: archived team lead renders under live goal`).toBeVisible({ timeout: 10_000 });
-		await page.locator(`[data-session-id="${ids.archivedTeamLead}"] span[title="Expand"]`).click();
+		const archivedLead = page.locator(`[data-session-id="${ids.archivedTeamLead}"]`);
+		await expect(archivedLead, `${MARK}: archived team lead renders under live goal`).toBeVisible({ timeout: 10_000 });
+		const archivedLeadExpand = archivedLead.locator(`span[title="Expand"]`).first();
+		if (await archivedLeadExpand.count()) await archivedLeadExpand.click();
 		await expect(page.locator(`[data-session-id="${ids.archivedTeamWorker}"]`), `${MARK}: archived worker expands under archived team lead`).toBeVisible({ timeout: 5_000 });
 
 		const parent = page.locator(`[data-session-id="${ids.liveSessionParent}"]`).first();
@@ -266,7 +276,7 @@ test.describe("Sidebar archived deterministic fixture", () => {
 
 		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`)).toHaveCount(0, { timeout: 5_000 });
-		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+		await expectArchivedSectionPreference(page, ids.projectB, "collapsed");
 
 		await loadFixture(page, { mode: "mobile", showArchived: true });
 		const search = page.locator("input[data-search]");
