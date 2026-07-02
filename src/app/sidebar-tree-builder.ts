@@ -661,6 +661,7 @@ function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildCon
 	const descendantsByRootId = collectDescendantIdsByRoot(spawnedCandidates);
 	for (const parent of spawnedCandidates) {
 		for (const lead of teamLeadSessionsForGoal(parent.id, ctx.liveSessions, ctx.archivedSessions, ctx.includeArchived)) {
+			if (!willRenderTeamLeadForSpawnedPlacement(parent, lead, ctx)) continue;
 			for (const child of selectSpawnedChildren(spawnedCandidates, parent.id, lead.id, ctx.includeArchived, lead.id)) {
 				ctx.spawnedRootGoalIds.add(child.id);
 				ctx.claimedSpawnedGoalIds.add(child.id);
@@ -670,6 +671,14 @@ function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildCon
 			}
 		}
 	}
+}
+
+function willRenderTeamLeadForSpawnedPlacement(goal: GoalLike, lead: SessionLike, ctx: BuildContext): boolean {
+	if (!goal.team) return false;
+	if (lead.archived || ctx.archivedSessions.includes(lead)) return ctx.includeArchived && ctx.passesSession(lead);
+	if (ctx.passesSession(lead)) return true;
+	const visibleLiveSessionForGoal = ctx.liveSessions.some(s => s.id !== lead.id && isGoalOwningSession(s, goal.id) && !isChildSession(s) && ctx.passesSession(s));
+	return visibleLiveSessionForGoal;
 }
 
 function collectDescendantIdsByRoot(goals: readonly GoalLike[]): Map<string, Set<string>> {
