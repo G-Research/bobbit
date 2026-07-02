@@ -5,7 +5,7 @@ import {
 	filterArchivedGoalsByQuery,
 	filterArchivedSessionsByQuery,
 	renderProjectArchivedSection,
-	isChildSession,
+	isStandaloneArchivedSession,
 } from "../../src/app/render-helpers.js";
 import {
 	expandedGoals,
@@ -200,7 +200,7 @@ function mobileArchivedTemplate() {
 	const q = state.searchQuery;
 	const archivedGoals = filterArchivedGoalsByQuery(state.goals.filter(g => g.archived), state.gatewaySessions, state.archivedSessions, q);
 	const standaloneArchived = filterArchivedSessionsByQuery(
-		state.archivedSessions.filter(s => !s.teamGoalId && !isChildSession(s)),
+		state.archivedSessions.filter(isStandaloneArchivedSession),
 		q,
 	);
 	const byProject = bucketArchivedByProject(archivedGoals, standaloneArchived, PROJECTS);
