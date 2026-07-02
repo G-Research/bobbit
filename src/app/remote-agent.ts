@@ -43,7 +43,7 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
-import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
@@ -1730,12 +1730,12 @@ export class RemoteAgent {
 					state.reviewPanelOpen = false;
 					if (!isReviewSubmitted(this._sessionId || "")) {
 						for (const m of this._state.messages) {
-							this._checkReviewToolResult(m);
+							await this._checkReviewToolResult(m);
 						}
 					} else {
 						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
 					}
-					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
+					(await loadReviewSources()).restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -2397,7 +2397,7 @@ export class RemoteAgent {
 	 * `state.remoteAgent`-based check would no-op the initial review-pane
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
-	private _checkReviewToolResult(msg: any, isLive = false): void {
+	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
 		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
 
 		// Extract review tool-result payloads. Production providers are not fully
@@ -2462,7 +2462,7 @@ export class RemoteAgent {
 				// (the fire-and-forget PUT would race with concurrent server-side
 				// setSubmitted(true) and clobber it on reload). RP-09.
 				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
-				openMarkdownReviewDocument({
+				(await loadReviewSources()).openMarkdownReviewDocument({
 					title: data.title,
 					markdown: data.markdown,
 					replace,
@@ -2476,7 +2476,7 @@ export class RemoteAgent {
 				if (closingTitle) {
 					state.reviewDocuments.delete(closingTitle);
 					clearAnnotations(sid, closingTitle);
-					removePersistedReviewDocument(sid, closingTitle);
+					(await loadReviewSources()).removePersistedReviewDocument(sid, closingTitle);
 					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
@@ -2486,7 +2486,7 @@ export class RemoteAgent {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					clearAllAnnotations(sid);
-					clearPersistedReviewDocuments(sid);
+					(await loadReviewSources()).clearPersistedReviewDocuments(sid);
 					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
@@ -2866,7 +2866,7 @@ export class RemoteAgent {
 						// Check for review tool results (review_open/review_close JSON).
 						// `isLive: true` distinguishes a fresh agent emission from a snapshot
 						// replay so the submitted-flag handling can differentiate. RP-09.
-						this._checkReviewToolResult(msg, /* isLive */ true);
+						void this._checkReviewToolResult(msg, /* isLive */ true);
 
 						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {
