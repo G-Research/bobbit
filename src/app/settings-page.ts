@@ -2509,7 +2509,7 @@ function handleSidebarTreeIndentInput(e: Event): void {
 	const raw = input.value.trim();
 	const px = Number.parseFloat(raw);
 	if (!Number.isFinite(px)) return;
-	if (e.type === "input" && px < SIDEBAR_TREE_INDENT_MIN_PX && raw.length < String(SIDEBAR_TREE_INDENT_MIN_PX).length) return;
+	if (e.type === "input" && px < SIDEBAR_TREE_INDENT_MIN_PX) return;
 	setSidebarTreeIndentPx(px);
 }
 
