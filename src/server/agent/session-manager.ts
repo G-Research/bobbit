@@ -63,6 +63,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
+import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
@@ -4318,7 +4319,17 @@ export class SessionManager {
 			// model can attempt them, but they are not approved grants yet.
 			if (this.mcpManager) {
 				for (const info of this.mcpManager.getToolInfos()) {
-					if (info.group === group) grantScopeTools.push(info.name);
+					if (info.group !== group) continue;
+					grantScopeTools.push(info.name);
+
+					// The guard/model-facing MCP surface is the collapsed meta-tool
+					// (`mcp_<server>` / `mcp_<server>__<sub>`), while the MCP manager
+					// stores canonical per-operation names. Group grants must include
+					// both forms: per-op names keep Layer B/internal filtering working,
+					// and the meta name lets the active guard correlate and cache only
+					// the MCP group it is currently unblocking.
+					const parsed = parseMcpToolName(info.name);
+					if (parsed) grantScopeTools.push(makeMetaToolName(parsed.server, parsed.sub));
 				}
 			}
 			if (this.toolManager) {

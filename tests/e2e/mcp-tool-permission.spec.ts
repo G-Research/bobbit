@@ -409,11 +409,12 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				// Wait for the replayed prompt's turn to complete
 				await conn.waitFor(agentEndPredicate(), 15_000).catch(() => {});
 
-				// Verify the role includes both MCP tools (echo and add)
+				// Verify the role includes canonical MCP operations and the model-facing meta-tool.
 				const roleResp = await apiFetch(`/api/roles/${groupRoleName}`);
 				const role = await roleResp.json();
 				expect(role.toolPolicies["mcp__mock__echo"]).toBe("allow");
 				expect(role.toolPolicies["mcp__mock__add"]).toBe("allow");
+				expect(role.toolPolicies[MCP_META_TOOL]).toBe("allow");
 			} finally {
 				conn.close();
 			}
@@ -649,14 +650,16 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 			cursor = conn.messageCount();
 			const groupGrantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
 				method: "POST",
-				body: JSON.stringify({ toolName: MCP_ADD_TOOL, toolGroup: "MCP: mock" }),
+				// Real guard/model-facing MCP requests use the collapsed meta-tool name,
+				// while group grants are built from canonical MCP operation names.
+				body: JSON.stringify({ toolName: MCP_META_TOOL, toolGroup: "MCP: mock" }),
 			}).then(r => r.json());
-			await conn.waitForFrom(cursor, (m) => m.type === "tool_permission_needed" && m.toolName === MCP_ADD_TOOL, 10_000);
-			conn.send({ type: "grant_tool_permission", toolName: MCP_ADD_TOOL, scope: "group", group: "MCP: mock", mode: "session-only" });
+			await conn.waitForFrom(cursor, (m) => m.type === "tool_permission_needed" && m.toolName === MCP_META_TOOL, 10_000);
+			conn.send({ type: "grant_tool_permission", toolName: MCP_META_TOOL, scope: "group", group: "MCP: mock", mode: "session-only" });
 			const groupGrant = await groupGrantPromise;
 			expect(groupGrant.granted).toBe(true);
 			expect(groupGrant.scope).toBe("group");
-			expect(new Set(groupGrant.tools)).toEqual(new Set([DENIED_TOOL, MCP_ADD_TOOL]));
+			expect(new Set(groupGrant.tools)).toEqual(new Set([DENIED_TOOL, MCP_ADD_TOOL, MCP_META_TOOL]));
 			expect(groupGrant.tools).not.toContain("session_prompt");
 		} finally {
 			conn?.close();
