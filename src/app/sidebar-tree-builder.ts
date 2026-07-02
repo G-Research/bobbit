@@ -481,7 +481,9 @@ function appendGoalRuntimeChildren(goalNode: SidebarTreeNode<GoalContext>, proje
 	const goalLiveSessions = ctx.liveSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s)).sort(compareSessions);
 	const filteredLive = goalLiveSessions.filter(ctx.passesSession);
 	if (goal.team) {
-		const liveLead = filteredLive.find(s => s.role === "team-lead");
+		const naturalLiveLead = goalLiveSessions.find(s => s.role === "team-lead");
+		const stickyLiveLead = naturalLiveLead && !filteredLive.includes(naturalLiveLead) && filteredLive.length > 0 ? naturalLiveLead : undefined;
+		const liveLead = stickyLiveLead ?? filteredLive.find(s => s.role === "team-lead");
 		if (liveLead) {
 			appendTeamLeadNode(goalNode, liveLead, filteredLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
 		} else {
@@ -676,9 +678,10 @@ function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildCon
 }
 
 function willRenderTeamLeadForSpawnedPlacement(goal: GoalLike, lead: SessionLike, ctx: BuildContext): boolean {
-	if (!goal.team) return false;
+	if (!goal.team || isChildSession(lead)) return false;
 	if (lead.archived || ctx.archivedSessions.includes(lead)) return ctx.includeArchived && ctx.passesSession(lead);
-	return ctx.passesSession(lead);
+	if (ctx.passesSession(lead)) return true;
+	return ctx.liveSessions.some(s => s.id !== lead.id && isGoalOwningSession(s, goal.id) && !isChildSession(s) && ctx.passesSession(s));
 }
 
 function collectDescendantIdsByRoot(goals: readonly GoalLike[]): Map<string, Set<string>> {
@@ -970,9 +973,9 @@ function isChildSession(session: SessionLike): boolean {
 
 function teamLeadSessionsForGoal(goalId: string, liveSessions: readonly SessionLike[], archivedSessions: readonly SessionLike[], includeArchived: boolean): SessionLike[] {
 	const out: SessionLike[] = [];
-	const liveLead = liveSessions.find(s => s.role === "team-lead" && isGoalOwningSession(s, goalId));
+	const liveLead = liveSessions.find(s => s.role === "team-lead" && isGoalOwningSession(s, goalId) && !isChildSession(s));
 	if (liveLead) out.push(liveLead);
-	if (includeArchived) out.push(...archivedSessions.filter(s => s.role === "team-lead" && isGoalOwningSession(s, goalId)));
+	if (includeArchived) out.push(...archivedSessions.filter(s => s.role === "team-lead" && isGoalOwningSession(s, goalId) && !isChildSession(s)));
 	return out;
 }
 
