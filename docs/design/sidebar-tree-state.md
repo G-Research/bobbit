@@ -1,19 +1,20 @@
 # Unified sidebar tree state design
 
-Status: design artifact. This document describes the target sidebar tree-state model; the current source still uses the legacy state and storage keys inventoried below.
+Status: partially implemented. This branch adds the shared sidebar tree builder in `src/app/sidebar-tree-builder.ts` and routes the desktop, mobile, collapsed-sidebar, and render-helper paths through builder-derived hierarchy data. The storage/state migration described later remains future work: production expansion state still comes from the legacy sets and localStorage keys inventoried below.
 
 ## Context
 
-The sidebar renders one navigation tree through several modules, but expansion state is currently split across unrelated module-level sets and localStorage keys. That makes it easy for refreshes, goal creation, keyboard navigation, and renderer-specific defaults to disagree about whether the same entity is open.
+The sidebar renders one navigation tree through several modules. Before this refactor, each renderer made parts of the hierarchy decision itself, while expansion state was split across unrelated module-level sets and localStorage keys. That made refreshes, goal creation, keyboard navigation, and renderer-specific defaults easy to drift.
 
-This design introduces one typed node-key model and one safe-storage-backed preference layer for sidebar disclosure state. Renderers, keyboard navigation, refresh polling, and create-goal flows should all ask the same API whether a node is expandable or expanded.
+The builder now centralizes rendered hierarchy, stable canonical keys, node kind/entity/context, parent/child ownership, depth/indent metadata, expansion metadata, and spawned-child placement. The remaining design introduces a safe-storage-backed preference layer so renderers, keyboard navigation, refresh polling, and create-goal flows can eventually ask one state API whether a node is expandable or expanded.
 
 ## Source map
 
-Later implementers should start with these files and functions:
+Maintainers and future storage-migration implementers should start with these files and functions:
 
 | Area | Source references | Why it matters |
 |---|---|---|
+| Shared tree builder | `src/app/sidebar-tree-builder.ts::buildSidebarTree`, `sidebarTreeKey`, `parseSidebarTreeKey`, `SidebarTreeNode` | Centralizes rendered hierarchy, stable keys, node context, depth/indent metadata, expansion metadata, and spawned-child placement. |
 | Desktop sidebar shell and project sections | `src/app/sidebar.ts::renderSidebar`, `renderProjectHeader`, `renderProjectContent`, `renderNestedNode`, `isProjectExpanded`, `toggleProjectExpanded`, `_expandedNestedDepthByProject` | Owns project headers, nested goal rendering, project reorder overrides, and the render-local “Show more child goals” depth cap. |
 | Shared goal/session rows and archived subsections | `src/app/render-helpers.ts::renderGoalGroup`, nested `renderTeamGroup`, `renderProjectArchivedSection`, `renderArchivedSessionRow`, `renderArchivedDelegates`, `INDENT` | Owns goal disclosure, team-lead disclosure, archived rows, delegate rows, and shared indentation constants. |
 | Refresh and goal creation | `src/app/api.ts::refreshSessions`, `createGoal` | Currently mutates `expandedGoals` directly when new goals arrive or are created. |
@@ -32,7 +33,7 @@ Later implementers should start with these files and functions:
 
 ## Non-goals
 
-- Do not change production code as part of this design artifact.
+- Do not use the remaining storage migration to expand the sidebar feature scope beyond tree hierarchy and disclosure state.
 - Do not include chat side panels, goal-dashboard gate rows, live verification rows, artifact rows, tree-cost disclosure, or marketplace/proposal disclosures.
 - Do not include goal-dashboard Plan tab nested disclosure state; rationale is below.
 
@@ -104,68 +105,103 @@ Render-only context such as `depth`, `projectId` for a goal, or `archived` statu
 
 ## Shared tree-builder contract
 
-Add a shared builder module, e.g. `src/app/sidebar-tree-builder.ts`, that is the single source of truth for sidebar hierarchy. The builder consumes normalized app state and returns a render-neutral tree. Renderers may choose markup, row components, and viewport-specific affordances, but they must not independently decide parent/child ownership, depth, expandability, or child ordering.
+`src/app/sidebar-tree-builder.ts` is now the source of truth for sidebar hierarchy. It consumes normalized app data and returns a render-neutral tree. Renderers still own markup, row components, toggles, and viewport-specific affordances, but should not independently decide parent/child ownership, logical depth, expandability, or child ordering.
 
-Recommended input/output shape:
+### As-built public builder API
+
+The module exports key helpers and builder types used by desktop, mobile, collapsed-sidebar, and render-helper paths:
+
+```ts
+function sidebarTreeKey(input: SidebarTreeNodeKey): string;
+function parseSidebarTreeKey(raw: string): SidebarTreeNodeKey | null;
+function isSidebarTreeExpandable(key: SidebarTreeNodeKey): boolean;
+function resolveSidebarTreeLayoutPreference(input?: SidebarTreeLayoutPreferenceV1): ResolvedSidebarTreeLayoutPreference;
+function buildSidebarTree(input: BuildSidebarTreeInput): SidebarTreeModel;
+```
+
+`BuildSidebarTreeInput` is state-adapter friendly. Current renderers pass legacy expansion helpers through the `expansion` adapter until the storage migration exists.
 
 ```ts
 interface BuildSidebarTreeInput {
-  projects: Project[];
-  goals: Goal[];
-  sessions: Session[];
-  staffSessions: Session[];
-  archivedSessions: Session[];
-  activeSessionId?: string | null;
-  activeGoalId?: string | null;
+  projects: readonly ProjectLike[];
+  goals: readonly GoalLike[];
+  sessions: readonly SessionLike[];
+  archivedSessions: readonly SessionLike[];
+  staff?: readonly StaffLike[];
   showArchived: boolean;
-  searchQuery?: string;
-  viewport: "desktop" | "mobile" | "collapsed";
+  viewport?: "desktop" | "mobile" | "collapsed";
+  projectOrder?: readonly string[];
+  nestedDepthByProject?: ReadonlyMap<string, number> | Record<string, number>;
+  defaultNestedDepth?: number;
+  expansion?: SidebarTreeExpansionInput;
+  layout?: SidebarTreeLayoutPreferenceV1;
+  filters?: SidebarTreeFilters;
 }
 
-interface SidebarTreeNode {
-  key: SidebarTreeNodeKey;
-  canonicalKey: string;
-  kind: SidebarTreeNodeKey["kind"];
-  entityId: string;
-  parentKey: string | null;
-  children: SidebarTreeNode[];
-  depth: number;
-  indentLevel: number;
-  expandable: boolean;
-  expanded: boolean;
-  defaultExpanded: boolean;
-  source: "user" | "migration" | "system" | "default" | "transient";
-  routeHash?: string;
-  active: boolean;
-  hiddenByFilter?: boolean;
-  counts?: { directChildren?: number; descendants?: number; visibleChildren?: number };
-  render: {
-    label: string;
-    icon?: string;
-    rowClass?: string;
-    ariaLabel?: string;
-    badges?: string[];
-    archived?: boolean;
-    status?: string;
-  };
+interface SidebarTreeFilters {
+  activeSessionId?: string;
+  includeArchived?: boolean;
+  searchQuery?: string;
+  bypassBusyReadFilters?: boolean;
+  passesSessionFilters?: (session: SessionLike, active: boolean, bypass: boolean) => boolean;
+}
+
+interface SidebarTreeExpansionInput {
+  isExpanded?: (key: SidebarTreeNodeKey, defaultExpanded: boolean) => boolean;
+  defaultExpanded?: (key: SidebarTreeNodeKey, defaultExpanded: boolean) => boolean;
 }
 ```
 
-Ownership and ordering invariants:
+Every emitted `SidebarTreeNode` carries structural and render context, but not row markup:
 
-- Each expandable row that shows a chevron appears exactly once in the built tree and uses `expanded` from the unified state API.
-- A goal is rendered either in the project nested goal forest or under the owning team lead selected by `selectSpawnedChildren()`, never both. The builder should carry a `claimedGoalIds` set from `computeSpawnedClaim()` and assert/test that no claimed goal is emitted again at project level.
-- `parentKey` and `children` describe the rendered sidebar hierarchy, not only domain parentage. A sub-goal shown under a team lead has `parentKey` of that team-lead row even though its domain `parentGoalId` remains goal metadata.
-- `depth` is the logical tree depth from the project section root. `indentLevel` is the layout depth renderers pass to CSS; renderers must not recalculate with `depth * 16` or hardcoded `padding-left` values.
+```ts
+interface SidebarTreeNode<TContext = unknown> {
+  key: string;
+  canonicalKey: string;
+  nodeKey: SidebarTreeNodeKey;
+  kind: SidebarTreeNodeKind;
+  entityId: string;
+  parentKey: string | null;
+  children: SidebarTreeNode[];
+  logicalDepth: number;
+  depth: number;
+  indentDepth: number;
+  indentLevel: number;
+  indentPx: number;
+  expandable: boolean;
+  expansionClass?: "project" | "section" | "goal" | "team-lead" | "session-children";
+  defaultExpanded: boolean;
+  expanded: boolean;
+  hiddenByFilter?: boolean;
+  context: TContext;
+}
+```
+
+`SidebarTreeModel` groups per-project output and lookup/diagnostic helpers:
+
+- `projects`: ordered `SidebarProjectTree[]` with project, goal forest, Sessions/Staff/Archived section nodes, ungrouped sessions, archived nodes, and staff rows.
+- `flatByKey`: all registered nodes by canonical string key.
+- `claimedSpawnedGoalIds`: goals claimed for team-lead placement and omitted from the project forest.
+- `spawnedGoalNodesByLeadSessionId` and `sessionChildrenNodesBySessionId`: lookup maps for render helpers.
+- `diagnostics`: non-fatal cycle, duplicate ID/key, and cross-project-parent findings.
+
+Context payloads are typed by node role: `ProjectContext`, `ProjectSectionContext`, `GoalContext`, `TeamLeadContext`, `SessionChildrenContext`, and `SessionContext`. They carry source entities and render-neutral metadata such as descendant counts, archived flags, owner lead session IDs, child key lists, search matches, and active-session candidacy.
+
+### Ownership and ordering invariants
+
+- Each expandable row that shows a chevron appears exactly once in the built tree and has `expanded`/`defaultExpanded` resolved through builder expansion metadata. Until `sidebar-tree-state.ts` exists, those values come from legacy adapter callbacks.
+- A goal is rendered either in the project nested goal forest, the archived section forest, or under the owning team lead selected by `selectSpawnedChildren()`, never more than once. The builder tracks `claimedSpawnedGoalIds`, `spawnedRootGoalIds`, and emitted goal IDs to prevent duplicates.
+- `parentKey` and `children` describe the rendered sidebar hierarchy, not only domain parentage. A sub-goal shown under a team lead has the team-lead row as its rendered parent even though its domain `parentGoalId` remains goal metadata.
+- `logicalDepth`/`depth` are rendered tree depth. `indentDepth`/`indentLevel` and `indentPx` are layout metadata; renderers should consume them rather than recomputing hierarchy from raw state.
 - Search/filtering may set `hiddenByFilter` or omit whole subtrees, but must not write expansion preferences.
-- Desktop, mobile, and collapsed-sidebar paths should call the same builder with a `viewport` value. Viewport-specific rendering can omit labels or collapse containers, but it must preserve canonical keys, active state, ordering, expandability, and indentation semantics for rows it renders.
-- `_expandedNestedDepthByProject` remains a render-local truncation cap layered after tree construction; it must not change node identity or persisted expansion state.
+- Desktop, mobile, and collapsed-sidebar paths call the same builder with a `viewport` value. Viewport-specific rendering can omit labels or containers, but it should preserve canonical keys, active state, ordering, expandability, and indentation semantics for rows it renders.
+- `_expandedNestedDepthByProject` remains a render-local truncation cap passed into `nestedDepthByProject`; it must not change node identity or persisted expansion state.
 
 Renderer responsibilities:
 
-- Read `node.canonicalKey` for `data-nav-id`, `node.expanded` for `aria-expanded`, and `node.indentLevel` for shared indentation styles.
-- Never call legacy sets or storage directly.
-- Keep row-specific visuals such as chevrons, active classes, descendant badges, live/archived ordering, and session status badges, but source their structural decisions from `SidebarTreeNode`.
+- Read `node.key`/`node.canonicalKey` for stable identity, `node.expanded` for disclosure state, and `node.indentLevel`/`node.indentPx` for indentation.
+- Keep row-specific visuals such as chevrons, active classes, descendant badges, live/archived ordering, and session status badges, but source structural decisions from `SidebarTreeNode`.
+- Avoid adding new hierarchy logic in renderers. Legacy expansion/storage calls are acceptable only as temporary adapters until the future storage-state module replaces them.
 
 ## Default expansion policies
 
@@ -288,9 +324,9 @@ Add a hydration-completion helper, e.g. `completeLegacyGoalExpansionMigration(go
 
 This intentionally treats legacy-absent existing goals as collapsed tombstones. It preserves explicit legacy collapse intent and aligns with the new default that goal and sub-goal branches are collapsed unless the user expands them or the current tab creates them. Newly discovered goals after the hydration-completion marker is verified may still use the narrower system rules below.
 
-## Public API shape
+## Future tree-state API shape
 
-Create a focused module, e.g. `src/app/sidebar-tree-state.ts`, consumed by `sidebar.ts`, `render-helpers.ts`, `sidebar-nav.ts`, and `api.ts`.
+Create a focused storage/state module, e.g. `src/app/sidebar-tree-state.ts`, consumed by `sidebar.ts`, `render-helpers.ts`, `sidebar-nav.ts`, and `api.ts`. This module is not implemented in the current builder-integration branch.
 
 ```ts
 export type SidebarTreeNodeKind = SidebarTreeNodeKey["kind"];
@@ -457,25 +493,31 @@ Rationale:
 
 If persisted Plan tab disclosure is later desired, define a separate `goalDashboard.planTree.v1` namespace and do not reuse sidebar node keys except as entity references.
 
-## Implementation sequence for later work
+## Implementation status and remaining work
 
-1. Add `src/app/sidebar-tree-state.ts` with typed keys, storage helpers, defaults, verified-write migration, legacy goal collapsed-tombstone recovery, layout preference helpers, and compatibility adapters.
-2. Add `src/app/sidebar-tree-builder.ts` with the `SidebarTreeNode` contract above, builder inputs, ownership invariants, viewport option, duplicate spawned-child prevention, and unit tests.
-3. Call migration during app bootstrap before first sidebar render, and call the goal hydration-completion helper from the first successful `refreshSessions()` payload before any system auto-expansion.
-4. Replace direct project/goal/section/team-lead expansion reads in `sidebar.ts` and `render-helpers.ts` with builder nodes and the new API.
-5. Route desktop, mobile, and collapsed-sidebar render paths through the shared builder or builder-derived primitives. Any temporary renderer-specific adapter must accept `SidebarTreeNode` data rather than recomputing hierarchy from raw state.
-6. Replace `sidebar-nav.ts` nav kind parsing with `parseSidebarTreeKey`, while retaining route mapping and active override behavior.
-7. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with the narrowed system-expansion helpers: top-level polling only, explicit create flow for newly created goals and ancestors.
-8. Add indentation settings UI near sidebar appearance controls, apply resolved CSS variables globally, and replace hardcoded indentation calculations with shared helpers.
-9. Keep legacy wrapper exports temporarily for tests and out-of-tree imports; mark mutable `expandedGoals` as deprecated and stop adding new call sites.
-10. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, bounded prune behavior, builder stable keys/hierarchy/depth/duplicate prevention, and indentation clamp/reset/persistence.
+Completed in this branch:
+
+- Added `src/app/sidebar-tree-builder.ts` with stable canonical keys, typed node keys, render-neutral node/context output, layout metadata, viewport input, spawned-child ownership, duplicate diagnostics, and focused unit coverage for builder shape and invariants.
+- Routed desktop sidebar construction through the builder while preserving legacy expansion adapters, project ordering, nested-depth caps, filtering, active highlighting, archived placement, and descendant badges.
+- Routed mobile landing and collapsed-sidebar/render-helper paths through builder-derived nodes or lookup maps so they share hierarchy and spawned-child placement instead of recomputing it from raw state.
+- Kept legacy storage and toggle helpers in place as temporary adapters; this avoids mixing hierarchy refactor risk with storage migration risk.
+
+Deferred future work:
+
+1. Add `src/app/sidebar-tree-state.ts` with storage helpers, defaults, verified-write migration, legacy goal collapsed-tombstone recovery, layout preference helpers, and compatibility adapters.
+2. Call migration during app bootstrap before first sidebar render, and call the goal hydration-completion helper from the first successful `refreshSessions()` payload before any system auto-expansion.
+3. Replace remaining direct legacy expansion reads/writes in `sidebar.ts`, `render-helpers.ts`, `sidebar-nav.ts`, and `api.ts` with the new state API, then remove legacy-key adapters after migration confidence is high.
+4. Migrate keyboard navigation IDs from legacy strings to `parseSidebarTreeKey`/`sidebarTreeKey`, while retaining route mapping and active override behavior.
+5. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with narrowed system-expansion helpers: top-level polling only, explicit create flow for newly created goals and ancestors.
+6. Add indentation settings UI near sidebar appearance controls, apply resolved CSS variables globally, and replace remaining hardcoded indentation calculations with shared helpers.
+7. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, bounded prune behavior, and indentation clamp/reset/persistence.
 
 ## Required verification plan
 
 Unit coverage:
 
 - Tree-state helper: defaults for every node kind, explicit user/migration precedence over system/defaults, source tracking, key serialization/parsing with encoded IDs, key separation for first-class vs archived delegates, corrupt/missing storage fallback, verified-write migration retry behavior, malformed legacy values, legacy collapsed-goal tombstone recovery, and bounded pruning.
-- Tree builder: stable canonical keys, parent/children shape, `depth` and `indentLevel`, active route metadata, desktop/mobile/collapsed parity for emitted rows, archived/live ordering, staff/sessions/archived section placement, team-lead ownership, first-class child sessions, delegate/archive delegate children, and no duplicate spawned child-goals.
+- Tree builder: stable canonical keys, parent/children shape, `depth` and `indentLevel`, active-session context metadata, desktop/mobile/collapsed parity for emitted rows, archived/live ordering, staff/sessions/archived section placement, team-lead ownership, first-class child sessions, delegate/archive delegate children, and no duplicate spawned child-goals.
 - Refresh/create integration: initial hydration does not system-expand migrated legacy-absent goals, later polling auto-expands only eligible top-level goals, newly discovered sub-goals do not auto-open parents, and `createGoal()` expands only the newly created goal plus ancestors when unset.
 - Indentation helpers: clamp range, invalid value fallback, reset behavior, CSS variable values, and no per-project/per-depth persistence.
 
