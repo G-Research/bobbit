@@ -1271,6 +1271,56 @@ type GoalTreeNode = SidebarTreeNode<GoalContext>;
 type SessionTreeNode = SidebarTreeNode<SessionContext>;
 type TeamLeadTreeNode = SidebarTreeNode<TeamLeadContext>;
 
+type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean };
+
+function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: ReadonlySet<string>, keepRuntimeRows: boolean): SearchPrunedNode | null {
+	const children: SidebarTreeNode[] = [];
+	let containsVisibleGoal = false;
+	for (const child of node.children) {
+		const pruned = child.kind === "goal"
+			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
+			: pruneRuntimeNodeForSearch(child, visibleGoalIds, keepRuntimeRows);
+		if (!pruned) continue;
+		children.push(pruned.node);
+		containsVisibleGoal ||= pruned.containsVisibleGoal;
+	}
+	if (!keepRuntimeRows && !containsVisibleGoal) return null;
+	return { node: { ...node, children }, containsVisibleGoal };
+}
+
+function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<string>): SearchPrunedNode<GoalContext> | null {
+	const ownMatch = visibleGoalIds.has(node.entityId);
+	const children: SidebarTreeNode[] = [];
+	let containsVisibleGoal = ownMatch;
+	for (const child of node.children) {
+		const pruned = child.kind === "goal"
+			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
+			: pruneRuntimeNodeForSearch(child, visibleGoalIds, ownMatch);
+		if (!pruned) continue;
+		children.push(pruned.node);
+		containsVisibleGoal ||= pruned.containsVisibleGoal;
+	}
+	if (!containsVisibleGoal) return null;
+	return { node: { ...node, children }, containsVisibleGoal };
+}
+
+function filterGoalForestForSearch(nodes: readonly GoalTreeNode[], visibleGoalIds: ReadonlySet<string>): GoalTreeNode[] {
+	return nodes
+		.map(node => pruneGoalNodeForSearch(node, visibleGoalIds)?.node)
+		.filter((node): node is GoalTreeNode => Boolean(node));
+}
+
+export function filterSidebarTreeModelGoalsForSearch(model: SidebarTreeModel, visibleGoalIds: ReadonlySet<string>): SidebarTreeModel {
+	return {
+		...model,
+		projects: model.projects.map(projectTree => ({
+			...projectTree,
+			goalForest: filterGoalForestForSearch(projectTree.goalForest, visibleGoalIds),
+			archivedGoalForest: filterGoalForestForSearch(projectTree.archivedGoalForest, visibleGoalIds),
+		})),
+	};
+}
+
 function renderGoalGroupFromTree(node: GoalTreeNode): TemplateResult {
 	const goal = node.context.goal as Goal;
 	return renderGoalGroup(goal, {
@@ -1408,9 +1458,10 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		? filterStaffByQuery(staffList.filter(s => s.state !== "retired"), q)
 		: staffList.filter(s => s.state !== "retired");
 	const liveSessionsNoStaff = state.gatewaySessions.filter(s => !sidebarData.staffSessionIds.has(s.id));
-	let goalsForTree: Goal[] = state.goals;
+	const goalsForTree: Goal[] = state.goals;
 	let sessionsForTree: GatewaySession[] = liveSessionsNoStaff;
 	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
+	let visibleSearchGoalIds: Set<string> | null = null;
 
 	if (query) {
 		const filteredLiveGoals = sidebarData.liveGoals.filter(goal => {
@@ -1420,15 +1471,14 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 			return goalMatches || hasMatchingSession;
 		});
 		const filteredArchivedGoals = filterArchivedGoalsByQuery(sidebarData.archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
-		goalsForTree = [...filteredLiveGoals, ...filteredArchivedGoals];
-		const visibleGoalIds = new Set(goalsForTree.map(g => g.id));
+		visibleSearchGoalIds = new Set([...filteredLiveGoals, ...filteredArchivedGoals].map(g => g.id));
 		const filteredUngrouped = sidebarData.ungroupedSessions
 			.filter(s => passesSidebarFilters(s, s.id === activeSessionId(), true))
 			.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 		const filteredUngroupedIds = new Set(filteredUngrouped.map(s => s.id));
 		sessionsForTree = liveSessionsNoStaff.filter(s => {
 			const owningGoalId = s.goalId || effectiveArchivedTeamGoalId(s);
-			if (owningGoalId) return visibleGoalIds.has(owningGoalId);
+			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
 			if (isChildSession(s)) return true;
 			return filteredUngroupedIds.has(s.id);
 		});
@@ -1436,7 +1486,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		const filteredStandaloneArchivedIds = new Set(filteredStandaloneArchived.map(s => s.id));
 		archivedSessionsForTree = state.archivedSessions.filter(s => {
 			const owningGoalId = s.goalId || s.teamGoalId || effectiveArchivedTeamGoalId(s);
-			if (owningGoalId) return visibleGoalIds.has(owningGoalId);
+			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
 			if (isChildSession(s)) return true;
 			if (isStandaloneArchivedSession(s)) return filteredStandaloneArchivedIds.has(s.id);
 			return false;
@@ -1444,7 +1494,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 	}
 
 	const projects = projectOrderForRender();
-	return buildSidebarTree({
+	const model = buildSidebarTree({
 		projects,
 		goals: goalsForTree,
 		sessions: sessionsForTree,
@@ -1476,6 +1526,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 			},
 		},
 	});
+	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
 
 /** Render goals and sessions for a single project (used in multi-project mode). */
