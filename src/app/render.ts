@@ -2028,14 +2028,31 @@ export function doRenderApp(): void {
 	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
 	const route = getRouteFromHash();
 	const routeSessionId = route.view === "session" ? route.sessionId : undefined;
-	const activeSid = activeSessionId() ?? (routeSessionId && state.selectedSessionId === routeSessionId ? routeSessionId : undefined);
+	const routeCachedSession = routeSessionId
+		? state.gatewaySessions.find(s => s.id === routeSessionId) ?? state.archivedSessions.find(s => s.id === routeSessionId)
+		: undefined;
+	const routeArchivedSession = routeCachedSession ? isArchivedSessionActionSource(routeCachedSession) : false;
+	const panelAgentInterface = state.chatPanel?.agentInterface as any;
+	const panelSessionId = typeof panelAgentInterface?.session?.sessionId === "string" ? panelAgentInterface.session.sessionId : undefined;
+	const routeHasReadOnlyPanel = Boolean(routeSessionId && panelAgentInterface?.readOnly && panelSessionId === routeSessionId);
+	const routeIsCurrentSession = Boolean(routeSessionId && (
+		state.selectedSessionId === routeSessionId
+		|| state.connectingSessionId === routeSessionId
+		|| state.remoteAgent?.gatewaySessionId === routeSessionId
+		|| routeArchivedSession
+		|| routeHasReadOnlyPanel
+	));
+	const activeSid = (routeSessionId && routeIsCurrentSession) ? routeSessionId : activeSessionId();
 	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
 	const activeSession: GatewaySession | undefined = activeSid ? (() => {
-		const cached = state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid);
+		const cached = activeSid === routeSessionId && routeCachedSession
+			? routeCachedSession
+			: state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid);
 		if (cached) return cached;
-		const ai = state.chatPanel?.agentInterface as any;
-		if (!ai?.readOnly || state.selectedSessionId !== activeSid) return undefined;
+		const ai = panelAgentInterface;
+		const aiSessionId = typeof ai?.session?.sessionId === "string" ? ai.session.sessionId : undefined;
+		if (!ai?.readOnly || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid)) return undefined;
 		return {
 			id: activeSid,
 			title: sessionTitle || "New session",
