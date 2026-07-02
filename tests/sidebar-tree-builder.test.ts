@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
 	buildSidebarTree,
+	descendantSubtreeInputForTesting,
 	parseSidebarTreeKey,
 	resolveSidebarTreeLayoutPreference,
 	sidebarTreeKey,
@@ -196,7 +197,25 @@ describe("buildSidebarTree", () => {
 		const live = model.projects[0].goalForest[0];
 		assert.equal(live.children.find(n => n.kind === "goal")?.entityId, "archived-child");
 		assert.deepEqual(model.projects[0].archivedGoalForest.map(n => n.entityId), ["archived-root"]);
-		assert.equal(model.projects[0].archivedGoalForest[0].children.find(n => n.kind === "goal")?.entityId, "archived-grand");
+		const archivedRoot = model.projects[0].archivedGoalForest[0];
+		assert.equal(archivedRoot.parentKey, model.projects[0].archivedSectionNode?.key);
+		assert.equal(archivedRoot.logicalDepth, (model.projects[0].archivedSectionNode?.logicalDepth ?? 0) + 1);
+		assert.equal(archivedRoot.children.find(n => n.kind === "goal")?.entityId, "archived-grand");
+	});
+
+	it("terminates malformed spawned descendant cycles before recursive subtree conversion", () => {
+		const diagnostics: any[] = [];
+		const cuts = new Map<string, string[]>();
+		const root = goal({ id: "spawned", parentGoalId: "parent", spawnedBySessionId: "lead", createdAt: 1 });
+		const subtree = descendantSubtreeInputForTesting(root, [
+			root,
+			goal({ id: "child", parentGoalId: "spawned", createdAt: 2 }),
+			goal({ id: "grand", parentGoalId: "child", createdAt: 3 }),
+			goal({ id: "child", parentGoalId: "grand", createdAt: 4 }),
+		], new Set(), diagnostics, cuts);
+		assert.deepEqual(subtree.map(g => g.id), ["spawned", "child", "grand"]);
+		assert.equal(diagnostics.some(d => d.kind === "cycle-cut" && d.goalId === "child" && d.parentGoalId === "grand"), true);
+		assert.deepEqual(cuts.get("grand"), ["child"]);
 	});
 
 	it("does not duplicate archived spawned goals under archived team leads", () => {
@@ -247,6 +266,27 @@ describe("buildSidebarTree", () => {
 		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["first-class"]);
 		assert.deepEqual(groups[0]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["live-delegate"]);
 		assert.equal(groups[0]?.children[0]?.context.childClass, "first-class");
+	});
+
+	it("applies filters to first-class children and routes archived first-class children to archived-delegate", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [],
+			sessions: [
+				session({ id: "parent", createdAt: 1 }),
+				session({ id: "first", parentSessionId: "parent", createdAt: 2 }),
+				session({ id: "hidden", parentSessionId: "parent", createdAt: 3 }),
+				session({ id: "terminated", parentSessionId: "parent", status: "terminated", createdAt: 4 }),
+			],
+			archivedSessions: [session({ id: "archived-first", parentSessionId: "parent", archived: true, status: "archived", createdAt: 5 })],
+			showArchived: true,
+			filters: { passesSessionFilters: s => s.id !== "hidden" },
+		});
+		const groups = model.sessionChildrenNodesBySessionId.get("parent") ?? [];
+		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["first-class", "archived-delegate"]);
+		assert.deepEqual(groups[0]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["first"]);
+		assert.deepEqual(groups[1]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["terminated", "archived-first"]);
+		assert.equal([...model.flatByKey.values()].some(n => n.kind === "session" && n.entityId === "hidden"), false);
 	});
 
 	it("keeps team goal member sessions visible when no live team lead exists", () => {
