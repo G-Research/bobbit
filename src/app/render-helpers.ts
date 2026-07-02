@@ -3,6 +3,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
+import type { GoalContext, SessionChildrenContext, SessionContext, SidebarTreeNode, TeamLeadContext } from "./sidebar-tree-builder.js";
 import { bucketTeamChildren } from "./team-archived-bucket.js";
 import {
 	state,
@@ -807,6 +808,7 @@ function renderSpawnedChildGoalRow(
 	child: Goal,
 	renderedAncestors?: Set<string>,
 	displayTitleSuffix?: string,
+	treeNode?: SidebarTreeNode<GoalContext>,
 ): TemplateResult {
 	if (isAncestorCycle(child.id, renderedAncestors)) {
 		return html`
@@ -818,10 +820,11 @@ function renderSpawnedChildGoalRow(
 			</div>
 		`;
 	}
-	const descendantCount = state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
+	const descendantCount = treeNode?.context.descendantCount ?? state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
+	const suffix = treeNode?.context.displayTitleSuffix ?? displayTitleSuffix;
 	return html`
-		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}">
-			${renderGoalGroup(child, { descendantCount, renderedAncestors, displayTitleSuffix })}
+		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}" data-tree-key=${treeNode?.key ?? nothing} data-tree-parent-key=${treeNode?.parentKey ?? nothing} data-tree-depth=${treeNode?.logicalDepth ?? nothing} data-tree-indent-depth=${treeNode?.indentDepth ?? nothing}>
+			${renderGoalGroup(child, { descendantCount, renderedAncestors, displayTitleSuffix: suffix, treeNode })}
 		</div>
 	`;
 }
@@ -833,7 +836,25 @@ function renderSpawnedChildGoalRow(
  * surface at the top via the helper's orphan-promotion. Indentation uses
  * the same 16px-per-level scheme as the live forest.
  */
-function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): TemplateResult {
+function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, archivedGoalForest?: SidebarTreeNode<GoalContext>[]): TemplateResult {
+	if (archivedGoalForest) {
+		const renderArcTreeNode = (node: SidebarTreeNode<GoalContext>): TemplateResult => {
+			const goal = node.context.goal as Goal;
+			const isExpanded = expandedGoals.has(goal.id);
+			const nestedGoalChildren = node.children.filter(child => isGoalTreeNode(child) && child.context.renderPlacement === "archived-section") as SidebarTreeNode<GoalContext>[];
+			return html`
+				<div data-testid="sidebar-archived-row" data-depth="${node.logicalDepth}" data-goal-id="${goal.id}" data-tree-key=${node.key} data-tree-parent-key=${node.parentKey ?? nothing} data-tree-depth=${node.logicalDepth} data-tree-indent-depth=${node.indentDepth} style="padding-left:${node.indentPx}px;">
+					${isMobile
+						? html`<div class="opacity-60">${renderGoalGroup(goal, { treeNode: node })}</div>`
+						: renderGoalGroup(goal, { treeNode: node })}
+				</div>
+				${isExpanded ? nestedGoalChildren.map(renderArcTreeNode) : nothing}
+			`;
+		};
+		return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+			${archivedGoalForest.map(renderArcTreeNode)}
+		</div>`;
+	}
 	// Symmetric to the live forest filter in sidebar.ts: exclude archived
 	// goals whose `spawnedBySessionId` points at an archived team-lead
 	// session in this same tree. Without this filter the same goal renders
@@ -880,9 +901,18 @@ export function renderProjectArchivedSection(
 	archivedGoals: Goal[],
 	standaloneArchivedSessions: GatewaySession[],
 	variant: "desktop" | "mobile" = "desktop",
+	treeOptions?: {
+		archivedSectionNode?: SidebarTreeNode;
+		archivedGoalForest?: SidebarTreeNode<GoalContext>[];
+		archivedSessionNodes?: SidebarTreeNode<SessionContext>[];
+	},
 ): TemplateResult | string {
 	if (!state.showArchived) return "";
-	if (archivedGoals.length === 0 && standaloneArchivedSessions.length === 0) return "";
+	const archivedGoalNodes = treeOptions?.archivedGoalForest;
+	const archivedSessionNodes = treeOptions?.archivedSessionNodes;
+	const archivedGoalCount = archivedGoalNodes?.length ?? archivedGoals.length;
+	const archivedSessionCount = archivedSessionNodes?.length ?? standaloneArchivedSessions.length;
+	if (archivedGoalCount === 0 && archivedSessionCount === 0) return "";
 	const expanded = isArchivedSectionExpanded(project.id);
 	const archHeaderNavId = `archived-header:${project.id}`;
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
@@ -894,7 +924,7 @@ export function renderProjectArchivedSection(
 	const labelStyle = isMobile ? "font-size: 1.1667em;" : "font-size: 0.75em;";
 	return html`
 		<div class="border-t border-border/30 ${dividerMy} mx-2"></div>
-		<div class="flex flex-col gap-0.5">
+		<div class="flex flex-col gap-0.5" data-tree-key=${treeOptions?.archivedSectionNode?.key ?? nothing} data-tree-parent-key=${treeOptions?.archivedSectionNode?.parentKey ?? nothing} data-tree-depth=${treeOptions?.archivedSectionNode?.logicalDepth ?? nothing} data-tree-indent-depth=${treeOptions?.archivedSectionNode?.indentDepth ?? nothing}>
 			<button
 				data-nav-id=${archHeaderNavId}
 				data-nav-active=${archHeaderActive ? "true" : "false"}
@@ -907,21 +937,45 @@ export function renderProjectArchivedSection(
 				<span class="${labelClass}" style="${labelStyle}">Archived</span>
 			</button>
 			${expanded ? html`
-				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedGoals.length > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile) : ""}
-				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${standaloneArchivedSessions.map(s => html`
-						${renderArchivedSessionRow(s)}
-						${renderArchivedDelegates(s.id)}
-					`)}
+				${archivedGoalCount > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${archivedGoalCount > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile, archivedGoalNodes) : ""}
+				${archivedGoalCount > 0 && archivedSessionCount > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${archivedSessionCount > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+					${archivedSessionNodes
+						? archivedSessionNodes.map(renderTreeSessionNode)
+						: standaloneArchivedSessions.map(s => html`
+							${renderArchivedSessionRow(s)}
+							${renderArchivedDelegates(s.id)}
+						`)}
 				</div>` : ""}
 			` : ""}
 		</div>
 	`;
 }
 
-export function renderSessionRow(session: GatewaySession) {
+type RenderSessionTreeOptions = {
+	treeNode?: SidebarTreeNode<SessionContext> | SidebarTreeNode<TeamLeadContext>;
+	childGroupNodes?: SidebarTreeNode<SessionChildrenContext>[];
+};
+
+function isSessionChildrenNode(node: SidebarTreeNode): node is SidebarTreeNode<SessionChildrenContext> {
+	return node.kind === "session-children";
+}
+
+function isSessionTreeNode(node: SidebarTreeNode): node is SidebarTreeNode<SessionContext> {
+	return node.kind === "session";
+}
+
+function isTeamLeadTreeNode(node: SidebarTreeNode): node is SidebarTreeNode<TeamLeadContext> {
+	return node.kind === "team-lead";
+}
+
+function isGoalTreeNode(node: SidebarTreeNode): node is SidebarTreeNode<GoalContext> {
+	return node.kind === "goal";
+}
+
+export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: RenderSessionTreeOptions | number) {
+	const treeOptions = typeof treeOptionsOrIndex === "number" ? undefined : treeOptionsOrIndex;
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const connecting = state.connectingSessionId === session.id;
@@ -930,10 +984,15 @@ export function renderSessionRow(session: GatewaySession) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + first-class child sessions + archived children)
-	const liveChildren = visibleLiveChildrenForParent(session.id);
-	const archivedChildren = state.showArchived ? archivedChildrenForParent(session.id) : [];
+	const treeChildGroups = treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
+	const liveChildren = treeChildGroups
+		? treeChildGroups.filter(group => group.context.childClass === "first-class").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+		: visibleLiveChildrenForParent(session.id);
+	const archivedChildren = treeChildGroups
+		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+		: state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
-	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession);
+	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession) || !!treeChildGroups?.some(group => group.context.childClass === "first-class" && group.children.length > 0);
 	const childrenExpanded = hasChildren && (hasFirstClassChild
 		? isFirstClassParentExpanded(session.id)
 		: isArchivedParentExpanded(session.id));
@@ -962,6 +1021,10 @@ export function renderSessionRow(session: GatewaySession) {
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-tree-key=${treeOptions?.treeNode?.key ?? nothing}
+			data-tree-parent-key=${treeOptions?.treeNode?.parentKey ?? nothing}
+			data-tree-depth=${treeOptions?.treeNode?.logicalDepth ?? nothing}
+			data-tree-indent-depth=${treeOptions?.treeNode?.indentDepth ?? nothing}
 			data-sidebar-actions-row-root
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
@@ -992,7 +1055,9 @@ export function renderSessionRow(session: GatewaySession) {
 						${buttons}
 					</div>`}
 		</div>
-		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${state.showArchived ? renderArchivedDelegates(session.id, true) : ""}` : ""}
+		${childrenExpanded ? (treeChildGroups
+			? renderTreeSessionChildrenGroups(treeChildGroups, hasFirstClassChild)
+			: html`${renderLiveDelegates(session.id)}${state.showArchived ? renderArchivedDelegates(session.id, true) : ""}`) : ""}
 	`;
 }
 
@@ -1026,15 +1091,42 @@ function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	</div>`;
 }
 
+function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildrenContext>[], forceArchivedExpanded = false): TemplateResult | string {
+	const rendered = groups.map(group => {
+		const expanded = group.context.childClass === "first-class"
+			? isFirstClassParentExpanded(group.context.sessionId)
+			: forceArchivedExpanded || isArchivedParentExpanded(group.context.sessionId);
+		if (!expanded || group.children.length === 0) return "";
+		return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="padding-left:${INDENT}px;">
+			${group.children.filter(isSessionTreeNode).map(renderTreeSessionNode)}
+		</div>`;
+	});
+	return html`${rendered}`;
+}
+
+function renderTreeSessionNode(node: SidebarTreeNode<SessionContext>): TemplateResult | string {
+	const session = node.context.session as GatewaySession;
+	const childGroupNodes = node.children.filter(isSessionChildrenNode);
+	const archived = node.context.childClass === "archived-delegate" || isArchivedOrTerminalSession(session);
+	if (archived) {
+		const hasChildContent = childGroupNodes.some(group => group.children.length > 0);
+		return html`${renderArchivedSessionRow(session, hasChildContent, { treeNode: node, childGroupNodes })}${renderTreeSessionChildrenGroups(childGroupNodes)}`;
+	}
+	return renderSessionRow(session, { treeNode: node, childGroupNodes });
+}
+
 // ============================================================================
 // ARCHIVED SESSION ROW
 // ============================================================================
 
-export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false) {
+export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false, treeOptions?: RenderSessionTreeOptions) {
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	const delegates = archivedChildrenForParent(session.id);
+	const treeChildGroups = treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
+	const delegates = treeChildGroups
+		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+		: archivedChildrenForParent(session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = SESSION_ROW_PY;
@@ -1047,6 +1139,10 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-tree-key=${treeOptions?.treeNode?.key ?? nothing}
+			data-tree-parent-key=${treeOptions?.treeNode?.parentKey ?? nothing}
+			data-tree-depth=${treeOptions?.treeNode?.logicalDepth ?? nothing}
+			data-tree-indent-depth=${treeOptions?.treeNode?.indentDepth ?? nothing}
 			data-sidebar-actions-row-root
 			data-nav-id=${archivedNavId}
 			data-nav-active=${active ? "true" : "false"}
@@ -1097,7 +1193,7 @@ export function renderArchivedDelegates(parentSessionId: string, forceExpanded =
  * Renders the team-lead session as a collapsible parent row.
  * Shows a collapse/expand chevron and child count badge.
  */
-function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded: boolean) {
+function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded: boolean, treeNode?: SidebarTreeNode<TeamLeadContext>) {
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const connecting = state.connectingSessionId === session.id;
@@ -1125,6 +1221,10 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-tree-key=${treeNode?.key ?? nothing}
+			data-tree-parent-key=${treeNode?.parentKey ?? nothing}
+			data-tree-depth=${treeNode?.logicalDepth ?? nothing}
+			data-tree-indent-depth=${treeNode?.indentDepth ?? nothing}
 			data-sidebar-actions-row-root
 			data-nav-id=${tlNavId}
 			data-nav-active=${active ? "true" : "false"}
@@ -1302,6 +1402,48 @@ function renderGoalBadge(goal: Goal) {
 	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" title=${badge.label}>${prIcon}</span>`;
 }
 
+function isArchivedTreeChild(node: SidebarTreeNode): boolean {
+	if (isGoalTreeNode(node)) return !!node.context.archived;
+	if (isSessionTreeNode(node)) return node.context.childClass === "archived-delegate" || isArchivedOrTerminalSession(node.context.session as GatewaySession);
+	return false;
+}
+
+function renderTreeTeamLeadNode(node: SidebarTreeNode<TeamLeadContext>, renderedAncestors?: Set<string>): TemplateResult {
+	const session = node.context.session as GatewaySession;
+	const archivedLead = isArchivedOrTerminalSession(session);
+	const expanded = archivedLead ? isArchivedParentExpanded(session.id) : isTeamLeadExpanded(session.id);
+	const childGroups = node.children.filter(isSessionChildrenNode);
+	const contentNodes = node.children.filter(child => !isSessionChildrenNode(child));
+	const childCount = contentNodes.filter(isSessionTreeNode).length + childGroups.reduce((total, group) => total + group.children.length, 0);
+	const activeNodes = archivedLead ? [] : contentNodes.filter(child => !isArchivedTreeChild(child));
+	const archivedNodes = archivedLead ? contentNodes : contentNodes.filter(isArchivedTreeChild);
+	const renderChild = (child: SidebarTreeNode): TemplateResult | string => {
+		if (isSessionTreeNode(child)) return renderTreeSessionNode(child);
+		if (isGoalTreeNode(child) && child.context.renderPlacement === "team-lead-spawned") return renderSpawnedChildGoalRow(child.context.goal as Goal, renderedAncestors, child.context.displayTitleSuffix, child);
+		return "";
+	};
+	return html`
+		${archivedLead
+			? renderArchivedSessionRow(session, childCount > 0, { treeNode: node, childGroupNodes: childGroups })
+			: renderTeamLeadRow(session, childCount, expanded, node)}
+		${expanded ? renderTreeSessionChildrenGroups(childGroups, true) : ""}
+		${expanded && contentNodes.length > 0 ? html`
+			<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				${activeNodes.map(renderChild)}
+				${activeNodes.length > 0 && archivedNodes.length > 0 ? archivedDivider(session.title) : ""}
+				${archivedNodes.map(renderChild)}
+			</div>
+		` : ""}
+	`;
+}
+
+function renderTreeGoalRuntimeChild(node: SidebarTreeNode, renderedAncestors?: Set<string>): TemplateResult | string {
+	if (isTeamLeadTreeNode(node)) return renderTreeTeamLeadNode(node, renderedAncestors);
+	if (isSessionTreeNode(node)) return renderTreeSessionNode(node);
+	if (isGoalTreeNode(node) && node.context.renderPlacement === "team-lead-spawned") return renderSpawnedChildGoalRow(node.context.goal as Goal, renderedAncestors, node.context.displayTitleSuffix, node);
+	return "";
+}
+
 /**
  * Expandable goal group used by both desktop sidebar and mobile landing.
  *
@@ -1311,9 +1453,12 @@ function renderGoalBadge(goal: Goal) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible with compact row padding. No double-click.
  */
-export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string }) {
+export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string; treeNode?: SidebarTreeNode<GoalContext> }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
+	const treeNode = opts?.treeNode;
+	const effectiveDescendantCount = treeNode?.context.descendantCount ?? opts?.descendantCount ?? 0;
+	const effectiveDisplayTitleSuffix = treeNode?.context.displayTitleSuffix ?? opts?.displayTitleSuffix;
 	// `goalSessions` is the full, unfiltered roster of sessions belonging to this
 	// goal. It drives badges, gate counts, `hasActiveTeam`, `isWorkMerged`,
 	// `hasActiveSession`, and the on-demand team-agents fetch below — all of
@@ -1421,6 +1566,16 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const teamChildren = isTeamGoal && teamLead ? displaySessions.filter(s => s.id !== teamLead.id) : [];
 	const nonTeamSessions = isTeamGoal ? displaySessions.filter(s => !teamLead || (s.id !== teamLead.id && !teamChildren.includes(s))) : displaySessions;
 
+	const renderTreeGoalChildren = () => {
+		const runtimeChildren = (treeNode?.children ?? []).filter(child => !isGoalTreeNode(child) || child.context.renderPlacement === "team-lead-spawned");
+		if (runtimeChildren.length === 0 && !isCreatingHere) {
+			return goal.archived
+				? nothing
+				: (isTeamGoal && hasActiveTeam ? nothing : emptyState);
+		}
+		return html`${runtimeChildren.map(child => renderTreeGoalRuntimeChild(child, extendAncestors(opts?.renderedAncestors, goal.id)))}`;
+	};
+
 	const renderTeamGroup = () => {
 		if (!teamLead) return displaySessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
@@ -1523,6 +1678,12 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
 			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
+				data-tree-key=${treeNode?.key ?? nothing}
+				data-tree-parent-key=${treeNode?.parentKey ?? nothing}
+				data-tree-depth=${treeNode?.logicalDepth ?? nothing}
+				data-tree-indent-depth=${treeNode?.indentDepth ?? nothing}
+				data-tree-active-child-keys=${treeNode ? treeNode.context.activeChildKeys.join(" ") : nothing}
+				data-tree-archived-child-keys=${treeNode ? treeNode.context.archivedChildKeys.join(" ") : nothing}
 				data-sidebar-actions-row-root
 				data-nav-id=${goalNavId}
 				data-nav-active=${goalNavActive ? "true" : "false"}
@@ -1532,14 +1693,14 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none" title="${isExpanded ? "Collapse goal" : "Expand goal"}"><span class="sidebar-chevron-glyph">${isExpanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="${mobile ? "margin-left:0;margin-right:1px;" : "margin-left:-3px;"}">${icon(GoalIcon, mobile ? "sm" : "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
-				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${opts?.displayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${opts.displayTitleSuffix})</span>` : ""}</span>
-				${(opts?.descendantCount ?? 0) > 0 ? html`
+				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${effectiveDisplayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${effectiveDisplayTitleSuffix})</span>` : ""}</span>
+				${effectiveDescendantCount > 0 ? html`
 					<span
 						class="shrink-0 font-semibold text-muted-foreground"
 						data-testid="sidebar-descendant-badge"
 						style="background:var(--secondary);padding:0 0.3333em;border-radius:0.5em;line-height:1.1667em;font-size:0.75em;"
-						title="${opts!.descendantCount} descendant goal${opts!.descendantCount === 1 ? "" : "s"}">
-						${opts!.descendantCount}
+						title="${effectiveDescendantCount} descendant goal${effectiveDescendantCount === 1 ? "" : "s"}">
+						${effectiveDescendantCount}
 					</span>
 				` : nothing}
 				${renderGoalBadge(goal)}
@@ -1551,7 +1712,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 			</div>
 			${isExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${displaySessions.length === 0 && !isCreatingHere
+					${treeNode ? renderTreeGoalChildren() : (displaySessions.length === 0 && !isCreatingHere
 						? (goal.archived
 							? nothing
 							/* Suppress "No agents — Start Team" when the team IS active but its
@@ -1559,13 +1720,13 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 							   (Show Busy / Show Read / Show Archived). The active team is
 							   still alive — it would be misleading to offer Start Team. */
 							: (isTeamGoal && hasActiveTeam ? nothing : emptyState))
-						: (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow))}
+						: (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow)))}
 					${isCreatingHere ? html`<div style="padding-left:var(--sidebar-chevron-w);${mobile ? "" : "font-size: 0.8333em;"}" class="py-1 text-muted-foreground flex items-center gap-1">
 						<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
 						Creating…
 					</div>` : ""}
 					${teamControls}
-					${state.showArchived ? (() => {
+					${!treeNode && state.showArchived ? (() => {
 						const archivedForGoal = state.archivedSessions.filter(s => effectiveArchivedTeamGoalId(s) === goal.id && !isChildSession(s));
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
