@@ -7,6 +7,7 @@ import { isConfigPageRoute } from "./routing.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
 import {
 	clearSidebarTreePreference,
+	getSidebarTreePreference,
 	isArchivedParentExpanded as sidebarIsArchivedParentExpanded,
 	isArchivedSectionExpanded as sidebarIsArchivedSectionExpanded,
 	isFirstClassParentExpanded as sidebarIsFirstClassParentExpanded,
@@ -643,8 +644,11 @@ const expandedDelegateParents: Set<string> = new Set(
 );
 
 export function saveExpandedGoals(): void {
-	safeSetItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
-	for (const goalId of expandedGoals) sidebarSetGoalExpanded(goalId, true);
+	const expandedGoalIds = [...expandedGoals].filter(goalId => (
+		getSidebarTreePreference({ kind: "goal", goalId }) !== "collapsed"
+	));
+	safeSetItem(EXPANDED_GOALS_KEY, JSON.stringify(expandedGoalIds));
+	for (const goalId of expandedGoalIds) sidebarSetGoalExpanded(goalId, true);
 }
 
 export function isUngroupedExpanded(projectId: string): boolean {
