@@ -1336,8 +1336,8 @@ Earlier versions used a fragile multi-layered approach: stub extensions raced ag
 2. The extension registers a `pi.on("tool_call", ...)` handler that intercepts every tool invocation.
 3. For `allow` tools (or tools already granted), the handler returns immediately - no blocking.
 4. For `ask` tools without a grant, the handler POSTs to `POST /api/sessions/:id/tool-grant-request` (long-poll). The gateway broadcasts a `tool_permission_needed` WebSocket message to all connected clients, and the HTTP request blocks until the user responds.
-5. The UI shows a grant dialog. The user can grant (with a duration choice) or deny.
-6. On grant: the gateway resolves the long-poll with `{ granted: true }`. The guard adds the tool to its in-memory grant set so future invocations pass through.
+5. The UI shows a grant card. The user can grant (with a duration choice) or deny.
+6. On grant: the gateway resolves the active long-poll with a scoped approval delta. The blocked guard invocation resumes from that response; the UI does not replay the original prompt text.
 7. On deny: the gateway resolves the long-poll with `{ granted: false, reason: "..." }`. The guard returns `{ block: true, reason }` and the agent sees a tool error.
 8. `never` tools are never registered with the agent, so no `tool_call` event fires for them - the guard is not involved.
 
@@ -1355,9 +1355,9 @@ Grant duration is chosen by the user at grant time, not configured in policy YAM
 
 | Duration | Effect |
 |---|---|
-| **Always** (permanent) | Tool is added to the role's `toolPolicies` as `allow` - persists across sessions. |
-| **This session** | Grant stored in the session's in-memory grant set - lasts until session ends. |
-| **Just this once** | Grant is consumed immediately - the guard will prompt again on the next invocation. |
+| **Always** (permanent) | Tool is added to the role's `toolPolicies` as `allow` - persists across sessions. The active guard may cache only the approved tool/group scope returned for the blocked request. |
+| **This session** | Grant stored in the session's in-memory grant set - lasts until session ends. The active guard may cache only the approved tool/group scope returned for the blocked request. |
+| **Just this once** | Grant authorizes only the currently blocked invocation. The active guard does not cache it, so the next invocation prompts again. |
 
 This replaces the old `ask-once` / `always-ask` distinction, which conflated "should this tool require a grant?" with "how long should the grant last?"
 
@@ -1369,7 +1369,19 @@ This replaces the old `ask-once` / `always-ask` distinction, which conflated "sh
 - `deny_tool_permission` (client → server): `{ toolName }`
 
 **REST endpoint:**
-- `POST /api/sessions/:id/tool-grant-request` - called by the guard extension (long-poll). Body: `{ toolName, toolGroup }`. Blocks until the user grants or denies. Returns `{ granted: boolean, reason? }`.
+- `POST /api/sessions/:id/tool-grant-request` - called by the guard extension (long-poll). Body: `{ toolName, toolGroup }`. Blocks until the user grants or denies. Returns a scoped result such as `{ granted: boolean, tools?, scope?, group?, mode?, reason? }`.
+
+### Grant resumption and deduplication
+
+The guard long-poll is the single owner for resuming an `ask`-gated tool call. Permission cards still carry `lastPromptText` so the UI can show context, but approving the card does **not** resend that text as a new user prompt. Replaying the prompt would create a second turn and can duplicate side-effecting tools such as `session_prompt`.
+
+Grant responses are scoped deltas, not the full effective allowed-tool surface. For a tool grant, the response names that tool. For a group grant, it names only tools in the approved group. The active guard uses that delta to decide whether the response covers the invocation it is currently blocking:
+
+- `one-time` grants unblock exactly the current invocation and are not added to the guard's in-process grant cache.
+- `session-only` and persistent grants may be cached by the active guard, but only for the approved tool/group scope returned in the response.
+- Stale or mismatched approvals are treated as denied. If the active pending request is for a different tool or group than the grant card being approved, the pending request resolves denied instead of applying the approval to another invocation.
+
+MCP group grants include both canonical operation names (`mcp__<server>__<operation>` or gateway sub-namespace variants) and model-facing MCP meta-tool names (`mcp_<server>` / `mcp_<server>__<sub>`). The canonical names preserve internal MCP operation enforcement, while the meta-tool names let the guard correlate the real model-facing pending request. The response still contains only the approved MCP group, not unrelated `ask` tools.
 
 ### Policy resolution cascade
 
