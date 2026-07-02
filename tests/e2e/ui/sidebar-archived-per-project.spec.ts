@@ -52,6 +52,7 @@ test.describe("Per-project Archived subsection full-stack smoke", () => {
 		try {
 			await openApp(page);
 			await page.evaluate(() => {
+				localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 				localStorage.removeItem("bobbit-archived-collapsed-projects");
 				localStorage.setItem("bobbit-show-archived", "true");
 			});
