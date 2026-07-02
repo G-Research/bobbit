@@ -126,6 +126,8 @@ describe("built-in source guards (§11.1)", () => {
 		assert.ok(baseEntrypoints.some((e) => (e as any).kind === "session-menu"), "session-menu entrypoint enabled by default");
 		assert.ok(entrypointListNames.includes("pr-walkthrough-open"), "slash entrypoint enabled by default");
 		assert.ok(entrypointListNames.includes("pr-walkthrough-route"), "route entrypoint enabled by default");
+		assert.equal((baseEntrypoints.find((e) => e.listName === "pr-walkthrough-open") as any)?.icon, "git-pull-request");
+		assert.equal((baseEntrypoints.find((e) => e.listName === "pr-walkthrough-session-menu") as any)?.icon, "git-pull-request");
 		assert.ok(!entrypointListNames.includes("pr-walkthrough-git-widget"), "old git-widget entrypoint absent");
 		assert.ok(!entrypointListNames.includes("pr-walkthrough-palette"), "old palette entrypoint absent");
 

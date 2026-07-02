@@ -26,6 +26,7 @@ describe("built-in terminal pack", () => {
 		assert.equal(contributions.panels[0]?.id, "terminal.panel");
 		const sessionMenu = contributions.entrypoints.find((e) => e.kind === "session-menu");
 		assert.equal(sessionMenu?.label, "Open Terminal");
+		assert.equal((sessionMenu as any)?.icon, "terminal");
 		assert.deepEqual(sessionMenu?.target, {
 			action: "channel-panel",
 			channel: "terminal",
