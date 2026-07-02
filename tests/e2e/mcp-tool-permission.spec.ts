@@ -28,6 +28,7 @@ import {
 	deleteSession,
 	nonGitCwd,
 	agentEndPredicate,
+	type WsConnection,
 } from "./e2e-setup.js";
 import type { Page } from "@playwright/test";
 
@@ -40,6 +41,7 @@ test.setTimeout(60_000);
 
 const ROLE_NAME = "mcp-perm-test-role";
 const DENIED_TOOL = "mcp__mock__echo";
+const MCP_ADD_TOOL = "mcp__mock__add";
 const MCP_GROUP_POLICY_KEY = "mcp__mock";
 const MCP_META_TOOL = "mcp_mock";
 const REFRESH_ROLE_NAME = "mcp-refresh-policy-role";
@@ -556,5 +558,64 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 		expect((grantResult as any).granted).toBe(true);
 
 		ws.close();
+	});
+
+	test("grant response returns only the approved scope for the active guard", async () => {
+		const roleName = `grant-scope-role-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		let conn: WsConnection | undefined;
+		try {
+			const roleResp = await apiFetch("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({
+					name: roleName,
+					label: "Grant Scope Role",
+					promptTemplate: "Role with unrelated ask-gated tools.",
+					toolPolicies: {
+						[DENIED_TOOL]: "ask",
+						[MCP_ADD_TOOL]: "ask",
+						session_prompt: "ask",
+					},
+				}),
+			});
+			expect(roleResp.status).toBe(201);
+
+			const sessionResp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), roleId: roleName }),
+			});
+			expect(sessionResp.status).toBe(201);
+			const { id: scopedSessionId } = await sessionResp.json();
+			sessionId = scopedSessionId;
+			conn = await connectWs(sessionId);
+
+			let cursor = conn.messageCount();
+			const toolGrantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+				method: "POST",
+				body: JSON.stringify({ toolName: DENIED_TOOL, toolGroup: "MCP: mock" }),
+			}).then(r => r.json());
+			await conn.waitForFrom(cursor, (m) => m.type === "tool_permission_needed" && m.toolName === DENIED_TOOL, 10_000);
+			conn.send({ type: "grant_tool_permission", toolName: DENIED_TOOL, scope: "tool", mode: "session-only" });
+			const toolGrant = await toolGrantPromise;
+			expect(toolGrant.granted).toBe(true);
+			expect(toolGrant.scope).toBe("tool");
+			expect(toolGrant.tools).toEqual([DENIED_TOOL]);
+
+			cursor = conn.messageCount();
+			const groupGrantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+				method: "POST",
+				body: JSON.stringify({ toolName: MCP_ADD_TOOL, toolGroup: "MCP: mock" }),
+			}).then(r => r.json());
+			await conn.waitForFrom(cursor, (m) => m.type === "tool_permission_needed" && m.toolName === MCP_ADD_TOOL, 10_000);
+			conn.send({ type: "grant_tool_permission", toolName: MCP_ADD_TOOL, scope: "group", group: "MCP: mock", mode: "session-only" });
+			const groupGrant = await groupGrantPromise;
+			expect(groupGrant.granted).toBe(true);
+			expect(groupGrant.scope).toBe("group");
+			expect(new Set(groupGrant.tools)).toEqual(new Set([DENIED_TOOL, MCP_ADD_TOOL]));
+			expect(groupGrant.tools).not.toContain("session_prompt");
+		} finally {
+			conn?.close();
+			if (sessionId) { await deleteSession(sessionId).catch(() => {}); sessionId = ""; }
+			await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 });

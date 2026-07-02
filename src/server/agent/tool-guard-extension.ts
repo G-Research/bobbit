@@ -131,11 +131,19 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
-        // Permission granted — add all server-confirmed grants to the in-memory
-        // set so the active process can continue without a grant-triggered
-        // restart or client prompt replay.
-        const newlyGranted = Array.isArray(r.tools) && r.tools.length > 0 ? r.tools : [toolName];
-        for (const granted of newlyGranted) {
+        // Permission granted — cache only the approved grant scope. The server
+        // returns a scope delta in r.tools; defensively fall back to the current
+        // tool if an older gateway omits scope metadata so unrelated ask-gated
+        // tools cannot be silently granted by a full effective tool surface.
+        const grantScope = r.scope === "group" ? "group" : "tool";
+        const responseTools = Array.isArray(r.tools) && r.tools.length > 0 ? r.tools : [toolName];
+        const newlyGranted = grantScope === "group"
+          ? responseTools.filter((granted) => {
+              const grantedPolicy = policyEntry(askPolicies, askPolicyNamesByLower, granted);
+              return grantedPolicy && grantedPolicy.entry.group === entry.group;
+            })
+          : [askPolicy.canonicalName];
+        for (const granted of (newlyGranted.length > 0 ? newlyGranted : [askPolicy.canonicalName])) {
           grantedTools.add(granted);
           grantedToolsLower.add(String(granted || "").toLowerCase());
         }
