@@ -168,6 +168,54 @@ test.describe("Sidebar bobbit data-URL memoization", () => {
 		expect(result.plainIdle.pulseCount).toBe(0);
 	});
 
+	test("compacting sidebar bobbits stay inside the clipped wrapper without layout shift", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(() => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			const capture = (isCompacting: boolean, accessory?: string) => {
+				api.renderStaticSidebarStatusInto(host, "idle", isCompacting, true, false, accessory);
+				const outer = host.querySelector(".sidebar-bobbit-status-test > span") as HTMLElement;
+				return {
+					outerHeight: parseFloat(outer.style.height),
+					layers: Array.from(host.querySelectorAll<HTMLImageElement>("img")).map(img => {
+						const top = parseFloat(img.style.top || "0");
+						const height = parseFloat(img.style.height || "0");
+						return {
+							top,
+							height,
+							bottom: top + height,
+							animation: img.style.animation,
+						};
+					}),
+				};
+			};
+
+			return {
+				plainIdle: capture(false),
+				plainCompact: capture(true),
+				crownIdle: capture(false, "crown"),
+				crownCompact: capture(true, "crown"),
+			};
+		});
+
+		expect(result.plainCompact.outerHeight).toBe(result.plainIdle.outerHeight);
+		expect(result.crownCompact.outerHeight).toBe(result.crownIdle.outerHeight);
+		expect(result.plainCompact.layers.map(l => l.top)).toEqual(result.plainIdle.layers.map(l => l.top));
+		expect(result.crownCompact.layers.map(l => l.top)).toEqual(result.crownIdle.layers.map(l => l.top));
+		expect(result.plainCompact.layers.length).toBe(2); // body + selected-eye overlay
+		expect(result.crownCompact.layers.length).toBe(3); // body + eye + accessory
+
+		for (const scenario of [result.plainCompact, result.crownCompact]) {
+			for (const layer of scenario.layers) {
+				expect(layer.bottom).toBeLessThanOrEqual(scenario.outerHeight + 0.01);
+			}
+		}
+		expect(result.plainCompact.layers[0].animation).toContain("bobbit-squish-s");
+		expect(result.crownCompact.layers[2].animation).toContain("bobbit-squish-crown-s");
+	});
+
 	test("identical opts: toDataURL runs once on first render, never again", async ({ page }) => {
 		await installSpyAndLoad(page);
 
