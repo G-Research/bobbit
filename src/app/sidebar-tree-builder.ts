@@ -335,13 +335,18 @@ interface BuildContext {
 function createBuildContext(input: BuildSidebarTreeInput): BuildContext {
 	const includeArchived = input.filters?.includeArchived ?? input.showArchived;
 	const bypass = Boolean(input.filters?.bypassBusyReadFilters || input.filters?.searchQuery?.trim());
+	const liveSessions = dedupeSessionsById(sortSessions(input.sessions.filter(s => !s.archived)));
+	const liveSessionIds = new Set(liveSessions.map(s => s.id));
+	const archivedSessions = includeArchived
+		? dedupeSessionsById(sortSessions(input.archivedSessions.filter(s => !liveSessionIds.has(s.id))))
+		: [];
 	return {
 		input,
 		viewport: input.viewport ?? "desktop",
 		includeArchived,
 		layout: resolveSidebarTreeLayoutPreference(input.layout),
-		liveSessions: sortSessions(input.sessions.filter(s => !s.archived)),
-		archivedSessions: includeArchived ? sortSessions(input.archivedSessions) : [],
+		liveSessions,
+		archivedSessions,
 		flatByKey: new Map(),
 		claimedSpawnedGoalIds: new Set(),
 		spawnedRootGoalIds: new Set(),

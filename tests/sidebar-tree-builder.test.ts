@@ -111,6 +111,38 @@ describe("buildSidebarTree", () => {
 		assert.equal(tree.archivedSectionNode?.children.find(n => n.entityId === "archived-session")?.kind, "session");
 	});
 
+	it("dedupes live and archived ungrouped sessions with live placement winning", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [],
+			sessions: [session({ id: "dupe", status: "terminated", createdAt: 1 })],
+			archivedSessions: [session({ id: "dupe", archived: true, status: "archived", createdAt: 0 })],
+			showArchived: true,
+		});
+		const tree = model.projects[0];
+		assert.deepEqual(tree.ungroupedSessionNodes.map(n => n.entityId), ["dupe"]);
+		assert.deepEqual(tree.archivedSessionNodes.map(n => n.entityId), []);
+		assert.equal([...model.flatByKey.values()].filter(n => n.kind === "session" && n.entityId === "dupe").length, 1);
+		assert.equal(model.diagnostics.some(d => d.kind === "duplicate-node-key"), false);
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+	});
+
+	it("dedupes live non-team goal sessions over archived duplicates", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [goal({ id: "g" })],
+			sessions: [session({ id: "same", goalId: "g", createdAt: 1 })],
+			archivedSessions: [session({ id: "same", goalId: "g", archived: true, status: "archived", createdAt: 0 })],
+			showArchived: true,
+		});
+		const goalNode = model.projects[0].goalForest[0];
+		assert.deepEqual(goalNode.children.filter(n => n.kind === "session").map(n => n.entityId), ["same"]);
+		assert.deepEqual(model.projects[0].archivedSessionNodes.map(n => n.entityId), []);
+		assert.equal([...model.flatByKey.values()].filter(n => n.kind === "session" && n.entityId === "same").length, 1);
+		assert.equal(model.diagnostics.some(d => d.kind === "duplicate-node-key"), false);
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+	});
+
 	it("preserves goal hierarchy, depths, indentation, descendant counts, and title suffixes", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
