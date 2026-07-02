@@ -124,6 +124,55 @@ test.describe("SB-00b: Archived delegates inline in session response", () => {
 		});
 	});
 
+	test.describe("tree expansion rendering", () => {
+		test("keeps mixed first-class and archived-delegate groups independently expandable", async ({ page }) => {
+			await page.goto(TEST_PAGE);
+			const collapsed = await page.evaluate(() => {
+				return (window as any).renderTreeSessionGroupModel([
+					{ childClass: "first-class", expanded: false, children: ["first"] },
+					{ childClass: "archived-delegate", expanded: false, children: ["archived"] },
+				]);
+			});
+			expect(collapsed).toEqual([
+				{ kind: "toggle", childClass: "archived-delegate", expanded: false, toggleTarget: "archived-delegate" },
+			]);
+
+			const archivedExpanded = await page.evaluate(() => {
+				return (window as any).renderTreeSessionGroupModel([
+					{ childClass: "first-class", expanded: false, children: ["first"] },
+					{ childClass: "archived-delegate", expanded: true, children: ["archived"] },
+				]);
+			});
+			expect(archivedExpanded).toEqual([
+				{ kind: "toggle", childClass: "archived-delegate", expanded: true, toggleTarget: "archived-delegate" },
+				{ kind: "child", childClass: "archived-delegate", id: "archived" },
+			]);
+		});
+
+		test("team-lead expansion exposes archived-delegate expander before archived delegates render", async ({ page }) => {
+			await page.goto(TEST_PAGE);
+			const collapsed = await page.evaluate(() => {
+				return (window as any).renderTeamLeadArchivedDelegateModel(true, false, ["archived-delegate"]);
+			});
+			expect(collapsed).toEqual([
+				{ kind: "toggle", childClass: "archived-delegate", expanded: false, toggleTarget: "archived-delegate" },
+			]);
+
+			const expanded = await page.evaluate(() => {
+				return (window as any).renderTeamLeadArchivedDelegateModel(true, true, ["archived-delegate"]);
+			});
+			expect(expanded).toEqual([
+				{ kind: "toggle", childClass: "archived-delegate", expanded: true, toggleTarget: "archived-delegate" },
+				{ kind: "child", childClass: "archived-delegate", id: "archived-delegate" },
+			]);
+
+			const teamLeadCollapsed = await page.evaluate(() => {
+				return (window as any).renderTeamLeadArchivedDelegateModel(false, true, ["archived-delegate"]);
+			});
+			expect(teamLeadCollapsed).toEqual([]);
+		});
+	});
+
 	test.describe("server BFS logic", () => {
 		test("finds direct archived delegates of live sessions", async ({ page }) => {
 			await page.goto(TEST_PAGE);

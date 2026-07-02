@@ -57,10 +57,51 @@ function serverBFS(liveSessions, allArchived) {
   return result;
 }
 
+/**
+ * Mirrors the render-helpers decision for session rows backed by tree child
+ * groups. First-class and archived-delegate groups keep independent expansion
+ * state; when both exist, the archived group emits its own visible toggle even
+ * while collapsed so the user can expand it without mutating the first-class key.
+ */
+function renderTreeSessionGroupModel(groups, options = {}) {
+  const hasFirstClass = groups.some(g => g.childClass === "first-class" && g.children.length > 0);
+  const hasArchived = groups.some(g => g.childClass === "archived-delegate" && g.children.length > 0);
+  const firstClassExpanded = groups.some(g => g.childClass === "first-class" && g.expanded);
+  const archivedExpanded = groups.some(g => g.childClass === "archived-delegate" && g.expanded);
+  const rowExpanded = hasFirstClass ? firstClassExpanded : archivedExpanded;
+  const renderChildArea = rowExpanded || (hasFirstClass && hasArchived);
+  const showArchivedHeader = options.showArchivedGroupHeader ?? (hasFirstClass && hasArchived);
+  if (!renderChildArea) return [];
+  const rows = [];
+  for (const group of groups) {
+    if (group.childClass === "archived-delegate" && group.children.length > 0 && showArchivedHeader) {
+      rows.push({ kind: "toggle", childClass: "archived-delegate", expanded: !!group.expanded, toggleTarget: "archived-delegate" });
+      if (group.expanded) rows.push(...group.children.map(id => ({ kind: "child", childClass: "archived-delegate", id })));
+      continue;
+    }
+    if (group.expanded) rows.push(...group.children.map(id => ({ kind: "child", childClass: group.childClass, id })));
+  }
+  return rows;
+}
+
+/**
+ * Mirrors renderTreeTeamLeadNode: the team-lead row expansion only opens the
+ * team-lead container. Archived delegate groups inside it still need their own
+ * archived-delegate toggle because their canonical key defaults collapsed.
+ */
+function renderTeamLeadArchivedDelegateModel(teamLeadExpanded, archivedGroupExpanded, childIds) {
+  if (!teamLeadExpanded || childIds.length === 0) return [];
+  const rows = [{ kind: "toggle", childClass: "archived-delegate", expanded: archivedGroupExpanded, toggleTarget: "archived-delegate" }];
+  if (archivedGroupExpanded) rows.push(...childIds.map(id => ({ kind: "child", childClass: "archived-delegate", id })));
+  return rows;
+}
+
 // Expose for Playwright
 window.mergeArchivedDelegates = mergeArchivedDelegates;
 window.computeHasChildren = computeHasChildren;
 window.serverBFS = serverBFS;
+window.renderTreeSessionGroupModel = renderTreeSessionGroupModel;
+window.renderTeamLeadArchivedDelegateModel = renderTeamLeadArchivedDelegateModel;
 </script>
 </body>
 </html>
