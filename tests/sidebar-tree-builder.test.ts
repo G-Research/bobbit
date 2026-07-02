@@ -355,9 +355,12 @@ describe("buildSidebarTree", () => {
 		assert.equal(live.children.find(n => n.kind === "goal")?.entityId, "archived-child");
 		assert.deepEqual(model.projects[0].archivedGoalForest.map(n => n.entityId), ["archived-root"]);
 		const archivedRoot = model.projects[0].archivedGoalForest[0];
+		const archivedGrand = archivedRoot.children.find(n => n.kind === "goal")!;
 		assert.equal(archivedRoot.parentKey, model.projects[0].archivedSectionNode?.key);
 		assert.equal(archivedRoot.logicalDepth, (model.projects[0].archivedSectionNode?.logicalDepth ?? 0) + 1);
-		assert.equal(archivedRoot.children.find(n => n.kind === "goal")?.entityId, "archived-grand");
+		assert.equal(archivedRoot.indentPx, 0);
+		assert.equal(archivedGrand.entityId, "archived-grand");
+		assert.equal(archivedGrand.indentPx, 16);
 	});
 
 	it("terminates malformed spawned descendant cycles before recursive subtree conversion", () => {

@@ -449,7 +449,7 @@ function convertGoalNode(
 	const goal = nested.goal as GoalLike;
 	if (ctx.emittedGoalIds.has(goal.id)) return undefined;
 	ctx.emittedGoalIds.add(goal.id);
-	const indentDepth = parent.kind === "project" ? nested.depth : parent.indentDepth + 1;
+	const indentDepth = parent.kind === "project" || parent.kind === "project-archived" ? nested.depth : parent.indentDepth + 1;
 	const goalIndentUnit = renderPlacement === "project-forest" || renderPlacement === "archived-section"
 		? ctx.layout.nestedGoalIndentPx
 		: ctx.layout.baseIndentPx;
