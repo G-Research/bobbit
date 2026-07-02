@@ -821,8 +821,6 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
 	const compactSquish = isCompacting && !isCancelling;
 
-	const compactTopOffset = compactSquish ? 2 : 0;
-
 	// Body transform: image already at CSS target size, no base scale needed.
 	// Compaction uses -s (smooth) keyframes that omit scale(1.6).
 	// transform-origin adjusted from 9px (sprite coords) to 14.4px (CSS coords).
@@ -851,9 +849,12 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 			: `transform:scaleY(0.75) translateY(${(isBandanaStyle ? 4 : 4.5) * S}px)${isCrown ? ` translateX(${-0.5 * S}px)` : ""};transform-origin:0 ${BODY_HEIGHT * S}px;`)
 		: `${isBandanaStyle ? `transform:translateY(${-0.5 * S}px);` : ""}${isCrown ? `transform:translateX(${-0.5 * S}px);` : ""}`;
 
-	const innerTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
-	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
-	const accTop = addsHeight ? `${acc.yOffset + compactTopOffset}px` : `${compactTopOffset}px`;
+	// Keep the compacting sprite on the same baseline as every other sidebar
+	// state. The squish animation already scales around the body bottom; adding a
+	// top offset pushes that fixed bottom edge outside the clipped wrapper.
+	const innerTop = addsHeight ? "4px" : "0px";
+	const eyeTop = innerTop;
+	const accTop = addsHeight ? `${acc.yOffset}px` : "0px";
 	const containerHeight = addsHeight ? "19px" : "15px";
 	const containerWidth = "20px";
 
