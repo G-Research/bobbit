@@ -28,13 +28,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, retryLoadSessions } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
-import {
-	clearPersistedReviewDocuments,
-	openReviewDocumentFromEvent,
-	reviewDecisionPayloadFromDetail,
-	reviewDocumentFromDecisionDetail,
-	submitReviewDecision,
-} from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -216,8 +210,15 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 });
 
 window.addEventListener("bobbit-open-review-document", (e: Event) => {
-	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
-	if (!doc) showHeaderToast("Could not open review document");
+	void (async () => {
+		try {
+			const { openReviewDocumentFromEvent } = await loadReviewSources();
+			const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
+			if (!doc) showHeaderToast("Could not open review document");
+		} catch {
+			showHeaderToast("Could not open review document");
+		}
+	})();
 });
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
@@ -2463,6 +2464,7 @@ export function doRenderApp(): void {
 						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
 						setPanelTabsForSession(state, sid, remainingLegacyTabs);
 						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
+						const { clearPersistedReviewDocuments } = await loadReviewSources();
 						clearAllAnnotations(sid);
 						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
@@ -2484,13 +2486,18 @@ export function doRenderApp(): void {
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
 					const sid = activeSessionId() || "";
-					const doc = reviewDocumentFromDecisionDetail(e.detail);
-					const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
-					if (!doc || !payload) {
-						showHeaderToast("Could not submit review decision");
-						return;
-					}
 					try {
+						const {
+							reviewDecisionPayloadFromDetail,
+							reviewDocumentFromDecisionDetail,
+							submitReviewDecision,
+						} = await loadReviewSources();
+						const doc = reviewDocumentFromDecisionDetail(e.detail);
+						const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
+						if (!doc || !payload) {
+							showHeaderToast("Could not submit review decision");
+							return;
+						}
 						await submitReviewDecision(doc, payload, {
 							sessionId: sid,
 							prompt: async (feedback) => {
@@ -2523,6 +2530,7 @@ export function doRenderApp(): void {
 					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
 					setPanelTabsForSession(state, sid, remainingLegacyTabs);
 					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
+					const { clearPersistedReviewDocuments } = await loadReviewSources();
 					clearAllAnnotations(sid);
 					clearPersistedReviewDocuments(sid);
 					if (hasMarkdownReview) {

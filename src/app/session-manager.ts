@@ -33,7 +33,7 @@ import { markSessionVisited } from "./render-helpers.js";
 import { showHeaderToast } from "./render.js";
 import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetProjectProposalPanel } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
-import { restorePersistedReviewDocuments } from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 import { getExpiredAccountOAuthCredentials } from "./account-oauth-providers.js";
 
@@ -1299,7 +1299,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		restorePersistedReviewDocuments(sessionId, { select: true });
+		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -2134,7 +2134,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		restorePersistedReviewDocuments(sessionId, { select: true });
+		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
