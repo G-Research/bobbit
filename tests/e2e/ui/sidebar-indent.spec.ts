@@ -108,9 +108,15 @@ async function seedSidebarState(page: Page, fixture: IndentFixture, indentPx?: n
 	await page.evaluate(({ key, parentId, indent }) => {
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 		localStorage.removeItem("bobbit-expanded-projects");
+		localStorage.removeItem("gateway.sessionId");
 		localStorage.setItem("bobbit-expanded-goals", JSON.stringify([parentId]));
 		if (indent === undefined) localStorage.removeItem(key);
 		else localStorage.setItem(key, String(indent));
+
+		// Mobile only renders the sidebar tree on the landing surface. Keep the
+		// reload deterministic even if a prior desktop assertion left the app on a
+		// settings/session route or with a restored session in localStorage.
+		history.replaceState(history.state, "", `${location.pathname}${location.search}#/`);
 	}, { key: INDENT_KEY, parentId: fixture.parentId, indent: indentPx });
 }
 
@@ -118,8 +124,12 @@ async function reloadAndWaitForSidebarTree(page: Page, fixture: IndentFixture): 
 	await page.reload();
 	await expect.poll(async () => page.locator("button").filter({ hasText: "Settings" }).first().isVisible()
 		|| page.locator("button").filter({ hasText: /^\s*Roles\s*$/ }).first().isVisible(), { timeout: 15_000 }).toBe(true);
-	await expect(goalRow(page, fixture.parentId)).toBeVisible({ timeout: 10_000 });
-	await expect(goalRow(page, fixture.childId)).toBeVisible({ timeout: 10_000 });
+	await expect(goalEntry(page, fixture.parentId)).toBeVisible({ timeout: 10_000 });
+	await expect(goalEntry(page, fixture.childId)).toBeVisible({ timeout: 10_000 });
+}
+
+function goalEntry(page: Page, goalId: string) {
+	return page.locator(`[data-goal-id='${goalId}']`).first();
 }
 
 function goalRow(page: Page, goalId: string) {
