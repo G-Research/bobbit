@@ -37,7 +37,7 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -46,6 +46,7 @@ import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 import { buildSidebarTree, type GoalContext, type SessionContext, type SidebarProjectTree, type SidebarTreeModel, type SidebarTreeNode, type TeamLeadContext } from "./sidebar-tree-builder.js";
 import { safeSetItem, safeGetJSON } from "./safe-storage.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -1005,7 +1006,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					</button>
 				</div>
 			</div>
-			${staffExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${list.filter((agent) => {
+			${staffExpanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">${list.filter((agent) => {
 				// Hide staff agents whose current session is archived and belongs to a goal
 				// — those show under their goal's archived section instead
 				if (agent.currentSessionId) {
@@ -1364,11 +1365,11 @@ function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 			</button>
 			${expanded ? html`
 				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedGoals.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+				${archivedGoals.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">
 					${archivedGoals.map(node => renderNestedNode(project.id, node, "sidebar-archived-row"))}
 				</div>` : ""}
 				${archivedGoals.length > 0 && archivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				${archivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${archivedSessions.map(node => html`
 						<div data-tree-key=${node.key}>
 							${renderArchivedSessionRow(node.context.session as GatewaySession)}
@@ -1404,12 +1405,11 @@ function _expandNestedDepth(projectId: string): void {
 
 /** Render the "Show N more child goals…" affordance when the depth cap clipped. */
 function renderTruncationRow(projectId: string, count: number, depth: number) {
-	const indentPx = depth * 16;
 	return html`
 		<div
 			class="flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors text-[10px] text-muted-foreground italic"
 			data-testid="sidebar-show-more-children"
-			style="padding-left:${indentPx + HEADER_CHEVRON_W}px;"
+			style="${sidebarTreeTruncationIndentStyle(depth)}"
 			@click=${(e: Event) => { e.stopPropagation(); _expandNestedDepth(projectId); }}
 			title="Reveal deeper nested goals">
 			Show ${count} more child goal${count === 1 ? "" : "s"}…
@@ -1433,7 +1433,7 @@ function renderNestedNode(
 	const archivedChildren = nestedGoalChildren(node, true);
 	const needsDivider = activeChildren.length > 0 && archivedChildren.length > 0;
 	return html`
-		<div data-testid=${rowTestId} data-tree-key=${node.key} data-depth=${node.indentDepth} data-goal-id=${goal.id} style="padding-left:${node.indentPx}px;">
+		<div data-testid=${rowTestId} data-tree-key=${node.key} data-depth=${node.indentDepth} data-goal-id=${goal.id} style="${sidebarTreeNodeIndentStyle(node)}">
 			<div data-testid="sidebar-goal-row">
 				${renderGoalGroupFromTree(node)}
 			</div>
@@ -1504,7 +1504,8 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
-		viewport: "desktop",
+		viewport: state.sidebarCollapsed ? "collapsed" : "desktop",
+		layout: loadSidebarTreeLayoutPreference(),
 		filters: {
 			searchQuery: state.searchQuery,
 			activeSessionId: activeSessionId(),
@@ -1584,7 +1585,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 				` : ""}
 			</div>
 			${ungroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
-				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${projectTree.ungroupedSessionNodes.map(node => html`<div data-tree-key=${node.key}>${renderSessionRow(node.context.session as GatewaySession)}</div>`)}
 				</div>
 			` : ""}
@@ -1701,7 +1702,7 @@ export function renderSidebar() {
 									${i > 0 ? html`<div class="project-reorder-separator border-t border-border/30 my-1 mx-2"></div>` : ""}
 									<div class="project-reorder-section" data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
 										${renderProjectHeader(project, effectiveExpanded)}
-										${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 											${renderProjectContent(projectTree)}
 										</div>` : ""}
 									</div>
@@ -1814,7 +1815,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead), true)}</span>
 				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
-			${tlExpanded ? children.map(child => html`<div style="padding-left:6px;">${renderCollapsedRuntimeNode(child)}</div>`) : ""}
+			${tlExpanded ? children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child)}</div>`) : ""}
 		`;
 	};
 
@@ -1832,7 +1833,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 					<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 					<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
 				</button>
-				${expanded ? node.children.map(child => html`<div style="padding-left:6px;">${renderCollapsedRuntimeNode(child, archived)}</div>`) : ""}
+				${expanded ? node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived)}</div>`) : ""}
 			</div>
 		`;
 	};
@@ -1841,7 +1842,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 		if (node.kind === "session") return renderCollapsedSessionNode(node as SessionTreeNode);
 		if (node.kind === "team-lead") return renderCollapsedTeamLeadNode(node as TeamLeadTreeNode);
 		if (node.kind === "goal") return renderCollapsedGoalNode(node as GoalTreeNode, archived || (node as GoalTreeNode).context.archived);
-		if (node.kind === "session-children") return html`${node.children.map(child => html`<div style="padding-left:6px;">${renderCollapsedRuntimeNode(child, archived)}</div>`)}`;
+		if (node.kind === "session-children") return html`${node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived)}</div>`)}`;
 		return "";
 	}
 
