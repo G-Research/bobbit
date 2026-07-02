@@ -1,6 +1,7 @@
 id: pr-walkthrough
 kind: composer-slash
 label: PR Walkthrough
+icon: git-pull-request
 # A composer-slash LAUNCHER (the slash menu). Its selection IS the user gesture.
 # SPAWN-ON-CLICK model (launch UX correction): like every launch surface, it calls
 # the pack `run` route to mint a fresh read-only reviewer sub-agent, then opens the

@@ -24,6 +24,8 @@
 // tool still loads with no renderer/actions; a console.warn is emitted) — never
 // fatal, mirroring the per-tool try/catch in tool-manager.ts::scanToolsDir.
 
+import { isSupportedEntrypointIconId, type EntrypointIconId } from "../../shared/entrypoint-icons.js";
+
 /** Tool-scoped contributions parsed from a tool YAML (renderer + actions only). */
 export interface ToolContributions {
 	/** Renderer ESM module path, relative to the tool YAML's dir (contained in
@@ -58,6 +60,7 @@ export interface EntrypointContribution {
 	id: string;
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
+	icon?: EntrypointIconId;
 	routeId?: string;
 	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
@@ -184,6 +187,13 @@ function parseActions(raw: unknown, filePath: string): ToolActionsContribution |
 	return out;
 }
 
+function parseLauncherEntrypointIcon(raw: unknown, id: string, filePath: string): EntrypointIconId | undefined {
+	if (raw === undefined) return undefined;
+	if (isSupportedEntrypointIconId(raw)) return raw;
+	console.warn(`[tool-contributions] Dropping unsupported launcher entrypoint icon for '${id}' in ${filePath}`);
+	return undefined;
+}
+
 /**
  * Parse an array of entrypoint declarations into typed `EntrypointContribution[]`
  * (pack-schema-v1 §1.5). Launcher kinds require a `label` + a structured `target`
@@ -286,7 +296,10 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 				target.route = route;
 			}
 			if (params) target.params = params;
-			out.push({ id, kind: kind as EntrypointContribution["kind"], label, target });
+			const icon = parseLauncherEntrypointIcon(obj.icon, id, filePath);
+			const launcher: EntrypointContribution = { id, kind: kind as EntrypointContribution["kind"], label, target };
+			if (icon) launcher.icon = icon;
+			out.push(launcher);
 		}
 	}
 	return out;
