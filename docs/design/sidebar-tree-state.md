@@ -1,12 +1,12 @@
 # Unified sidebar tree state design
 
-Status: partially implemented. This branch adds the shared sidebar tree builder in `src/app/sidebar-tree-builder.ts` and routes the desktop, mobile, collapsed-sidebar, and render-helper paths through builder-derived hierarchy data. The storage/state migration described later remains future work: production expansion state still comes from the legacy sets and localStorage keys inventoried below.
+Status: partially implemented. The shared sidebar tree builder and sidebar tree indentation preference have shipped. Desktop, mobile, collapsed-sidebar, and render-helper paths now consume builder-derived hierarchy/layout data and shared indentation helpers. The storage/state migration described later remains future work: production expansion state still comes from the legacy sets and localStorage keys inventoried below.
 
 ## Context
 
 The sidebar renders one navigation tree through several modules. Before this refactor, each renderer made parts of the hierarchy decision itself, while expansion state was split across unrelated module-level sets and localStorage keys. That made refreshes, goal creation, keyboard navigation, and renderer-specific defaults easy to drift.
 
-The builder now centralizes rendered hierarchy, stable canonical keys, node kind/entity/context, parent/child ownership, depth/indent metadata, expansion metadata, and spawned-child placement. The remaining design introduces a safe-storage-backed preference layer so renderers, keyboard navigation, refresh polling, and create-goal flows can eventually ask one state API whether a node is expandable or expanded.
+The builder now centralizes rendered hierarchy, stable canonical keys, node kind/entity/context, parent/child ownership, depth/indent metadata, expansion metadata, and spawned-child placement. The shipped indentation preference uses that metadata plus shared CSS variables so spacing stays consistent across sidebar surfaces. The remaining design introduces a safe-storage-backed disclosure-state layer so renderers, keyboard navigation, refresh polling, and create-goal flows can eventually ask one state API whether a node is expandable or expanded.
 
 ## Source map
 
@@ -16,7 +16,8 @@ Maintainers and future storage-migration implementers should start with these fi
 |---|---|---|
 | Shared tree builder | `src/app/sidebar-tree-builder.ts::buildSidebarTree`, `sidebarTreeKey`, `parseSidebarTreeKey`, `SidebarTreeNode` | Centralizes rendered hierarchy, stable keys, node context, depth/indent metadata, expansion metadata, and spawned-child placement. |
 | Desktop sidebar shell and project sections | `src/app/sidebar.ts::renderSidebar`, `renderProjectHeader`, `renderProjectContent`, `renderNestedNode`, `isProjectExpanded`, `toggleProjectExpanded`, `_expandedNestedDepthByProject` | Owns project headers, nested goal rendering, project reorder overrides, and the render-local “Show more child goals” depth cap. |
-| Shared goal/session rows and archived subsections | `src/app/render-helpers.ts::renderGoalGroup`, nested `renderTeamGroup`, `renderProjectArchivedSection`, `renderArchivedSessionRow`, `renderArchivedDelegates`, `INDENT` | Owns goal disclosure, team-lead disclosure, archived rows, delegate rows, and shared indentation constants. |
+| Shared goal/session rows and archived subsections | `src/app/render-helpers.ts::renderGoalGroup`, nested `renderTeamGroup`, `renderProjectArchivedSection`, `renderArchivedSessionRow`, `renderArchivedDelegates`, `sidebarTreeBaseIndentStyle`, `sidebarTreeNodeIndentStyle` | Owns goal disclosure, team-lead disclosure, archived rows, delegate rows, and consumes shared indentation helpers. |
+| Sidebar indentation preference | `src/app/sidebar-tree-layout.ts`, `src/app/settings-page.ts::renderSidebarTreeIndentControl`, `src/app/state.ts` re-exports/startup application | Owns the shipped per-browser indentation setting, storage key, clamping, CSS variables, and template style helpers. |
 | Refresh and goal creation | `src/app/api.ts::refreshSessions`, `createGoal` | Currently mutates `expandedGoals` directly when new goals arrive or are created. |
 | Keyboard navigation | `src/app/sidebar-nav.ts::NavKind`, `navIdFor`, `parseNavId`, `isNavItemExpanded`, `setNavItemExpanded`, `getVisibleNavOrder`, `navIdToHash`, `getActiveNavId` | Currently uses string `data-nav-id` values such as `goal:<id>` and switches on legacy nav kinds. |
 | Nested goal forest | `src/app/sidebar-nesting.ts::buildNestedGoalForest`, `NestedGoalNode` | Produces depth, parent/child structure, descendant counts, and truncation metadata for nested goals. |
@@ -51,6 +52,7 @@ Maintainers and future storage-migration implementers should start with these fi
 | `bobbit-expanded-delegate-parents` | `src/app/state.ts::EXPANDED_DELEGATE_PARENTS_KEY`, `isArchivedParentExpanded`, `setArchivedParentExpanded`, `toggleArchivedParentExpanded` | Expanded archived delegate parent session IDs. | collapsed |
 | `_expandedNestedDepthByProject` | `src/app/sidebar.ts::_expandedNestedDepthByProject` | In-memory depth cap for “Show N more child goals”. | 5, not persisted |
 | `bobbit-sidebar-collapsed` | `src/app/state.ts::state.sidebarCollapsed`, `src/app/sidebar.ts::toggleSidebar`, `renderCollapsedSidebar` | Shell width mode, not tree node expansion. | expanded shell |
+| `bobbit:sidebar-tree-indent` | `src/app/sidebar-tree-layout.ts::SIDEBAR_TREE_INDENT_KEY`, `loadSidebarTreeIndentPx`, `saveSidebarTreeIndentPx`, `resetSidebarTreeIndentPreference` | Per-browser nested sidebar tree indentation. This is shipped layout state, not tree node expansion state. | `16` px, clamped to `8`–`28` for finite values; invalid values default |
 
 ## Node-key model
 
@@ -199,7 +201,7 @@ Context payloads are typed by node role: `ProjectContext`, `ProjectSectionContex
 
 Renderer responsibilities:
 
-- Read `node.key`/`node.canonicalKey` for stable identity, `node.expanded` for disclosure state, and `node.indentLevel`/`node.indentPx` for indentation.
+- Read `node.key`/`node.canonicalKey` for stable identity and `node.expanded` for disclosure state; pass node indentation metadata through `src/app/sidebar-tree-layout.ts` helpers instead of recomputing padding.
 - Keep row-specific visuals such as chevrons, active classes, descendant badges, live/archived ordering, and session status badges, but source structural decisions from `SidebarTreeNode`.
 - Avoid adding new hierarchy logic in renderers. Legacy expansion/storage calls are acceptable only as temporary adapters until the future storage-state module replaces them.
 
@@ -259,14 +261,6 @@ interface SidebarTreeStateV1 {
     source: "user" | "migration" | "system";
     updatedAt: number;
   }>;
-  layout?: SidebarTreeLayoutPreferenceV1;
-}
-
-interface SidebarTreeLayoutPreferenceV1 {
-  version: 1;
-  indentMode?: "compact" | "comfortable" | "spacious";
-  baseIndentPx?: number;
-  nestedGoalIndentPx?: number;
 }
 ```
 
@@ -277,15 +271,16 @@ Storage rules:
 - Absence from `nodes` means “no stored preference”; it does not mean “default deviation absent for this node after comparing to the default table”.
 - Drop entries for entities that no longer exist during opportunistic cleanup, but cleanup must be bounded and best-effort.
 - If JSON is corrupt, ignore it and fall back to migration/defaults; do not delete it synchronously during module import.
-- Keep all safe-storage reads/writes inside the new `src/app/sidebar-tree-state.ts` module. Renderers and `src/app/api.ts` may call only its exported tree-state API helpers; they must not access storage directly.
+- Keep indentation outside this node store. The shipped layout preference remains under `bobbit:sidebar-tree-indent` and is owned by `src/app/sidebar-tree-layout.ts`.
+- Keep all safe-storage reads/writes for expansion state inside the new `src/app/sidebar-tree-state.ts` module. Renderers and `src/app/api.ts` may call only its exported tree-state API helpers; they must not access expansion storage directly.
 
 ## Migration behavior
 
 Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent or whenever the v1 state cannot be verified. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, verifies the v1 write, then sets `bobbit.sidebarTree.migrated.v1 = "true"`. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
 
-`safeSetItem()` currently returns `void` and swallows storage errors, so the migration marker must not rely on its return value. The tree-state module should use a small verified-write helper: write the candidate v1 object, immediately read `bobbit.sidebarTree.v1` back with `safeGetJSON`, compare `version`, `updatedAt`, and representative node/layout content (or a stored migration nonce), and set the marker only after that readback succeeds. If readback fails, leave the marker absent so the next boot retries. An implementation may instead omit the marker entirely and rely on idempotent per-boot merge, but it must not mark migration complete after an unverified write.
+`safeSetItem()` currently returns `void` and swallows storage errors, so the migration marker must not rely on its return value. The tree-state module should use a small verified-write helper: write the candidate v1 object, immediately read `bobbit.sidebarTree.v1` back with `safeGetJSON`, compare `version`, `updatedAt`, and representative node content (or a stored migration nonce), and set the marker only after that readback succeeds. If readback fails, leave the marker absent so the next boot retries. An implementation may instead omit the marker entirely and rely on idempotent per-boot merge, but it must not mark migration complete after an unverified write.
 
-If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed or retried migration is safe and non-destructive.
+If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes`. This avoids skipping legacy migration for partial v1 state while ensuring a failed or retried migration is safe and non-destructive.
 
 If `bobbit.sidebarTree.v1` is corrupt, treat it as unreadable and fall back to defaults plus legacy recovery. Because the first implementation retains legacy keys, corruption should ignore the migration marker for that boot and attempt the idempotent legacy merge into a fresh v1 object. If the fresh write verifies, keep or rewrite `bobbit.sidebarTree.migrated.v1`; if it does not verify, leave the marker state unchanged so the next boot can retry.
 
@@ -306,6 +301,7 @@ Special cases:
 
 - `bobbit-sidebar-collapsed` is a shell preference, not a tree-node preference. Do not migrate it into `bobbit.sidebarTree.v1`.
 - `bobbit-show-archived` is a visibility filter, not a disclosure preference. Do not migrate it.
+- `bobbit:sidebar-tree-indent` is the shipped indentation preference, not a disclosure preference. Do not migrate it into `bobbit.sidebarTree.v1`.
 - `_expandedNestedDepthByProject` is in-memory render state. Do not migrate it.
 - For `bobbit-expanded-projects`, ignore malformed entries that do not start with `collapsed:` unless a compatibility test demonstrates older plain project IDs exist.
 - Ignore non-array legacy values via `safeGetJSON(key, [])` semantics.
@@ -370,12 +366,9 @@ export function pruneSidebarTreeState(liveIds: {
   goalIds?: ReadonlySet<string>;
   sessionIds?: ReadonlySet<string>;
 }): void;
-
-export function getSidebarTreeLayoutPreference(): ResolvedSidebarTreeLayoutPreference;
-export function setSidebarTreeIndentPreference(input: Partial<SidebarTreeLayoutPreferenceV1>): void;
-export function resetSidebarTreeIndentPreference(): void;
-export function applySidebarTreeIndentCssVariables(root?: HTMLElement): void;
 ```
+
+The indentation preference is already implemented separately in `src/app/sidebar-tree-layout.ts` and re-exported from app state where needed. The future disclosure-state module should import or re-export those helpers only as a facade; it should not create a second indentation storage path.
 
 API semantics:
 
@@ -446,39 +439,51 @@ The existing active override behavior in `getActiveNavId()` and the rapid-keypre
 
 ## Indentation preference model
 
-Indentation is layout, not node expansion. The tree-state module may expose layout preferences, but node keys should not encode indentation.
+Indentation is shipped layout state, not node expansion state. Node keys do not encode indentation, and the future expansion-state migration must not move indentation into the node preference store.
 
-Current render references:
+Historical context: the builder integration originally found several ad-hoc render offsets, including shared `INDENT` containers, `node.depth * 16` nested-goal padding, direct `node.indentPx` strings, and collapsed-sidebar `padding-left:6px` wrappers. Those paths now consume `src/app/sidebar-tree-layout.ts` helpers and builder metadata instead of recomputing hierarchy-specific padding in renderers.
 
-- Child containers use shared `INDENT` from `render-helpers.ts`, imported by `sidebar.ts`.
-- Nested goal rows add `node.depth * 16` in `sidebar.ts::renderNestedNode`.
-- Header chevron alignment uses `HEADER_CHEVRON_W` and `--sidebar-header-chevron-w`.
-
-Recommended model:
+Implemented model:
 
 ```ts
-type SidebarIndentMode = "compact" | "comfortable" | "spacious";
-
 interface SidebarTreeLayoutPreferenceV1 {
   version: 1;
-  indentMode?: SidebarIndentMode; // default "comfortable"
-  baseIndentPx?: number;          // default existing INDENT
-  nestedGoalIndentPx?: number;    // default 16
+  indentMode?: "compact" | "comfortable" | "spacious";
+  baseIndentPx?: number;
+  nestedGoalIndentPx?: number;
 }
 ```
 
 Rules:
 
-- Store layout preferences alongside v1 state or under a sibling versioned key, but keep them separate from `nodes`.
-- Default to the existing visual spacing: `indentMode:"comfortable"`, `baseIndentPx:5`, and `nestedGoalIndentPx:16`.
-- Clamp custom values before persisting and before applying to the DOM. Recommended supported range: `baseIndentPx` 2–16 and `nestedGoalIndentPx` 8–28. Values outside the range, `NaN`, or non-numbers fall back to defaults.
-- Provide a reset API, e.g. `resetSidebarTreeIndentPreference()`, that removes custom layout fields and re-applies defaults. Reset is durable and should trigger the same sidebar rerender path as a normal preference write.
-- Expose the setting near existing sidebar appearance controls. UI may use mode presets (`compact`, `comfortable`, `spacious`) plus an advanced/custom slider, but it must show a reset action and describe that the value controls tree nesting width, not sidebar shell width or font size.
-- Apply indentation through CSS custom properties (`--sidebar-indent`, `--sidebar-nested-goal-indent`) so desktop/mobile renderers share values. The app shell should set these variables from the resolved preference before sidebar render; rows should consume them through a helper such as `sidebarIndentStyle(node.indentLevel)`.
-- Renderers must replace hardcoded `padding-left:${INDENT}px`, `depth * 16`, and collapsed-sidebar `padding-left:6px` calculations with the shared variables/helper. Chevron widths remain separate variables (`--sidebar-chevron-w`, `--sidebar-header-chevron-w`).
-- Do not migrate existing sidebar font-size preferences into indentation. Font scale and indentation are independent accessibility controls.
+- The user-facing setting is **Sidebar tree indentation** under Settings → General → Appearance.
+- The setting is stored per browser in `localStorage` under `bobbit:sidebar-tree-indent`.
+- The only user-controlled value is `nestedGoalIndentPx`; `baseIndentPx` remains fixed at `5` px so compact non-goal child spacing does not drift.
+- Default spacing is `indentMode:"comfortable"`, `baseIndentPx:5`, and `nestedGoalIndentPx:16`.
+- Finite custom values are rounded to the `1` px step and clamped to `8`–`28` px before storage and DOM application.
+- Missing, empty, unavailable, throwing, non-numeric, `NaN`, or infinite values default to `16` px.
+- Reset writes the default value, reapplies CSS variables, and triggers the normal sidebar rerender path.
+- Collapsed-sidebar spacing is derived as `min(6, max(2, round(nestedGoalIndentPx / 3)))` so nesting remains visible without creating collapsed-mode overflow.
+- Font scale and indentation remain independent accessibility controls. Do not migrate sidebar font-size preferences into indentation.
 - Do not persist per-project or per-depth indentation.
-- Browser E2E should cover minimum, maximum, reset, reload persistence, and no horizontal overflow in desktop, mobile, and collapsed sidebar surfaces that render nested rows.
+
+Runtime CSS variables are written on `document.documentElement` by `applySidebarTreeLayoutVars()`:
+
+| Variable | Meaning |
+|---|---|
+| `--sidebar-tree-base-indent` | Fixed compact child spacing, `5px`. |
+| `--sidebar-tree-nested-goal-indent` | User-configured nested goal spacing. |
+| `--sidebar-tree-collapsed-indent` | Derived capped spacing for collapsed sidebar nesting. |
+
+`.sidebar-root` owns only fallback/default variables with distinct names, including `--sidebar-tree-base-indent-default`, `--sidebar-tree-nested-goal-indent-default`, `--sidebar-tree-collapsed-indent-default`, and `--sidebar-tree-half-indent`. Row-internal chevron slots remain governed by existing chevron variables such as `--sidebar-chevron-w` and `--sidebar-header-chevron-w`.
+
+Renderer contract:
+
+- Desktop, mobile, and collapsed sidebar builders pass `loadSidebarTreeLayoutPreference()` into `buildSidebarTree()`.
+- Renderers use helper-generated `padding-inline-start` styles such as `sidebarTreeBaseIndentStyle()`, `sidebarTreeHalfIndentStyle()`, `sidebarTreeNodeIndentStyle(node)`, `sidebarTreeLegacyGoalIndentStyle(depth)`, `sidebarTreeTruncationIndentStyle(depth)`, and `sidebarTreeCollapsedIndentStyle(depth?)`.
+- Keep `min-w-0`, `truncate`, overflow gradients, active row classes, and chevron slot padding independent from the indent preference.
+
+See [../sidebar-tree-indentation.md](../sidebar-tree-indentation.md) for the durable feature contract and current test coverage.
 
 ## Goal-dashboard Plan tab disclosure is out of scope
 
@@ -495,22 +500,22 @@ If persisted Plan tab disclosure is later desired, define a separate `goalDashbo
 
 ## Implementation status and remaining work
 
-Completed in this branch:
+Completed so far:
 
 - Added `src/app/sidebar-tree-builder.ts` with stable canonical keys, typed node keys, render-neutral node/context output, layout metadata, viewport input, spawned-child ownership, duplicate diagnostics, and focused unit coverage for builder shape and invariants.
 - Routed desktop sidebar construction through the builder while preserving legacy expansion adapters, project ordering, nested-depth caps, filtering, active highlighting, archived placement, and descendant badges.
 - Routed mobile landing and collapsed-sidebar/render-helper paths through builder-derived nodes or lookup maps so they share hierarchy and spawned-child placement instead of recomputing it from raw state.
-- Kept legacy storage and toggle helpers in place as temporary adapters; this avoids mixing hierarchy refactor risk with storage migration risk.
+- Shipped the sidebar tree indentation preference in `src/app/sidebar-tree-layout.ts`, including `bobbit:sidebar-tree-indent` storage, `8`–`28` px clamping, reset behavior, document-level CSS variables, shared renderer helpers, and unit/browser coverage.
+- Kept legacy expansion storage and toggle helpers in place as temporary adapters; this avoids mixing hierarchy refactor risk with disclosure-state migration risk.
 
 Deferred future work:
 
-1. Add `src/app/sidebar-tree-state.ts` with storage helpers, defaults, verified-write migration, legacy goal collapsed-tombstone recovery, layout preference helpers, and compatibility adapters.
-2. Call migration during app bootstrap before first sidebar render, and call the goal hydration-completion helper from the first successful `refreshSessions()` payload before any system auto-expansion.
+1. Add `src/app/sidebar-tree-state.ts` with expansion storage helpers, defaults, verified-write migration, legacy goal collapsed-tombstone recovery, and compatibility adapters.
+2. Call expansion-state migration during app bootstrap before first sidebar render, and call the goal hydration-completion helper from the first successful `refreshSessions()` payload before any system auto-expansion.
 3. Replace remaining direct legacy expansion reads/writes in `sidebar.ts`, `render-helpers.ts`, `sidebar-nav.ts`, and `api.ts` with the new state API, then remove legacy-key adapters after migration confidence is high.
 4. Migrate keyboard navigation IDs from legacy strings to `parseSidebarTreeKey`/`sidebarTreeKey`, while retaining route mapping and active override behavior.
 5. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with narrowed system-expansion helpers: top-level polling only, explicit create flow for newly created goals and ancestors.
-6. Add indentation settings UI near sidebar appearance controls, apply resolved CSS variables globally, and replace remaining hardcoded indentation calculations with shared helpers.
-7. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, bounded prune behavior, and indentation clamp/reset/persistence.
+6. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, and bounded prune behavior.
 
 ## Required verification plan
 
@@ -519,12 +524,12 @@ Unit coverage:
 - Tree-state helper: defaults for every node kind, explicit user/migration precedence over system/defaults, source tracking, key serialization/parsing with encoded IDs, key separation for first-class vs archived delegates, corrupt/missing storage fallback, verified-write migration retry behavior, malformed legacy values, legacy collapsed-goal tombstone recovery, and bounded pruning.
 - Tree builder: stable canonical keys, parent/children shape, `depth` and `indentLevel`, active-session context metadata, desktop/mobile/collapsed parity for emitted rows, archived/live ordering, staff/sessions/archived section placement, team-lead ownership, first-class child sessions, delegate/archive delegate children, and no duplicate spawned child-goals.
 - Refresh/create integration: initial hydration does not system-expand migrated legacy-absent goals, later polling auto-expands only eligible top-level goals, newly discovered sub-goals do not auto-open parents, and `createGoal()` expands only the newly created goal plus ancestors when unset.
-- Indentation helpers: clamp range, invalid value fallback, reset behavior, CSS variable values, and no per-project/per-depth persistence.
+- Existing indentation coverage: `tests/sidebar-tree-layout.test.ts`, `tests/sidebar-tree-builder.test.ts`, and `tests/e2e/ui/sidebar-indent.spec.ts` cover clamping, invalid value fallback, reset, persistence, CSS variable values, fixed base spacing, visible offset changes, and supported-value overflow behavior.
 
 Browser E2E coverage:
 
 - Representative sidebar disclosures: project, project Sessions, Staff, Archived, parent goal with sub-goal collapsed by default, team lead, first-class child session parent, live delegate parent, archived delegate parent, and keyboard `Ctrl+←/→` for every row type that presents a chevron.
-- Indentation customization: visible offset changes at compact/default/spacious or min/default/max, hard refresh persistence, reset behavior, and no horizontal overflow at supported values.
+- Indentation customization: visible offset changes at min/default/max, hard refresh persistence, reset behavior, seeded out-of-range storage clamping, and no horizontal overflow at supported values.
 - Mobile and collapsed sidebar parity for rows that are visible in those surfaces.
 
 Restart/manual coverage:
@@ -537,7 +542,7 @@ Final commands:
 
 - Run `npm run check`.
 - Run `npm run test:unit`.
-- Run relevant sidebar browser E2E and restart/manual coverage added by the verification sub-goal.
+- Run relevant sidebar browser E2E, including `tests/e2e/ui/sidebar-indent.spec.ts` when indentation behavior changes.
 
 ## Focused verification performed for this design
 

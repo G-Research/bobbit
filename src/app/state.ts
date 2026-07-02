@@ -277,6 +277,40 @@ import { applySidebarFontScaleVar as _applySidebarFontScaleVar, loadSidebarFontS
 _applySidebarFontScaleVar(_loadSidebarFontScale());
 
 // ============================================================================
+// SIDEBAR TREE LAYOUT — pure preference helpers live in
+// `./sidebar-tree-layout.ts`; re-exported here for app call sites.
+// ============================================================================
+
+export {
+	SIDEBAR_TREE_INDENT_KEY,
+	SIDEBAR_TREE_INDENT_DEFAULT_PX,
+	SIDEBAR_TREE_INDENT_MIN_PX,
+	SIDEBAR_TREE_INDENT_MAX_PX,
+	SIDEBAR_TREE_INDENT_STEP_PX,
+	SIDEBAR_TREE_BASE_INDENT_PX,
+	SIDEBAR_TREE_COLLAPSED_INDENT_MAX_PX,
+	clampSidebarTreeIndentPx,
+	sidebarTreeIndentPxToLayout,
+	sidebarTreeCollapsedIndentPx,
+	loadSidebarTreeIndentPx,
+	saveSidebarTreeIndentPx,
+	resetSidebarTreeIndentPreference,
+	loadSidebarTreeLayoutPreference,
+	applySidebarTreeLayoutVars,
+	sidebarTreeBaseIndentStyle,
+	sidebarTreeHalfIndentStyle,
+	sidebarTreeNodeIndentStyle,
+	sidebarTreeLegacyGoalIndentStyle,
+	sidebarTreeTruncationIndentStyle,
+	sidebarTreeCollapsedIndentStyle,
+} from "./sidebar-tree-layout.js";
+
+import { applySidebarTreeLayoutVars as _applySidebarTreeLayoutVars, loadSidebarTreeLayoutPreference as _loadSidebarTreeLayoutPreference } from "./sidebar-tree-layout.js";
+
+// Apply immediately so the first paint already reflects saved tree spacing.
+_applySidebarTreeLayoutVars(_loadSidebarTreeLayoutPreference());
+
+// ============================================================================
 // MUTABLE STATE
 // ============================================================================
 
