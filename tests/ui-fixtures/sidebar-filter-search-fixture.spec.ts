@@ -17,6 +17,7 @@ const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
 const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
 const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
 const SIDEBAR_SPAWNED_CHILDREN_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
+const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
 
 const MARK = "SIDEBAR_FILTER_SEARCH_FIXTURE";
 
@@ -36,6 +37,7 @@ test.beforeAll(() => {
 			SEARCH_STATUS_DOT_SRC,
 			SIDEBAR_NESTING_SRC,
 			SIDEBAR_SPAWNED_CHILDREN_SRC,
+			SIDEBAR_TREE_BUILDER_SRC,
 		],
 	});
 });
