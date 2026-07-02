@@ -131,9 +131,39 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
-        // Permission granted — add to in-memory set so future calls pass through
-        grantedTools.add(toolName);
-        grantedToolsLower.add(String(toolName || "").toLowerCase());
+        // Permission granted — only unblock if the server response actually
+        // covers the tool call this guard is currently blocking. A stale or
+        // mismatched permission-card response must not release this invocation.
+        const grantScope = r.scope === "group" ? "group" : (r.scope === "tool" ? "tool" : undefined);
+        const responseTools = Array.isArray(r.tools) ? r.tools : [];
+        const responseToolsLower = new Set(responseTools.map((name) => String(name || "").toLowerCase()));
+        const currentNamesLower = new Set([String(toolName || "").toLowerCase(), String(askPolicy.canonicalName || "").toLowerCase()]);
+        const currentListed = [...currentNamesLower].some((name) => responseToolsLower.has(name));
+        const groupMatches = grantScope === "group" && r.group === entry.group;
+        const coversCurrent = responseTools.length > 0
+          ? currentListed && (grantScope !== "group" || groupMatches)
+          : groupMatches;
+        if (!coversCurrent) {
+          return { block: true, reason: "Permission grant did not cover tool " + toolName };
+        }
+
+        if (r.mode === "one-time") {
+          // One-time grants authorize exactly this blocked invocation. Do not
+          // cache them in this process, or future turns would bypass ask prompts
+          // after the server revokes its oneTimeGrantedTools on agent_end.
+          return { block: false };
+        }
+
+        const newlyGranted = grantScope === "group"
+          ? responseTools.filter((granted) => {
+              const grantedPolicy = policyEntry(askPolicies, askPolicyNamesByLower, granted);
+              return grantedPolicy && grantedPolicy.entry.group === entry.group;
+            })
+          : [askPolicy.canonicalName];
+        for (const granted of (newlyGranted.length > 0 ? newlyGranted : [askPolicy.canonicalName])) {
+          grantedTools.add(granted);
+          grantedToolsLower.add(String(granted || "").toLowerCase());
+        }
         return { block: false };
       } else {
         const reason = (r && r.reason) ? r.reason : "Permission denied by user";

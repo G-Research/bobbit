@@ -1310,29 +1310,11 @@ export class RemoteAgent {
 		// no-op: tools are server-side for the coding agent
 	}
 
-	/** Pending prompt text to replay after a tool permission grant restarts the session */
-	private _pendingGrantReplay?: string;
-
-	/**
-	 * After a tool permission grant, the server restarts the session. When it
-	 * becomes idle, replay the original prompt so the tool call succeeds. Fired
-	 * from `case "session_status"` on every frame (live, idempotent, and gap)
-	 * so a missed transition + heartbeat-driven recovery still triggers replay.
-	 */
-	private _maybeReplayGrant(status: string): void {
-		if (status === "idle" && this._pendingGrantReplay) {
-			const replayText = this._pendingGrantReplay;
-			this._pendingGrantReplay = undefined;
-			// Small delay to ensure the session is fully ready
-			setTimeout(() => {
-				this.send({ type: "prompt", text: replayText });
-			}, 200);
-		}
-	}
-
 	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
-		// Save the prompt to replay after the session restarts with the new tool
-		this._pendingGrantReplay = lastPromptText;
+		// The guard long-poll/server grant path owns resuming the blocked tool call.
+		// Re-sending lastPromptText here would create a fresh user turn and can
+		// duplicate side-effecting tools such as session_prompt.
+		void lastPromptText;
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
 
@@ -1850,11 +1832,9 @@ export class RemoteAgent {
 				// See docs/design/unify-session-status.md §4.3.
 				const v = typeof (msg as any).statusVersion === "number" ? (msg as any).statusVersion : undefined;
 
-				// Idempotent: heartbeat or duplicate. Side effects (grant replay,
-				// onStatusChange) still fire so consumers don't miss a refresh,
-				// but we drop the actual status mutation.
+				// Idempotent: heartbeat or duplicate. onStatusChange still fires so
+				// consumers don't miss a refresh, but we drop the actual status mutation.
 				if (v !== undefined && v <= this._lastStatusVersion) {
-					this._maybeReplayGrant(msg.status);
 					this.onStatusChange?.(msg.status);
 					break;
 				}
@@ -1894,7 +1874,6 @@ export class RemoteAgent {
 					try { publishClientStatus(this._sessionId, msg.status); } catch { /* non-fatal */ }
 				}
 
-				this._maybeReplayGrant(msg.status);
 				this.onStatusChange?.(msg.status);
 				break;
 			}

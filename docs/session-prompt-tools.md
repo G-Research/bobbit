@@ -41,6 +41,8 @@ Parameters:
 
 `session_prompt` is intentionally more powerful than `team_prompt`: it is not limited to owned children, team members, or direct child goal leads. Because of that scope, the tool YAML declares `grantPolicy: never`. It is registered as a built-in tool but is absent from default allowed tools until a role, project, or user policy explicitly grants `session_prompt`.
 
+If a role or project changes `session_prompt` to `ask`, permission approval resumes the blocked tool call through the active guard long-poll. The UI grant card does not resend the original prompt text, which avoids duplicate delivery to the target session. See [Tool access policies](internals.md#tool-access-policies) for the grant resumption contract.
+
 Server-side authorization is caller-based:
 
 1. The REST endpoint resolves the caller from the per-session secret.
