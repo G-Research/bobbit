@@ -102,6 +102,71 @@ Rules:
 
 Render-only context such as `depth`, `projectId` for a goal, or `archived` status must not be part of stable identity unless two disclosure states are intentionally independent.
 
+## Shared tree-builder contract
+
+Add a shared builder module, e.g. `src/app/sidebar-tree-builder.ts`, that is the single source of truth for sidebar hierarchy. The builder consumes normalized app state and returns a render-neutral tree. Renderers may choose markup, row components, and viewport-specific affordances, but they must not independently decide parent/child ownership, depth, expandability, or child ordering.
+
+Recommended input/output shape:
+
+```ts
+interface BuildSidebarTreeInput {
+  projects: Project[];
+  goals: Goal[];
+  sessions: Session[];
+  staffSessions: Session[];
+  archivedSessions: Session[];
+  activeSessionId?: string | null;
+  activeGoalId?: string | null;
+  showArchived: boolean;
+  searchQuery?: string;
+  viewport: "desktop" | "mobile" | "collapsed";
+}
+
+interface SidebarTreeNode {
+  key: SidebarTreeNodeKey;
+  canonicalKey: string;
+  kind: SidebarTreeNodeKey["kind"];
+  entityId: string;
+  parentKey: string | null;
+  children: SidebarTreeNode[];
+  depth: number;
+  indentLevel: number;
+  expandable: boolean;
+  expanded: boolean;
+  defaultExpanded: boolean;
+  source: "user" | "migration" | "system" | "default" | "transient";
+  routeHash?: string;
+  active: boolean;
+  hiddenByFilter?: boolean;
+  counts?: { directChildren?: number; descendants?: number; visibleChildren?: number };
+  render: {
+    label: string;
+    icon?: string;
+    rowClass?: string;
+    ariaLabel?: string;
+    badges?: string[];
+    archived?: boolean;
+    status?: string;
+  };
+}
+```
+
+Ownership and ordering invariants:
+
+- Each expandable row that shows a chevron appears exactly once in the built tree and uses `expanded` from the unified state API.
+- A goal is rendered either in the project nested goal forest or under the owning team lead selected by `selectSpawnedChildren()`, never both. The builder should carry a `claimedGoalIds` set from `computeSpawnedClaim()` and assert/test that no claimed goal is emitted again at project level.
+- `parentKey` and `children` describe the rendered sidebar hierarchy, not only domain parentage. A sub-goal shown under a team lead has `parentKey` of that team-lead row even though its domain `parentGoalId` remains goal metadata.
+- `depth` is the logical tree depth from the project section root. `indentLevel` is the layout depth renderers pass to CSS; renderers must not recalculate with `depth * 16` or hardcoded `padding-left` values.
+- Search/filtering may set `hiddenByFilter` or omit whole subtrees, but must not write expansion preferences.
+- Desktop, mobile, and collapsed-sidebar paths should call the same builder with a `viewport` value. Viewport-specific rendering can omit labels or collapse containers, but it must preserve canonical keys, active state, ordering, expandability, and indentation semantics for rows it renders.
+- `_expandedNestedDepthByProject` remains a render-local truncation cap layered after tree construction; it must not change node identity or persisted expansion state.
+
+Renderer responsibilities:
+
+- Read `node.canonicalKey` for `data-nav-id`, `node.expanded` for `aria-expanded`, and `node.indentLevel` for shared indentation styles.
+- Never call legacy sets or storage directly.
+- Keep row-specific visuals such as chevrons, active classes, descendant badges, live/archived ordering, and session status badges, but source their structural decisions from `SidebarTreeNode`.
+
 ## Default expansion policies
 
 Defaults apply only when no stored preference exists.
@@ -180,11 +245,13 @@ Storage rules:
 
 ## Migration behavior
 
-Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, then sets `bobbit.sidebarTree.migrated.v1 = "true"` only after the merged v1 write succeeds. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
+Migration is idempotent and runs on load whenever `bobbit.sidebarTree.migrated.v1` is absent or whenever the v1 state cannot be verified. It reads legacy keys, merges equivalent v1 node preferences into the existing `bobbit.sidebarTree.v1` state, verifies the v1 write, then sets `bobbit.sidebarTree.migrated.v1 = "true"`. It should not remove legacy keys in the first implementation; leaving them is safer for rollback. Once release confidence is high, a later cleanup can remove them.
+
+`safeSetItem()` currently returns `void` and swallows storage errors, so the migration marker must not rely on its return value. The tree-state module should use a small verified-write helper: write the candidate v1 object, immediately read `bobbit.sidebarTree.v1` back with `safeGetJSON`, compare `version`, `updatedAt`, and representative node/layout content (or a stored migration nonce), and set the marker only after that readback succeeds. If readback fails, leave the marker absent so the next boot retries. An implementation may instead omit the marker entirely and rely on idempotent per-boot merge, but it must not mark migration complete after an unverified write.
 
 If both v1 state and legacy keys exist, existing v1 node entries win per node. Migration fills only missing canonical node keys with `source:"migration"`, preserving existing v1 `nodes` and `layout` fields. This avoids skipping legacy migration for partial v1 state while ensuring a failed or retried migration is safe and non-destructive.
 
-If `bobbit.sidebarTree.v1` is corrupt, treat it as unreadable and fall back to defaults plus legacy recovery. Because the first implementation retains legacy keys, corruption should ignore the migration marker for that boot and attempt the idempotent legacy merge into a fresh v1 object. If the fresh write succeeds, keep or rewrite `bobbit.sidebarTree.migrated.v1`; if it fails, leave the marker state unchanged so the next boot can retry.
+If `bobbit.sidebarTree.v1` is corrupt, treat it as unreadable and fall back to defaults plus legacy recovery. Because the first implementation retains legacy keys, corruption should ignore the migration marker for that boot and attempt the idempotent legacy merge into a fresh v1 object. If the fresh write verifies, keep or rewrite `bobbit.sidebarTree.migrated.v1`; if it does not verify, leave the marker state unchanged so the next boot can retry.
 
 Legacy mapping:
 
@@ -206,6 +273,20 @@ Special cases:
 - `_expandedNestedDepthByProject` is in-memory render state. Do not migrate it.
 - For `bobbit-expanded-projects`, ignore malformed entries that do not start with `collapsed:` unless a compatibility test demonstrates older plain project IDs exist.
 - Ignore non-array legacy values via `safeGetJSON(key, [])` semantics.
+
+### Legacy goal collapsed-tombstone recovery
+
+`bobbit-expanded-goals` cannot distinguish “never expanded” from “explicitly collapsed after auto-expansion.” Migration must therefore prevent the first post-migration `/api/goals` hydration from treating every legacy-absent goal as a fresh unseen goal eligible for system expansion.
+
+Add a hydration-completion helper, e.g. `completeLegacyGoalExpansionMigration(goals, sessions)`, called by `refreshSessions()` after the first successful goals/sessions payload when legacy migration is pending or just completed. It should:
+
+1. Read the legacy `bobbit-expanded-goals` set.
+2. For every goal present in the initial payload that is absent from that legacy expanded set, write a missing v1 `goal(goalId)` entry with `expanded:false`, `source:"migration"`.
+3. Preserve any existing v1 user/migration/system entry for that goal.
+4. Mark the goal-hydration migration complete only after the v1 write verifies, using the same verified-write strategy as the base migration.
+5. Suppress `refreshSessions()` system auto-expansion for the same initial payload.
+
+This intentionally treats legacy-absent existing goals as collapsed tombstones. It preserves explicit legacy collapse intent and aligns with the new default that goal and sub-goal branches are collapsed unless the user expands them or the current tab creates them. Newly discovered goals after the hydration-completion marker is verified may still use the narrower system rules below.
 
 ## Public API shape
 
@@ -239,12 +320,25 @@ export function setSidebarTreeSystemExpandedIfUnset(
   expanded: boolean
 ): boolean;
 
+export function getSidebarTreePreferenceSource(
+  key: SidebarTreeNodeKey
+): "user" | "migration" | "system" | "default";
+
 export function migrateLegacySidebarTreeState(): void;
+export function completeLegacyGoalExpansionMigration(
+  goals: readonly Goal[],
+  sessions: readonly Session[]
+): "already-complete" | "completed-this-payload" | "retry-needed";
 export function pruneSidebarTreeState(liveIds: {
   projectIds?: ReadonlySet<string>;
   goalIds?: ReadonlySet<string>;
   sessionIds?: ReadonlySet<string>;
 }): void;
+
+export function getSidebarTreeLayoutPreference(): ResolvedSidebarTreeLayoutPreference;
+export function setSidebarTreeIndentPreference(input: Partial<SidebarTreeLayoutPreferenceV1>): void;
+export function resetSidebarTreeIndentPreference(): void;
+export function applySidebarTreeIndentCssVariables(root?: HTMLElement): void;
 ```
 
 API semantics:
@@ -267,15 +361,21 @@ Current behavior in `api.ts::refreshSessions`: when `/api/goals` returns newly d
 
 New rule:
 
+1. On the first successful post-migration goals/sessions payload, call `completeLegacyGoalExpansionMigration(goals, sessions)` and do not perform system auto-expansion for that payload.
+2. On later refreshes, system auto-expand only newly discovered **top-level** goals that have sessions and have no user/migration preference. Do not auto-expand newly discovered sub-goals and do not auto-expand their parents.
+3. Never write a system expansion if the goal has any stored user/migration preference.
+
 ```ts
-for each newly discovered goal g:
-  if goal has at least one session and no explicit/migrated preference exists:
-    setSidebarTreeSystemExpandedIfUnset(goal(g.id), true)
-    if g.parentGoalId exists:
-      setSidebarTreeSystemExpandedIfUnset(goal(g.parentGoalId), true)
+const legacyHydration = completeLegacyGoalExpansionMigration(goals, sessions);
+
+if (legacyHydration !== "completed-this-payload") {
+  for each newly discovered goal g:
+    if !g.parentGoalId && goal has at least one session:
+      setSidebarTreeSystemExpandedIfUnset(goal(g.id), true)
+}
 ```
 
-Do not write a system expansion if the goal has any stored user/migration preference. This preserves the “do not re-expand seen collapsed goals” invariant even across reloads.
+This preserves legacy top-level live-goal visibility without reopening collapsed migrated goals. It also makes sub-goal branches collapsed by default on polling/discovery; a child row appears only after the user expands its parent or after an explicit creation flow below expands the necessary ancestors.
 
 ### `createGoal()`
 
@@ -334,9 +434,15 @@ interface SidebarTreeLayoutPreferenceV1 {
 Rules:
 
 - Store layout preferences alongside v1 state or under a sibling versioned key, but keep them separate from `nodes`.
-- Apply indentation through CSS custom properties (`--sidebar-indent`, `--sidebar-nested-goal-indent`) so desktop/mobile renderers share values.
+- Default to the existing visual spacing: `indentMode:"comfortable"`, `baseIndentPx:5`, and `nestedGoalIndentPx:16`.
+- Clamp custom values before persisting and before applying to the DOM. Recommended supported range: `baseIndentPx` 2–16 and `nestedGoalIndentPx` 8–28. Values outside the range, `NaN`, or non-numbers fall back to defaults.
+- Provide a reset API, e.g. `resetSidebarTreeIndentPreference()`, that removes custom layout fields and re-applies defaults. Reset is durable and should trigger the same sidebar rerender path as a normal preference write.
+- Expose the setting near existing sidebar appearance controls. UI may use mode presets (`compact`, `comfortable`, `spacious`) plus an advanced/custom slider, but it must show a reset action and describe that the value controls tree nesting width, not sidebar shell width or font size.
+- Apply indentation through CSS custom properties (`--sidebar-indent`, `--sidebar-nested-goal-indent`) so desktop/mobile renderers share values. The app shell should set these variables from the resolved preference before sidebar render; rows should consume them through a helper such as `sidebarIndentStyle(node.indentLevel)`.
+- Renderers must replace hardcoded `padding-left:${INDENT}px`, `depth * 16`, and collapsed-sidebar `padding-left:6px` calculations with the shared variables/helper. Chevron widths remain separate variables (`--sidebar-chevron-w`, `--sidebar-header-chevron-w`).
 - Do not migrate existing sidebar font-size preferences into indentation. Font scale and indentation are independent accessibility controls.
 - Do not persist per-project or per-depth indentation.
+- Browser E2E should cover minimum, maximum, reset, reload persistence, and no horizontal overflow in desktop, mobile, and collapsed sidebar surfaces that render nested rows.
 
 ## Goal-dashboard Plan tab disclosure is out of scope
 
@@ -353,13 +459,43 @@ If persisted Plan tab disclosure is later desired, define a separate `goalDashbo
 
 ## Implementation sequence for later work
 
-1. Add `src/app/sidebar-tree-state.ts` with typed keys, storage helpers, defaults, migration, and adapters.
-2. Call migration during app bootstrap before first sidebar render.
-3. Replace direct project/goal/section/team-lead expansion reads in `sidebar.ts` and `render-helpers.ts` with the new API.
-4. Replace `sidebar-nav.ts` nav kind parsing with `parseSidebarTreeKey`, while retaining route mapping and active override behavior.
-5. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with system-expansion helpers.
-6. Keep legacy wrapper exports temporarily for tests and out-of-tree imports; mark mutable `expandedGoals` as deprecated and stop adding new call sites.
-7. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, and bounded prune behavior.
+1. Add `src/app/sidebar-tree-state.ts` with typed keys, storage helpers, defaults, verified-write migration, legacy goal collapsed-tombstone recovery, layout preference helpers, and compatibility adapters.
+2. Add `src/app/sidebar-tree-builder.ts` with the `SidebarTreeNode` contract above, builder inputs, ownership invariants, viewport option, duplicate spawned-child prevention, and unit tests.
+3. Call migration during app bootstrap before first sidebar render, and call the goal hydration-completion helper from the first successful `refreshSessions()` payload before any system auto-expansion.
+4. Replace direct project/goal/section/team-lead expansion reads in `sidebar.ts` and `render-helpers.ts` with builder nodes and the new API.
+5. Route desktop, mobile, and collapsed-sidebar render paths through the shared builder or builder-derived primitives. Any temporary renderer-specific adapter must accept `SidebarTreeNode` data rather than recomputing hierarchy from raw state.
+6. Replace `sidebar-nav.ts` nav kind parsing with `parseSidebarTreeKey`, while retaining route mapping and active override behavior.
+7. Replace `api.ts` direct `expandedGoals.add()` / `saveExpandedGoals()` calls with the narrowed system-expansion helpers: top-level polling only, explicit create flow for newly created goals and ancestors.
+8. Add indentation settings UI near sidebar appearance controls, apply resolved CSS variables globally, and replace hardcoded indentation calculations with shared helpers.
+9. Keep legacy wrapper exports temporarily for tests and out-of-tree imports; mark mutable `expandedGoals` as deprecated and stop adding new call sites.
+10. Add focused tests for migration, default resolution, user-over-system precedence, refresh/createGoal auto-expansion, keyboard `Ctrl+←/→` expansion, malformed canonical key parsing, corrupt v1 JSON fallback, migration marker write-failure retry, malformed legacy entries, bounded prune behavior, builder stable keys/hierarchy/depth/duplicate prevention, and indentation clamp/reset/persistence.
+
+## Required verification plan
+
+Unit coverage:
+
+- Tree-state helper: defaults for every node kind, explicit user/migration precedence over system/defaults, source tracking, key serialization/parsing with encoded IDs, key separation for first-class vs archived delegates, corrupt/missing storage fallback, verified-write migration retry behavior, malformed legacy values, legacy collapsed-goal tombstone recovery, and bounded pruning.
+- Tree builder: stable canonical keys, parent/children shape, `depth` and `indentLevel`, active route metadata, desktop/mobile/collapsed parity for emitted rows, archived/live ordering, staff/sessions/archived section placement, team-lead ownership, first-class child sessions, delegate/archive delegate children, and no duplicate spawned child-goals.
+- Refresh/create integration: initial hydration does not system-expand migrated legacy-absent goals, later polling auto-expands only eligible top-level goals, newly discovered sub-goals do not auto-open parents, and `createGoal()` expands only the newly created goal plus ancestors when unset.
+- Indentation helpers: clamp range, invalid value fallback, reset behavior, CSS variable values, and no per-project/per-depth persistence.
+
+Browser E2E coverage:
+
+- Representative sidebar disclosures: project, project Sessions, Staff, Archived, parent goal with sub-goal collapsed by default, team lead, first-class child session parent, live delegate parent, archived delegate parent, and keyboard `Ctrl+←/→` for every row type that presents a chevron.
+- Indentation customization: visible offset changes at compact/default/spacious or min/default/max, hard refresh persistence, reset behavior, and no horizontal overflow at supported values.
+- Mobile and collapsed sidebar parity for rows that are visible in those surfaces.
+
+Restart/manual coverage:
+
+- Explicit collapse/expand choices for project, goal/sub-goal, team-lead, first-class child parent, archived delegate parent, and archived section survive a hard browser refresh and gateway/server restart.
+- Indentation preference survives hard refresh and gateway/server restart.
+- A collapsed parent goal remains collapsed when a new child/sub-goal is discovered by polling after restart.
+
+Final commands:
+
+- Run `npm run check`.
+- Run `npm run test:unit`.
+- Run relevant sidebar browser E2E and restart/manual coverage added by the verification sub-goal.
 
 ## Focused verification performed for this design
 
