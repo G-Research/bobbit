@@ -131,6 +131,13 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
+        if (r.mode === "one-time") {
+          // One-time grants authorize exactly this blocked invocation. Do not
+          // cache them in this process, or future turns would bypass ask prompts
+          // after the server revokes its oneTimeGrantedTools on agent_end.
+          return { block: false };
+        }
+
         // Permission granted — cache only the approved grant scope. The server
         // returns a scope delta in r.tools; defensively fall back to the current
         // tool if an older gateway omits scope metadata so unrelated ask-gated
