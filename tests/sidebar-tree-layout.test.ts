@@ -97,6 +97,10 @@ describe("sidebar tree indent storage", () => {
 		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
 		localStorage.setItem(SIDEBAR_TREE_INDENT_KEY, "garbage");
 		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
+		localStorage.setItem(SIDEBAR_TREE_INDENT_KEY, "20px-junk");
+		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
+		localStorage.setItem(SIDEBAR_TREE_INDENT_KEY, "12abc");
+		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
 		delete (globalThis as any).localStorage;
 		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
 	});

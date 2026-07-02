@@ -47,8 +47,9 @@ export function loadSidebarTreeIndentPx(): number {
 	try {
 		if (typeof localStorage === "undefined") return SIDEBAR_TREE_INDENT_DEFAULT_PX;
 		const raw = localStorage.getItem(SIDEBAR_TREE_INDENT_KEY);
-		if (!raw) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
-		const px = Number.parseFloat(raw);
+		const trimmed = raw?.trim();
+		if (!trimmed) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
+		const px = Number(trimmed);
 		if (!Number.isFinite(px)) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
 		return clampSidebarTreeIndentPx(px);
 	} catch {
