@@ -5486,7 +5486,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -5564,6 +5564,8 @@ export class SessionManager {
 				isCompacting: false,
 				titleGenerated: false,
 				goalId,
+				teamGoalId: opts?.teamGoalId,
+				teamLeadSessionId: opts?.teamLeadSessionId,
 				assistantType,
 				taskId: opts?.taskId,
 				parentSessionId: opts?.parentSessionId,
@@ -5576,6 +5578,7 @@ export class SessionManager {
 				// keys off the right role id during the worktree-prep window.
 				role: opts?.role ?? opts?.roleName,
 				accessory: opts?.accessory,
+				nonInteractive: opts?.nonInteractive,
 				worktreePath,
 				worktreePushPolicy: opts?.worktreePushPolicy,
 				projectId,
@@ -5604,6 +5607,8 @@ export class SessionManager {
 				title: opts?.title || "New session",
 				cwd,
 				goalId,
+				teamGoalId: opts?.teamGoalId,
+				teamLeadSessionId: opts?.teamLeadSessionId,
 				assistantType,
 				taskId: opts?.taskId,
 				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
@@ -5621,6 +5626,7 @@ export class SessionManager {
 				sandboxed: opts?.sandboxed,
 				role: opts?.role,
 				accessory: opts?.accessory,
+				nonInteractive: opts?.nonInteractive,
 				agentArgs,
 				env: opts?.env,
 				rolePrompt: resolvedRolePrompt,
@@ -5691,6 +5697,8 @@ export class SessionManager {
 			title: opts?.title || "New session",
 			cwd,
 			goalId,
+			teamGoalId: opts?.teamGoalId,
+			teamLeadSessionId: opts?.teamLeadSessionId,
 			assistantType,
 			taskId: opts?.taskId,
 			parentSessionId: opts?.parentSessionId,
@@ -5704,6 +5712,7 @@ export class SessionManager {
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
+			nonInteractive: opts?.nonInteractive,
 			agentArgs,
 			env: opts?.env,
 			rolePrompt: resolvedRolePrompt,

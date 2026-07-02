@@ -246,6 +246,7 @@ export interface SessionSetupPlan {
 	 * carry `goalId`) and for goal-less sessions.
 	 */
 	teamGoalId?: string;
+	teamLeadSessionId?: string;
 	assistantType?: string;
 	delegateOf?: string;
 	parentSessionId?: string;
@@ -990,6 +991,8 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		createdAt: session.createdAt,
 		lastActivity: session.lastActivity,
 		goalId: plan.goalId,
+		teamGoalId: plan.teamGoalId,
+		teamLeadSessionId: plan.teamLeadSessionId,
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
@@ -1475,6 +1478,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		// defaults plan.title to "New session", so any other value is a deliberate title.
 		titleGenerated: !!assistantDef || plan.mode === "delegate" || (!!plan.title && plan.title !== "New session"),
 		goalId: plan.goalId,
+		teamGoalId: plan.teamGoalId,
+		teamLeadSessionId: plan.teamLeadSessionId,
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
@@ -1487,6 +1492,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		// `tryAutoSelectModel` safety net keys off the right role id.
 		role: plan.role ?? plan.roleName,
 		accessory: plan.accessory,
+		nonInteractive: plan.nonInteractive,
 		promptQueue: new PromptQueue(),
 		spawnPinnedModel,
 		spawnPinnedThinkingLevel,
