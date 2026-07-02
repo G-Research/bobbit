@@ -32,7 +32,7 @@ Archived search uses the same case-insensitive substring contract as the sidebar
 - Archived goals match on `title`.
 - Archived goals also match when an affiliated non-child session matches on `title` or `role`.
 
-An affiliated session is attached through the goal relationship fields used by the sidebar (`goalId` or `teamGoalId`). Delegate and child sessions are not direct goal-match evidence, but the API can return related archived sessions for a matched goal page so the sidebar can render nesting correctly.
+An affiliated session is attached through the goal relationship fields used by the sidebar (`goalId` or `teamGoalId`). Archived verifier sessions (`llm-review-*` / `agent-qa-*`) also use `goalId` as an effective team-goal fallback when legacy rows are missing `teamGoalId`; see [Reviewer Archive Cleanup](reviewer-archive-cleanup.md). Delegate and child sessions are not direct goal-match evidence, but the API can return related archived sessions for a matched goal page so the sidebar can render nesting correctly.
 
 Search does not inspect transcript contents, tool output, goal specs, or task text.
 

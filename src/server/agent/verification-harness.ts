@@ -3218,10 +3218,18 @@ export class VerificationHarness {
 				? _preRoleThinking
 				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
 			const _preInitialThinking = clampReviewThinking(_preInitialThinkingRaw, _preInitialModel) ?? _preInitialThinkingRaw;
+			const reviewerMeta = buildVerificationReviewerMeta({
+				kind: "llm-review",
+				roleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			});
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
+				...reviewerMeta,
 				sandboxed: isSandboxed,
 				sessionId,
 				skipAutoModel: true,
@@ -3243,13 +3251,7 @@ export class VerificationHarness {
 			// and the archived render path lumps them under "unmapped" — they
 			// only surface under the LAST archived team-lead. Pure-helper
 			// contract pinned by tests/verification-reviewer-meta.test.ts.
-			this.sessionManager!.updateSessionMeta(sessionId, buildVerificationReviewerMeta({
-				kind: "llm-review",
-				roleName,
-				goalId,
-				roleAccessory: role.accessory,
-				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
-			}));
+			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
 
 			// Register in team store (if team manager available)
 			if (this.teamManager) {
@@ -3581,10 +3583,18 @@ export class VerificationHarness {
 				? _preQaRoleThinking
 				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
 			const _preQaInitialThinking = clampReviewThinking(_preQaInitialThinkingRaw, _preQaInitialModel) ?? _preQaInitialThinkingRaw;
+			const qaReviewerMeta = buildVerificationReviewerMeta({
+				kind: "agent-qa",
+				roleName: qaRoleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			});
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
+				...qaReviewerMeta,
 				sandboxed: qaIsSandboxed,
 				sessionId: qaSessionId,
 				skipAutoModel: true,
@@ -3603,13 +3613,7 @@ export class VerificationHarness {
 			const qaTitlePrefix = step.name?.trim()
 				|| (step.role ? `QA (${step.role})` : "QA");
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
-			this.sessionManager!.updateSessionMeta(qaSessionId, buildVerificationReviewerMeta({
-				kind: "agent-qa",
-				roleName: qaRoleName,
-				goalId,
-				roleAccessory: role.accessory,
-				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
-			}));
+			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
 
 			// Register in team store
 			if (this.teamManager) {
