@@ -5,6 +5,7 @@ import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
+import { resetArchivedSidebarTreeExpansion } from "./sidebar-tree-state.js";
 
 // ============================================================================
 // TYPES
@@ -687,13 +688,15 @@ export function isArchivedParentExpanded(sessionId: string): boolean {
 }
 
 export function resetArchivedExpandState(): void {
-	// Remove archived goal IDs from expandedGoals
 	const archivedGoalIds = new Set(state.goals.filter(g => g.archived).map(g => g.id));
+	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
+	resetArchivedSidebarTreeExpansion({ archivedGoalIds, archivedSessionIds });
+
+	// Remove archived goal IDs from expandedGoals
 	for (const id of archivedGoalIds) expandedGoals.delete(id);
 	saveExpandedGoals();
 
 	// Remove archived session IDs from expandedDelegateParents
-	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
 	for (const id of archivedSessionIds) expandedDelegateParents.delete(id);
 	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 
