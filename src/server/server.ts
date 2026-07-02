@@ -7059,6 +7059,7 @@ async function handleApiRoute(
 			entrypoints: p.entrypoints.map((e) => {
 				const out: Record<string, unknown> = { id: e.id, kind: e.kind, listName: e.listName };
 				if (e.label !== undefined) out.label = e.label;
+				if (e.icon !== undefined) out.icon = e.icon;
 				if (e.routeId !== undefined) out.routeId = e.routeId;
 				if (e.target !== undefined) out.target = e.target;
 				if (e.paramKeys !== undefined) out.paramKeys = e.paramKeys;

@@ -32,6 +32,7 @@ import path from "node:path";
 import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
+import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
@@ -137,6 +138,7 @@ export interface EntrypointContribution {
 	id: string; // unique within the pack
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string; // required for launcher kinds
+	icon?: EntrypointIconId;
 	routeId?: string; // required for kind:"route"; host-global
 	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];

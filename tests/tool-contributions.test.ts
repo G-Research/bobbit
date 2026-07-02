@@ -157,6 +157,33 @@ describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rej
 		);
 	});
 
+	it("preserves valid launcher icons and drops malformed or unknown icons without dropping the entrypoint", () => {
+		const parsed = parseEntrypoints(
+			[
+				{ id: "terminal", kind: "session-menu", label: "Open Terminal", icon: "terminal", target: { panelId: "terminal.panel" } },
+				{ id: "pr", kind: "composer-slash", label: "PR Walkthrough", icon: "git-pull-request", target: { route: "pr.run" } },
+				{ id: "bad", kind: "session-menu", label: "Bad Icon", icon: "not-a-real-icon", target: { route: "demo.route" } },
+				{ id: "malformed", kind: "session-menu", label: "Malformed Icon", icon: 42, target: { route: "demo.route" } },
+			],
+			FP,
+		) as Array<Record<string, unknown>>;
+
+		assert.equal(parsed.length, 4, "invalid icon values must not drop otherwise-valid launchers");
+		assert.equal(parsed.find((e) => e.id === "terminal")?.icon, "terminal");
+		assert.equal(parsed.find((e) => e.id === "pr")?.icon, "git-pull-request");
+		assert.equal(parsed.find((e) => e.id === "bad")?.icon, undefined);
+		assert.equal(parsed.find((e) => e.id === "malformed")?.icon, undefined);
+	});
+
+	it("ignores icon on route entrypoints", () => {
+		const parsed = parseEntrypoints(
+			[{ id: "r", kind: "route", routeId: "demo.deep", icon: "terminal", target: { panelId: "demo.viewer" }, paramKeys: [] }],
+			FP,
+		) as Array<Record<string, unknown>>;
+		assert.equal(parsed.length, 1);
+		assert.equal(parsed[0].icon, undefined);
+	});
+
 	it("drops removed command-palette and git-widget-button entrypoint kinds", () => {
 		assert.deepEqual(
 			parseEntrypoints([

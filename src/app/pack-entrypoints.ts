@@ -35,6 +35,7 @@
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { setExtRoute } from "./routing.js";
 import { openPackPanel, getLauncherHost } from "./pack-panels.js";
+import { isSupportedEntrypointIconId, type EntrypointIconId } from "../shared/entrypoint-icons.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
 
 /** Launcher kinds (a clickable surface) PLUS the routable `route` kind (a
@@ -70,6 +71,7 @@ export interface LauncherEntrypoint {
 	packId: string;
 	kind: LauncherKind;
 	label: string;
+	icon?: EntrypointIconId;
 	target: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget;
 }
 
@@ -109,6 +111,7 @@ export interface RegisteredLauncher {
 	packId: string;
 	kind: LauncherKind;
 	label: string;
+	icon?: EntrypointIconId;
 	target: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget;
 	projectId?: string;
 }
@@ -222,6 +225,7 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 				packId: ep.packId,
 				kind: ep.kind,
 				label: ep.label,
+				...(ep.icon ? { icon: ep.icon } : {}),
 				target: ep.target,
 				projectId,
 			});
@@ -468,9 +472,10 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 				// OR a SpawnLaunchTarget ({action,route,panelId}). We do not validate the
 				// target internals here (registration does), so the spawn shape survives the
 				// contributions wire.
-				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | undefined;
+				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget | undefined;
 				if (!label || !target) continue;
-				out.push({ id, packId, kind, label, target });
+				const icon = isSupportedEntrypointIconId(e.icon) ? e.icon : undefined;
+				out.push({ id, packId, kind, label, ...(icon ? { icon } : {}), target });
 			}
 		}
 	}

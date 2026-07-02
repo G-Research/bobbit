@@ -2641,6 +2641,7 @@ export interface PackEntrypointWire {
 	id: string;
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
+	icon?: string;
 	routeId?: string;
 	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];

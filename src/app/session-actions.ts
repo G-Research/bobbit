@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2, Zap } from "lucide";
+import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
@@ -10,6 +10,7 @@ import { connectToSession, forkSession, terminateSession } from "./session-manag
 import { state, type GatewaySession } from "./state.js";
 import { ensureContinueSessionChooser } from "./lazy-widgets.js";
 import { errorDetails } from "./error-helpers.js";
+import { entrypointIconNode } from "./entrypoint-icon-registry.js";
 
 export type SessionActionId =
 	| "modify"
@@ -399,7 +400,7 @@ function buildSessionMenuLauncherActions(sessionId: string, onRefreshStateChange
 			id: launcher.key,
 			label: launcher.label,
 			title: isSpawn ? `Start ${launcher.label}` : launcher.label,
-			icon: icon(Zap, "xs"),
+			icon: icon(entrypointIconNode(launcher.icon), "xs"),
 			priority: 80 + index,
 			quick: false,
 			run: (event: Event) => {

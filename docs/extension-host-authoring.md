@@ -887,8 +887,8 @@ fails closed instead of silently spawning a host shell.
 
 The built-in xterm panel behavior:
 
-- Entrypoints: session menu `Open Terminal` and composer slash `/terminal` both open/focus the
-  terminal side panel without writing terminal output into chat.
+- Entrypoints: session menu `Open Terminal` (`icon: terminal`) and composer slash `/terminal`
+  both open/focus the terminal side panel without writing terminal output into chat.
 - Identity: one session-persistent singleton channel (`singletonKey: session-terminal`) for the
   built-in terminal pack.
 - Output following: new PTY output and local typing keep the active prompt/input visible after large
@@ -1153,8 +1153,59 @@ is not loaded).
 id: my-pack.open
 kind: composer-slash          # composer-slash | session-menu
 label: My Viewer              # required for launcher kinds
+icon: zap                     # optional; stable launcher icon id
 target:
   route: my-pack              # OR { panelId: ... }
+```
+
+Launcher entrypoints may declare an optional **`icon`** field. This is the canonical
+field name; use lower-case stable ids, not Lucide component names or inline SVG. Supported
+stable ids are:
+
+| `icon` | Renders as | Typical use |
+|---|---|---|
+| `zap` | Lightning bolt | Default / generic launcher |
+| `terminal` | Terminal | Terminal or shell launchers |
+| `git-pull-request` | Pull request | PR review / PR walkthrough launchers |
+
+`icon` is available only on launcher kinds (`composer-slash` and `session-menu`). Route-only
+entrypoints have no clickable menu surface, so they should not declare it. When `icon` is absent,
+Bobbit keeps the existing `zap` icon. When `icon` is unknown or not a string, pack loading remains
+tolerant: the invalid value is dropped with a warning, `/api/ext/contributions` omits it, and the
+client falls back to `zap`. This keeps menus safe because packs can choose only from Bobbit's
+bundled icon registry, never arbitrary HTML or SVG.
+
+For `session-menu` launchers, the resolved icon is used in every session action menu surface that
+shows extension launchers: the sidebar session-row overflow menu and the chat/mobile header
+hamburger menu. The label remains the accessible action name.
+
+First-party launcher examples:
+
+```yaml
+# market-packs/terminal/entrypoints/terminal-session-menu.yaml
+id: terminal.session-menu
+kind: session-menu
+label: Open Terminal
+icon: terminal
+target:
+  action: channel-panel
+  channel: terminal
+  singletonKey: session-terminal
+  panelId: terminal.panel
+  params:
+    autoStart: true
+```
+
+```yaml
+# market-packs/pr-walkthrough/entrypoints/pr-walkthrough-session-menu.yaml
+id: pr-walkthrough.session-menu
+kind: session-menu
+label: PR Walkthrough
+icon: git-pull-request
+target:
+  action: spawn
+  route: run
+  panelId: pr-walkthrough.panel
 ```
 
 A launcher normally carries **no** static `params` — the panel derives whatever
@@ -1661,7 +1712,7 @@ pr-walkthrough/
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
 | Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. The bundle tool keeps legacy JSON as the omitted/default `format` while opt-in `format=compact` emits a unified-diff-like model-facing view. The durable flow uses compact chunk-save output, full status readback, and finalization tools; `submit_pr_walkthrough_yaml` remains a compatibility wrapper. Tools are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
-| Launch — spawn-on-click, a real isolated reviewer | both launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
+| Launch — spawn-on-click, a real isolated reviewer | both launchers carry `icon: git-pull-request` and `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces through launcher feedback from the session menu; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | Durable review state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds `reviewers/<childSessionId>`, `reviews/<jobId>/binding/<childSessionId>`, draft chunks/status/checkpoints, and `reviews/<jobId>/final/payload`. Per-review quota scopes isolate draft/final payload size, and real `delete` / `deletePrefix` cleanup frees bytes on reviewer shutdown. Legacy `binding/<child>`, `submitted/<jobId>`, `job/<jobId>`, and `cards/<changesetId>` remain migration fallbacks only |
 | Deep-link + launchers | three `entrypoints/*.yaml` — two **spawn launchers** (composer-slash and session-menu) both carrying `target.action: spawn` **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) that re-registers the panel so a child-session reload restores `#/ext/pr-walkthrough` |

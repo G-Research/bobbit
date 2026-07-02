@@ -1,6 +1,7 @@
 id: pr-walkthrough.session-menu
 kind: session-menu
 label: PR Walkthrough
+icon: git-pull-request
 # A session-menu LAUNCHER (the sidebar/chat session actions overflow menu). Its
 # selection IS the user gesture. SPAWN-ON-CLICK model (launch UX correction): like
 # every launch surface, it calls the pack `run` route to mint a fresh read-only

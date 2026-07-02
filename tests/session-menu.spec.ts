@@ -65,6 +65,28 @@ test.describe("pack launcher session-menu surfaces", () => {
 		expect(out.launcherIds).toEqual(expect.arrayContaining([out.routeKey, out.spawnKey]));
 	});
 
+	test("renders resolved launcher icons in sidebar and chat header menus", async ({ page }) => {
+		await ready(page);
+		const terminalSignatures = ["path[d=\"M12 19h8\"]", "path[d=\"m4 17 6-6-6-6\"]"];
+		const gitPullRequestSignatures = ["circle[cx=\"18\"][cy=\"18\"][r=\"3\"]", "line[x1=\"6\"][x2=\"6\"][y1=\"9\"][y2=\"21\"]"];
+		const zapSignature = "path[d=\"M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z\"]";
+
+		for (const surface of ["sidebar", "header"] as const) {
+			const signaturesByLabel = await page.evaluate(async (surfaceName) => {
+				const w = window as any;
+				w.__reset();
+				w.__registerSessionMenu();
+				await w.__openSurface(surfaceName);
+				return w.__menuIconSignaturesByLabel();
+			}, surface);
+
+			expect(signaturesByLabel["Open Demo"]).toEqual(expect.arrayContaining(terminalSignatures));
+			expect(signaturesByLabel["PR Walkthrough"]).toEqual(expect.arrayContaining(gitPullRequestSignatures));
+			expect(signaturesByLabel["Missing Route"]).toContain(zapSignature);
+			expect(signaturesByLabel["Broken Walkthrough"]).toContain(zapSignature);
+		}
+	});
+
 	test("clicking a route launcher uses runLauncherEntrypoint and closes the menu", async ({ page }) => {
 		await ready(page);
 		const out = await page.evaluate(async () => {
