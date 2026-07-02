@@ -288,8 +288,9 @@ export function buildSidebarTree(input: BuildSidebarTreeInput): SidebarTreeModel
 	const goals = dedupeGoals(input.goals, ctx.diagnostics);
 	const goalById = new Map(goals.map(g => [g.id, g]));
 	const projectIdByGoalId = new Map<string, string>();
+	const fallbackProjectId = projects[0]?.id;
 	for (const goal of goals) {
-		const projectId = resolveGoalProjectId(goal, goalById, projectIds);
+		const projectId = resolveGoalProjectId(goal, goalById, projectIds, fallbackProjectId);
 		if (projectId) projectIdByGoalId.set(goal.id, projectId);
 	}
 	for (const goal of goals) {
@@ -323,6 +324,7 @@ interface BuildContext {
 	archivedSessions: SessionLike[];
 	flatByKey: Map<string, SidebarTreeNode>;
 	claimedSpawnedGoalIds: Set<string>;
+	spawnedRootGoalIds: Set<string>;
 	spawnedGoalNodesByLeadSessionId: Map<string, SidebarTreeNode<GoalContext>[]>;
 	sessionChildrenNodesBySessionId: Map<string, SidebarTreeNode<SessionChildrenContext>[]>;
 	diagnostics: SidebarTreeDiagnostic[];
@@ -342,6 +344,7 @@ function createBuildContext(input: BuildSidebarTreeInput): BuildContext {
 		archivedSessions: includeArchived ? sortSessions(input.archivedSessions) : [],
 		flatByKey: new Map(),
 		claimedSpawnedGoalIds: new Set(),
+		spawnedRootGoalIds: new Set(),
 		spawnedGoalNodesByLeadSessionId: new Map(),
 		sessionChildrenNodesBySessionId: new Map(),
 		diagnostics: [],
@@ -550,7 +553,7 @@ function appendTeamLeadNode(
 
 function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal: GoalLike, project: ProjectLike, spawnedCandidates: readonly GoalLike[], ctx: BuildContext): void {
 	const cycleCutsByParentGoalId = new Map<string, string[]>();
-	const subtreeInput = descendantSubtreeInput(goal, spawnedCandidates, ctx.claimedSpawnedGoalIds, ctx.diagnostics, cycleCutsByParentGoalId);
+	const subtreeInput = descendantSubtreeInput(goal, spawnedCandidates, ctx.spawnedRootGoalIds, ctx.diagnostics, cycleCutsByParentGoalId);
 	const sanitized = sanitizeGoalForestInput(subtreeInput, project.id, new Map(spawnedCandidates.map(g => [g.id, project.id])), ctx.diagnostics, cycleCutsByParentGoalId);
 	const subtree = buildNestedGoalForest(sanitized, { maxDepth: ctx.input.defaultNestedDepth ?? DEFAULT_NESTED_DEPTH, includeArchived: true })
 		.find(n => n.goal.id === goal.id) ?? { goal, depth: 0, children: [], descendantCount: 0 };
@@ -655,13 +658,44 @@ function registerNode(node: SidebarTreeNode, ctx: BuildContext): void {
 }
 
 function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildContext): void {
+	const descendantsByRootId = collectDescendantIdsByRoot(spawnedCandidates);
 	for (const parent of spawnedCandidates) {
 		for (const lead of teamLeadSessionsForGoal(parent.id, ctx.liveSessions, ctx.archivedSessions, ctx.includeArchived)) {
 			for (const child of selectSpawnedChildren(spawnedCandidates, parent.id, lead.id, ctx.includeArchived, lead.id)) {
+				ctx.spawnedRootGoalIds.add(child.id);
 				ctx.claimedSpawnedGoalIds.add(child.id);
+				for (const descendantId of descendantsByRootId.get(child.id) ?? []) {
+					ctx.claimedSpawnedGoalIds.add(descendantId);
+				}
 			}
 		}
 	}
+}
+
+function collectDescendantIdsByRoot(goals: readonly GoalLike[]): Map<string, Set<string>> {
+	const byParent = new Map<string, GoalLike[]>();
+	for (const goal of goals) {
+		if (!goal.parentGoalId) continue;
+		const children = byParent.get(goal.parentGoalId) ?? [];
+		children.push(goal);
+		byParent.set(goal.parentGoalId, children);
+	}
+	const out = new Map<string, Set<string>>();
+	const visit = (rootId: string, goal: GoalLike, path: Set<string>) => {
+		const children = byParent.get(goal.id) ?? [];
+		for (const child of children) {
+			if (path.has(child.id)) continue;
+			let descendants = out.get(rootId);
+			if (!descendants) {
+				descendants = new Set();
+				out.set(rootId, descendants);
+			}
+			descendants.add(child.id);
+			visit(rootId, child, new Set([...path, child.id]));
+		}
+	};
+	for (const goal of goals) visit(goal.id, goal, new Set([goal.id]));
+	return out;
 }
 
 function descendantSubtreeInput(
@@ -853,7 +887,7 @@ function dedupeSessionsById<T extends SessionLike>(sessions: readonly T[]): T[] 
 	return out;
 }
 
-function resolveGoalProjectId(goal: GoalLike, goalById: ReadonlyMap<string, GoalLike>, projectIds: ReadonlySet<string>): string | undefined {
+function resolveGoalProjectId(goal: GoalLike, goalById: ReadonlyMap<string, GoalLike>, projectIds: ReadonlySet<string>, fallbackProjectId?: string): string | undefined {
 	if (goal.projectId && projectIds.has(goal.projectId)) return goal.projectId;
 	let cursor: GoalLike | undefined = goal;
 	const seen = new Set<string>();
@@ -864,7 +898,7 @@ function resolveGoalProjectId(goal: GoalLike, goalById: ReadonlyMap<string, Goal
 		if (parent.projectId && projectIds.has(parent.projectId)) return parent.projectId;
 		cursor = parent;
 	}
-	return undefined;
+	return fallbackProjectId;
 }
 
 function nestedDepthForProject(projectId: string, depths: BuildSidebarTreeInput["nestedDepthByProject"], fallback: number): number {

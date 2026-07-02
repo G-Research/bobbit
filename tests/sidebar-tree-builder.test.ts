@@ -141,24 +141,29 @@ describe("buildSidebarTree", () => {
 		assert.equal(root.defaultExpanded, false, "goal rows default collapsed; polling must not auto-open sub-goals in the builder");
 	});
 
-	it("places spawned goals under the owning team lead and excludes them from project and archived forests", () => {
+	it("places spawned goals and descendants under the owning team lead and excludes them from project and archived forests", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
 			goals: [
 				goal({ id: "parent", team: true, createdAt: 1 }),
 				goal({ id: "spawned", parentGoalId: "parent", spawnedBySessionId: "lead", createdAt: 2 }),
+				goal({ id: "spawned-child", parentGoalId: "spawned", createdAt: 3 }),
 			],
 			sessions: [session({ id: "lead", goalId: "parent", role: "team-lead" })],
 			archivedSessions: [],
 			showArchived: false,
 		});
 		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), true);
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned-child"), true);
 		assert.deepEqual(model.projects[0].goalForest.map(n => n.entityId), ["parent"]);
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned-child").length, 1);
 		assert.equal(model.projects[0].archivedGoalForest.length, 0);
 		const spawned = model.spawnedGoalNodesByLeadSessionId.get("lead")?.[0];
 		assert.equal(spawned?.entityId, "spawned");
 		assert.equal(spawned?.parentKey, sidebarTreeKey({ kind: "team-lead", sessionId: "lead" }));
+		assert.equal(spawned?.children.find(n => n.kind === "goal")?.entityId, "spawned-child");
 		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "spawned" })), true);
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "spawned-child" })), true);
 	});
 
 	it("keeps missing-goal verifier transcripts standalone while nesting renderable-goal verifiers", () => {
@@ -321,6 +326,23 @@ describe("buildSidebarTree", () => {
 		assert.equal(bypassValues.every(Boolean), true);
 		assert.deepEqual(model.projects[0].ungroupedSessionNodes.map(n => n.entityId), ["visible"]);
 		assert.equal(model.projects[0].ungroupedSessionNodes[0].context.matchesSearch, true);
+	});
+
+	it("falls back missing-project goals to the first project bucket", () => {
+		const model = buildSidebarTree({
+			projects: [project("p1"), project("p2")],
+			goals: [
+				goal({ id: "legacy-live", projectId: undefined, createdAt: 1 }),
+				goal({ id: "legacy-archived", projectId: "missing-project", archived: true, createdAt: 2 }),
+			],
+			sessions: [],
+			archivedSessions: [],
+			showArchived: true,
+		});
+		assert.deepEqual(model.projects[0].goalForest.map(n => n.entityId), ["legacy-live"]);
+		assert.deepEqual(model.projects[0].archivedGoalForest.map(n => n.entityId), ["legacy-archived"]);
+		assert.deepEqual(model.projects[1].goalForest.map(n => n.entityId), []);
+		assert.deepEqual(model.projects[1].archivedGoalForest.map(n => n.entityId), []);
 	});
 
 	it("handles malformed goal data defensively and keeps flatByKey complete", () => {
