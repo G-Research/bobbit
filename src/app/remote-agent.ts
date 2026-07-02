@@ -43,7 +43,7 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
-import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
@@ -1730,12 +1730,12 @@ export class RemoteAgent {
 					state.reviewPanelOpen = false;
 					if (!isReviewSubmitted(this._sessionId || "")) {
 						for (const m of this._state.messages) {
-							this._checkReviewToolResult(m);
+							await this._checkReviewToolResult(m);
 						}
 					} else {
 						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
 					}
-					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
+					(await loadReviewSources()).restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -2397,8 +2397,10 @@ export class RemoteAgent {
 	 * `state.remoteAgent`-based check would no-op the initial review-pane
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
-	private _checkReviewToolResult(msg: any, isLive = false): void {
-		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
+	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
+		const sessionId = this._sessionId || "";
+		const isActiveSession = (): boolean => !sessionId || state.selectedSessionId === sessionId;
+		if (!isActiveSession()) return;
 
 		// Extract review tool-result payloads. Production providers are not fully
 		// consistent here: the review extension usually returns a JSON text block,
@@ -2437,10 +2439,11 @@ export class RemoteAgent {
 		collectReviewPayloads((msg as any).result);
 
 		for (const data of payloads) {
+			if (!isActiveSession()) return;
 			if (data.action === "review_open" && data.title && data.markdown) {
-				if (this._sessionId) {
+				if (sessionId) {
 					const title = String(data.title);
-					const hasOpenWorkspaceTab = getSidePanelWorkspace(this._sessionId).tabs.some((tab) => {
+					const hasOpenWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.some((tab) => {
 						if (tab.kind !== "review") return false;
 						const source = tab.source as Record<string, unknown> | undefined;
 						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
@@ -2455,46 +2458,50 @@ export class RemoteAgent {
 				// On a LIVE event (the agent emits a fresh review_open after a prior
 				// submit) we DO want to reopen — fall through and clear the flag.
 				// RP-09.
-				if (!isLive && this._sessionId && isReviewSubmitted(this._sessionId)) return;
+				if (!isLive && sessionId && isReviewSubmitted(sessionId)) return;
 				const replace = data.replace !== false;
+				const reviewSources = await loadReviewSources();
+				if (!isActiveSession()) return;
 				// New review opened on a LIVE event — clear any prior submitted flag
 				// so the panel can reopen on subsequent reconnects. Skip on replay
 				// (the fire-and-forget PUT would race with concurrent server-side
 				// setSubmitted(true) and clobber it on reload). RP-09.
-				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
-				openMarkdownReviewDocument({
+				if (isLive && sessionId) clearReviewSubmitted(sessionId);
+				if (!isActiveSession()) return;
+				reviewSources.openMarkdownReviewDocument({
 					title: data.title,
 					markdown: data.markdown,
 					replace,
-					sessionId: this._sessionId || "",
+					sessionId,
 				});
 			} else if (data.action === "review_close") {
-				const sid = this._sessionId || "";
 				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+				const reviewSources = await loadReviewSources();
+				if (!isActiveSession()) return;
 				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (closingTitle) {
 					state.reviewDocuments.delete(closingTitle);
-					clearAnnotations(sid, closingTitle);
-					removePersistedReviewDocument(sid, closingTitle);
+					clearAnnotations(sessionId, closingTitle);
+					reviewSources.removePersistedReviewDocument(sessionId, closingTitle);
 					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
 					}
-					closeReviewWorkspaceTabs([closingTitle], { sessionId: sid, select: false });
+					closeReviewWorkspaceTabs([closingTitle], { sessionId, select: false });
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
-					clearAllAnnotations(sid);
-					clearPersistedReviewDocuments(sid);
-					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
+					clearAllAnnotations(sessionId);
+					reviewSources.clearPersistedReviewDocuments(sessionId);
+					closeReviewWorkspaceTabs(undefined, { sessionId, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 				if (shouldReselect) {
 					if (state.reviewPanelOpen && state.reviewActiveTab) {
-						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId: sid, select: true });
+						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
 					} else {
-						selectSensiblePanelWorkspaceTab({ sessionId: sid, select: true });
+						selectSensiblePanelWorkspaceTab({ sessionId, select: true });
 					}
 				}
 				renderApp();
@@ -2866,7 +2873,7 @@ export class RemoteAgent {
 						// Check for review tool results (review_open/review_close JSON).
 						// `isLive: true` distinguishes a fresh agent emission from a snapshot
 						// replay so the submitted-flag handling can differentiate. RP-09.
-						this._checkReviewToolResult(msg, /* isLive */ true);
+						void this._checkReviewToolResult(msg, /* isLive */ true);
 
 						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {

@@ -380,7 +380,6 @@ export default defineConfig(({ mode }) => ({
 					if (normalizedId.endsWith("/src/app/session-manager.ts") || normalizedId.endsWith("/src/app/remote-agent.ts")) return "app-session-runtime";
 					if (normalizedId.endsWith("/src/app/preview-panel.ts")) return "app-preview-panel";
 					if (
-						normalizedId.endsWith("/src/app/review-sources.ts") ||
 						normalizedId.endsWith("/src/ui/components/review/ReviewPane.ts") ||
 						normalizedId.endsWith("/src/ui/components/review/AnnotationStore.ts")
 					) return "app-review";
