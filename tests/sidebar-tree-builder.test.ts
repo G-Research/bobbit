@@ -192,6 +192,35 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
 	});
 
+	it("keeps visible team members direct and unclaims spawned goals when the team lead is filtered out", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [
+				goal({ id: "parent", team: true, createdAt: 1 }),
+				goal({ id: "spawned", parentGoalId: "parent", spawnedBySessionId: "lead", createdAt: 2 }),
+				goal({ id: "spawned-child", parentGoalId: "spawned", createdAt: 3 }),
+			],
+			sessions: [
+				session({ id: "lead", goalId: "parent", teamGoalId: "parent", role: "team-lead", createdAt: 1 }),
+				session({ id: "member", teamGoalId: "parent", role: "coder", teamLeadSessionId: "lead", createdAt: 2 }),
+			],
+			archivedSessions: [],
+			showArchived: false,
+			filters: { passesSessionFilters: s => s.id !== "lead" },
+		});
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), false);
+		assert.equal(model.spawnedGoalNodesByLeadSessionId.has("lead"), false);
+		const parent = model.projects[0].goalForest.find(n => n.entityId === "parent")!;
+		assert.equal(parent.children.some(n => n.kind === "team-lead"), false);
+		assert.deepEqual(parent.children.filter(n => n.kind === "session").map(n => n.entityId), ["member"]);
+		const spawned = parent.children.find(n => n.kind === "goal" && n.entityId === "spawned");
+		assert.equal(spawned?.parentKey, parent.key);
+		assert.equal(spawned?.children.find(n => n.kind === "goal")?.entityId, "spawned-child");
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned").length, 1);
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned-child").length, 1);
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+	});
+
 	it("keeps missing-goal verifier transcripts standalone while nesting renderable-goal verifiers", () => {
 		const model = buildSidebarTree({
 			projects: [project()],

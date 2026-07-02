@@ -476,14 +476,11 @@ function appendGoalRuntimeChildren(goalNode: SidebarTreeNode<GoalContext>, proje
 	const goalLiveSessions = ctx.liveSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s)).sort(compareSessions);
 	const filteredLive = goalLiveSessions.filter(ctx.passesSession);
 	if (goal.team) {
-		const naturalLead = goalLiveSessions.find(s => s.role === "team-lead");
-		let displayLive = filteredLive;
-		if (naturalLead && !displayLive.includes(naturalLead) && displayLive.length > 0) displayLive = sortSessions([naturalLead, ...displayLive]);
-		const liveLead = displayLive.find(s => s.role === "team-lead");
+		const liveLead = filteredLive.find(s => s.role === "team-lead");
 		if (liveLead) {
-			appendTeamLeadNode(goalNode, liveLead, displayLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
+			appendTeamLeadNode(goalNode, liveLead, filteredLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
 		} else {
-			for (const session of displayLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx));
+			for (const session of filteredLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx));
 		}
 		if (!ctx.includeArchived) return;
 		const archivedForGoal = ctx.archivedSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s));
@@ -676,9 +673,7 @@ function claimSpawnedGoals(spawnedCandidates: readonly GoalLike[], ctx: BuildCon
 function willRenderTeamLeadForSpawnedPlacement(goal: GoalLike, lead: SessionLike, ctx: BuildContext): boolean {
 	if (!goal.team) return false;
 	if (lead.archived || ctx.archivedSessions.includes(lead)) return ctx.includeArchived && ctx.passesSession(lead);
-	if (ctx.passesSession(lead)) return true;
-	const visibleLiveSessionForGoal = ctx.liveSessions.some(s => s.id !== lead.id && isGoalOwningSession(s, goal.id) && !isChildSession(s) && ctx.passesSession(s));
-	return visibleLiveSessionForGoal;
+	return ctx.passesSession(lead);
 }
 
 function collectDescendantIdsByRoot(goals: readonly GoalLike[]): Map<string, Set<string>> {
