@@ -264,6 +264,9 @@ test.describe("archived session actions", () => {
 		goalsToDelete.add(goalId);
 
 		await showArchivedInSidebar(page);
+		if (!(await sessionRow(page, ineligibleId).isVisible().catch(() => false))) {
+			await page.locator(`[data-nav-id="goal:${goalId}"]`).first().click();
+		}
 		await openArchivedSidebarMenu(page, ineligibleId);
 		await expectArchivedSafeMenu(page, ARCHIVED_READ_ONLY_ACTION_IDS);
 		await expect(menuItem(page, "continue-archived"), "goal-linked archived sessions must not offer Continue").toHaveCount(0);

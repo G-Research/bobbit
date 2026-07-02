@@ -2026,12 +2026,37 @@ export function doRenderApp(): void {
 	const connected = hasActiveSession();
 
 	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
+	const route = getRouteFromHash();
+	const routeSessionId = route.view === "session" ? route.sessionId : undefined;
+	const activeSid = activeSessionId() ?? (routeSessionId && state.selectedSessionId === routeSessionId ? routeSessionId : undefined);
 	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
-	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
-	const headerTitle = activeStaffAgent?.name ?? sessionTitle;
-	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid) : undefined;
-	const hasHeaderSessionActions = Boolean(connected && state.remoteAgent && activeSession);
+	const activeSession: GatewaySession | undefined = activeSid ? (() => {
+		const cached = state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid);
+		if (cached) return cached;
+		const ai = state.chatPanel?.agentInterface as any;
+		if (!ai?.readOnly || state.selectedSessionId !== activeSid) return undefined;
+		return {
+			id: activeSid,
+			title: sessionTitle || "New session",
+			cwd: ai.cwd || "",
+			projectId: ai.projectId,
+			status: "archived",
+			createdAt: 0,
+			lastActivity: 0,
+			clientCount: 0,
+			goalId: ai.goalId,
+			delegateOf: ai.delegateOf,
+			teamGoalId: ai.teamGoalId,
+			assistantType: ai.assistantType,
+			readOnly: true,
+			archived: true,
+		} as GatewaySession;
+	})() : undefined;
+	const activeSessionArchived = activeSession ? isArchivedSessionActionSource(activeSession) : false;
+	const showingSessionHeader = Boolean((connected && state.remoteAgent) || (activeSessionArchived && activeSession));
+	const headerTitle = activeStaffAgent?.name ?? (sessionTitle || activeSession?.title || "New session");
+	const hasHeaderSessionActions = Boolean(activeSession && ((connected && state.remoteAgent) || activeSessionArchived));
 	const headerSessionActions = hasHeaderSessionActions && activeSession ? renderHeaderSessionActions({
 		session: activeSession,
 		displayTitle: sessionTitle || activeSession.title,
@@ -2041,7 +2066,7 @@ export function doRenderApp(): void {
 	}) : html``;
 
 	const headerLeft = () => {
-		if (connected && state.remoteAgent) {
+		if (showingSessionHeader) {
 			const backBtn = !desktop ? Button({
 				variant: "ghost",
 				size: "sm",
@@ -2055,7 +2080,6 @@ export function doRenderApp(): void {
 			}) : "";
 
 			if (!desktop) {
-				const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 				const goalId = activeSession?.goalId || activeSession?.teamGoalId;
 				const goalTitle = goalId ? state.goals.find(g => g.id === goalId)?.title : undefined;
 				// Left-aligned title layout (flex row, not absolute-centered) so
@@ -2073,7 +2097,7 @@ export function doRenderApp(): void {
 					</div>
 				`;
 			}
-			const deskSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+			const deskSession = activeSession;
 			const deskGoalId = deskSession?.goalId || deskSession?.teamGoalId;
 			const deskGoalTitle = deskGoalId ? state.goals.find(g => g.id === deskGoalId)?.title : undefined;
 			return html`
@@ -2106,7 +2130,7 @@ export function doRenderApp(): void {
 			onClick: () => { import("./settings-page.js").then((m) => m.toggleSettings()); },
 			title: "Settings",
 		});
-		if (connected && state.remoteAgent) {
+		if (showingSessionHeader) {
 			return html``;
 		}
 		return html`
