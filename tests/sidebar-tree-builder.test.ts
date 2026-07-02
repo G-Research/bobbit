@@ -160,6 +160,26 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "spawned" })), true);
 	});
 
+	it("keeps missing-goal verifier transcripts standalone while nesting renderable-goal verifiers", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [goal({ id: "team", team: true, createdAt: 1 })],
+			sessions: [session({ id: "lead", goalId: "team", teamGoalId: "team", role: "team-lead", createdAt: 2 })],
+			archivedSessions: [
+				session({ id: "normal-standalone", archived: true, status: "archived", createdAt: 3 }),
+				session({ id: "llm-review-renderable", goalId: "team", archived: true, status: "archived", title: "New session", createdAt: 4, agentSessionFile: "reviews/renderable.jsonl" }),
+				session({ id: "llm-review-missing-transcript", goalId: "missing", archived: true, status: "archived", title: "New session", createdAt: 5, agentSessionFile: "reviews/missing.jsonl" }),
+				session({ id: "agent-qa-missing-placeholder", goalId: "missing", archived: true, status: "archived", title: "New session", createdAt: 6 }),
+			],
+			showArchived: true,
+		});
+		const archivedIds = model.projects[0].archivedSessionNodes.map(n => n.entityId);
+		assert.deepEqual(archivedIds, ["normal-standalone", "llm-review-missing-transcript"]);
+		const lead = model.projects[0].goalForest[0].children.find(n => n.kind === "team-lead")!;
+		assert.equal(lead.children.some(n => n.kind === "session" && n.entityId === "llm-review-renderable"), true);
+		assert.equal([...model.flatByKey.values()].some(n => n.kind === "session" && n.entityId === "agent-qa-missing-placeholder"), false);
+	});
+
 	it("keeps archived live-parent children in the project forest and archived orphan chains in archived section", () => {
 		const model = buildSidebarTree({
 			projects: [project()],

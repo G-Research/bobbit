@@ -75,6 +75,7 @@ export interface SessionLike {
 	teamLeadSessionId?: string;
 	archived?: boolean;
 	title?: string;
+	agentSessionFile?: unknown;
 }
 
 export interface StaffLike {
@@ -351,6 +352,7 @@ function createBuildContext(input: BuildSidebarTreeInput): BuildContext {
 
 function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGoalId: ReadonlyMap<string, string>, ctx: BuildContext): SidebarProjectTree {
 	const projectNode = makeNode<ProjectContext>(ctx, { kind: "project", projectId: project.id }, { project, projectId: project.id, viewport: ctx.viewport }, null, 0, 0, 0);
+	const renderableGoalIds = new Set(goals.map(g => g.id));
 	const projectGoals = sortGoals(goals.filter(g => projectIdByGoalId.get(g.id) === project.id));
 	const liveGoals = projectGoals.filter(g => !g.archived);
 	const archivedGoals = projectGoals.filter(g => g.archived);
@@ -410,7 +412,7 @@ function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGo
 	if (ctx.includeArchived) {
 		archivedSectionNode = makeNode<ProjectSectionContext>(ctx, { kind: "project-archived", projectId: project.id }, { project, projectId: project.id, section: "archived", viewport: ctx.viewport }, projectNode.key, 1, 0, 0, false);
 		archivedSessionNodes = ctx.archivedSessions
-			.filter(s => s.projectId === project.id && !s.goalId && !s.teamGoalId && !isChildSession(s) && ctx.passesSession(s))
+			.filter(s => s.projectId === project.id && isStandaloneArchivedSession(s, renderableGoalIds) && ctx.passesSession(s))
 			.map(s => makeSessionNode(s, archivedSectionNode!, "archived-delegate", ctx));
 		archivedSectionNode.children.push(...archivedGoalForest, ...archivedSessionNodes);
 		if (archivedSectionNode.children.length > 0) registerNode(archivedSectionNode, ctx);
@@ -830,6 +832,33 @@ function isReadonlyNumberMap(value: ReadonlyMap<string, number> | Record<string,
 
 function isGoalOwningSession(session: SessionLike, goalId: string): boolean {
 	return session.goalId === goalId || session.teamGoalId === goalId;
+}
+
+function isVerifierSessionId(id: string | undefined): boolean {
+	return !!id && (/^llm-review-/.test(id) || /^agent-qa-/.test(id));
+}
+
+function effectiveArchivedTeamGoalId(session: SessionLike): string | undefined {
+	return session.teamGoalId || (isVerifierSessionId(session.id) ? session.goalId : undefined);
+}
+
+function hasVerifierFallbackContent(session: SessionLike): boolean {
+	const transcript = typeof session.agentSessionFile === "string"
+		? session.agentSessionFile.trim()
+		: session.agentSessionFile;
+	const title = (session.title || "").trim();
+	return !!transcript || (!!title && title !== "New session");
+}
+
+function isStandaloneArchivedSession(session: SessionLike, renderableGoalIds: ReadonlySet<string>): boolean {
+	if (isChildSession(session)) return false;
+	const owningGoalId = effectiveArchivedTeamGoalId(session);
+	if (!owningGoalId) {
+		const directOwningGoalId = session.goalId || session.teamGoalId;
+		return !directOwningGoalId || !renderableGoalIds.has(directOwningGoalId);
+	}
+	if (!isVerifierSessionId(session.id)) return false;
+	return !renderableGoalIds.has(owningGoalId) && hasVerifierFallbackContent(session);
 }
 
 function sessionParentId(session: SessionLike): string | undefined {
