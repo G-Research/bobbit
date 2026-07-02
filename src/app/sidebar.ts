@@ -16,16 +16,6 @@ import {
 	isDesktop,
 	setSidebarWidth,
 	SIDEBAR_WIDTH_DEFAULT,
-	expandedGoals,
-	isUngroupedExpanded,
-	setUngroupedExpanded,
-	isStaffExpanded,
-	setStaffSectionExpanded,
-	isArchivedSectionExpanded,
-	setArchivedSectionExpanded,
-	saveExpandedGoals,
-	toggleTeamLeadExpanded,
-	isTeamLeadExpanded,
 	getSidebarData,
 	type Goal,
 	type Project,
@@ -44,29 +34,21 @@ import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 import { buildSidebarTree, type GoalContext, type SessionContext, type SidebarProjectTree, type SidebarTreeModel, type SidebarTreeNode, type TeamLeadContext } from "./sidebar-tree-builder.js";
-import { safeSetItem, safeGetJSON } from "./safe-storage.js";
+import { safeSetItem } from "./safe-storage.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import {
+	isProjectExpanded,
+	toggleProjectExpanded,
+	setUngroupedExpanded,
+	isStaffExpanded,
+	setStaffSectionExpanded,
+	setArchivedSectionExpanded,
+	toggleTeamLeadExpanded,
+	toggleGoalExpanded,
+	sidebarTreeExpansionInput,
+} from "./sidebar-tree-state.js";
 
-// ============================================================================
-// PROJECT EXPANSION STATE
-// ============================================================================
-
-const EXPANDED_PROJECTS_KEY = "bobbit-expanded-projects";
-const _expandedProjects: Set<string> = new Set(
-	safeGetJSON<string[]>(EXPANDED_PROJECTS_KEY, []),
-);
-
-export function isProjectExpanded(projectId: string): boolean {
-	// Default to expanded if never toggled
-	return !_expandedProjects.has(`collapsed:${projectId}`);
-}
-
-export function toggleProjectExpanded(projectId: string): void {
-	const key = `collapsed:${projectId}`;
-	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
-	else _expandedProjects.add(key);
-	safeSetItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
-}
+export { isProjectExpanded, toggleProjectExpanded };
 
 // ============================================================================
 // PROJECT REORDER STATE
@@ -961,11 +943,11 @@ async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void>
 	}
 }
 
-export function renderStaffSidebarSection(filteredList?: typeof state.staffList, projectId?: string, dataTreeKey?: string) {
+export function renderStaffSidebarSection(filteredList?: typeof state.staffList, projectId?: string, dataTreeKey?: string, expandedOverride?: boolean) {
 	ensureStaffLoaded();
 	const list = filteredList ?? state.staffList.filter((s) => s.state !== "retired");
 	const mobile = !isDesktop();
-	const staffExpanded = isStaffExpanded(projectId || "");
+	const staffExpanded = expandedOverride ?? isStaffExpanded(projectId || "");
 	const staffProject = projectId ? state.projects.find((p) => p.id === projectId) : undefined;
 	const staffAccentColor = staffProject ? getProjectAccentColor(staffProject) : "var(--primary)";
 	// Always show the Staff section so users can create their first staff agent
@@ -1341,7 +1323,7 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
-	const expanded = isArchivedSectionExpanded(project.id);
+	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const archivedGoals = projectTree.archivedGoalForest;
@@ -1428,7 +1410,7 @@ function renderNestedNode(
 	rowTestId = "sidebar-nested-row",
 ): TemplateResult | typeof nothing {
 	const goal = node.context.goal as Goal;
-	const isExpanded = expandedGoals.has(goal.id);
+	const isExpanded = node.expanded;
 	const activeChildren = nestedGoalChildren(node, false);
 	const archivedChildren = nestedGoalChildren(node, true);
 	const needsDivider = activeChildren.length > 0 && archivedChildren.length > 0;
@@ -1512,19 +1494,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 			bypassBusyReadFilters: bypassFilters,
 			includeArchived: state.showArchived,
 		},
-		expansion: {
-			isExpanded: (key, defaultExpanded) => {
-				switch (key.kind) {
-					case "project": return isProjectExpanded(key.projectId);
-					case "project-sessions": return isUngroupedExpanded(key.projectId);
-					case "project-staff": return isStaffExpanded(key.projectId);
-					case "project-archived": return isArchivedSectionExpanded(key.projectId);
-					case "goal": return expandedGoals.has(key.goalId);
-					case "team-lead": return isTeamLeadExpanded(key.sessionId);
-					default: return defaultExpanded;
-				}
-			},
-		},
+		expansion: sidebarTreeExpansionInput(),
 	});
 	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
@@ -1533,7 +1503,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 function renderProjectContent(projectTree: SidebarProjectTree) {
 	const project = projectTree.project as Project;
 	const isProvisional = !!project.provisional;
-	const ungroupedExp = isUngroupedExpanded(project.id);
+	const ungroupedExp = projectTree.sessionsSectionNode.expanded;
 	const { active: activeNodes, archived: archivedNodes, needsDivider: needsBoundaryDivider } =
 		bucketActiveArchived(projectTree.goalForest, n => n.context.archived);
 	return html`
@@ -1590,7 +1560,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 			` : ""}
 			`; })()}
 		</div>
-		${!isProvisional ? renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key) : ""}
+		${!isProvisional ? renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key, projectTree.staffSectionNode?.expanded) : ""}
 		${!isProvisional ? renderProjectArchivedSection(projectTree) : ""}
 	`;
 }
@@ -1695,7 +1665,7 @@ export function renderSidebar() {
 						: html`
 							${sidebarTree.projects.map((projectTree, i) => {
 								const project = projectTree.project as Project;
-								const expanded = isProjectExpanded(project.id);
+								const expanded = projectTree.projectNode.expanded;
 								const effectiveExpanded = isProjectReordering() ? false : expanded;
 								return html`
 									${i > 0 ? html`<div class="project-reorder-separator border-t border-border/30 my-1 mx-2"></div>` : ""}
@@ -1799,7 +1769,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 	const renderCollapsedTeamLeadNode = (node: TeamLeadTreeNode) => {
 		const teamLead = node.context.session as GatewaySession;
 		const children = node.children;
-		const tlExpanded = isTeamLeadExpanded(teamLead.id);
+		const tlExpanded = node.expanded;
 		const tlActive = activeSessionId() === teamLead.id;
 		const tlTitle = tlActive && state.remoteAgent ? state.remoteAgent.title : teamLead.title;
 		return html`
@@ -1820,14 +1790,14 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 
 	const renderCollapsedGoalNode = (node: GoalTreeNode, archived = false): TemplateResult => {
 		const goal = node.context.goal as Goal;
-		const expanded = expandedGoals.has(goal.id);
+		const expanded = node.expanded;
 		return html`
 			<div class=${archived ? "opacity-60" : ""}>
 				<button
 					data-tree-key=${node.key}
 					class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 					title=${goal.title}
-					@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
+					@click=${(e: Event) => { e.stopPropagation(); toggleGoalExpanded(goal.id); renderApp(); }}
 				>
 					<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 					<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
@@ -1841,7 +1811,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 		if (node.kind === "session") return renderCollapsedSessionNode(node as SessionTreeNode);
 		if (node.kind === "team-lead") return renderCollapsedTeamLeadNode(node as TeamLeadTreeNode);
 		if (node.kind === "goal") return renderCollapsedGoalNode(node as GoalTreeNode, archived || (node as GoalTreeNode).context.archived);
-		if (node.kind === "session-children") return html`${node.children.map(child => html`<div style="padding-left:6px;">${renderCollapsedRuntimeNode(child, archived)}</div>`)}`;
+		if (node.kind === "session-children") return node.expanded ? html`${node.children.map(child => html`<div style="padding-left:6px;">${renderCollapsedRuntimeNode(child, archived)}</div>`)}` : "";
 		return "";
 	}
 
@@ -1856,8 +1826,8 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 						.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
 					const hasContent = projectTree.goalForest.length > 0 || projectTree.ungroupedSessionNodes.length > 0 || staffRows.length > 0;
 					if (!hasContent) return "";
-					const _collapsedUngroupedExp = isUngroupedExpanded(project.id);
-					const _collapsedStaffExp = isStaffExpanded(project.id);
+					const _collapsedUngroupedExp = projectTree.sessionsSectionNode.expanded;
+					const _collapsedStaffExp = projectTree.staffSectionNode?.expanded ?? isStaffExpanded(project.id);
 					return html`
 						${pi > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 						${projectTree.goalForest.map((node, i) => html`
