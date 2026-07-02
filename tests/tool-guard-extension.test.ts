@@ -288,4 +288,32 @@ describe("generateToolGuardExtension", () => {
 			},
 		);
 	});
+
+	it("accepts MCP group grants that include the model-facing meta-tool only for that group", async () => {
+		const guard = await importGeneratedGuard(
+			generateToolGuardExtension("sess-mcp-meta-group", {
+				mcp_mock: { policy: "ask", group: "MCP: mock" },
+				mcp__mock__echo: { policy: "ask", group: "MCP: mock" },
+				session_prompt: { policy: "ask", group: "Agent" },
+			}, []),
+			"mcp-meta-group",
+		);
+		await withGrantServer(
+			(count) => count === 1
+				? { granted: true, mode: "session-only", scope: "group", group: "MCP: mock", tools: ["mcp__mock__echo", "mcp_mock"] }
+				: { granted: false, reason: "session_prompt still ask-gated" },
+			async (requestCount) => {
+				let onToolCall: ((event: any) => Promise<any>) | undefined;
+				guard({ on: (_event, cb) => { onToolCall = cb; } });
+				assert.ok(onToolCall);
+				assert.deepEqual(await onToolCall!({ toolName: "mcp_mock" }), { block: false });
+				assert.equal(await onToolCall!({ toolName: "mcp_mock" }), undefined);
+				assert.deepEqual(await onToolCall!({ toolName: "session_prompt" }), {
+					block: true,
+					reason: "session_prompt still ask-gated",
+				});
+				assert.equal(requestCount(), 2, "MCP group grant must not cache unrelated ask-gated tools");
+			},
+		);
+	});
 });
