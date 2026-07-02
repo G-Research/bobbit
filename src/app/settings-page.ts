@@ -36,6 +36,14 @@ import {
 	applySidebarFontScaleVar,
 	sidebarFontSizePxToScale,
 	sidebarFontScaleToDisplayPx,
+	SIDEBAR_TREE_INDENT_DEFAULT_PX,
+	SIDEBAR_TREE_INDENT_MIN_PX,
+	SIDEBAR_TREE_INDENT_MAX_PX,
+	SIDEBAR_TREE_INDENT_STEP_PX,
+	loadSidebarTreeIndentPx,
+	saveSidebarTreeIndentPx,
+	resetSidebarTreeIndentPreference,
+	applySidebarTreeLayoutVars,
 } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
@@ -2484,6 +2492,62 @@ function renderSidebarFontScaleControl() {
 	`;
 }
 
+function setSidebarTreeIndentPx(px: number): void {
+	const clamped = saveSidebarTreeIndentPx(px);
+	applySidebarTreeLayoutVars(clamped);
+	renderApp();
+}
+
+function resetSidebarTreeIndent(): void {
+	const px = resetSidebarTreeIndentPreference();
+	applySidebarTreeLayoutVars(px);
+	renderApp();
+}
+
+function handleSidebarTreeIndentInput(e: Event): void {
+	const input = e.target as HTMLInputElement;
+	const raw = input.value.trim();
+	const px = Number.parseFloat(raw);
+	if (!Number.isFinite(px)) return;
+	if (e.type === "input" && px < SIDEBAR_TREE_INDENT_MIN_PX && raw.length < String(SIDEBAR_TREE_INDENT_MIN_PX).length) return;
+	setSidebarTreeIndentPx(px);
+}
+
+function renderSidebarTreeIndentControl() {
+	const currentPx = loadSidebarTreeIndentPx();
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<label for="sidebar-tree-indent-input" class="text-sm font-medium text-foreground">Sidebar tree indentation</label>
+			<p id="sidebar-tree-indent-help" class="text-xs text-muted-foreground">
+				Sets how far each nested sidebar level steps inward. Larger values make goal trees easier to scan; smaller values leave more room for names. Affects only the sidebar. Saved per browser.
+			</p>
+			<div class="flex items-center gap-3">
+				<label class="flex items-center gap-2 text-sm text-foreground">
+					<input
+						id="sidebar-tree-indent-input"
+						type="number"
+						min=${String(SIDEBAR_TREE_INDENT_MIN_PX)}
+						max=${String(SIDEBAR_TREE_INDENT_MAX_PX)}
+						step=${String(SIDEBAR_TREE_INDENT_STEP_PX)}
+						.value=${live(String(currentPx))}
+						aria-describedby="sidebar-tree-indent-help"
+						data-testid="sidebar-tree-indent-input"
+						class="w-20 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						@input=${handleSidebarTreeIndentInput}
+						@change=${handleSidebarTreeIndentInput}
+					/>
+					<span class="text-sm text-muted-foreground">px</span>
+				</label>
+				<button
+					class="text-xs text-muted-foreground hover:text-foreground underline"
+					data-testid="sidebar-tree-indent-reset"
+					@click=${resetSidebarTreeIndent}
+				>Reset to ${SIDEBAR_TREE_INDENT_DEFAULT_PX} px</button>
+			</div>
+		</div>
+	`;
+}
+
 function renderGeneralTab() {
 	loadGeneralSettings();
 	return html`
@@ -2491,6 +2555,7 @@ function renderGeneralTab() {
 			<div class="flex flex-col gap-2">
 				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
 				${renderSidebarFontScaleControl()}
+				${renderSidebarTreeIndentControl()}
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">

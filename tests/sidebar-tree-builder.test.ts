@@ -76,8 +76,10 @@ describe("sidebar tree key primitives", () => {
 
 	it("resolves clamped indentation defaults for builder metadata", () => {
 		assert.deepEqual(resolveSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 16 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 }), { version: 1, indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 }), { version: 1, indentMode: "spacious", baseIndentPx: 5, nestedGoalIndentPx: 28 });
 		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 99, nestedGoalIndentPx: Number.NaN }), { version: 1, indentMode: "spacious", baseIndentPx: 5, nestedGoalIndentPx: 16 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: -10, nestedGoalIndentPx: -1 }), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 8 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: 99, nestedGoalIndentPx: 99 }), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 28 });
 	});
 });
 
@@ -171,6 +173,43 @@ describe("buildSidebarTree", () => {
 		assert.equal(childA.context.displayTitleSuffix, "child-" );
 		assert.equal(childB.context.displayTitleSuffix, "child-" );
 		assert.equal(root.defaultExpanded, false, "goal rows default collapsed; polling must not auto-open sub-goals in the builder");
+	});
+
+	it("applies custom nested goal indentation while keeping runtime child spacing fixed", () => {
+		const goalModel = buildSidebarTree({
+			projects: [project()],
+			goals: [goal({ id: "root", createdAt: 1 }), goal({ id: "child", parentGoalId: "root", createdAt: 2 })],
+			sessions: [],
+			archivedSessions: [],
+			showArchived: false,
+			layout: { nestedGoalIndentPx: 24, baseIndentPx: 14 },
+		});
+		const root = goalModel.projects[0].goalForest.find(n => n.entityId === "root")!;
+		const child = root.children.find(n => n.kind === "goal" && n.entityId === "child")!;
+		assert.equal(root.indentPx, 0);
+		assert.equal(child.indentPx, 24);
+
+		const runtimeModel = buildSidebarTree({
+			projects: [project()],
+			goals: [
+				goal({ id: "team", team: true, createdAt: 1 }),
+				goal({ id: "spawned", parentGoalId: "team", spawnedBySessionId: "lead", createdAt: 2 }),
+			],
+			sessions: [
+				session({ id: "lead", goalId: "team", role: "team-lead", teamGoalId: "team", createdAt: 3 }),
+				session({ id: "member", teamGoalId: "team", role: "coder", teamLeadSessionId: "lead", createdAt: 4 }),
+			],
+			archivedSessions: [],
+			showArchived: false,
+			layout: { nestedGoalIndentPx: 24, baseIndentPx: 14 },
+		});
+		const teamRoot = runtimeModel.projects[0].goalForest.find(n => n.entityId === "team")!;
+		const lead = teamRoot.children.find(n => n.kind === "team-lead")!;
+		const member = lead.children.find(n => n.kind === "session")!;
+		const spawned = runtimeModel.spawnedGoalNodesByLeadSessionId.get("lead")?.find(n => n.entityId === "spawned")!;
+		assert.equal(lead.indentPx, 5);
+		assert.equal(member.indentPx, 10);
+		assert.equal(spawned.indentPx, 10);
 	});
 
 	it("places spawned goals and descendants under the owning team lead and excludes them from project and archived forests", () => {

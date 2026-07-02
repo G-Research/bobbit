@@ -1,6 +1,12 @@
 import { buildNestedGoalForest, type NestableGoal, type NestedGoalNode } from "./sidebar-nesting.js";
 import { selectSpawnedChildren } from "./sidebar-spawned-children.js";
 import { bucketTeamChildren } from "./team-archived-bucket.js";
+import {
+	SIDEBAR_TREE_BASE_INDENT_PX,
+	SIDEBAR_TREE_INDENT_DEFAULT_PX,
+	SIDEBAR_TREE_INDENT_MAX_PX,
+	SIDEBAR_TREE_INDENT_MIN_PX,
+} from "./sidebar-tree-layout.js";
 
 export type SidebarTreeNodeKey =
 	| { kind: "project"; projectId: string }
@@ -215,12 +221,10 @@ export interface SidebarTreeModel {
 
 const KEY_PREFIX = "sidebar-tree/v1/";
 const DEFAULT_NESTED_DEPTH = 5;
-const DEFAULT_BASE_INDENT_PX = 5;
-const DEFAULT_NESTED_GOAL_INDENT_PX = 16;
-const MIN_BASE_INDENT_PX = 2;
-const MAX_BASE_INDENT_PX = 16;
-const MIN_NESTED_GOAL_INDENT_PX = 8;
-const MAX_NESTED_GOAL_INDENT_PX = 28;
+const DEFAULT_BASE_INDENT_PX = SIDEBAR_TREE_BASE_INDENT_PX;
+const DEFAULT_NESTED_GOAL_INDENT_PX = SIDEBAR_TREE_INDENT_DEFAULT_PX;
+const MIN_NESTED_GOAL_INDENT_PX = SIDEBAR_TREE_INDENT_MIN_PX;
+const MAX_NESTED_GOAL_INDENT_PX = SIDEBAR_TREE_INDENT_MAX_PX;
 
 export function sidebarTreeKey(input: SidebarTreeNodeKey): string {
 	const [kind, id] = keyParts(input);
@@ -276,7 +280,7 @@ export function resolveSidebarTreeLayoutPreference(input?: SidebarTreeLayoutPref
 	return {
 		version: 1,
 		indentMode: mode,
-		baseIndentPx: clampNumber(input?.baseIndentPx, MIN_BASE_INDENT_PX, MAX_BASE_INDENT_PX, DEFAULT_BASE_INDENT_PX),
+		baseIndentPx: DEFAULT_BASE_INDENT_PX,
 		nestedGoalIndentPx: clampNumber(input?.nestedGoalIndentPx, MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_NESTED_GOAL_INDENT_PX),
 	};
 }
@@ -985,8 +989,11 @@ function matchesSearch(text: string, query: string | undefined): boolean {
 }
 
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) return fallback;
-	return Math.floor(value);
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+	const rounded = Math.round(value);
+	if (rounded < min) return min;
+	if (rounded > max) return max;
+	return rounded;
 }
 
 function isDefined<T>(value: T | undefined): value is T {
