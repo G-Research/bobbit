@@ -1267,23 +1267,28 @@ function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: Readon
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
 	}
 	if (!keepRuntimeRows && !containsVisibleGoal) return null;
-	return { node: { ...node, children }, containsVisibleGoal };
+	return { node: { ...node, children, expanded: containsVisibleGoal || node.expanded }, containsVisibleGoal };
 }
 
 function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<string>): SearchPrunedNode<GoalContext> | null {
 	const ownMatch = visibleGoalIds.has(node.entityId);
 	const children: SidebarTreeNode[] = [];
 	let containsVisibleGoal = ownMatch;
+	let containsVisibleDescendantGoal = false;
 	for (const child of node.children) {
 		const pruned = child.kind === "goal"
 			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
 			: pruneRuntimeNodeForSearch(child, visibleGoalIds, ownMatch);
 		if (!pruned) continue;
 		children.push(pruned.node);
+		containsVisibleDescendantGoal ||= pruned.containsVisibleGoal;
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
 	}
 	if (!containsVisibleGoal) return null;
-	return { node: { ...node, children }, containsVisibleGoal };
+	// Search filtering is an ephemeral view: expand retained ancestor goals in the
+	// pruned model so matching descendants are actually rendered, without writing
+	// any persisted expansion preference.
+	return { node: { ...node, children, expanded: containsVisibleDescendantGoal || node.expanded }, containsVisibleGoal };
 }
 
 function filterGoalForestForSearch(nodes: readonly GoalTreeNode[], visibleGoalIds: ReadonlySet<string>): GoalTreeNode[] {

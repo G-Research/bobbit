@@ -18,6 +18,8 @@ const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot
 const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
 const SIDEBAR_SPAWNED_CHILDREN_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
 const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
+const SIDEBAR_TREE_STATE_SRC = path.resolve("src/app/sidebar-tree-state.ts");
+const SUBGOALS_FLAG_SRC = path.resolve("src/app/subgoals-flag.ts");
 
 const MARK = "SIDEBAR_FILTER_SEARCH_FIXTURE";
 
@@ -38,6 +40,8 @@ test.beforeAll(() => {
 			SIDEBAR_NESTING_SRC,
 			SIDEBAR_SPAWNED_CHILDREN_SRC,
 			SIDEBAR_TREE_BUILDER_SRC,
+			SIDEBAR_TREE_STATE_SRC,
+			SUBGOALS_FLAG_SRC,
 		],
 	});
 });
@@ -50,7 +54,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "nestedMatchGoal" | "archivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -137,6 +141,24 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("");
 		expect(await searchInput.evaluate((el) => document.activeElement === el), `${MARK}: Escape blurs search input`).toBe(false);
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+	});
+
+	test("search expands retained collapsed goal ancestors ephemerally", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: collapsed parent starts visible`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: matching child starts hidden behind collapsed parent`).toBeHidden();
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "NestedSearchNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search keeps ancestor chain`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: search expands ancestor in filtered model to reveal matching child`).toBeVisible();
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps parent visible`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: clearing search restores collapsed parent behavior`).toBeHidden();
 	});
 
 	test("Show Read and Show Busy filters hide rows while search bypasses the filters", async ({ page }) => {
