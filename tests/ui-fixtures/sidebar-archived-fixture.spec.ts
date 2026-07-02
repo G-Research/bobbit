@@ -20,6 +20,7 @@ const SIDEBAR_SPAWNED_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
 const TEAM_ARCHIVED_BUCKET_SRC = path.resolve("src/app/team-archived-bucket.ts");
 
 const MARK = "SIDEBAR_ARCHIVED_FIXTURE";
+const VERIFIER_MARK = "SIDEBAR_ARCHIVED_VERIFIER";
 
 test.beforeAll(() => {
 	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
@@ -69,6 +70,43 @@ function expectIncreasing(indexes: number[], label: string): void {
 		expect(indexes[i], `${MARK}: ${label} selector ${i} missing`).toBeGreaterThanOrEqual(0);
 		if (i > 0) expect(indexes[i], `${MARK}: ${label} order ${i}`).toBeGreaterThan(indexes[i - 1]);
 	}
+}
+
+async function expectNotProjectStandaloneArchived(page: Page, sessionId: string, projectId: string, nextProjectId: string, label: string): Promise<void> {
+	const placement = await page.evaluate(({ sessionId, projectId, nextProjectId }) => {
+		const all = Array.from(document.querySelectorAll("*"));
+		const row = document.querySelector(`[data-session-id="${sessionId}"]`);
+		const archivedHeader = document.querySelector(`[data-nav-id="archived-header:${projectId}"]`);
+		const nextProject = document.querySelector(`.project-reorder-section[data-project-id="${nextProjectId}"], section[data-project-id="${nextProjectId}"]`);
+		const rowIndex = row ? all.indexOf(row) : -1;
+		const headerIndex = archivedHeader ? all.indexOf(archivedHeader) : -1;
+		const nextProjectIndex = nextProject ? all.indexOf(nextProject) : all.length;
+		const dividerText = all
+			.slice(Math.max(0, headerIndex), Math.max(0, rowIndex))
+			.map(el => el.textContent?.trim())
+			.filter(text => text === "Goals" || text === "Sessions")
+			.at(-1) ?? "";
+		return {
+			rowIndex,
+			headerIndex,
+			nextProjectIndex,
+			dividerText,
+			isStandalone: rowIndex >= 0 && headerIndex >= 0 && rowIndex > headerIndex && rowIndex < nextProjectIndex && dividerText === "Sessions",
+		};
+	}, { sessionId, projectId, nextProjectId });
+
+	expect(
+		placement.isStandalone,
+		`${VERIFIER_MARK}: ${label} verifier ${sessionId} rendered as a project-level standalone archived session ${JSON.stringify(placement)}`,
+	).toBe(false);
+}
+
+async function expandLiveTeamLead(page: Page, teamLeadId: string, teamWorkerId: string): Promise<void> {
+	const lead = page.locator(`[data-session-id="${teamLeadId}"]`).first();
+	await expect(lead, `${VERIFIER_MARK}: live team lead renders`).toBeVisible({ timeout: 10_000 });
+	const expand = lead.locator(`span[title="Expand"]`).first();
+	if (await expand.count()) await expand.click();
+	await expect(page.locator(`[data-session-id="${teamWorkerId}"]`), `${VERIFIER_MARK}: live team lead is expanded`).toBeVisible({ timeout: 5_000 });
 }
 
 async function setShowArchived(page: Page, checked: boolean): Promise<void> {
@@ -130,6 +168,29 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
 	});
 
+	test("legacy verifier sessions stay out of project-level standalone archive rows", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-session-id="${ids.archivedStandaloneA}"]`), `${VERIFIER_MARK}: normal standalone archived session still renders`).toBeVisible({ timeout: 10_000 });
+		await expectNotProjectStandaloneArchived(page, ids.legacyLlmReview, ids.projectA, ids.projectB, "desktop llm-review");
+		await expectNotProjectStandaloneArchived(page, ids.legacyAgentQa, ids.projectA, ids.projectB, "desktop agent-qa");
+	});
+
+	test("legacy live team-goal verifier nests near the expanded live team lead", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expandLiveTeamLead(page, ids.teamLead, ids.teamWorker);
+		await expect(page.locator(`[data-session-id="${ids.legacyLlmReview}"]`), `${VERIFIER_MARK}: legacy llm-review verifier renders under the live team lead`).toBeVisible({ timeout: 10_000 });
+		expectIncreasing(await domIndexes(page, [
+			`[data-session-id="${ids.teamLead}"]`,
+			`[data-session-id="${ids.legacyLlmReview}"]`,
+			`[data-session-id="${ids.legacyAgentQa}"]`,
+			`[data-nav-id="archived-header:${ids.projectA}"]`,
+		]), `${VERIFIER_MARK}: live team-goal verifier rows are nested before the project archived bucket`);
+	});
+
 	test("archived team leads, members, and delegates nest under their live owners", async ({ page }) => {
 		test.setTimeout(30_000);
 		await loadFixture(page, { showArchived: true });
@@ -168,6 +229,9 @@ test.describe("Sidebar archived deterministic fixture", () => {
 
 		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: mobile project A archived header`).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`), `${MARK}: mobile project B archived header`).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`[data-session-id="${ids.archivedStandaloneA}"]`), `${VERIFIER_MARK}: mobile normal standalone archived session still renders`).toBeVisible({ timeout: 10_000 });
+		await expectNotProjectStandaloneArchived(page, ids.legacyLlmReview, ids.projectA, ids.projectB, "mobile llm-review");
+		await expectNotProjectStandaloneArchived(page, ids.legacyAgentQa, ids.projectA, ids.projectB, "mobile agent-qa");
 		expectIncreasing(await domIndexes(page, [
 			`section[data-project-id="${ids.projectA}"]`,
 			`[data-nav-id="archived-header:${ids.projectA}"]`,

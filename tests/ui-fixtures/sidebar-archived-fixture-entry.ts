@@ -56,6 +56,8 @@ const IDS = {
 	archivedNestedDelegate: "sidebar-archived-nested-delegate-session",
 	archivedStandaloneA: "sidebar-archived-standalone-a",
 	archivedStandaloneB: "sidebar-archived-standalone-b",
+	legacyLlmReview: "llm-review-sidebar-archived-legacy-001",
+	legacyAgentQa: "agent-qa-sidebar-archived-legacy-001",
 	teamLead: "sidebar-archived-team-lead",
 	teamWorker: "sidebar-archived-team-worker",
 	archivedTeamLead: "sidebar-archived-archived-team-lead",
@@ -160,6 +162,8 @@ function fixtureArchivedSessions(): GatewaySession[] {
 		session({ id: IDS.archivedDelegate, title: "Alpha Archived Delegate", projectId: PROJECT_A_ID, createdAt: 60, delegateOf: IDS.liveSessionParent, archived: true, archivedAt: 160, status: "terminated" }),
 		session({ id: IDS.archivedNestedDelegate, title: "Alpha Archived Nested Delegate", projectId: PROJECT_A_ID, createdAt: 61, delegateOf: IDS.archivedDelegate, archived: true, archivedAt: 161, status: "terminated" }),
 		session({ id: IDS.archivedStandaloneA, title: "Alpha Archived Standalone Session", projectId: PROJECT_A_ID, createdAt: 70, archived: true, archivedAt: 170, status: "terminated" }),
+		session({ id: IDS.legacyLlmReview, title: "New session", projectId: PROJECT_A_ID, createdAt: 71, role: "bug-hunter", accessory: "magnifier", goalId: IDS.teamGoalA, archived: true, archivedAt: 171, status: "terminated", nonInteractive: true }),
+		session({ id: IDS.legacyAgentQa, title: "New session", projectId: PROJECT_A_ID, createdAt: 72, role: "tester", accessory: "magnifier", goalId: IDS.teamGoalA, archived: true, archivedAt: 172, status: "terminated", nonInteractive: true }),
 		session({ id: IDS.archivedStandaloneB, title: "Bravo Archived Standalone Session", projectId: PROJECT_B_ID, createdAt: 80, archived: true, archivedAt: 180, status: "terminated" }),
 		session({ id: IDS.archivedTeamLead, title: "Alpha Archived Team Lead", projectId: PROJECT_A_ID, createdAt: 90, role: "team-lead", goalId: IDS.teamGoalA, teamGoalId: IDS.teamGoalA, archived: true, archivedAt: 190, status: "terminated" }),
 		session({ id: IDS.archivedTeamWorker, title: "Alpha Archived Team Worker", projectId: PROJECT_A_ID, createdAt: 91, role: "coder", goalId: IDS.teamGoalA, teamGoalId: IDS.teamGoalA, teamLeadSessionId: IDS.archivedTeamLead, archived: true, archivedAt: 191, status: "terminated" }),
@@ -278,7 +282,7 @@ async function resetFixture(options: { mode?: "desktop" | "mobile"; showArchived
 		archivedGoalsTotal: 4,
 		archivedSessionsCursor: null,
 		archivedSessionsHasMore: false,
-		archivedSessionsTotal: 6,
+		archivedSessionsTotal: 8,
 	});
 	window.history.replaceState({}, "", "#/fixture");
 	renderFixture();
