@@ -22,6 +22,15 @@ Steered delivery is not a silent downgrade to a normal prompt. If the target is 
 
 `session_prompt` sends a message to any live Bobbit agent session by session id.
 
+The chat transcript uses a dedicated `session_prompt` tool renderer instead of showing the raw JSON response. The card summarizes the action and target in its header, then shows:
+
+- the target session title when the delivery result includes one, otherwise a shortened session id fallback;
+- the target session link using the same session-link affordance as other agent cards;
+- the delivery mode (`prompt` by default, or `steer`);
+- the prompt/steer message body, preserving line breaks while relying on Lit template escaping for safety.
+
+Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the delivery outcome: `queued`, `dispatched`, or `live steer dispatched`. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
+
 Parameters:
 
 | Name | Type | Required | Default | Notes |
@@ -42,6 +51,34 @@ Server-side authorization is caller-based:
 4. Only then does the server deliver to the target session id.
 
 Target authorization is deliberately broad after the caller is authorized: any live target id is valid. Missing, archived, or terminated targets are rejected before delivery.
+
+### Result metadata
+
+Successful `session_prompt` deliveries include target metadata so the renderer can identify the destination without widening access:
+
+```ts
+type SessionPromptResult =
+  | {
+      ok: true;
+      mode: "prompt";
+      status: "dispatched" | "queued";
+      target: { sessionId: string; title?: string };
+    }
+  | {
+      ok: true;
+      mode: "steer";
+      dispatched: true;
+      target: { sessionId: string; title?: string };
+    }
+  | {
+      ok: true;
+      mode: "steer";
+      status: "dispatched" | "queued";
+      target: { sessionId: string; title?: string };
+    };
+```
+
+`target.sessionId` is always the resolved target id. `target.title` is present only when the live session has a non-empty title. This metadata is display-only: `session_prompt` keeps `grantPolicy: never`, still requires the caller session secret, and still checks the caller's allowed tools before resolving or delivering to the target.
 
 ### Non-interactive / reviewer sessions
 
@@ -93,7 +130,8 @@ See [REST API](rest-api.md) for the route table and [Orchestration](orchestratio
 
 Focused coverage lives in:
 
-- `tests/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, and non-interactive rules.
+- `tests/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, result `target.sessionId`/optional `target.title` metadata, and non-interactive rules.
 - `tests/session-prompt-policy.test.ts` — real `session_prompt` YAML `grantPolicy: never` and absence from default allowed tools until explicitly re-granted.
-- `tests/e2e/session-prompt.spec.ts` — caller authorization, arbitrary live target prompting, and steer-mode interruption of `bash_bg wait` through the live-steer path.
+- `tests/session-prompt-renderer.spec.ts` with `tests/fixtures/session-prompt-renderer.html` — browser fixture coverage for default prompt mode, steer mode with distinct icon/label, multiline escaped message text, missing-title fallback to shortened id, session link rendering, and server error display.
+- `tests/e2e/session-prompt.spec.ts` — caller authorization, arbitrary live target prompting, returned target metadata, and steer-mode interruption of `bash_bg wait` through the live-steer path.
 - `tests/e2e/team-steer-prompt.spec.ts` — `team_prompt` default steer behavior, `mode: "prompt"` normal queue semantics, and workflow context injection in both modes.
