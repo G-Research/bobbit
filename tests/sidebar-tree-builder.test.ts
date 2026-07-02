@@ -224,7 +224,7 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
 	});
 
-	it("keeps visible team members direct and unclaims spawned goals when the team lead is filtered out", () => {
+	it("keeps a filtered natural team lead sticky when visible members remain", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
 			goals: [
@@ -240,16 +240,42 @@ describe("buildSidebarTree", () => {
 			showArchived: false,
 			filters: { passesSessionFilters: s => s.id !== "lead" },
 		});
-		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), false);
-		assert.equal(model.spawnedGoalNodesByLeadSessionId.has("lead"), false);
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), true);
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned-child"), true);
 		const parent = model.projects[0].goalForest.find(n => n.entityId === "parent")!;
-		assert.equal(parent.children.some(n => n.kind === "team-lead"), false);
-		assert.deepEqual(parent.children.filter(n => n.kind === "session").map(n => n.entityId), ["member"]);
-		const spawned = parent.children.find(n => n.kind === "goal" && n.entityId === "spawned");
-		assert.equal(spawned?.parentKey, parent.key);
+		const lead = parent.children.find(n => n.kind === "team-lead" && n.entityId === "lead")!;
+		assert.ok(lead, "filtered natural lead should remain as the structural team row");
+		assert.deepEqual(lead.children.filter(n => n.kind === "session").map(n => n.entityId), ["member"]);
+		const spawned = model.spawnedGoalNodesByLeadSessionId.get("lead")?.[0];
+		assert.equal(spawned?.entityId, "spawned");
+		assert.equal(spawned?.parentKey, lead.key);
 		assert.equal(spawned?.children.find(n => n.kind === "goal")?.entityId, "spawned-child");
+		assert.equal(parent.children.some(n => n.kind === "goal" && n.entityId === "spawned"), false);
 		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned").length, 1);
 		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned-child").length, 1);
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+	});
+
+	it("does not let child team-lead sessions claim spawned goals", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [
+				goal({ id: "parent", team: true, createdAt: 1 }),
+				goal({ id: "spawned", parentGoalId: "parent", spawnedBySessionId: "child-lead", createdAt: 2 }),
+			],
+			sessions: [
+				session({ id: "child-lead", goalId: "parent", teamGoalId: "parent", role: "team-lead", parentSessionId: "host", createdAt: 1 }),
+			],
+			archivedSessions: [],
+			showArchived: false,
+		});
+		assert.equal(model.claimedSpawnedGoalIds.has("spawned"), false);
+		assert.equal(model.spawnedGoalNodesByLeadSessionId.has("child-lead"), false);
+		const parent = model.projects[0].goalForest.find(n => n.entityId === "parent")!;
+		assert.equal(parent.children.some(n => n.kind === "team-lead"), false);
+		const spawned = parent.children.find(n => n.kind === "goal" && n.entityId === "spawned");
+		assert.equal(spawned?.parentKey, parent.key);
+		assert.equal(allGoalIds(model.projects[0].goalForest).filter(id => id === "spawned").length, 1);
 		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
 	});
 
