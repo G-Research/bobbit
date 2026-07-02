@@ -38,7 +38,7 @@ import { state } from "../../src/app/state.js";
 	docCount: state.reviewDocuments.size,
 	docTitles: [...state.reviewDocuments.keys()],
 });
-(window as any).__deliverReviewToolResult = (a: any, action: string, payload: any, isLive = true, shape = "json-text") => {
+(window as any).__deliverReviewToolResult = async (a: any, action: string, payload: any, isLive = true, shape = "json-text") => {
 	// Build live tool-result-shaped messages. Replays only reopen when the server
 	// workspace already has a matching review tab.
 	const envelope = { action, ...payload };
@@ -49,7 +49,7 @@ import { state } from "../../src/app/state.js";
 			? [{ type: "tool_result", content: [{ type: "text", text: "(tool ack)" }, envelope] }]
 			: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
 	const msg = { role: "toolResult", content };
-	(a as any)._checkReviewToolResult(msg, isLive);
+	await (a as any)._checkReviewToolResult(msg, isLive);
 };
 
 (window as any).__ready = true;

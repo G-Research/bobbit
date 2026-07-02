@@ -20,6 +20,7 @@ const BUNDLE = path.resolve("tests/fixtures/review-tool-active-guard-bundle.js")
 const ENTRY = path.resolve("tests/fixtures/review-tool-active-guard-entry.ts");
 const REMOTE_AGENT_SRC = path.resolve("src/app/remote-agent.ts");
 const REVIEW_SOURCES_SRC = path.resolve("src/app/review-sources.ts");
+const REVIEW_SOURCES_LAZY_SRC = path.resolve("src/app/review-sources-lazy.ts");
 const PREVIEW_PANEL_SRC = path.resolve("src/app/preview-panel.ts");
 const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
 
@@ -28,6 +29,7 @@ test.beforeAll(() => {
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(REMOTE_AGENT_SRC).mtimeMs,
 		fs.statSync(REVIEW_SOURCES_SRC).mtimeMs,
+		fs.statSync(REVIEW_SOURCES_LAZY_SRC).mtimeMs,
 		fs.statSync(PREVIEW_PANEL_SRC).mtimeMs,
 		fs.statSync(PANEL_WORKSPACE_SRC).mtimeMs,
 	);
@@ -58,7 +60,7 @@ async function gotoAndWait(page: any) {
 test.describe("review tool active-session guard", () => {
 	test("background session's review_open does NOT mutate global review state", async ({ page }) => {
 		await gotoAndWait(page);
-		const result = await page.evaluate(() => {
+		const result = await page.evaluate(async () => {
 			const w = window as any;
 			const active = w.__makeAgent("active-session");
 			const background = w.__makeAgent("background-session");
@@ -66,7 +68,7 @@ test.describe("review tool active-session guard", () => {
 			w.__clearReviewState();
 
 			// Simulate the bug: background session's agent emits review_open.
-			w.__deliverReviewToolResult(background, "review_open", {
+			await w.__deliverReviewToolResult(background, "review_open", {
 				title: "PR-from-background",
 				markdown: "# Should not appear",
 			});
@@ -81,13 +83,13 @@ test.describe("review tool active-session guard", () => {
 
 	test("active session's review_open DOES open the review pane", async ({ page }) => {
 		await gotoAndWait(page);
-		const result = await page.evaluate(() => {
+		const result = await page.evaluate(async () => {
 			const w = window as any;
 			const active = w.__makeAgent("active-session");
 			w.__setActive(active);
 			w.__clearReviewState();
 
-			w.__deliverReviewToolResult(active, "review_open", {
+			await w.__deliverReviewToolResult(active, "review_open", {
 				title: "PR-from-active",
 				markdown: "# Welcome",
 			});
@@ -103,13 +105,13 @@ test.describe("review tool active-session guard", () => {
 
 	test("active session's inline review_open also handles structured tool-result payloads", async ({ page }) => {
 		await gotoAndWait(page);
-		const result = await page.evaluate(() => {
+		const result = await page.evaluate(async () => {
 			const w = window as any;
 			const active = w.__makeAgent("active-session");
 			w.__setActive(active);
 			w.__clearReviewState();
 
-			w.__deliverReviewToolResult(active, "review_open", {
+			await w.__deliverReviewToolResult(active, "review_open", {
 				title: "Structured inline markdown",
 				markdown: "# Inline\n\nOpened from a structured result object.",
 			}, true, "nested-tool-result");
@@ -125,7 +127,7 @@ test.describe("review tool active-session guard", () => {
 
 	test("background session's review_close does NOT clear active session's documents", async ({ page }) => {
 		await gotoAndWait(page);
-		const result = await page.evaluate(() => {
+		const result = await page.evaluate(async () => {
 			const w = window as any;
 			const active = w.__makeAgent("active-session");
 			const background = w.__makeAgent("background-session");
@@ -133,14 +135,14 @@ test.describe("review tool active-session guard", () => {
 			w.__clearReviewState();
 
 			// Active session opens a review.
-			w.__deliverReviewToolResult(active, "review_open", {
+			await w.__deliverReviewToolResult(active, "review_open", {
 				title: "Active-PR",
 				markdown: "# Important",
 			});
 			const before = w.__getReviewState();
 
 			// Background session emits review_close — must NOT clear the active doc.
-			w.__deliverReviewToolResult(background, "review_close", {});
+			await w.__deliverReviewToolResult(background, "review_close", {});
 			const after = w.__getReviewState();
 
 			return { before, after };
