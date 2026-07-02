@@ -21,6 +21,7 @@ const BUSY_SESSION_ID = "sidebar-filter-busy-session";
 const GOAL_ID = "sidebar-filter-goal";
 const GOAL_READ_SESSION_ID = "sidebar-filter-goal-read-session";
 const COLLAPSED_PARENT_GOAL_ID = "sidebar-filter-collapsed-parent-goal";
+const COLLAPSED_PARENT_SESSION_ID = "sidebar-filter-collapsed-parent-session";
 const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
 
@@ -77,6 +78,7 @@ const IDS = {
 	goal: `goal:${GOAL_ID}`,
 	goalReadSession: GOAL_READ_SESSION_ID,
 	collapsedParentGoal: `goal:${COLLAPSED_PARENT_GOAL_ID}`,
+	collapsedParentSession: COLLAPSED_PARENT_SESSION_ID,
 	nestedMatchGoal: `goal:${NESTED_MATCH_GOAL_ID}`,
 	archivedSession: ARCHIVED_SESSION_ID,
 };
@@ -223,6 +225,19 @@ function fixtureSessions(): GatewaySession[] {
 			goalId: GOAL_ID,
 			status: "idle",
 			createdAt: 50,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: COLLAPSED_PARENT_SESSION_ID,
+			title: "CollapsedRuntimeNeedle",
+			role: "runtime-child-role-needle",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			status: "idle",
+			createdAt: 55,
 			lastActivity: 1_000,
 			lastReadAt: 2_000,
 			clientCount: 0,

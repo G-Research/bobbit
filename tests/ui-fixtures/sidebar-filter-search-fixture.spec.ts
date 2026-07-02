@@ -54,7 +54,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "nestedMatchGoal" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "nestedMatchGoal" | "archivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -159,6 +159,24 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await setSearch(page, "");
 		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps parent visible`).toBeVisible();
 		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: clearing search restores collapsed parent behavior`).toBeHidden();
+	});
+
+	test("search reveals matching runtime rows under collapsed goals without persisting expansion", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: collapsed goal starts visible`).toBeVisible();
+		await expectSessionHidden(page, ids.collapsedParentSession, `${MARK}: runtime child starts hidden behind collapsed goal`);
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "runtime-child-role-needle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search keeps collapsed goal with matching runtime row`).toBeVisible();
+		await expectSessionVisible(page, ids.collapsedParentSession, `${MARK}: search expands pruned model to reveal matching runtime role row`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps goal visible`).toBeVisible();
+		await expectSessionHidden(page, ids.collapsedParentSession, `${MARK}: clearing search restores collapsed goal behavior`);
 	});
 
 	test("Show Read and Show Busy filters hide rows while search bypasses the filters", async ({ page }) => {

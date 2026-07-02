@@ -1253,11 +1253,29 @@ type GoalTreeNode = SidebarTreeNode<GoalContext>;
 type SessionTreeNode = SidebarTreeNode<SessionContext>;
 type TeamLeadTreeNode = SidebarTreeNode<TeamLeadContext>;
 
-type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean };
+type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean; containsRuntimeSearchResult: boolean };
+
+function textMatchesActiveSidebarSearch(...parts: Array<string | undefined>): boolean {
+	const q = state.searchQuery.trim().toLowerCase();
+	return !!q && parts.some(part => !!part && part.toLowerCase().includes(q));
+}
+
+function runtimeNodeMatchesActiveSidebarSearch(node: SidebarTreeNode): boolean {
+	if (node.kind === "session") {
+		const context = node.context as Partial<SessionContext>;
+		return context.matchesSearch === true || textMatchesActiveSidebarSearch(context.session?.title, context.session?.role);
+	}
+	if (node.kind === "team-lead") {
+		const context = node.context as Partial<TeamLeadContext>;
+		return textMatchesActiveSidebarSearch(context.session?.title, context.session?.role);
+	}
+	return false;
+}
 
 function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: ReadonlySet<string>, keepRuntimeRows: boolean): SearchPrunedNode | null {
 	const children: SidebarTreeNode[] = [];
 	let containsVisibleGoal = false;
+	let containsRuntimeSearchResult = runtimeNodeMatchesActiveSidebarSearch(node);
 	for (const child of node.children) {
 		const pruned = child.kind === "goal"
 			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
@@ -1265,9 +1283,10 @@ function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: Readon
 		if (!pruned) continue;
 		children.push(pruned.node);
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
+		containsRuntimeSearchResult ||= pruned.containsRuntimeSearchResult;
 	}
-	if (!keepRuntimeRows && !containsVisibleGoal) return null;
-	return { node: { ...node, children, expanded: containsVisibleGoal || node.expanded }, containsVisibleGoal };
+	if (!keepRuntimeRows && !containsVisibleGoal && !containsRuntimeSearchResult) return null;
+	return { node: { ...node, children, expanded: containsVisibleGoal || containsRuntimeSearchResult || node.expanded }, containsVisibleGoal, containsRuntimeSearchResult };
 }
 
 function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<string>): SearchPrunedNode<GoalContext> | null {
@@ -1275,6 +1294,7 @@ function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<
 	const children: SidebarTreeNode[] = [];
 	let containsVisibleGoal = ownMatch;
 	let containsVisibleDescendantGoal = false;
+	let containsRuntimeSearchResult = false;
 	for (const child of node.children) {
 		const pruned = child.kind === "goal"
 			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
@@ -1283,12 +1303,13 @@ function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<
 		children.push(pruned.node);
 		containsVisibleDescendantGoal ||= pruned.containsVisibleGoal;
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
+		containsRuntimeSearchResult ||= pruned.containsRuntimeSearchResult;
 	}
-	if (!containsVisibleGoal) return null;
+	if (!containsVisibleGoal && !containsRuntimeSearchResult) return null;
 	// Search filtering is an ephemeral view: expand retained ancestor goals in the
-	// pruned model so matching descendants are actually rendered, without writing
-	// any persisted expansion preference.
-	return { node: { ...node, children, expanded: containsVisibleDescendantGoal || node.expanded }, containsVisibleGoal };
+	// pruned model so matching descendants or matching runtime rows are actually
+	// rendered, without writing any persisted expansion preference.
+	return { node: { ...node, children, expanded: containsVisibleDescendantGoal || containsRuntimeSearchResult || node.expanded }, containsVisibleGoal, containsRuntimeSearchResult };
 }
 
 function filterGoalForestForSearch(nodes: readonly GoalTreeNode[], visibleGoalIds: ReadonlySet<string>): GoalTreeNode[] {
