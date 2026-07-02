@@ -2034,7 +2034,14 @@ export function doRenderApp(): void {
 	const routeArchivedSession = routeCachedSession ? isArchivedSessionActionSource(routeCachedSession) : false;
 	const panelAgentInterface = state.chatPanel?.agentInterface as any;
 	const panelSessionId = typeof panelAgentInterface?.session?.sessionId === "string" ? panelAgentInterface.session.sessionId : undefined;
-	const routeHasReadOnlyPanel = Boolean(routeSessionId && panelAgentInterface?.readOnly && panelSessionId === routeSessionId);
+	// Archived read-only panel agents may not expose `session.sessionId`; when
+	// the current route is archived or not yet cached, the route id is the only
+	// stable action source. Keep this read-only-only so live routes don't get
+	// normal live session actions until their session binding is explicit.
+	const routeHasReadOnlyPanel = Boolean(routeSessionId && panelAgentInterface?.readOnly && (
+		panelSessionId === routeSessionId
+		|| (!panelSessionId && (routeArchivedSession || !routeCachedSession))
+	));
 	const routeIsCurrentSession = Boolean(routeSessionId && (
 		state.selectedSessionId === routeSessionId
 		|| state.connectingSessionId === routeSessionId
@@ -2052,7 +2059,8 @@ export function doRenderApp(): void {
 		if (cached) return cached;
 		const ai = panelAgentInterface;
 		const aiSessionId = typeof ai?.session?.sessionId === "string" ? ai.session.sessionId : undefined;
-		if (!ai?.readOnly || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid)) return undefined;
+		const routeReadOnlyPanelSource = activeSid === routeSessionId && routeHasReadOnlyPanel;
+		if (!ai?.readOnly || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid && !routeReadOnlyPanelSource)) return undefined;
 		return {
 			id: activeSid,
 			title: sessionTitle || "New session",
