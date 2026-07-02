@@ -393,7 +393,7 @@ const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const MAX_RECOVER_DRAIN_RETRIES = 2;
 
 type ToolGrantMode = "persistent" | "session-only" | "one-time";
-type ToolGrantResolution = { granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string; mode?: ToolGrantMode };
+type ToolGrantResolution = { granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string; mode?: ToolGrantMode; reason?: string };
 
 const PROVIDER_AUTH_FAILURE_PATTERNS = [
 	/No API key found for\s+([A-Za-z0-9_.-]+)/i,
@@ -4330,6 +4330,25 @@ export class SessionManager {
 			grantScopeTools.push(toolName);
 		}
 		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
+
+		if (session.pendingGrantRequest) {
+			const pending = session.pendingGrantRequest;
+			const requestedToolMatches = pending.toolName.toLowerCase() === toolName.toLowerCase();
+			const requestedGroupMatches = !!group && pending.toolGroup.toLowerCase() === group.toLowerCase();
+			const approvedToolsCoverPending = approvedGrantTools.some(t => t.toLowerCase() === pending.toolName.toLowerCase());
+			const grantCoversPending = scope === "group"
+				? requestedGroupMatches && approvedToolsCoverPending
+				: requestedToolMatches && approvedToolsCoverPending;
+			if (!grantCoversPending) {
+				clearTimeout(pending.timer);
+				session.pendingGrantRequest = undefined;
+				pending.resolve({
+					granted: false,
+					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
+				});
+				return session.allowedTools ?? [];
+			}
+		}
 
 		let resultTools: string[];
 

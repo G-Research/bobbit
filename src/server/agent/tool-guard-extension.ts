@@ -131,6 +131,22 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
+        // Permission granted — only unblock if the server response actually
+        // covers the tool call this guard is currently blocking. A stale or
+        // mismatched permission-card response must not release this invocation.
+        const grantScope = r.scope === "group" ? "group" : (r.scope === "tool" ? "tool" : undefined);
+        const responseTools = Array.isArray(r.tools) ? r.tools : [];
+        const responseToolsLower = new Set(responseTools.map((name) => String(name || "").toLowerCase()));
+        const currentNamesLower = new Set([String(toolName || "").toLowerCase(), String(askPolicy.canonicalName || "").toLowerCase()]);
+        const currentListed = [...currentNamesLower].some((name) => responseToolsLower.has(name));
+        const groupMatches = grantScope === "group" && r.group === entry.group;
+        const coversCurrent = responseTools.length > 0
+          ? currentListed && (grantScope !== "group" || groupMatches)
+          : groupMatches;
+        if (!coversCurrent) {
+          return { block: true, reason: "Permission grant did not cover tool " + toolName };
+        }
+
         if (r.mode === "one-time") {
           // One-time grants authorize exactly this blocked invocation. Do not
           // cache them in this process, or future turns would bypass ask prompts
@@ -138,12 +154,6 @@ export default function(pi) {
           return { block: false };
         }
 
-        // Permission granted — cache only the approved grant scope. The server
-        // returns a scope delta in r.tools; defensively fall back to the current
-        // tool if an older gateway omits scope metadata so unrelated ask-gated
-        // tools cannot be silently granted by a full effective tool surface.
-        const grantScope = r.scope === "group" ? "group" : "tool";
-        const responseTools = Array.isArray(r.tools) && r.tools.length > 0 ? r.tools : [toolName];
         const newlyGranted = grantScope === "group"
           ? responseTools.filter((granted) => {
               const grantedPolicy = policyEntry(askPolicies, askPolicyNamesByLower, granted);
