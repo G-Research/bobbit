@@ -1,7 +1,10 @@
 # Archived Session Menu UX
 
-**Status:** UX brief for archived-session action menus.  
+**Status:** Implemented UX brief for archived-session action menus.
+
 **Scope:** Archived session rows in the sidebar and archived session actions in the chat/header area on desktop and mobile.
+
+**Implementation reference:** See [Unified Session Actions — Archived session actions](../session-actions.md#archived-session-actions).
 
 ## UX intent
 
@@ -11,7 +14,7 @@ Archived sessions are read-only records, but users still need the same discovery
 
 - Add a right-aligned hamburger action trigger to archived session rows wherever active session rows expose one.
 - Use the same icon-only button footprint, visual treatment, hover/focus states, and popover anchoring as active session row action triggers.
-- Label the trigger `Session actions for <session title>`.
+- Label the trigger `Session actions`, matching the live session actions trigger.
 - Set `aria-haspopup="menu"` and synchronize `aria-expanded` with the popover state.
 - On desktop, the trigger follows the active-row pattern: visually secondary, right-aligned with existing row metadata/timestamp treatment, and revealed consistently with the row action area.
 - On mobile/touch, the trigger is always visible in the row action cluster; do not rely on hover.
