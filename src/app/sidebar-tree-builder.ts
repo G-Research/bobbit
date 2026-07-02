@@ -476,7 +476,11 @@ function appendGoalRuntimeChildren(goalNode: SidebarTreeNode<GoalContext>, proje
 		let displayLive = filteredLive;
 		if (naturalLead && !displayLive.includes(naturalLead) && displayLive.length > 0) displayLive = sortSessions([naturalLead, ...displayLive]);
 		const liveLead = displayLive.find(s => s.role === "team-lead");
-		if (liveLead) appendTeamLeadNode(goalNode, liveLead, displayLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
+		if (liveLead) {
+			appendTeamLeadNode(goalNode, liveLead, displayLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
+		} else {
+			for (const session of displayLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx));
+		}
 		if (!ctx.includeArchived) return;
 		const archivedForGoal = ctx.archivedSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s));
 		const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead" && ctx.passesSession(s));
@@ -560,16 +564,18 @@ function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal:
 
 function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: SessionLike, ctx: BuildContext): string[] {
 	const groupKeys: string[] = [];
-	const firstClass = ctx.liveSessions
-		.filter(s => s.parentSessionId === parentSession.id && !s.delegateOf && ctx.passesSession(s))
+	const liveChildren = ctx.liveSessions
+		.filter(s => sessionParentId(s) === parentSession.id
+			&& (ctx.includeArchived || !isArchivedOrTerminalSession(s))
+			&& (isFirstClassChildSession(s) || ctx.passesSession(s)))
 		.sort(compareSessions);
-	const firstClassIds = new Set(firstClass.map(s => s.id));
+	const liveChildIds = new Set(liveChildren.map(s => s.id));
 	const archivedDelegates = ctx.includeArchived
 		? [...ctx.liveSessions, ...ctx.archivedSessions]
-			.filter(s => sessionParentId(s) === parentSession.id && !firstClassIds.has(s.id) && (s.archived || s.status === "terminated" || !!s.delegateOf || ctx.archivedSessions.includes(s)) && ctx.passesSession(s))
+			.filter(s => sessionParentId(s) === parentSession.id && !liveChildIds.has(s.id) && (s.archived || s.status === "terminated" || !!s.delegateOf || ctx.archivedSessions.includes(s)) && ctx.passesSession(s))
 			.sort(compareSessions)
 		: [];
-	for (const [childClass, children] of [["first-class", firstClass], ["archived-delegate", archivedDelegates]] as const) {
+	for (const [childClass, children] of [["first-class", liveChildren], ["archived-delegate", archivedDelegates]] as const) {
 		if (children.length === 0) continue;
 		const group = makeNode<SessionChildrenContext>(ctx, { kind: "session-children", sessionId: parentSession.id, childClass }, { sessionId: parentSession.id, childClass, childSessionKeys: [] }, parent.key, parent.logicalDepth + 1, parent.indentDepth + 1, (parent.indentDepth + 1) * ctx.layout.baseIndentPx);
 		for (const child of children) {
@@ -863,6 +869,14 @@ function isStandaloneArchivedSession(session: SessionLike, renderableGoalIds: Re
 
 function sessionParentId(session: SessionLike): string | undefined {
 	return session.parentSessionId || session.delegateOf;
+}
+
+function isFirstClassChildSession(session: SessionLike): boolean {
+	return !!session.parentSessionId && !session.delegateOf;
+}
+
+function isArchivedOrTerminalSession(session: SessionLike): boolean {
+	return session.archived === true || session.status === "terminated" || session.status === "archived";
 }
 
 function isChildSession(session: SessionLike): boolean {

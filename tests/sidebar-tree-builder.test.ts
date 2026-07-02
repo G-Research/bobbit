@@ -232,6 +232,36 @@ describe("buildSidebarTree", () => {
 		assert.deepEqual(groups.map(g => g.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId)), [["first"], ["delegate"]]);
 	});
 
+	it("keeps live delegate child sessions visible when archived rows are hidden", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [],
+			sessions: [
+				session({ id: "parent", createdAt: 1 }),
+				session({ id: "live-delegate", delegateOf: "parent", createdAt: 2 }),
+			],
+			archivedSessions: [],
+			showArchived: false,
+		});
+		const groups = model.sessionChildrenNodesBySessionId.get("parent") ?? [];
+		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["first-class"]);
+		assert.deepEqual(groups[0]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["live-delegate"]);
+		assert.equal(groups[0]?.children[0]?.context.childClass, "first-class");
+	});
+
+	it("keeps team goal member sessions visible when no live team lead exists", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [goal({ id: "team", team: true })],
+			sessions: [session({ id: "member", teamGoalId: "team", role: "coder" })],
+			archivedSessions: [],
+			showArchived: false,
+		});
+		const goalNode = model.projects[0].goalForest[0];
+		assert.equal(goalNode.children.some(n => n.kind === "team-lead"), false);
+		assert.deepEqual(goalNode.children.filter(n => n.kind === "session").map(n => n.entityId), ["member"]);
+	});
+
 	it("applies injected session filters and uses search as bypass", () => {
 		const bypassValues: boolean[] = [];
 		const model = buildSidebarTree({
