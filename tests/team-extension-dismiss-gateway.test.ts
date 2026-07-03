@@ -4,7 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import teamExtension from "../defaults/tools/team/extension.ts";
+import agentExtension from "../defaults/tools/agent/extension.ts";
 import { __clearCredsCacheForTesting } from "../defaults/tools/_shared/gateway.ts";
+import { __clearCredsCacheForTesting as __clearAgentCredsCacheForTesting } from "../defaults/tools/agent/gateway.js";
 
 type RegisteredTool = {
 	name: string;
@@ -36,6 +38,14 @@ function registerTeamDismiss(): RegisteredTool {
 	return tool;
 }
 
+function registerOwnChildDismiss(): RegisteredTool {
+	const tools = new Map<string, RegisteredTool>();
+	agentExtension({ registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); } } as any);
+	const tool = tools.get("team_dismiss");
+	assert.ok(tool, "own-child team_dismiss should register for non-goal sessions");
+	return tool;
+}
+
 describe("team_dismiss extension gateway handling", () => {
 	beforeEach(() => {
 		stateRoot = mkdtempSync(path.join(tmpdir(), "bobbit-team-dismiss-ext-"));
@@ -47,12 +57,14 @@ describe("team_dismiss extension gateway handling", () => {
 		setEnv("BOBBIT_TOKEN", undefined);
 		setEnv("BOBBIT_GATEWAY_URL", undefined);
 		__clearCredsCacheForTesting();
+		__clearAgentCredsCacheForTesting();
 		originalFetch = globalThis.fetch;
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		__clearCredsCacheForTesting();
+		__clearAgentCredsCacheForTesting();
 		for (const [name, value] of Object.entries(savedEnv)) {
 			if (value === undefined) delete process.env[name];
 			else process.env[name] = value;
@@ -97,5 +109,27 @@ describe("team_dismiss extension gateway handling", () => {
 		assert.equal(result.details.httpStatus, 500);
 		assert.match(result.content[0].text, /team_dismiss failed for child-2/);
 		assert.match(result.content[0].text, /upstream exploded/);
+	});
+
+	it("marks own-child non-structured non-2xx dismiss responses as failed tool results", async () => {
+		setEnv("BOBBIT_GOAL_ID", undefined);
+		setEnv("BOBBIT_SESSION_ID", "parent-session");
+		setEnv("BOBBIT_SESSION_SECRET", "parent-secret");
+		const tool = registerOwnChildDismiss();
+		globalThis.fetch = (async (_url: any, init: any) => {
+			assert.equal(init?.headers?.Authorization, "Bearer old-token");
+			assert.equal(init?.headers?.["X-Bobbit-Session-Secret"], "parent-secret");
+			return new Response(JSON.stringify({ error: "gateway unavailable" }), { status: 500 });
+		}) as typeof fetch;
+
+		const result = await tool.execute("call-3", { session_id: "child-3" });
+
+		assert.equal(result.isError, true);
+		assert.equal(result.details.status, "failed");
+		assert.equal(result.details.sessionId, "child-3");
+		assert.equal(result.details.retryable, true);
+		assert.equal(result.details.httpStatus, 500);
+		assert.match(result.content[0].text, /team_dismiss failed for child-3/);
+		assert.match(result.content[0].text, /gateway unavailable/);
 	});
 });

@@ -22,7 +22,7 @@
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readGatewayCreds, apiCall } from "./gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──
 
@@ -230,21 +230,55 @@ const extension: ExtensionFactory = (pi) => {
 		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body, { extraHeaders });
 	}
 
-	async function orchestrateDetailed(method: string, verb: string, body?: unknown): Promise<{ ok: boolean; status: number; body: any }> {
+	async function orchestrateDetailed(method: string, verb: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown }> {
 		const credsResult = readGatewayCreds();
 		if ("error" in credsResult) throw new Error(credsResult.error);
 		const owner = ownerSessionId || "unknown";
 		const extraHeaders: Record<string, string> = {};
 		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
-		const resp = await fetch(`${credsResult.baseUrl}/api/sessions/${owner}/orchestrate/${verb}`, {
+		const { ok, status, body: responseBody } = await apiCallDetailed(
+			credsResult,
 			method,
-			headers: { Authorization: `Bearer ${credsResult.token}`, "Content-Type": "application/json", ...extraHeaders },
-			body: body !== undefined ? JSON.stringify(body) : undefined,
-		});
-		const text = await resp.text();
-		let parsed: any = text;
-		try { parsed = JSON.parse(text); } catch { /* keep text */ }
-		return { ok: resp.ok, status: resp.status, body: parsed };
+			`/api/sessions/${owner}/orchestrate/${verb}`,
+			body,
+			{ extraHeaders },
+		);
+		return { ok, status, body: responseBody };
+	}
+
+	const dismissStatuses = new Set(["dismissed", "already-dismissed", "not-owned", "not-found", "failed"]);
+
+	function isStructuredDismissResult(value: unknown): value is { ok: boolean; status: string; sessionId: string; message: string; retryable: boolean } {
+		if (!value || typeof value !== "object") return false;
+		const v = value as Record<string, unknown>;
+		return typeof v.ok === "boolean"
+			&& typeof v.status === "string"
+			&& dismissStatuses.has(v.status)
+			&& typeof v.sessionId === "string"
+			&& typeof v.message === "string"
+			&& typeof v.retryable === "boolean";
+	}
+
+	function responseErrorText(body: unknown, fallback: string): string {
+		if (body && typeof body === "object" && "error" in body) return String((body as Record<string, unknown>).error);
+		if (typeof body === "string" && body.trim()) return body;
+		return fallback;
+	}
+
+	function normalizeDismissResponse(resp: { ok: boolean; status: number; body: unknown }, sessionId: string) {
+		if (isStructuredDismissResult(resp.body)) return resp.body;
+		const retryable = resp.status === 401 || resp.status === 408 || resp.status === 429 || resp.status >= 500;
+		return {
+			ok: false,
+			status: "failed",
+			sessionId,
+			message: resp.ok
+				? `team_dismiss returned an unstructured response (HTTP ${resp.status}).`
+				: `team_dismiss request failed (HTTP ${resp.status}): ${responseErrorText(resp.body, "unstructured gateway response")}`,
+			retryable,
+			httpStatus: resp.status,
+			response: resp.body,
+		};
 	}
 
 	function dismissText(result: any): string {
@@ -591,8 +625,10 @@ const extension: ExtensionFactory = (pi) => {
 			}),
 			async execute(_id, params) {
 				try {
-					const resp = await orchestrateDetailed("POST", "dismiss", { childSessionId: params.session_id });
-					return { content: [{ type: "text" as const, text: dismissText(resp.body) }], details: resp.body, isError: !resp.ok && resp.body?.status === "failed" };
+					const targetSessionId = params.session_id;
+					const resp = await orchestrateDetailed("POST", "dismiss", { childSessionId: targetSessionId });
+					const result = normalizeDismissResponse(resp, targetSessionId);
+					return { content: [{ type: "text" as const, text: dismissText(result) }], details: result, isError: result.status === "failed" };
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});

@@ -303,6 +303,8 @@ export class TeamManager {
 	private sessionToGoal = new Map<string, string>();
 	/** sessionId → goalId for idempotent duplicate dismiss classification after live team tracking is removed. */
 	private dismissedSessionToGoal = new Map<string, string>();
+	/** Per-session dismiss mutex. Prevents overlapping duplicate dismisses from mutating stale agent indexes. */
+	private dismissLocks = new Map<string, Promise<void>>();
 
 	/** Track last notification time per worker session to debounce rapid agent_end events. */
 	private lastNotifyTime = new Map<string, number>();
@@ -2252,6 +2254,30 @@ export class TeamManager {
 
 	/** Dismiss a role agent for a specific goal, preserving structured authz/not-found outcomes. */
 	async dismissRoleForGoal(goalId: string, sessionId: string): Promise<DismissResult> {
+		return this.runDismissLocked(sessionId, () => this.dismissRoleForGoalLocked(goalId, sessionId));
+	}
+
+	private async runDismissLocked<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+		for (;;) {
+			const previous = this.dismissLocks.get(sessionId);
+			if (!previous) break;
+			await previous.catch(() => undefined);
+		}
+
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		this.dismissLocks.set(sessionId, current);
+		try {
+			return await action();
+		} finally {
+			if (this.dismissLocks.get(sessionId) === current) {
+				this.dismissLocks.delete(sessionId);
+			}
+			release();
+		}
+	}
+
+	private async dismissRoleForGoalLocked(goalId: string, sessionId: string): Promise<DismissResult> {
 		const mappedGoalId = this.sessionToGoal.get(sessionId);
 		if (mappedGoalId && mappedGoalId !== goalId) {
 			return { ok: false, status: "not-owned", sessionId, message: `Team agent ${sessionId} belongs to a different goal.`, retryable: false };
@@ -2321,8 +2347,14 @@ export class TeamManager {
 
 		// Worktree is preserved for archived session review — cleanup happens at purge time
 
-		// Remove from tracking
-		entry.agents.splice(agentIndex, 1);
+		// Remove from tracking. Re-find by sessionId after awaits so a duplicate or
+		// external cleanup cannot make us splice a stale index and remove another agent.
+		const removalIndex = entry.agents.findIndex((a) => a.sessionId === sessionId);
+		if (removalIndex === -1) {
+			this.dismissedSessionToGoal.set(sessionId, goalId);
+			return this.classifyUntrackedDismiss(goalId, sessionId);
+		}
+		entry.agents.splice(removalIndex, 1);
 		this.dismissedSessionToGoal.set(sessionId, goalId);
 		this.sessionToGoal.delete(sessionId);
 		this.lastNotifyTime.delete(sessionId);

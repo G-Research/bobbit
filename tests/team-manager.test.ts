@@ -472,6 +472,57 @@ describe("TeamManager", () => {
 				{ ok: false, status: "not-found", sessionId: "orphan-session", retryable: false },
 			);
 		});
+
+		it("should keep other agents tracked during overlapping duplicate dismisses", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+			const entry = (team as any).teams.get("goal-1")!;
+			const now = Date.now();
+			entry.agents.push(
+				{ sessionId: "agent-a", role: "coder", kind: "worker", task: "A", createdAt: now },
+				{ sessionId: "agent-b", role: "tester", kind: "worker", task: "B", createdAt: now },
+			);
+			(team as any).sessionToGoal.set("agent-a", "goal-1");
+			(team as any).sessionToGoal.set("agent-b", "goal-1");
+			sm._sessions.set("agent-a", { id: "agent-a", title: "Agent A", status: "idle" });
+			sm._sessions.set("agent-b", { id: "agent-b", title: "Agent B", status: "idle" });
+
+			let releaseTerminate!: () => void;
+			let terminateStarted!: () => void;
+			const terminateStartedPromise = new Promise<void>((resolve) => { terminateStarted = resolve; });
+			sm.terminateSession = mock.fn(async (id: string) => {
+				assert.equal(id, "agent-a");
+				terminateStarted();
+				await new Promise<void>((resolve) => { releaseTerminate = resolve; });
+				sm._sessions.delete(id);
+				return true;
+			});
+
+			const first = team.dismissRoleForGoal("goal-1", "agent-a");
+			await terminateStartedPromise;
+			const duplicate = team.dismissRoleForGoal("goal-1", "agent-a");
+
+			assert.deepEqual(team.listAgents("goal-1").map((a) => a.sessionId), ["agent-a", "agent-b"]);
+			releaseTerminate();
+
+			const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+			assert.equal(sm.terminateSession.mock.callCount(), 1, "duplicate dismiss should not terminate twice");
+			assert.deepEqual(
+				{ ok: firstResult.ok, status: firstResult.status, sessionId: firstResult.sessionId, retryable: firstResult.retryable },
+				{ ok: true, status: "dismissed", sessionId: "agent-a", retryable: false },
+			);
+			assert.deepEqual(
+				{ ok: duplicateResult.ok, status: duplicateResult.status, sessionId: duplicateResult.sessionId, retryable: duplicateResult.retryable },
+				{ ok: true, status: "already-dismissed", sessionId: "agent-a", retryable: false },
+			);
+			assert.deepEqual(team.listAgents("goal-1").map((a) => a.sessionId), ["agent-b"]);
+			assert.equal(sm.getSession("agent-b")?.status, "idle", "agent-b should remain live");
+		});
 	});
 
 	// ---------------------------------------------------------------------------
