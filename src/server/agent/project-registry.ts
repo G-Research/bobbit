@@ -9,11 +9,14 @@ import {
 import { getProjectRoot } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
+export type ProjectKind = "normal" | "headquarters" | "system";
+
 export interface RegisteredProject {
   id: string;           // UUID
   name: string;         // Display name
   rootPath: string;     // Absolute path to project directory
   createdAt: number;    // Epoch ms
+  kind?: ProjectKind;   // Special project discriminator; absent means normal for legacy records
   color?: string;       // Deprecated — kept for backward compat
   palette?: string;     // One of 10 palette IDs or undefined
   colorLight: string;   // Accent color for light mode (always present)
@@ -39,6 +42,10 @@ export interface RegisteredProject {
 
 /** Stable id for the synthetic system project. */
 export const SYSTEM_PROJECT_ID = "system";
+/** Stable id for the user-facing server workspace alias. */
+export const HEADQUARTERS_PROJECT_ID = "headquarters";
+/** Server-owned display name for the Headquarters project. */
+export const HEADQUARTERS_PROJECT_NAME = "Headquarters";
 
 export type ProjectOrderErrorCode = "invalid_project_order" | "stale_project_order";
 
@@ -539,6 +546,10 @@ export class ProjectRegistry {
     const existing = this.projects.get(SYSTEM_PROJECT_ID);
     if (existing) {
       let changed = false;
+      if (existing.kind !== "system") {
+        existing.kind = "system";
+        changed = true;
+      }
       if (!existing.hidden) {
         existing.hidden = true;
         changed = true;
@@ -577,6 +588,7 @@ export class ProjectRegistry {
       name: "System",
       rootPath,
       createdAt: Date.now(),
+      kind: "system",
       colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
       colorDark: DEFAULT_PROJECT_COLOR_DARK,
       hidden: true,
