@@ -8,6 +8,7 @@ import { openApp } from "./ui-helpers.js";
 const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
 const INDENT_KEY = "bobbit:sidebar-tree-indent";
 const CUSTOM_INDENT_PX = 24;
+const UPDATED_INDENT_PX = 28;
 const SPEC = "Sidebar restart durability fixture goal with enough detail for validation.";
 
 const createdGoalIds: string[] = [];
@@ -92,9 +93,9 @@ async function seedCleanBrowserState(page: Page): Promise<void> {
 			localStorage.removeItem("bobbit-collapsed-staff");
 			localStorage.removeItem("bobbit-archived-collapsed-projects");
 			localStorage.removeItem("gateway.sessionId");
+			localStorage.setItem(indentKey, String(indentPx));
 			sessionStorage.setItem("bobbit-e2e-sidebar-restart-seeded", "1");
 		}
-		localStorage.setItem(indentKey, String(indentPx));
 	}, { treeStateKey: TREE_STATE_KEY, indentKey: INDENT_KEY, indentPx: CUSTOM_INDENT_PX });
 }
 
@@ -179,6 +180,9 @@ test.describe("Sidebar tree restart durability", () => {
 		expect(await storedTreePreference(page, parentGoalKey)).toBe("expanded");
 		expect(await storedIndent(page)).toBe(String(CUSTOM_INDENT_PX));
 
+		await page.evaluate(({ key, px }) => localStorage.setItem(key, String(px)), { key: INDENT_KEY, px: UPDATED_INDENT_PX });
+		expect(await storedIndent(page)).toBe(String(UPDATED_INDENT_PX));
+
 		await crashAndRestart(gateway, page);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await waitForSidebarScaffold(page, fixture);
@@ -187,7 +191,7 @@ test.describe("Sidebar tree restart durability", () => {
 		await expect(goalRow(page, fixture.childId), "expanded parent goal preference should survive restart/reload").toBeVisible({ timeout: 5_000 });
 		expect(await storedTreePreference(page, sessionsKey)).toBe("collapsed");
 		expect(await storedTreePreference(page, parentGoalKey)).toBe("expanded");
-		expect(await storedIndent(page)).toBe(String(CUSTOM_INDENT_PX));
-		await waitForRuntimeIndent(page, CUSTOM_INDENT_PX);
+		expect(await storedIndent(page)).toBe(String(UPDATED_INDENT_PX));
+		await waitForRuntimeIndent(page, UPDATED_INDENT_PX);
 	});
 });
