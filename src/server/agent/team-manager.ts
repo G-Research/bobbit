@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
-import { isNonRetryableAgentError } from "./verification-logic.js";
+import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
@@ -77,6 +77,26 @@ function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
 		}
 	}
 	return out;
+}
+
+const BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS = 3;
+
+function isErroredIdleAutoRetryEligible(session: SessionInfo): boolean {
+	const errMsg = session.lastTurnErrorMessage || "";
+	if (!errMsg || isNonRetryableAgentError(errMsg)) return false;
+
+	const isBackoff = isProviderBackoffError(errMsg);
+	const isTransient = isTransientReviewError(errMsg);
+	const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
+	// OpenAI/Codex reports retryable 5xx failures with a compact `server_error`
+	// code; keep team-manager recovery consistent with the visible Retry path for
+	// that provider code without treating arbitrary unknown errors as retryable.
+	const isRetryableServerErrorCode = /\bserver_error\b/i.test(errMsg);
+	if (!isBackoff && !isTransient && !isGenericRetryable && !isRetryableServerErrorCode) return false;
+	if (isBackoff) return true;
+
+	return (session.transientRetryAttempts ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+		&& (session.consecutiveErrorTurns ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
 }
 
 async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
@@ -1121,12 +1141,18 @@ export class TeamManager {
 			return true;
 		}
 
-		const errMsg = session.lastTurnErrorMessage || "";
-		const exhausted = (session.consecutiveErrorTurns ?? 0) >= 3;
-		if (exhausted || isNonRetryableAgentError(errMsg)) {
+		if (!isErroredIdleAutoRetryEligible(session)) {
+			const errMsg = session.lastTurnErrorMessage || "";
+			const exhausted = (session.consecutiveErrorTurns ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+				|| (session.transientRetryAttempts ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
+			const reason = exhausted
+				? " after exhausted retries"
+				: isNonRetryableAgentError(errMsg)
+					? " for a non-retryable error"
+					: " for an unclassified error";
 			console.log(
 				`[team-manager] ${label} suppressed for errored idle session ${sessionId}; ` +
-				`manual Retry required${exhausted ? " after exhausted retries" : ""}`,
+				`manual Retry required${reason}`,
 			);
 			return true;
 		}
