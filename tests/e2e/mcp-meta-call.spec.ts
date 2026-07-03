@@ -242,26 +242,35 @@ test.describe("MCP meta-tool API E2E", () => {
 		const cwdKey = `cwd:${path.resolve(projectRoot)}`;
 		const cwdMgr = await makeFakeMcpManager(gateway, "cwd-server", { scopeKey: cwdKey });
 		(gateway.sessionManager as any).scopedMcpManagers.set(cwdKey, cwdMgr);
+		const unrelatedRoot = path.join(projectRoot!, "..", "unrelated-mcp-scope");
+		const unrelatedCwdKey = `cwd:${path.resolve(unrelatedRoot)}`;
+		const unrelatedCwdMgr = await makeFakeMcpManager(gateway, "unrelated-cwd-server", { scopeKey: unrelatedCwdKey });
+		(gateway.sessionManager as any).scopedMcpManagers.set(unrelatedCwdKey, unrelatedCwdMgr);
 		gateway.sessionManager.refreshExternalMcpToolRegistrations();
 		const projectClient = (projectMgr as any).clients.get("project-server");
 		const cwdClient = (cwdMgr as any).clients.get("cwd-server");
+		const unrelatedCwdClient = (unrelatedCwdMgr as any).clients.get("unrelated-cwd-server");
 
 		let toolsBody = await (await apiFetch("/api/tools")).json();
 		let names = toolsBody.tools.map((t: any) => t.name);
 		expect(names).toContain("mcp__default-server__echo");
 		expect(names).toContain("mcp__project-server__echo");
 		expect(names).toContain("mcp__cwd-server__echo");
+		expect(names).toContain("mcp__unrelated-cwd-server__echo");
 
 		await gateway.sessionManager.cleanupScopedMcpManagersForProject(projectId!, projectRoot);
 
 		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
 		expect(gateway.sessionManager.getMcpManager({ cwd: projectRoot })).toBeNull();
+		expect(gateway.sessionManager.getMcpManager({ cwd: unrelatedRoot })).not.toBeNull();
 		expect(projectClient?.connected).toBe(false);
 		expect(cwdClient?.connected).toBe(false);
+		expect(unrelatedCwdClient?.connected).toBe(true);
 
 		toolsBody = await (await apiFetch("/api/tools")).json();
 		names = toolsBody.tools.map((t: any) => t.name);
 		expect(names).toContain("mcp__default-server__echo");
+		expect(names).toContain("mcp__unrelated-cwd-server__echo");
 		expect(names).not.toContain("mcp__project-server__echo");
 		expect(names).not.toContain("mcp__cwd-server__echo");
 	});

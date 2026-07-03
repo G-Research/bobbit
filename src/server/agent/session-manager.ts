@@ -2128,10 +2128,17 @@ export class SessionManager {
 
 	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
 		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
+		const projectScopeKey = this.mcpScopeKey({ projectId });
+		const targetCwdScopeKey = targetRoot ? this.mcpScopeKey({ cwd: targetRoot }) : undefined;
 		const keys: string[] = [];
 		for (const [key, mgr] of this.scopedMcpManagers) {
 			const scope = mgr.getDiscoveryScope();
-			if (key === this.mcpScopeKey({ projectId }) || scope.projectId === projectId || (targetRoot && path.resolve(scope.cwd) === targetRoot)) {
+			if (
+				key === projectScopeKey
+				|| key === targetCwdScopeKey
+				|| scope.projectId === projectId
+				|| (targetRoot && path.resolve(scope.cwd) === targetRoot)
+			) {
 				keys.push(key);
 			}
 		}
