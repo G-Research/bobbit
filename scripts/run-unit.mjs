@@ -112,10 +112,12 @@ const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FA
 const exitCloseGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_EXIT_CLOSE_GRACE_MS || "5000", 10) || 5000);
 // Keep the unit wrapper inside the workflow/gate timeout even when a child runner
 // never exits (for example a leaked handle that survives --test-force-exit). The
-// timeout must be long enough for legitimate slow Windows runs but shorter than
-// the gate's 1200s watchdog so failures include the runner tail instead of an
-// opaque outer timeout.
-const runnerTimeoutMs = Math.max(60_000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_TIMEOUT_MS || "900000", 10) || 900_000);
+// default is 17.5 minutes: long enough for legitimate slow Windows/gate runs
+// under heavy contention, but still below the gate's 1200s watchdog with ~150s
+// left for npm pretest/build overhead, process-tree cleanup, and failure-tail
+// replay. BOBBIT_UNIT_RUNNER_TIMEOUT_MS remains the explicit override for local
+// stress runs or temporary CI tuning.
+const runnerTimeoutMs = Math.max(60_000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_TIMEOUT_MS || "1050000", 10) || 1_050_000);
 const runnerKillGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_KILL_GRACE_MS || "10000", 10) || 10_000);
 
 function appendTail(tail, chunk) {
