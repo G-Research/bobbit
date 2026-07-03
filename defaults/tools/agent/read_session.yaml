@@ -13,10 +13,11 @@ detail_docs: >-
   ## Purpose
 
 
-  Read the conversation transcript of another Bobbit session — a peer team
-  agent, a delegate session, or an archived session. The tool resolves the
-  session's JSONL file server-side so callers never deal with paths, sandbox
-  remapping, or filesystem permissions.
+  Read the conversation transcript of another Bobbit session on the same
+  gateway — a peer team agent, a delegate session, a session from another
+  project, or an archived session. The tool resolves the session's JSONL file
+  server-side so callers never deal with paths, sandbox remapping, or
+  filesystem permissions.
 
 
   ## Parameters
@@ -108,8 +109,6 @@ detail_docs: >-
   | `invalid_regex` | 400 | `pattern` failed to compile. |
 
   | `invalid_params` | 400 | `limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc. |
-
-  | `permission_denied` | 403 | Cross-project read. |
 
 
   ## Examples
