@@ -25,7 +25,7 @@ import { state, renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
 import { isSidebarTreeExpanded, setSidebarTreeExpanded } from "./sidebar-tree-state.js";
-import type { SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
+import { isSidebarTreeExpandable, parseSidebarTreeKey, type SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
 
 export type NavKind = "project" | "goal" | "session" | "ungrouped-header" | "staff-header" | "archived-header";
 
@@ -111,6 +111,51 @@ function navItemTreeKey(item: NavItem): SidebarTreeNodeKey | null {
 		case "archived-header": return { kind: "project-archived", projectId: item.id };
 		case "session": return null;
 	}
+}
+
+function navRowForId(navId: string): HTMLElement | null {
+	if (typeof document === "undefined") return null;
+	const sidebar = document.querySelector(".sidebar-edge");
+	if (!sidebar) return null;
+	for (const el of sidebar.querySelectorAll<HTMLElement>("[data-nav-id]")) {
+		if (el.getAttribute("data-nav-id") === navId) return el;
+	}
+	return null;
+}
+
+function rowHasChevron(row: HTMLElement): boolean {
+	return !!row.querySelector(".sidebar-chevron-glyph")?.textContent?.trim();
+}
+
+function sessionParentId(session: { parentSessionId?: unknown; delegateOf?: unknown }): string | undefined {
+	return typeof session.parentSessionId === "string" && session.parentSessionId
+		? session.parentSessionId
+		: typeof session.delegateOf === "string" && session.delegateOf
+			? session.delegateOf
+			: undefined;
+}
+
+function isArchivedOrTerminalSession(session: { archived?: unknown; status?: unknown }): boolean {
+	return session.archived === true || session.status === "terminated" || session.status === "archived";
+}
+
+function sessionChildTreeKeyForRow(sessionId: string, row: HTMLElement | null): SidebarTreeNodeKey | null {
+	if (!row || !rowHasChevron(row)) return null;
+	const hasLiveChildren = state.gatewaySessions.some(session => sessionParentId(session) === sessionId && !isArchivedOrTerminalSession(session));
+	if (hasLiveChildren) return { kind: "session-children", sessionId, childClass: "first-class" };
+	const hasArchivedChildren = [...state.gatewaySessions, ...state.archivedSessions]
+		.some(session => sessionParentId(session) === sessionId && isArchivedOrTerminalSession(session));
+	if (hasArchivedChildren) return { kind: "session-children", sessionId, childClass: "archived-delegate" };
+	return null;
+}
+
+function navItemTreeKeyForRow(item: NavItem, navId: string): SidebarTreeNodeKey | null {
+	const row = navRowForId(navId);
+	const renderedKey = row?.getAttribute("data-tree-key");
+	const parsedKey = renderedKey ? parseSidebarTreeKey(renderedKey) : null;
+	if (parsedKey && isSidebarTreeExpandable(parsedKey)) return parsedKey;
+	if (item.kind === "session") return sessionChildTreeKeyForRow(item.id, row);
+	return navItemTreeKey(item);
 }
 
 export function isNavItemExpanded(navId: string): boolean | null {
@@ -245,11 +290,12 @@ export function expandActiveSidebarItem(expand: boolean): void {
 		return;
 	}
 	const item = parseNavId(activeId);
-	if (!item || !isExpandableKind(item.kind)) return;
-	const expanded = isNavItemExpanded(activeId);
-	if (expanded === null) return;
+	if (!item) return;
+	const key = navItemTreeKeyForRow(item, activeId);
+	if (!key) return;
+	const expanded = isSidebarTreeExpanded(key);
 	if (expanded === expand) return; // already in requested state
-	setNavItemExpanded(activeId, expand);
+	setSidebarTreeExpanded(key, expand);
 	renderApp();
 }
 

@@ -53,18 +53,33 @@ afterEach(() => {
 });
 
 describe("sidebar-tree-state", () => {
-	it("uses the designed defaults for every node kind", async () => {
+	it("uses the representative durable defaults for unified tree node kinds", async () => {
 		const state = await importFresh("defaults");
+		const cases: Array<{ name: string; key: SidebarTreeNodeKey; expected: boolean }> = [
+			{ name: "project", key: { kind: "project", projectId: "project" }, expected: true },
+			{ name: "project sessions", key: { kind: "project-sessions", projectId: "project" }, expected: true },
+			{ name: "staff", key: { kind: "project-staff", projectId: "project" }, expected: true },
+			{ name: "archived", key: { kind: "project-archived", projectId: "project" }, expected: true },
+			{ name: "parent goal", key: { kind: "goal", goalId: "parent-goal" }, expected: false },
+			{ name: "sub-goal", key: { kind: "goal", goalId: "child-goal" }, expected: false },
+			{ name: "team lead", key: { kind: "team-lead", sessionId: "team-session" }, expected: true },
+			{ name: "first-class child sessions", key: { kind: "session-children", sessionId: "parent-session", childClass: "first-class" }, expected: true },
+			{ name: "archived delegate children", key: { kind: "session-children", sessionId: "parent-session", childClass: "archived-delegate" }, expected: false },
+			{ name: "session leaf", key: { kind: "session", sessionId: "leaf-session" }, expected: false },
+		];
 
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "project", projectId: "same" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "project-sessions", projectId: "same" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "project-staff", projectId: "same" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "project-archived", projectId: "same" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "goal", goalId: "same" }), false);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "team-lead", sessionId: "same" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "session-children", sessionId: "same", childClass: "first-class" }), true);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "session-children", sessionId: "same", childClass: "archived-delegate" }), false);
-		assert.equal(state.sidebarTreeDefaultExpanded({ kind: "session", sessionId: "same" }), false);
+		for (const testCase of cases) {
+			assert.equal(state.sidebarTreeDefaultExpanded(testCase.key), testCase.expected, testCase.name);
+			assert.equal(state.isSidebarTreeExpanded(testCase.key), testCase.expected, testCase.name);
+		}
+		assert.equal(state.isProjectExpanded("project"), true);
+		assert.equal(state.isUngroupedExpanded("project"), true);
+		assert.equal(state.isStaffExpanded("project"), true);
+		assert.equal(state.isArchivedSectionExpanded("project"), true);
+		assert.equal(state.isGoalExpanded("child-goal"), false);
+		assert.equal(state.isTeamLeadExpanded("team-session"), true);
+		assert.equal(state.isFirstClassParentExpanded("parent-session"), true);
+		assert.equal(state.isArchivedParentExpanded("parent-session"), false);
 
 		const input = state.sidebarTreeExpansionInput();
 		assert.equal(input.defaultExpanded?.({ kind: "session", sessionId: "leaf" }, true), true);
@@ -106,6 +121,41 @@ describe("sidebar-tree-state", () => {
 		assert.equal(state.isFirstClassParentExpanded(id), false);
 		assert.equal(state.isArchivedParentExpanded(id), true);
 		assert.equal(Object.keys(storedExpansion(store)).length, 5);
+	});
+
+	it("reloads explicit preferences from storage across fresh module imports", async () => {
+		const { store } = installStorage();
+		const first = await importFresh("reload-first");
+
+		first.setSidebarTreeExpanded({ kind: "project", projectId: "project" }, false);
+		first.setSidebarTreeExpanded({ kind: "project-sessions", projectId: "project" }, false);
+		first.setSidebarTreeExpanded({ kind: "project-staff", projectId: "project" }, false);
+		first.setSidebarTreeExpanded({ kind: "project-archived", projectId: "project" }, false);
+		first.setGoalExpanded("sub-goal", true);
+		first.setTeamLeadExpanded("team-session", false);
+		first.setFirstClassParentExpanded("parent-session", false);
+		first.setArchivedParentExpanded("parent-session", true);
+
+		const second = await importFresh("reload-second");
+
+		assert.equal(second.isProjectExpanded("project"), false);
+		assert.equal(second.isUngroupedExpanded("project"), false);
+		assert.equal(second.isStaffExpanded("project"), false);
+		assert.equal(second.isArchivedSectionExpanded("project"), false);
+		assert.equal(second.isGoalExpanded("sub-goal"), true);
+		assert.equal(second.isTeamLeadExpanded("team-session"), false);
+		assert.equal(second.isFirstClassParentExpanded("parent-session"), false);
+		assert.equal(second.isArchivedParentExpanded("parent-session"), true);
+		assert.deepEqual(storedExpansion(store), {
+			[key({ kind: "goal", goalId: "sub-goal" })]: "expanded",
+			[key({ kind: "project", projectId: "project" })]: "collapsed",
+			[key({ kind: "project-archived", projectId: "project" })]: "collapsed",
+			[key({ kind: "project-sessions", projectId: "project" })]: "collapsed",
+			[key({ kind: "project-staff", projectId: "project" })]: "collapsed",
+			[key({ kind: "session-children", sessionId: "parent-session", childClass: "archived-delegate" })]: "expanded",
+			[key({ kind: "session-children", sessionId: "parent-session", childClass: "first-class" })]: "collapsed",
+			[key({ kind: "team-lead", sessionId: "team-session" })]: "collapsed",
+		});
 	});
 
 	it("migrates every legacy key without deleting legacy entries", async () => {
@@ -181,11 +231,25 @@ describe("sidebar-tree-state", () => {
 		state.collapseSidebarTreeNode({ kind: "goal", goalId: "parent" });
 		state.expandSidebarTreeNode({ kind: "goal", goalId: "parent" }, { explicit: false });
 		assert.equal(state.isGoalExpanded("parent"), false);
-		assert.equal(state.getSidebarTreePreference({ kind: "goal", goalId: "child" }), undefined);
+		assert.equal(storedExpansion(store)[key({ kind: "goal", goalId: "parent" })], "collapsed");
+
+		state.collapseSidebarTreeNode({ kind: "project", projectId: "default-expanded-project" });
+		state.expandSidebarTreeNode({ kind: "project", projectId: "default-expanded-project" }, { explicit: false });
+		assert.equal(state.isProjectExpanded("default-expanded-project"), false);
+		assert.equal(storedExpansion(store)[key({ kind: "project", projectId: "default-expanded-project" })], "collapsed");
+
+		state.setFirstClassParentExpanded("default-expanded-children", false);
+		state.expandSidebarTreeNode({ kind: "session-children", sessionId: "default-expanded-children", childClass: "first-class" }, { explicit: false });
+		assert.equal(state.isFirstClassParentExpanded("default-expanded-children"), false);
+		assert.equal(storedExpansion(store)[key({ kind: "session-children", sessionId: "default-expanded-children", childClass: "first-class" })], "collapsed");
 
 		state.expandSidebarTreeNode({ kind: "team-lead", sessionId: "default-expanded" }, { explicit: false });
 		assert.equal(state.isTeamLeadExpanded("default-expanded"), true);
 		assert.equal(storedExpansion(store)[key({ kind: "team-lead", sessionId: "default-expanded" })], undefined);
+
+		state.expandSidebarTreeNode({ kind: "session-children", sessionId: "default-expanded-children-without-pref", childClass: "first-class" }, { explicit: false });
+		assert.equal(state.isFirstClassParentExpanded("default-expanded-children-without-pref"), true);
+		assert.equal(storedExpansion(store)[key({ kind: "session-children", sessionId: "default-expanded-children-without-pref", childClass: "first-class" })], undefined);
 
 		state.expandSidebarTreeNode({ kind: "goal", goalId: "top-level" }, { explicit: false });
 		assert.equal(state.isGoalExpanded("top-level"), true);
