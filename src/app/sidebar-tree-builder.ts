@@ -949,17 +949,19 @@ function dedupeSessionsById<T extends SessionLike>(sessions: readonly T[]): T[] 
 }
 
 function resolveGoalProjectId(goal: GoalLike, goalById: ReadonlyMap<string, GoalLike>, projectIds: ReadonlySet<string>, fallbackProjectId?: string): string | undefined {
-	if (goal.projectId && projectIds.has(goal.projectId)) return goal.projectId;
 	let cursor: GoalLike | undefined = goal;
 	const seen = new Set<string>();
-	while (cursor?.parentGoalId && !seen.has(cursor.id)) {
+	let resolvedProjectId: string | undefined;
+	while (cursor && !seen.has(cursor.id)) {
 		seen.add(cursor.id);
-		const parent = goalById.get(cursor.parentGoalId);
-		if (!parent) break;
-		if (parent.projectId && projectIds.has(parent.projectId)) return parent.projectId;
-		cursor = parent;
+		if (cursor.projectId) {
+			if (!projectIds.has(cursor.projectId)) return undefined;
+			resolvedProjectId ??= cursor.projectId;
+		}
+		if (!cursor.parentGoalId) break;
+		cursor = goalById.get(cursor.parentGoalId);
 	}
-	return fallbackProjectId;
+	return resolvedProjectId ?? fallbackProjectId;
 }
 
 function nestedDepthForProject(projectId: string, depths: BuildSidebarTreeInput["nestedDepthByProject"], fallback: number): number {

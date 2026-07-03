@@ -501,12 +501,44 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.projects[0].ungroupedSessionNodes[0].context.matchesSearch, true);
 	});
 
-	it("falls back missing-project goals to the first project bucket", () => {
+	it("omits hidden Headquarters goals instead of bucketing them under a visible project", () => {
+		const model = buildSidebarTree({
+			projects: [project("p1")],
+			goals: [
+				goal({ id: "normal", projectId: "p1", createdAt: 1 }),
+				goal({ id: "headquarters-goal", projectId: "headquarters", createdAt: 2 }),
+			],
+			sessions: [],
+			archivedSessions: [],
+			showArchived: false,
+		});
+		assert.deepEqual(allGoalIds([model.projects[0].projectNode]), ["normal"]);
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "headquarters-goal" })), false);
+	});
+
+	it("omits children whose parent has a hidden explicit projectId", () => {
+		const model = buildSidebarTree({
+			projects: [project("p1")],
+			goals: [
+				goal({ id: "normal", projectId: "p1", createdAt: 1 }),
+				goal({ id: "hidden-parent", projectId: "headquarters", createdAt: 2 }),
+				goal({ id: "hidden-child", projectId: "p1", parentGoalId: "hidden-parent", createdAt: 3 }),
+			],
+			sessions: [],
+			archivedSessions: [],
+			showArchived: false,
+		});
+		assert.deepEqual(allGoalIds([model.projects[0].projectNode]), ["normal"]);
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "hidden-parent" })), false);
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "hidden-child" })), false);
+	});
+
+	it("falls back legacy goals with no projectId ancestry to the first project bucket", () => {
 		const model = buildSidebarTree({
 			projects: [project("p1"), project("p2")],
 			goals: [
 				goal({ id: "legacy-live", projectId: undefined, createdAt: 1 }),
-				goal({ id: "legacy-archived", projectId: "missing-project", archived: true, createdAt: 2 }),
+				goal({ id: "legacy-archived", projectId: undefined, archived: true, createdAt: 2 }),
 			],
 			sessions: [],
 			archivedSessions: [],
