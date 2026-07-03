@@ -45,6 +45,19 @@ The command step itself should not have been finalized as a command failure just
 
 Current command recovery can sometimes recover from an `exitFile`, but if the process is gone and no exit file exists, it fabricates a failed verification step with a restart-attributed message. That is not a real command verdict.
 
+### Required terminal semantics for gone/no-status recovery
+
+"Process gone after restart with no durable status" means Bobbit has neither a verified live process identity nor a wrapper-written exit/status snapshot. It is not equivalent to exit code `1`, timeout, or an `error_pattern` mismatch, and `expectFailure` mapping must not run because there is no command verdict.
+
+Required mapping:
+
+- Durable exit/status exists → finalize from the real status and retained logs; non-zero exits are normal command failures.
+- Persisted timeout/cancel/kill intent exists → finalize as that terminal reason and kill by verified process identity.
+- Restart-adjacent disappearance with no independent death proof → classify the verification attempt as `restart-interrupted` / `unrecoverable-no-status`; keep the gate `pending`, make the signal retryable/re-signalable, and expose a blocked/interrupted diagnostic row in `gate_status` / `gate_inspect` with retained output. Do not mark the command step `failed`, do not cache it as a reusable command result, and do not send failed-step inspect hints for never-run later phases.
+- Independently proven disappearance outside restart/cancel/timeout paths → surface an infrastructure failure, not a command verdict. The gate may fail as infrastructure, but UI/status payloads and team-lead notifications must say no command exit code/status was obtained and that retry is appropriate; they must not imply the workflow command returned a failing exit code.
+
+Later phases follow the attempt outcome: after a real recovered command failure they become explicit skipped rows; after a retryable interruption they remain blocked by the interrupted attempt rather than failed placeholders.
+
 ## 3. Current command-step persistence model and precise gaps
 
 Relevant code: `src/server/agent/verification-harness.ts`.
@@ -187,12 +200,46 @@ Existing coverage is useful but incomplete:
 
 - `tests/verification-harness-restart.test.ts` covers zombie command active entries and a PID-age reuse guard.
 - `tests/e2e/verification-restart-resignal.spec.ts` covers re-signaling after a simulated zombie verification.
-- `tests/verification-resume-restart-prompt.test.ts` and `tests/verification-resume-restart-recovery.test.ts` cover LLM reviewer resume behavior.
+- `tests/verification-resume-restart-prompt.test.ts` and `tests/verification-resume-restart-recovery.test.ts` pin LLM reviewer resume behavior: restart-prompt timeouts leave the gate pending, slow revived reviewers are prompted after readiness, and transient reattach failures rerun from scratch without a hard `Resume Error`.
 - `tests/spawn-tree-shutdown-survival.test.ts` pins `markSurvival()`/`killAllTracked()` behavior.
 - `tests/bg-process-persistence.test.ts`, `tests/bg-process-windows-restart.test.ts`, and `tests/manual-integration/bg-process-restart-survival.spec.ts` cover the mature `bash_bg` process model.
 - `tests/notify-team-lead-failure.test.ts` already pins that skipped steps are omitted from failure notifications when marked correctly.
+- Optional-step behavior is pinned by `tests/verification-logic.test.ts` (`partitionOptionalSteps` and `computeAllPassed` cases for optional-skipped and phase-skipped rows) plus `tests/e2e/optional-steps-api.spec.ts` (`optional step skipped when not enabled` and `optional step auto-passes when enabled`).
 
 Missing coverage: a command verification that is genuinely running across a gateway restart and then produces a real exit code.
+
+### Pre-fix reproduction procedure
+
+Use the smallest workflow that has one long-running command followed by a later-phase reviewer:
+
+```yaml
+gates:
+  - id: implementation
+    name: Implementation
+    verify:
+      - name: Restart probe
+        type: command
+        phase: 0
+        run: >-
+          node -e "const fs=require('fs'); const exit=Number(process.env.PROBE_EXIT||7); fs.appendFileSync('restart-probe.log','started\\n'); console.log('probe:started'); setTimeout(()=>{fs.appendFileSync('restart-probe.log','after-restart\\n'); console.log('probe:after-restart'); process.exit(exit);},45000)"
+      - name: Downstream review
+        type: llm-review
+        phase: 1
+        prompt: "This should not run when Restart probe fails."
+```
+
+Procedure:
+
+1. Signal the gate with `PROBE_EXIT=7` for the failure path, or `PROBE_EXIT=0` for the success path.
+2. Wait until live output or `gate_inspect` shows `probe:started`.
+3. Restart the gateway before the 45-second timer expires.
+4. After restart, wait for verification recovery/finalization and inspect the gate.
+
+Pre-fix expected symptoms for the observed bug:
+
+- Non-container command path: the intended post-fix behavior is to reattach or recover `probe:after-restart` and the real exit code. On the current buggy path, if the restart loses the detached child or its exit file, the gate is marked `failed` with `Verification command process died during gateway restart before producing an exit code.`, the real exit is unknown, and retained output may stop at `probe:started`.
+- Container/sandbox command path: current `docker exec` execution is attached to the gateway and has no durable exit/status mirror. A restart should be expected to reproduce the lost-handle/no-verdict behavior unless container support is implemented; the post-fix contract is either full recovery or an explicit pending/re-signalable interruption, never a fake command verdict.
+- In both paths, the later `Downstream review` phase must not run after a real non-zero command exit. Pre-fix resume may render that never-run row as failed and include it in team-lead failure notifications; the fix must render it as skipped after real command failure, or blocked/pending after retryable interruption.
 
 ### Required new regression cases
 
@@ -273,6 +320,17 @@ If not supported in the first implementation:
 #### Windows restart behavior
 
 Add a Windows-focused/manual test mirroring the `bash_bg` manual integration, but through `gate_signal`. It should verify the dev harness kills only the gateway PID, not detached verification children, and that a Windows no-Git-Bash host does not silently degrade into non-restart-safe command execution.
+
+### Planned validation matrix
+
+| Area | Validation |
+|---|---|
+| Command restart success/failure | New API E2E or manual-integration tests using the pre-fix workflow above, covering exit `0` and non-zero after restart. |
+| Gone with no durable status | New unit recovery case asserting `restart-interrupted`/pending or infrastructure-failed/no-verdict semantics, with no fabricated exit code. |
+| Phase skip + notifications | New recovery test for downstream skipped rows, plus existing `tests/notify-team-lead-failure.test.ts`. |
+| LLM-review resume non-regression | Run existing `tests/verification-resume-restart-prompt.test.ts` and `tests/verification-resume-restart-recovery.test.ts`; no command-runner change may bypass their pending/rerun behavior. |
+| Optional-step non-regression | Run existing `tests/verification-logic.test.ts` optional/compute cases and `tests/e2e/optional-steps-api.spec.ts` skipped/enabled cases; optional-skipped rows remain skipped-as-passed and distinct from phase-skipped rows. |
+| `bash_bg` non-regression | Run existing `tests/bg-process-persistence.test.ts`, `tests/bg-process-windows-restart.test.ts`, and the manual restart-survival spec when touching shared process primitives. |
 
 ## 6. Downstream phase semantics and notification bug
 
