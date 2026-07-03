@@ -316,6 +316,96 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			t.mock.timers.reset();
 		}
 	});
+
+	it("suppresses unknown errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "model stopped with an unexplained deterministic failure";
+			tlSession.lastPromptText = "continue coordinating the team";
+
+			fire("agent_end");
+			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"unknown/unclassified errors must not be auto-retried by the team-manager nudge path");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"unknown errored idle sessions must suppress auto-nudge transcript cards");
+			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"unknown errored idle sessions must suppress auto-nudge steer cards");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("suppresses non-retryable errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "Authentication failed: invalid API key for provider";
+			tlSession.lastPromptText = "continue coordinating the team";
+
+			fire("agent_end");
+			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			await Promise.resolve();
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"non-retryable errors must leave manual Retry instead of using retryLastPrompt(auto)");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"non-retryable errored idle sessions must suppress auto-nudge transcript cards");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("does not emit duplicate [AUTO-NUDGE] cards while session auto-retry is pending", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		let pendingAutoRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
+			tlSession.lastPromptText = "continue coordinating the team";
+			pendingAutoRetryTimer = setTimeout(() => {}, 60 * 60 * 1000);
+			tlSession.pendingAutoRetryTimer = pendingAutoRetryTimer as any;
+
+			for (let i = 0; i < 3; i++) {
+				fire("agent_end");
+				t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+				await Promise.resolve();
+			}
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"team-manager must not start another retry while SessionManager auto-retry is pending");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"repeated timer ticks while auto-retry is pending must not enqueue duplicate auto-nudge cards");
+			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"repeated timer ticks while auto-retry is pending must not steer duplicate auto-nudge cards");
+		} finally {
+			if (pendingAutoRetryTimer) clearTimeout(pendingAutoRetryTimer);
+			t.mock.timers.reset();
+		}
+	});
 });
 
 describe("TeamManager — idle-nudge exponential backoff (regression)", () => {

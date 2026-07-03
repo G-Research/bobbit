@@ -1056,6 +1056,7 @@ describe("TeamManager", () => {
 			const teamLead = await team.startTeam("goal-1");
 			(teamLead as any).status = "idle";
 			(teamLead as any).lastTurnErrored = true;
+			(teamLead as any).lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
 
 			const entry = (team as any).teams.get("goal-1")!;
 			sm._sessions.set("worker-1", {
