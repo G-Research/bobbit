@@ -11,6 +11,8 @@
  * import without dragging the whole verification-harness graph in.
  */
 
+import { isRestartInterruptedStep } from "./verification-logic.js";
+
 export interface FailureStepLike {
 	name: string;
 	type: string;
@@ -55,7 +57,9 @@ export function buildVerificationFailureMessage(
 	gateId: string,
 	steps: ReadonlyArray<FailureStepLike>,
 ): string {
-	const failed = steps.filter((s) => !s.passed && !s.skipped);
+	const failed = steps.filter((s) =>
+		!s.passed && !s.skipped && !isRestartInterruptedStep({ passed: s.passed, output: s.output ?? "", type: s.type }),
+	);
 
 	const lines: string[] = [];
 	lines.push("**Gate verification FAILED**");
