@@ -257,11 +257,24 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
 
 	await goToTab(page, "browse");
-	await expect(page.locator('[data-testid="market-browse-source-chips"]')).toBeVisible({ timeout: 15_000 });
-	await expect(page.locator('[data-testid="market-source-chip"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" })).toBeVisible({ timeout: 15_000 });
-	await page.locator('[data-testid="market-source-chip-none"]').click();
+	const sourceMenuTrigger = page.locator('[data-testid="market-source-menu-trigger"]');
+	await expect(sourceMenuTrigger).toBeVisible({ timeout: 15_000 });
+	await expect(sourceMenuTrigger).toHaveAttribute("aria-haspopup", "dialog");
+	await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 3 packs from 1 source");
+	await sourceMenuTrigger.click();
+	await expect(sourceMenuTrigger).toHaveAttribute("aria-expanded", "true");
+	await expect(page.locator('[data-testid="market-source-menu"]')).toBeVisible({ timeout: 15_000 });
+	const sourceOption = page.locator('[data-testid="market-source-option"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" });
+	await expect(sourceOption).toBeVisible({ timeout: 15_000 });
+	await expect(sourceOption.locator('[data-testid="market-source-count"]')).toContainText("3 packages");
+	const sourceCheckbox = sourceOption.locator('[data-testid="market-source-checkbox"]');
+	await expect(sourceCheckbox).toBeChecked();
+	await page.locator('[data-testid="market-source-clear"]').click();
+	await expect(page.locator('[data-testid="market-source-menu"]')).toBeVisible();
+	await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("No sources selected");
 	await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
-	await page.locator('[data-testid="market-source-chip"]').filter({ hasText: "mcp-local.t3.zone/readonly/mcp" }).click();
+	await sourceCheckbox.click();
+	await expect(sourceCheckbox).toBeChecked();
 	for (const provider of PROVIDERS) {
 		await expect(page.locator(`[data-testid="market-browse-pack"][data-pack-name="mcp-${provider.id}-${SOURCE_ID}"]`), provider.label).toBeVisible({ timeout: 15_000 });
 	}
