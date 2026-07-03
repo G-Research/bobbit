@@ -260,7 +260,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	const sourceMenuTrigger = page.locator('[data-testid="market-source-menu-trigger"]');
 	await expect(sourceMenuTrigger).toBeVisible({ timeout: 15_000 });
 	await expect(sourceMenuTrigger).toHaveAttribute("aria-haspopup", "dialog");
-	await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 3 packs from 1 source");
+	await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 3 packages from 1 source");
 	await sourceMenuTrigger.click();
 	await expect(sourceMenuTrigger).toHaveAttribute("aria-expanded", "true");
 	await expect(page.locator('[data-testid="market-source-menu"]')).toBeVisible({ timeout: 15_000 });

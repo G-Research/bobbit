@@ -387,26 +387,36 @@ test.describe("Marketplace UI", () => {
 		await expect(page.locator('[data-testid="market-browse-controls"]')).toBeVisible({ timeout: 15_000 });
 		await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
 		await expect(trigger).toHaveAttribute("aria-expanded", "false");
-		await expect(summary).toContainText("Showing 2 packs from 2 sources");
+		await expect(summary).toContainText("Showing 5 packages from 3 sources");
 		await openBrowseSourcesMenu(page);
 		const menu = page.locator('[data-testid="market-source-menu"]');
+		const sourceOptions = page.locator('[data-testid="market-source-option"]');
+		const sourceCheckboxes = page.locator('[data-testid="market-source-checkbox"]');
+		const fixtureOptions = sourceOptions.filter({ hasText: "1 package" });
 		await expect(menu).toHaveAttribute("role", "dialog");
-		await expect(page.locator('[data-testid="market-source-option"]')).toHaveCount(2);
-		await expect(page.locator('[data-testid="market-source-count"]')).toHaveCount(2);
-		await expect(page.locator('[data-testid="market-source-count"]').first()).toContainText("1 package");
-		await expect(page.locator('[data-testid="market-source-checkbox"]')).toHaveCount(2);
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(0)).toBeChecked();
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(1)).toBeChecked();
+		await expect(sourceOptions).toHaveCount(3);
+		await expect(page.locator('[data-testid="market-source-count"]')).toHaveCount(3);
+		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "1 package" })).toHaveCount(2);
+		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "3 packages" })).toHaveCount(1);
+		await expect(sourceCheckboxes).toHaveCount(3);
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
 
-		await page.locator('[data-testid="market-source-checkbox"]').nth(0).click();
+		await page.locator('[data-testid="market-source-clear"]').click();
+		await expect(menu).toBeVisible();
+		await expect(summary).toContainText("No sources selected");
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(0);
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
+		await expect(page.getByText("No sources selected. Open Sources and select at least one source to browse packages.")).toBeVisible();
+
+		await fixtureOptions.nth(1).locator('[data-testid="market-source-checkbox"]').click();
 		await expect(menu).toBeVisible();
 		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(1);
-		await expect(summary).toContainText("Showing 1 pack from 1 source");
+		await expect(summary).toContainText("Showing 1 package from 1 source");
 		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="alpha-pack"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="beta-pack"]')).toBeVisible();
 
 		await page.locator('[data-testid="market-browse-search"]').fill("beta");
-		await expect(summary).toContainText("Showing 1 pack from 1 source");
+		await expect(summary).toContainText("Showing 1 package from 1 source");
 		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="beta-pack"]')).toBeVisible();
 		await page.locator('[data-testid="market-browse-search"]').fill("alpha");
 		await expect(summary).toContainText("No packages match the current filters");
@@ -417,23 +427,15 @@ test.describe("Marketplace UI", () => {
 		await goToTab(page, "sources");
 		await goToTab(page, "browse");
 		await openBrowseSourcesMenu(page);
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(0)).not.toBeChecked();
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(1)).toBeChecked();
-		await expect(summary).toContainText("Showing 1 pack from 1 source");
-
-		await page.locator('[data-testid="market-source-clear"]').click();
-		await expect(menu).toBeVisible();
-		await expect(summary).toContainText("No sources selected");
-		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(0);
-		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
-		await expect(page.getByText("No sources selected. Open Sources and select at least one source to browse packages.")).toBeVisible();
+		await expect(fixtureOptions.nth(0).locator('[data-testid="market-source-checkbox"]')).not.toBeChecked();
+		await expect(fixtureOptions.nth(1).locator('[data-testid="market-source-checkbox"]')).toBeChecked();
+		await expect(summary).toContainText("Showing 1 package from 1 source");
 
 		await page.locator('[data-testid="market-source-select-all"]').click();
 		await expect(menu).toBeVisible();
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(0)).toBeChecked();
-		await expect(page.locator('[data-testid="market-source-checkbox"]').nth(1)).toBeChecked();
-		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(2);
-		await expect(summary).toContainText("Showing 2 packs from 2 sources");
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(5);
+		await expect(summary).toContainText("Showing 5 packages from 3 sources");
 
 		await page.keyboard.press("Escape");
 		await expect(trigger).toHaveAttribute("aria-expanded", "false");
@@ -480,7 +482,7 @@ test.describe("Marketplace UI", () => {
 		await navigateToHash(page, "#/market");
 		await goToTab(page, "browse");
 
-		await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 2 packs from 2 sources", { timeout: 15_000 });
+		await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 2 packages from 2 sources", { timeout: 15_000 });
 		await expect(page.locator('[data-testid="market-browse-source-warnings"]')).toContainText("Errored source", { timeout: 15_000 });
 		await openBrowseSourcesMenu(page);
 
