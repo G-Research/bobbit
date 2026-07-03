@@ -3286,6 +3286,7 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 	return html`
 		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
 			<button
+				data-testid="settings-headquarters-scope"
 				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5
 					${headquartersActive
 						? "bg-background text-foreground shadow-sm border border-border"

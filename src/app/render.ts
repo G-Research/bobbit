@@ -128,7 +128,7 @@ function _headquartersHiddenWithNoVisibleProjects(): boolean {
 
 function _splashSessionLabel(): string {
 	if (_headquartersHiddenWithNoVisibleProjects()) return "Quick Session";
-	return state.projects.length === 0 ? "New Project" : "New Session";
+	return state.projects.length === 0 ? "New Project" : "Quick Session";
 }
 
 function _splashSessionIcon() {

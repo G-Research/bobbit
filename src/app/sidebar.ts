@@ -1195,7 +1195,7 @@ function renderHiddenHeadquartersSidebarFallback(): TemplateResult | string {
 	if (!headquartersHiddenWithNoVisibleProjects()) return "";
 	return html`
 		<div class="mx-2 my-3 p-3 rounded-md text-center border border-border bg-secondary/20" data-testid="headquarters-hidden-sidebar-fallback">
-			<p class="text-foreground font-medium mb-1" style="font-size: 0.9167em;">Headquarters is hidden from project lists.</p>
+			<p class="text-foreground font-medium mb-1" style="font-size: 0.9167em;">Headquarters is hidden in the sidebar.</p>
 			<p class="text-muted-foreground mb-3" style="font-size: 0.75em;">The built-in server workspace is still available.</p>
 			<div class="flex flex-col gap-1.5">
 				<button class="px-2 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors" style="font-size: 0.8333em;" ?disabled=${state.creatingSession} @click=${() => createAndConnectSession(undefined, undefined, undefined, undefined, undefined, HEADQUARTERS_PROJECT_ID)}>Quick Session in Headquarters</button>

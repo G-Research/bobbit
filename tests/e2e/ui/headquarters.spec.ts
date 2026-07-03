@@ -295,7 +295,7 @@ test.describe("Headquarters browser UX", () => {
 		}).toEqual([]);
 
 		await openApp(page);
-		await expect(page.getByText("Headquarters is hidden from project lists.")).toBeVisible({ timeout: 15_000 });
+		await expect(page.getByText("Headquarters is hidden from project lists.").first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.getByRole("button", { name: "Quick Session in Headquarters" }).first()).toBeVisible();
 		await expect(page.getByRole("button", { name: "Show Headquarters" }).first()).toBeVisible();
 		await expect(page.getByRole("button", { name: /Add Project/i }).first()).toBeVisible();
@@ -317,8 +317,10 @@ test.describe("Headquarters browser UX", () => {
 
 		await navigateToHash(page, "#/settings/system/general");
 		await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
-		await expect(page.getByRole("button", { name: HEADQUARTERS_NAME }).first()).toBeVisible({ timeout: 10_000 });
-		await expect(headquartersIcon(page.getByRole("button", { name: HEADQUARTERS_NAME }).first()), "Settings scope row should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+		const settingsHeadquartersScope = page.getByTestId("settings-headquarters-scope");
+		await expect(settingsHeadquartersScope).toBeVisible({ timeout: 10_000 });
+		await expect(settingsHeadquartersScope).toContainText(HEADQUARTERS_NAME);
+		await expect(headquartersIcon(settingsHeadquartersScope), "Settings scope row should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
 		await expect(page.getByRole("button", { name: "System", exact: true }), "Settings should not expose both System and Headquarters scopes").toHaveCount(0);
 
 		await navigateToHash(page, "#/roles");
