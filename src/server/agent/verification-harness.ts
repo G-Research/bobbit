@@ -62,7 +62,6 @@ import {
 	shouldRetryVerificationStep,
 	shouldSuppressRestartInterrupt,
 	isRestartInterruptError,
-	isRestartInterruptedStep,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
@@ -731,27 +730,8 @@ export interface ActiveVerification {
 
 type TerminalGateSignalStepStatus = "passed" | "failed" | "skipped";
 
-type ResumedVerificationStep = {
-	name: string;
-	type: string;
-	passed: boolean;
-	skipped?: boolean;
-	status?: GateSignalStep["status"];
-	phase?: number;
-	output: string;
-	duration_ms: number;
-	diagnostics?: GateStepDiagnostics;
-};
-
 function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): TerminalGateSignalStepStatus {
 	if (step.skipped || step.status === "skipped") return "skipped";
-	if (step.status === "passed" || step.status === "failed") return step.status;
-	return step.passed ? "passed" : "failed";
-}
-
-function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): GateSignalStep["status"] {
-	if (step.skipped || step.status === "skipped") return "skipped";
-	if (step.status === "waiting" || step.status === "running") return step.status;
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
 }
@@ -1444,7 +1424,7 @@ export class VerificationHarness {
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
-		const resolvedSteps: ResumedVerificationStep[] = [];
+		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; phase?: number; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }> = [];
 
 		for (const step of v.steps) {
 			if (step.status !== "running") {
@@ -1537,7 +1517,7 @@ export class VerificationHarness {
 			}
 
 			if (resumeResult) {
-				resolvedSteps.push({ ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 });
+				resolvedSteps.push({ ...resumeResult, status: terminalStatusForStep(resumeResult), phase: step.phase ?? 0 });
 			} else {
 				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({
@@ -1549,40 +1529,6 @@ export class VerificationHarness {
 					output: "Step was running but had no session ID — cannot resume after restart.",
 					duration_ms: Date.now() - step.startedAt,
 				});
-			}
-		}
-
-		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-			if (step.passed || step.skipped) return earliest;
-			if (persistedStatusForStep(step) !== "failed") return earliest;
-			if (isRestartInterruptedStep(step)) return earliest;
-			const phase = step.phase ?? 0;
-			return earliest === undefined || phase < earliest ? phase : earliest;
-		}, undefined);
-		if (firstRealFailedPhase !== undefined) {
-			for (const step of resolvedSteps) {
-				const phase = step.phase ?? 0;
-				if (step.status === "waiting" && phase > firstRealFailedPhase) {
-					step.passed = true;
-					step.skipped = true;
-					step.status = "skipped";
-					step.output = "Skipped — earlier phase failed";
-					step.duration_ms = 0;
-				}
-			}
-		} else {
-			const firstRestartInterruptedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-				if (step.passed || step.skipped || !isRestartInterruptedStep(step)) return earliest;
-				const phase = step.phase ?? 0;
-				return earliest === undefined || phase < earliest ? phase : earliest;
-			}, undefined);
-			if (firstRestartInterruptedPhase !== undefined) {
-				for (const step of resolvedSteps) {
-					const phase = step.phase ?? 0;
-					if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
-						step.output = "Step was interrupted by server restart before this phase could run.";
-					}
-				}
 			}
 		}
 
@@ -1606,7 +1552,7 @@ export class VerificationHarness {
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
 			steps: resolvedSteps.map(r => {
-				const status = persistedStatusForStep(r);
+				const status = terminalStatusForStep(r);
 				const stepResult: GateSignalStep = {
 					name: r.name,
 					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
@@ -4490,18 +4436,18 @@ export class VerificationHarness {
 	 * 2. Else if `pid` is still alive — the detached child outlived the
 	 *    gateway and is still chugging away. Poll for the exit file with
 	 *    the remaining timeout budget computed from `startedAt`.
-	 * 3. Else — process is gone and there's no exit file. There is no durable
-	 *    command verdict, so leave the gate pending/retryable instead of
-	 *    fabricating a failed command result.
+	 * 3. Else — process is gone and there's no exit file. The child was
+	 *    killed (OOM, manual kill, antivirus). Finalize as failed.
 	 *
-	 * Returns null only when a future command subtype has no restart recovery
-	 * path at all; ordinary no-status command interruptions return an explicit
-	 * restart-interrupted row.
+	 * Returns null when there's nothing to resume (no exit file recorded,
+	 * e.g. the step pre-dates Layer 1 or used the attached-mode fallback)
+	 * so the caller can fall through to the legacy "no session id" failure.
 	 */
 	private async _resumeCommandStep(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
-	): Promise<ResumedVerificationStep | null> {
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics } | null> {
+		if (!step.exitFile && !step.pid) return null;
 
 		const readFiles = (): { out: string; err: string } => {
 			let out = "";
@@ -4538,20 +4484,11 @@ export class VerificationHarness {
 				return undefined;
 			}
 		};
-		const withDiagnostics = (result: ResumedVerificationStep) => {
+		const withDiagnostics = (result: { name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }) => {
 			const diagnostics = finalizeDiagnostics();
 			if (diagnostics) result.diagnostics = diagnostics;
 			return result;
 		};
-		const restartInterrupted = () => withDiagnostics({
-			name: step.name,
-			type: step.type,
-			passed: false,
-			status: "waiting",
-			output: "Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained; please re-signal the gate to run a fresh verification.",
-			duration_ms: Date.now() - step.startedAt,
-		});
-		if (!step.exitFile && !step.pid) return restartInterrupted();
 		const finalize = (code: number | null) => {
 			const { out, err } = readFiles();
 			const output = (out + "\n" + err).trim().slice(-5000);
@@ -4643,11 +4580,16 @@ export class VerificationHarness {
 			}
 		}
 
-		// Case C: process gone, no exit file. There is no durable command
-		// verdict to map through expectFailure/error_pattern, so leave the gate
-		// pending/retryable instead of fabricating a failed command result.
-		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — leaving gate pending for re-signal`);
-		return restartInterrupted();
+		// Case C: process gone, no exit file — killed by something between our
+		// last persist and now.
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
+		return withDiagnostics({
+			name: step.name,
+			type: step.type,
+			passed: false,
+			output: "Verification command process died during gateway restart before producing an exit code.",
+			duration_ms: Date.now() - step.startedAt,
+		});
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,
