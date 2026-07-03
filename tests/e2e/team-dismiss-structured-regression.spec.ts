@@ -78,6 +78,31 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 		}
 	});
 
+	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async ({ gateway }) => {
+		const goal = await createGoal({ title: "Structured real team worker dismiss", team: true });
+		let agentId: string | undefined;
+		try {
+			await startTeam(goal.id as string);
+			const spawned = await gateway.teamManager.spawnRole(goal.id as string, "coder", "structured dismiss real worker");
+			agentId = spawned.sessionId;
+			expect(gateway.teamManager.listAgents(goal.id as string).some((agent) => agent.sessionId === agentId)).toBe(true);
+
+			const first = await goalTeamDismiss(goal.id as string, agentId);
+			expect(first.status).toBe(200);
+			expect(first.json?.ok).toBe(true);
+			expect(first.json?.status).toBe("dismissed");
+			expect(gateway.teamManager.listAgents(goal.id as string).some((agent) => agent.sessionId === agentId)).toBe(false);
+
+			const duplicate = await goalTeamDismiss(goal.id as string, agentId);
+			expectStructuredAlreadyDismissed(duplicate, agentId);
+			agentId = undefined;
+		} finally {
+			if (agentId) await goalTeamDismiss(goal.id as string, agentId).catch(() => {});
+			await teardownTeam(goal.id as string).catch(() => {});
+			await deleteGoal(goal.id as string).catch(() => {});
+		}
+	});
+
 	test("/api/goals/:id/team/dismiss own-child fallback duplicate dismiss is structured already-dismissed", async () => {
 		const goal = await createGoal({ title: "Structured duplicate fallback dismiss", team: true });
 		let leadId: string | undefined;
