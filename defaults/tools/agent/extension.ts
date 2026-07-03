@@ -22,7 +22,7 @@
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readGatewayCreds, apiCall } from "./gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──
 
@@ -228,6 +228,67 @@ const extension: ExtensionFactory = (pi) => {
 		const extraHeaders: Record<string, string> = {};
 		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
 		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body, { extraHeaders });
+	}
+
+	async function orchestrateDetailed(method: string, verb: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown }> {
+		const credsResult = readGatewayCreds();
+		if ("error" in credsResult) throw new Error(credsResult.error);
+		const owner = ownerSessionId || "unknown";
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		const { ok, status, body: responseBody } = await apiCallDetailed(
+			credsResult,
+			method,
+			`/api/sessions/${owner}/orchestrate/${verb}`,
+			body,
+			{ extraHeaders },
+		);
+		return { ok, status, body: responseBody };
+	}
+
+	const dismissStatuses = new Set(["dismissed", "already-dismissed", "not-owned", "not-found", "failed"]);
+
+	function isStructuredDismissResult(value: unknown): value is { ok: boolean; status: string; sessionId: string; message: string; retryable: boolean } {
+		if (!value || typeof value !== "object") return false;
+		const v = value as Record<string, unknown>;
+		return typeof v.ok === "boolean"
+			&& typeof v.status === "string"
+			&& dismissStatuses.has(v.status)
+			&& typeof v.sessionId === "string"
+			&& typeof v.message === "string"
+			&& typeof v.retryable === "boolean";
+	}
+
+	function responseErrorText(body: unknown, fallback: string): string {
+		if (body && typeof body === "object" && "error" in body) return String((body as Record<string, unknown>).error);
+		if (typeof body === "string" && body.trim()) return body;
+		return fallback;
+	}
+
+	function normalizeDismissResponse(resp: { ok: boolean; status: number; body: unknown }, sessionId: string) {
+		if (isStructuredDismissResult(resp.body)) return resp.body;
+		const retryable = resp.status === 401 || resp.status === 408 || resp.status === 429 || resp.status >= 500;
+		return {
+			ok: false,
+			status: "failed",
+			sessionId,
+			message: resp.ok
+				? `team_dismiss returned an unstructured response (HTTP ${resp.status}).`
+				: `team_dismiss request failed (HTTP ${resp.status}): ${responseErrorText(resp.body, "unstructured gateway response")}`,
+			retryable,
+			httpStatus: resp.status,
+			response: resp.body,
+		};
+	}
+
+	function dismissText(result: any): string {
+		return [
+			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
+			result?.message ? `message: ${result.message}` : undefined,
+			`retryable: ${result?.retryable === true ? "true" : "false"}`,
+			"",
+			JSON.stringify(result, null, 2),
+		].filter(Boolean).join("\n");
 	}
 
 	function ok(text: string, details?: unknown) {
@@ -557,14 +618,17 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_dismiss",
 			label: "Dismiss Child Agent",
-			description: "Terminate and archive one of your child agents.",
-			promptSnippet: "team_dismiss - Dismiss (terminate + archive) a child agent by session ID.",
+			description: "Dismiss your child agent by session ID; returns structured status/retryable details and treats already-dismissed as idempotent.",
+			promptSnippet: "team_dismiss - Dismiss a child agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 			}),
 			async execute(_id, params) {
 				try {
-					return ok(JSON.stringify(await orchestrate("POST", "dismiss", { childSessionId: params.session_id }), null, 2));
+					const targetSessionId = params.session_id;
+					const resp = await orchestrateDetailed("POST", "dismiss", { childSessionId: targetSessionId });
+					const result = normalizeDismissResponse(resp, targetSessionId);
+					return { content: [{ type: "text" as const, text: dismissText(result) }], details: result, isError: result.status === "failed" };
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});

@@ -1,5 +1,5 @@
 name: team_dismiss
-description: "Terminate and archive one agent — a goal team agent (cleans its worktree) or your own team_delegate child (shared parent worktree)."
+description: "Dismiss one team or owned child agent; returns structured DismissResult with retryable/idempotent status."
 summary: "Terminate one agent (team or own child)"
 params: [session_id]
 provider:
@@ -11,7 +11,7 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Terminate and archive one agent. For a **goal team agent**, use after its work is merged — it removes the agent's git worktree. For your own **`team_delegate` child** (which runs in your worktree, no sub-branch), it just terminates + archives the child. To dismiss all goal agents at once, use `team_complete`.
+  Terminate and archive one agent: a goal team agent, or your own `team_delegate` child. The result is always a structured `DismissResult` with `ok`, `status`, `sessionId`, `message`, and `retryable`. Duplicate owned dismisses are idempotent `already-dismissed` successes and should not be retried.
 detail_docs: >-
   ## Purpose
 
@@ -28,7 +28,35 @@ detail_docs: >-
   sub-branch or worktree to clean up. Own-child scoping is enforced server-side.
 
 
-  In both cases the agent is permanently removed and its session archived.
+  ## Result Contract
+
+
+  `team_dismiss` returns a structured `DismissResult` in tool text and details:
+
+
+  ```ts
+  {
+    ok: boolean;
+    status: "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+    sessionId: string;
+    message: string;
+    retryable: boolean;
+  }
+  ```
+
+
+  | Status | Meaning | Retry? |
+  |--------|---------|--------|
+  | `dismissed` | The owned live target was terminated and archived. | No |
+  | `already-dismissed` | The caller owns or previously owned the target, but it is already not live or archived. Duplicate dismiss requests land here as idempotent success. | No |
+  | `not-owned` | The target exists but does not belong to the caller/goal, or the caller is not allowed to dismiss it. | No |
+  | `not-found` | No live, archived, or remembered session exists for that id. | No |
+  | `failed` | Termination/archive failed or the gateway returned an unstructured failure. | Follow `retryable` |
+
+
+  Never retry just because `ok` is `false`. Inspect `status` and `retryable`.
+  `already-dismissed` has `ok:true` and `retryable:false`; it confirms cleanup is
+  already complete.
 
 
   ## Parameters
@@ -38,7 +66,7 @@ detail_docs: >-
 
   |------|------|----------|-------------|
 
-  | `session_id` | string | **Yes** | The session ID of the agent to dismiss \u2014
+  | `session_id` | string | **Yes** | The session ID of the agent to dismiss —
   a team agent (from `team_list`) or your own `team_delegate` child (id from
   `team_wait` / a `non_blocking` spawn). |
 
@@ -67,6 +95,9 @@ detail_docs: >-
   - **Dismissing all agents** — use `team_complete` instead for a clean
   end-of-goal dismissal.
 
+  - **Already-dismissed result** — do not retry when `status` is
+  `already-dismissed`; the duplicate request was handled safely.
+
 
   ## Examples
 
@@ -90,7 +121,8 @@ detail_docs: >-
 
   - **Who can dismiss** — a team lead dismisses its goal team agents; any owner
   (goal or non-goal) can dismiss its own `team_delegate` children. You cannot
-  dismiss an agent you do not own (server-enforced).
+  dismiss an agent you do not own; the result is `not-owned` with
+  `retryable:false`.
 
   - **Irreversible** — the agent's session is killed and archived. For a goal
   team agent its worktree is deleted; any uncommitted or unmerged work is lost.
@@ -99,6 +131,10 @@ detail_docs: >-
   changes back to the goal branch before dismissing. Check with `team_list` or
   review the git log. (A `team_delegate` child shares your worktree, so there is
   nothing separate to merge.)
+
+  - **Duplicate/idempotent behavior** — a repeated dismiss of an owned target
+  returns `already-dismissed` instead of an ambiguous `{ ok:false }` and should
+  not trigger another retry.
 
   - **Worktree cleanup** — a goal team agent's isolated git worktree directory
   is removed automatically; a `team_delegate` child has none (it shared yours).

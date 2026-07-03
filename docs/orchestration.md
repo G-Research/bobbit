@@ -123,6 +123,57 @@ For non-blocking children you spawned, these verbs work over the child's session
 - **`team_dismiss`** — terminate and archive the child.
 - **`read_session`** — read the child's full transcript (unchanged).
 
+### `team_dismiss` outcomes
+
+`team_dismiss` uses a structured result instead of a bare `{ "ok": false }`, so callers
+can tell whether a retry is useful. The tool result text and structured `details` carry
+the same fields:
+
+```ts
+type DismissStatus = "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+
+interface DismissResult {
+  ok: boolean;
+  status: DismissStatus;
+  sessionId: string;
+  message: string;
+  retryable: boolean;
+}
+```
+
+| Status | Meaning | Retry behavior |
+|---|---|---|
+| `dismissed` | The target was live, owned by the caller, terminated, and archived. | Do not retry. |
+| `already-dismissed` | The target is already not live or archived, and ownership can still be verified from current, persisted, or remembered ownership. Duplicate dismiss requests land here as idempotent success. | Do not retry. |
+| `not-owned` | The target exists, but it belongs to another owner/goal, is the team lead, or the authentic caller is not allowed to dismiss it. Live targets require runtime ownership; mutable persisted ownership metadata is used only for already-dismissed idempotency. | Do not retry. |
+| `not-found` | No live, persisted, or remembered target exists for that session id. | Do not retry. |
+| `failed` | Termination/archive failed, or a tool wrapper had to normalize an unstructured gateway failure. | Follow `retryable`; canonical server failures set it to `true`. |
+
+HTTP routes map `dismissed` and `already-dismissed` to `200`, `not-owned` to `403`,
+`not-found` to `404`, and `failed` to `500`. Missing required request fields still use
+ordinary validation errors.
+
+Authorization is intentionally split by surface:
+
+- **Own-child route** (`/api/sessions/:ownerId/orchestrate/dismiss`) requires the
+  caller's per-session secret to resolve to `:ownerId`, then checks the target is an
+  owned child. A live foreign session cannot be dismissed by patching persisted metadata.
+- **Goal-team route** (`/api/goals/:goalId/team/dismiss`) dismisses real team agents
+  through `TeamManager`, so goal state, subscriptions, timers, broadcasts, and worktree
+  metadata are cleaned up. Tracked team-agent dismiss is team-lead-only; same-goal workers
+  using a sandbox token receive structured `not-owned`.
+- **Team-lead own-child fallback** lets the goal-scoped tool dismiss a team lead's
+  non-blocking `team_delegate` helper, which is not a goal team member. The fallback uses
+  the same owner-secret check as the own-child route and excludes real team agents so they
+  still flow through `TeamManager` cleanup.
+
+Tool and UI surfaces must keep the outcome visible. The extension text starts with
+`team_dismiss <status> for <sessionId>`, stores `DismissResult` in `details`, and
+normalizes malformed gateway replies to `failed` rather than returning ambiguous data. The
+chat renderer prefers `details`, labels `already-dismissed`, `not-owned`, `not-found`, and
+`failed` distinctly from `dismissed`, includes the target session id, and renders the
+retry guidance from `retryable`.
+
 The team-lead's goal-scoped versions of these verbs (plus `team_spawn`, `team_list`,
 `team_complete`) keep their worktree/role/gate semantics. `team_prompt` also preserves
 `workflowGateId` / `inputGateIds` dependency context injection in both prompt and steer
