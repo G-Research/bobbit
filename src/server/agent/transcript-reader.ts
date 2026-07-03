@@ -280,7 +280,7 @@ function isToolResultRole(role: unknown): boolean {
 	return role === "toolResult" || role === "tool_result" || role === "tool";
 }
 
-function isToolResultBlock(block: unknown): block is Record<string, unknown> {
+function isToolResultBlock(block: unknown): boolean {
 	if (!block || typeof block !== "object") return false;
 	const b = block as Record<string, unknown>;
 	return b.type === "tool_result" || b.type === "toolResult" || isToolResultRole(b.role);
