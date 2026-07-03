@@ -3,8 +3,9 @@
 `Ctrl+↑` / `Ctrl+↓` walk every row currently rendered in the sidebar, in
 top-to-bottom DOM order with wrap-around. Each step **immediately** opens the
 matching destination — there is no Enter key. `Ctrl+→` / `Ctrl+←` are a
-keyboard equivalent of clicking the chevron on a group header: they expand or
-collapse the active row without moving the cursor.
+keyboard equivalent of clicking the active row's chevron: they expand or
+collapse expandable project, section, goal, team-lead, and child/delegate rows
+without moving the cursor.
 
 The feature lives in [`src/app/sidebar-nav.ts`](../src/app/sidebar-nav.ts); the
 shortcuts are registered in `src/app/main.ts` (ids `prev-session`,
@@ -16,8 +17,8 @@ shortcuts are registered in `src/app/main.ts` (ids `prev-session`,
 |---|---|
 | `Ctrl+↓` | Move active row to next visible sidebar row, wrap at end, auto-open destination. |
 | `Ctrl+↑` | Move active row to previous visible sidebar row, wrap at top, auto-open destination. |
-| `Ctrl+→` | If the active row is a collapsed group header, expand it. No-op on leaves or already-expanded groups. Cursor stays put. |
-| `Ctrl+←` | If the active row is an expanded group header, collapse it. No-op on leaves or already-collapsed groups. Cursor stays put. |
+| `Ctrl+→` | If the active row has a collapsed tree disclosure, expand it. No-op on leaves or already-expanded rows. Cursor stays put. |
+| `Ctrl+←` | If the active row has an expanded tree disclosure, collapse it. No-op on leaves or already-collapsed rows. Cursor stays put. |
 
 All four are registered with `allowInInput: true`, so they work even while
 focus is in a text field (the standard exclusions in `MessageEditor`,
@@ -107,12 +108,12 @@ respects:
 - Search filtering — only filtered-visible rows are in the cycle.
 - Archived view toggle — archived rows enter/leave the cycle as
   `state.showArchived` flips.
-- Every collapse state — `isProjectExpanded`, `expandedGoals`,
-  `isUngroupedExpanded`, `isStaffExpanded`, `isArchivedSectionExpanded`.
+- Every sidebar tree disclosure state — project, section, goal, team-lead,
+  first-class child-session, live delegate, and archived delegate expansion.
 
 The single source of truth is whatever the user can see.
 
-### The `data-nav-id` tagging contract
+### The `data-nav-id` and `data-tree-key` contracts
 
 Every selectable sidebar row carries `data-nav-id="<kind>:<id>"` where
 `<kind>` is one of:
@@ -121,16 +122,24 @@ Every selectable sidebar row carries `data-nav-id="<kind>:<id>"` where
 project | goal | session | ungrouped-header | staff-header | archived-header
 ```
 
+Expandable rows also expose the unified sidebar tree key through `data-tree-key`
+when the renderer has a `SidebarTreeNode`. `Ctrl+←` / `Ctrl+→` prefer that key,
+which lets keyboard expansion cover team leads, first-class child-session groups,
+live delegates, and archived delegates in addition to the older project/section/
+goal headers. Session rows without a rendered tree key fall back to inferring the
+appropriate `session-children` key from visible children.
+
 Emission sites:
 
 - `src/app/sidebar.ts` — project headers, ungrouped header, staff header,
-  staff session rows.
-- `src/app/render-helpers.ts` — goal headers, sessions under goals, archived
-  rows, top-level session rows, archived section header.
+  desktop/collapsed tree rows, and archived section headers.
+- `src/app/render-helpers.ts` — goal headers, sessions under goals, team leads,
+  child/delegate groups, archived rows, and top-level session rows.
 
 Tests (and any future tooling) can rely on this contract: see
 [`tests/e2e/ui/sidebar-keyboard-nav.spec.ts`](../tests/e2e/ui/sidebar-keyboard-nav.spec.ts)
-for the 8-case coverage of the full behavior table.
+and [`tests/e2e/ui/sidebar-unified-tree.spec.ts`](../tests/e2e/ui/sidebar-unified-tree.spec.ts)
+for coverage.
 
 ## Edge cases
 
@@ -141,8 +150,8 @@ for the 8-case coverage of the full behavior table.
 - **Active row deleted / no longer in the cycle** — same fallback: next
   press picks the first or last visible row.
 - **Empty sidebar** — all four shortcuts are no-ops.
-- **`Ctrl+→` / `Ctrl+←` on a leaf** — no-op. Cursor never moves; route
-  never changes.
+- **`Ctrl+→` / `Ctrl+←` on a leaf or non-chevron row** — no-op. Cursor never
+  moves; route never changes.
 - **`Ctrl+→` on an already-expanded group, `Ctrl+←` on an already-collapsed
   group** — no-op.
 - **Wrap-around** — `Ctrl+↑/↓` only. `Ctrl+←/→` never move the cursor, so
@@ -167,7 +176,8 @@ interactions was changed by this feature.
 - [`src/app/sidebar-nav.ts`](../src/app/sidebar-nav.ts) — `parseNavId`,
   `navIdFor`, `navIdToHash`, `getActiveNavId`, `getVisibleNavOrder`,
   `openForNavItem`, `navigateSidebar`, `expandActiveSidebarItem`,
-  `setNavItemExpanded`, `installKeyboardNavOverrideClearListener`.
+  `setNavItemExpanded`, `installKeyboardNavOverrideClearListener`, and the
+  row-to-sidebar-tree-key mapping used for unified expansion.
 - [`src/app/main.ts`](../src/app/main.ts) — shortcut registrations under
   ids `prev-session`, `next-session`, `sidebar-expand`, `sidebar-collapse`.
 - [`src/app/sidebar.ts`](../src/app/sidebar.ts),

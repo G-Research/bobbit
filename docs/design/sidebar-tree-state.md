@@ -1,6 +1,6 @@
 # Sidebar tree expansion state
 
-Status: implemented for sidebar expansion preferences. The shared tree builder and indentation layout seams are integrated; indentation preferences remain separate from expansion preferences.
+Status: implemented. For the current implementation reference, see [Sidebar tree state](../sidebar-tree-state.md) and [Sidebar tree indentation](../sidebar-tree-indentation.md). This design note records the rationale and approved shape.
 
 ## Context
 
@@ -19,7 +19,7 @@ The current implementation centralizes durable disclosure preferences in `src/ap
 | Shared rows/archived sections | `src/app/render-helpers.ts` | Renders goals, teams, sessions, archived delegate controls, and consumes tree node expansion/layout metadata. |
 | Mobile sidebar | `src/app/render.ts` | Builds mobile tree views with the same expansion and layout inputs. |
 | Keyboard navigation | `src/app/sidebar-nav.ts` | Maps nav rows to canonical tree keys and calls the shared expansion API. |
-| Refresh/create flows | `src/app/api.ts` | Uses `expandSidebarTreeNode()` for minimal top-level goal expansion and does not mutate legacy goal sets. |
+| Refresh/create flows | `src/app/api.ts` | Uses `expandSidebarTreeNode()` for minimal automatic expansion and does not mutate legacy goal sets directly. |
 | Compatibility re-exports | `src/app/state.ts` | Keeps existing imports working while delegating tree expansion helpers to `sidebar-tree-state.ts`. |
 
 ## Storage namespace
@@ -98,9 +98,9 @@ Compatibility wrappers cover projects, ungrouped sessions, staff, archived secti
 
 `refreshSessions()` tracks new goal IDs and may auto-expand only newly discovered top-level goals with a live owning session. It does not auto-expand parent goals when a child/sub-goal appears, and it does not persist an expanded preference for newly discovered sub-goals.
 
-`createGoal()` explicitly expands only newly created top-level goals because the user directly created/opened that root item. Child goals/sub-goals do not expand themselves and do not expand their parent.
+`createGoal()` reveals the newly created goal path by expanding the created goal and its ancestors only when those nodes have no explicit preference. This explicit creation flow is intentionally narrower than polling: it helps the user see what they just created without reopening branches they previously collapsed.
 
-This preserves collapsed-by-default sub-goals and prevents new child discovery from reopening a parent the user collapsed.
+This preserves collapsed-by-default sub-goals during discovery and prevents new child discovery from reopening a parent the user collapsed.
 
 ## Search behavior
 
@@ -127,7 +127,7 @@ Legacy mapping:
 | `bobbit-archived-collapsed-projects` | project-archived collapsed. |
 | `bobbit-collapsed-team-leads` | team-lead collapsed. |
 | `bobbit-collapsed-first-class-parents` | session-children/first-class collapsed. |
-| `bobbit-expanded-delegate-parents` | session-children/archived-delegate expanded. |
+| `bobbit-expanded-delegate-parents` | session-children/delegate and session-children/archived-delegate expanded. |
 
 Malformed or non-array legacy values are ignored through safe-storage fallback behavior.
 

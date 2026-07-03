@@ -530,13 +530,13 @@ Reusable helpers in `tests/e2e/ui/ui-helpers.ts`. Import from `./ui-helpers.js`:
 
 ### Test-only window hooks
 
-Three properties are attached to `window` in `src/app/main.ts` for browser E2E use. All three are harmless in production — the state object is already mutable from devtools, the render trigger is the same function the production code paths invoke, and the expanded-goals set is just a `Set<string>`. None contain secrets.
+Three properties are attached to `window` in `src/app/main.ts` for browser E2E use. All three are harmless in production — the state object is already mutable from devtools, the render trigger is the same function the production code paths invoke, and the expanded-goals hook is a compatibility writer for sidebar tree expansion. None contain secrets.
 
 | Hook | What it is | Why tests need it |
 |---|---|---|
 | `window.__bobbitState` | The mutable `state` singleton from `src/app/state.ts` | Patch in-memory session/goal/cache fields to drive deterministic predicate scenarios that would otherwise require a real backend (team-lead role flips, fabricated goals, gate verification flags). |
 | `window.__bobbitRenderApp` | The `renderApp()` function | Force a fresh paint after patching state, without relying on viewport-resize side effects (which are unreliable under Playwright). |
-| `window.__bobbitExpandedGoals` | The `expandedGoals: Set<string>` driving sidebar group expansion | Inject synthetic goals into `state.goals` and force them into the expanded state — the production auto-expand path in `api.ts` only fires for server-confirmed goals. |
+| `window.__bobbitExpandedGoals` | Legacy-compatible `Set<string>` facade that writes goal expansion into the unified sidebar tree state | Inject synthetic goals into `state.goals` and force them into the expanded state — the production auto-expand path in `api.ts` only fires for server-confirmed goals. |
 
 Usage pattern (from `tests/e2e/ui/notification-policy.spec.ts`):
 
