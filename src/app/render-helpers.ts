@@ -993,11 +993,11 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
 	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession) || !!treeChildGroups?.some(group => group.context.childClass === "first-class" && group.children.length > 0);
 	const hasArchivedChildGroup = archivedChildren.length > 0;
-	const firstClassGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "first-class" && group.expanded);
-	const delegateGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "delegate" && group.expanded);
-	const archivedGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "archived-delegate" && group.expanded);
+	const firstClassGroupExpanded = treeChildGroups?.find(group => group.context.childClass === "first-class")?.expanded;
+	const delegateGroupExpanded = treeChildGroups?.find(group => group.context.childClass === "delegate")?.expanded;
+	const archivedGroupExpanded = treeChildGroups?.find(group => group.context.childClass === "archived-delegate")?.expanded;
 	const childrenExpanded = hasChildren && (treeChildGroups
-		? (hasFirstClassChild ? !!firstClassGroupExpanded : !!(delegateGroupExpanded ?? archivedGroupExpanded))
+		? (hasFirstClassChild ? !!firstClassGroupExpanded : !!delegateGroupExpanded || !!archivedGroupExpanded)
 		: (hasFirstClassChild ? isFirstClassParentExpanded(session.id) : isArchivedParentExpanded(session.id)));
 	const shouldRenderChildArea = childrenExpanded || (hasFirstClassChild && hasArchivedChildGroup);
 
