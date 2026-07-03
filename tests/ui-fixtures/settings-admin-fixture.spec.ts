@@ -422,7 +422,8 @@ test.describe("Settings/admin UI fixture", () => {
 
 	test("config scope rows, origin badges, tools, and embedded workflows render from fixtures", async ({ page }) => {
 		await loadRoles(page);
-		await expect(page.locator("button").filter({ hasText: "System" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "Headquarters" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "System" })).toHaveCount(0);
 		await expect(page.locator("button").filter({ hasText: "Scope UI Project" }).first()).toBeVisible();
 		await expect(page.locator(".config-origin-badge").first()).toBeVisible();
 		await expect(page.locator(".config-origin-badge").first()).toHaveText(/builtin|server|project/);
@@ -435,7 +436,8 @@ test.describe("Settings/admin UI fixture", () => {
 		}).toBe(true);
 
 		await loadTools(page);
-		await expect(page.locator("button").filter({ hasText: "System" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "Headquarters" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "System" })).toHaveCount(0);
 		await expect(page.locator(".tool-group-header").first()).toBeVisible();
 		await page.locator(".tool-group-header").first().click();
 		await expect(page.locator(".tool-row").first()).toBeVisible();
