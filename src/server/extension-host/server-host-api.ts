@@ -28,7 +28,7 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
 // import is erased at runtime (no module cycle); the gateway injects the live
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
-import type { OrchestrationCore } from "../agent/orchestration-core.js";
+import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -84,8 +84,10 @@ export interface ServerHostAgentsApi {
 	}): Promise<{ childSessionId: string }>;
 	/** Run-if-idle / queue a follow-up prompt to an owned host.agents child. */
 	prompt(childSessionId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
-	/** Terminate + archive an owned host.agents child. */
-	dismiss(childSessionId: string): Promise<boolean>;
+	/** Terminate + archive an owned host.agents child.
+	 *  Returns OrchestrationCore's structured outcome so callers can distinguish
+	 *  dismissed/already-dismissed/not-found/failed from retryable failures. */
+	dismiss(childSessionId: string): Promise<DismissResult>;
 	/** List the bound session's host.agents children (source-filtered). */
 	list(): Promise<Array<{ childSessionId: string; status: string; childKind: string }>>;
 	/** Read an owned host.agents child's transcript/output. */
