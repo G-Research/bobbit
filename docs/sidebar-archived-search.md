@@ -48,9 +48,13 @@ Archived search keeps pagination separate from normal Show Archived pagination.
 
 Normal archived pagination is unchanged when no query is active: Show Archived loads archive pages by recency with no `q` filter.
 
-## Project bucketing and parity
+## Project bucketing, parity, and persistence
 
 The server returns archived records with their project metadata intact. The client merges them into the same state used by normal archived pagination, then buckets archived sessions and goals under each project archived section. Desktop and mobile sidebar renderers share the same filtering helpers, so matching and highlight behavior stay consistent across layouts.
+
+Archived search does not persist disclosure changes. Search may temporarily show archived rows and expand retained ancestors in the in-memory sidebar tree so matches are visible, but it does not write the unified tree-state namespace. If search was the only reason archived rows were shown, clearing the query closes them again and clears fetched archive pages without deleting explicit archived-section or archived-delegate expansion choices. Manual Show Archived toggles still persist separately via `bobbit-show-archived`.
+
+See [Sidebar tree state](sidebar-tree-state.md#archived-and-search-behavior) for how archived visibility, per-project archived expansion, and archived delegate disclosure keys fit together.
 
 ## API reference
 

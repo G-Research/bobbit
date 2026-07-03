@@ -20,6 +20,11 @@ import {
 	type Goal,
 	type Project,
 } from "../../src/app/state.js";
+import {
+	setArchivedParentExpanded as setTreeArchivedParentExpanded,
+	setGoalExpanded as setTreeGoalExpanded,
+	setTeamLeadExpanded as setTreeTeamLeadExpanded,
+} from "../../src/app/sidebar-tree-state.js";
 
 const PROJECT_A_ID = "sidebar-archived-project-a";
 const PROJECT_B_ID = "sidebar-archived-project-b";
@@ -246,6 +251,7 @@ async function resetFixture(options: { mode?: "desktop" | "mobile"; showArchived
 	localStorage.setItem("bobbit-show-archived", showArchived ? "true" : "false");
 	localStorage.removeItem("bobbit-archived-collapsed-projects");
 	localStorage.removeItem("bobbit-expanded-delegate-parents");
+	localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 	localStorage.setItem("bobbit-show-busy", "true");
 	localStorage.setItem("bobbit-show-read", "true");
 	setProjects(PROJECTS.map(p => ({ ...p })));
@@ -298,5 +304,11 @@ setRenderApp(renderFixture);
 (window as any).__bobbitState = state;
 (window as any).__sidebarArchivedFixtureIds = IDS;
 (window as any).__renderSidebarArchivedFixture = renderFixture;
+(window as any).__setArchivedSearchPreferenceFixture = () => {
+	setArchivedSectionExpanded(PROJECT_A_ID, false);
+	setTreeGoalExpanded(IDS.archivedGoalA1, true);
+	setTreeTeamLeadExpanded(IDS.archivedTeamLead, false);
+	setTreeArchivedParentExpanded(IDS.archivedDelegate, true);
+};
 (window as any).__resetSidebarArchivedFixture = resetFixture;
 (window as any).__sidebarArchivedReady = true;

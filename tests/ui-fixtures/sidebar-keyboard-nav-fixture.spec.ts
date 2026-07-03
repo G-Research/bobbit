@@ -12,6 +12,7 @@ const SIDEBAR_SRC = path.resolve("src/app/sidebar.ts");
 const SIDEBAR_NAV_SRC = path.resolve("src/app/sidebar-nav.ts");
 const SIDEBAR_FILTERS_SRC = path.resolve("src/ui/components/sidebar-filters.ts");
 const RENDER_HELPERS_SRC = path.resolve("src/app/render-helpers.ts");
+const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
 const API_SRC = path.resolve("src/app/api.ts");
 const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
@@ -45,6 +46,7 @@ test.beforeAll(() => {
 			SIDEBAR_NAV_SRC,
 			SIDEBAR_FILTERS_SRC,
 			RENDER_HELPERS_SRC,
+			SIDEBAR_TREE_BUILDER_SRC,
 			STATE_SRC,
 			API_SRC,
 			SEARCH_BOX_SRC,

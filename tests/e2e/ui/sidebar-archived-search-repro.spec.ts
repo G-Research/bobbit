@@ -112,6 +112,7 @@ test.describe("Sidebar archived search reproducer", () => {
 			expect(firstPage.sessions.some(s => s.id === coverageId)).toBe(false);
 
 			await page.addInitScript(() => {
+				localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 				localStorage.removeItem("bobbit-expanded-projects");
 				localStorage.removeItem("bobbit-archived-collapsed-projects");
 				localStorage.setItem("bobbit-show-archived", "false");

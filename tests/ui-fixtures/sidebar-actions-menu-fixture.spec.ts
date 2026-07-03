@@ -10,6 +10,7 @@ const BUNDLE = path.join(BUNDLE_DIR, "sidebar-actions-menu-fixture-bundle.js");
 
 const SIDEBAR_SRC = path.resolve("src/app/sidebar.ts");
 const RENDER_HELPERS_SRC = path.resolve("src/app/render-helpers.ts");
+const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
 const SIDEBAR_POPOVER_SRC = path.resolve("src/ui/components/SidebarActionsPopover.ts");
 const SIDEBAR_FLIP_SRC = path.resolve("src/ui/components/sidebar-actions-flip.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
@@ -35,6 +36,7 @@ test.beforeAll(() => {
 			ENTRY,
 			SIDEBAR_SRC,
 			RENDER_HELPERS_SRC,
+			SIDEBAR_TREE_BUILDER_SRC,
 			SIDEBAR_POPOVER_SRC,
 			SIDEBAR_FLIP_SRC,
 			STATE_SRC,

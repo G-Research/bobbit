@@ -4,7 +4,7 @@ import "../ui/components/CommentableMarkdown.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { html, render } from "lit";
+import { html, render, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -15,22 +15,14 @@ import {
 	isDesktop,
 	hasActiveSession,
 	activeSessionId,
-	isUngroupedExpanded,
-	setUngroupedExpanded,
-
 	getSidebarData,
 	setRenderSuppressed,
 	type GatewaySession,
+	type Project,
 } from "./state.js";
 import { gatewayFetch, retryLoadSessions } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
-import {
-	clearPersistedReviewDocuments,
-	openReviewDocumentFromEvent,
-	reviewDecisionPayloadFromDetail,
-	reviewDocumentFromDecisionDetail,
-	submitReviewDecision,
-} from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -50,10 +42,12 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls } from "./sidebar.js";
-import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
+import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
+import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
 // route. Lazy-load via the shared widgets registrar so their combined
@@ -72,7 +66,7 @@ import "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, renderSandboxIndicator, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId, archivedDivider, bucketActiveArchived } from "./render-helpers.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -212,12 +206,20 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 });
 
 window.addEventListener("bobbit-open-review-document", (e: Event) => {
-	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
-	if (!doc) showHeaderToast("Could not open review document");
+	void (async () => {
+		try {
+			const { openReviewDocumentFromEvent } = await loadReviewSources();
+			const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
+			if (!doc) showHeaderToast("Could not open review document");
+		} catch {
+			showHeaderToast("Could not open review document");
+		}
+	})();
 });
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
+import { getActiveNavId } from "./sidebar-nav.js";
 import { lookupPackRoute } from "./pack-entrypoints.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import "./config-scope.css";
@@ -338,29 +340,123 @@ function renderClientDebugButton() {
 
 /** Compact session row for mobile — mirrors sidebar row with always-visible buttons */
 
+type RenderGoalGroupOptionsWithTree = NonNullable<Parameters<typeof renderGoalGroup>[1]> & { treeNode?: SidebarTreeNode<GoalContext> };
+const renderGoalGroupWithTreeNode = renderGoalGroup as (
+	goal: Parameters<typeof renderGoalGroup>[0],
+	opts?: RenderGoalGroupOptionsWithTree,
+) => ReturnType<typeof renderGoalGroup>;
+
+function renderMobileGoalTreeNode(node: SidebarTreeNode<GoalContext>, archived = false): ReturnType<typeof html> {
+	const goal = node.context.goal as Parameters<typeof renderGoalGroup>[0];
+	const goalBody = renderGoalGroupWithTreeNode(goal, {
+		descendantCount: node.context.descendantCount,
+		displayTitleSuffix: node.context.displayTitleSuffix,
+		treeNode: node,
+	});
+	const nestedGoalChildren = node.children.filter((child): child is SidebarTreeNode<GoalContext> =>
+		child.kind === "goal"
+		&& (child.context as GoalContext).renderPlacement === node.context.renderPlacement,
+	);
+	const { active: activeChildren, archived: archivedChildren, needsDivider } =
+		bucketActiveArchived(nestedGoalChildren, child => child.context.archived);
+	return html`
+		<div
+			data-testid=${archived ? "sidebar-archived-row" : nothing}
+			data-tree-key=${node.key}
+			data-goal-id=${goal.id}
+			style="${sidebarTreeNodeIndentStyle(node)}"
+		>
+			${archived ? html`<div class="opacity-60">${goalBody}</div>` : goalBody}
+		</div>
+		${node.expanded ? html`
+			${activeChildren.map(child => renderMobileGoalTreeNode(child, archived))}
+			${needsDivider ? archivedDivider() : ""}
+			${archivedChildren.map(child => renderMobileGoalTreeNode(child, archived))}
+		` : ""}
+	`;
+}
+
+function renderMobileGoalForest(nodes: readonly SidebarTreeNode<GoalContext>[], archived = false): ReturnType<typeof html> {
+	const { active: activeNodes, archived: archivedNodes, needsDivider } =
+		bucketActiveArchived([...nodes], node => node.context.archived);
+	return html`
+		${activeNodes.map((node, index) => html`
+			${index > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+			${renderMobileGoalTreeNode(node, archived)}
+		`)}
+		${needsDivider ? archivedDivider() : ""}
+		${archivedNodes.map((node, index) => html`
+			${index > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+			${renderMobileGoalTreeNode(node, archived)}
+		`)}
+	`;
+}
+
+function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): ReturnType<typeof html> | string {
+	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	const project = projectTree.project;
+	const expanded = projectTree.archivedSectionNode.expanded;
+	const archHeaderNavId = `archived-header:${project.id}`;
+	const archHeaderActive = getActiveNavId() === archHeaderNavId;
+	const dividerMy = "my-0.5";
+	return html`
+		<div class="border-t border-border/30 ${dividerMy} mx-2"></div>
+		<div class="flex flex-col gap-0.5" data-tree-key=${projectTree.archivedSectionNode.key}>
+			<button
+				data-nav-id=${archHeaderNavId}
+				data-nav-active=${archHeaderActive ? "true" : "false"}
+				data-tree-key=${projectTree.archivedSectionNode.key}
+				class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left ${archHeaderActive ? "bg-secondary text-foreground sidebar-session-active" : "active:bg-secondary/50"} rounded-md transition-colors"
+				style="padding-left:var(--sidebar-header-chevron-w);"
+				@click=${() => { setArchivedSectionExpanded(project.id, !expanded); renderApp(); }}
+			>
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none opacity-60"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+				<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
+				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium opacity-60" style="font-size: 1.1667em;">Archived</span>
+			</button>
+			${expanded ? html`
+				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">${renderMobileGoalForest(projectTree.archivedGoalForest, true)}</div>` : ""}
+				${projectTree.archivedGoalForest.length > 0 && projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
+					${projectTree.archivedSessionNodes.map(node => renderTreeSessionNode(node))}
+				</div>` : ""}
+			` : ""}
+		</div>
+	`;
+}
+
 function renderMobileLanding() {
 	const sidebarData = getSidebarData();
-	let { ungroupedSessions, liveGoals } = sidebarData;
-	let { archivedGoals } = sidebarData;
+	const { liveGoals, archivedGoals } = sidebarData;
 
 	const bypassFilters = !!state.searchQuery.trim();
-
-	// Client-side title filtering for mobile
-	if (state.searchQuery) {
-		const q = state.searchQuery.toLowerCase();
-		liveGoals = liveGoals.filter(goal => {
-			const goalMatches = goal.title.toLowerCase().includes(q);
+	const query = state.searchQuery.trim();
+	const queryLower = query.toLowerCase();
+	const sessionMatchesQuery = (session: GatewaySession) =>
+		(session.title?.toLowerCase().includes(queryLower) || session.role?.toLowerCase().includes(queryLower)) ?? false;
+	const matchingLiveGoals = query
+		? liveGoals.filter(goal => {
+			const goalMatches = goal.title.toLowerCase().includes(queryLower);
 			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || effectiveArchivedTeamGoalId(s) === goal.id) && !isChildSession(s));
-			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+			const hasMatchingSession = goalSessions.some(sessionMatchesQuery);
 			return goalMatches || hasMatchingSession;
-		});
-		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
-		archivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
-	}
-
-	// Apply Show Busy / Show Read filters to standalone live sessions.
-	ungroupedSessions = ungroupedSessions.filter(s =>
-		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
+		})
+		: liveGoals;
+	const matchingArchivedGoals = query
+		? filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery)
+		: archivedGoals;
+	const searchRetention = query
+		? collectSidebarSearchSessionRetention({
+			visibleGoalIds: [...matchingLiveGoals, ...matchingArchivedGoals].map(goal => goal.id),
+			goals: state.goals as any,
+			liveSessions: state.gatewaySessions,
+			archivedSessions: state.archivedSessions,
+			sessionMatchesQuery,
+		})
+		: null;
+	const visibleSearchGoalIds = searchRetention?.visibleGoalIds ?? null;
+	const retainedSearchSessionIds = searchRetention?.retainedSessionIds ?? null;
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
@@ -460,64 +556,65 @@ function renderMobileLanding() {
 								</div>`
 							: html`
 								${(() => {
-									// Group goals, sessions, and staff by project
+									// Build the mobile project/goal/session hierarchy through the shared tree model.
 									let staffList = (state.staffList || []).filter(s => s.state !== "retired");
-									if (state.searchQuery) {
-										const q = state.searchQuery.toLowerCase();
-										staffList = filterStaffByQuery(staffList, q);
-									}
+									if (query) staffList = filterStaffByQuery(staffList, queryLower);
 									const projectsForRender = projectOrderForRender();
-									// Sub-goals spawned by a team-lead are rendered NESTED under that
-									// team-lead inside renderGoalGroup (Path A — renderSpawnedChildGoalRow).
-									// They must therefore be excluded from the flat top-level goal list
-									// here, or they'd render in two places at once (nested AND top-level).
-									// Mirrors the desktop sidebar's `computeSpawnedClaim` exclusion in
-									// renderProjectContent. See docs/nested-goals.md.
-									const claimedGoalIds = computeSpawnedClaim(
-										[...liveGoals, ...(state.showArchived ? archivedGoals : [])] as any,
-										state.gatewaySessions,
-										state.archivedSessions,
-										state.showArchived,
+									const filteredStandaloneArchivedSessionIds = new Set(
+										filterArchivedSessionsByQuery(state.archivedSessions.filter(isStandaloneArchivedSession), state.searchQuery).map(s => s.id),
 									);
-									const topLevelGoals = liveGoals.filter(g => !claimedGoalIds.has(g.id));
-									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
-										for (const p of projectsForRender) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-										for (const g of topLevelGoals) {
-											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
-											const bucket = projectMap.get(g.projectId);
-											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
-											bucket.goals.push(g);
-										}
-										for (const s of ungroupedSessions) {
-											if (!s.projectId) { console.warn("[mobile] orphaned session with no projectId — skipping", s.id); continue; }
-											const bucket = projectMap.get(s.projectId);
-											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
-											bucket.sessions.push(s);
-										}
-										// Bucket staff per project for the dedicated Staff sub-section
-										// (rendered via renderStaffSidebarSection in the project's expanded
-										// body) — staff are NOT merged into the Sessions list.
-										for (const s of staffList) {
-											if (!s.projectId) continue;
-											const bucket = projectMap.get(s.projectId);
-											if (!bucket) continue;
-											bucket.staff.push(s);
-										}
-										// Bucket archived goals + standalone archived sessions per project.
-										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(isStandaloneArchivedSession) : [];
-										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
-										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, projectsForRender);
-										return html`<div data-project-reorder-list>${projectsForRender.map((project, i) => {
-											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
-											const expanded = isProjectExpanded(project.id);
+									const liveSessionInput = state.gatewaySessions.filter(session => {
+										if (sidebarData.staffSessionIds.has(session.id)) return false;
+										if (!query) return true;
+										if (retainedSearchSessionIds!.has(session.id)) return true;
+										if (isChildSession(session)) return false;
+										const owningGoalId = session.goalId || effectiveArchivedTeamGoalId(session);
+										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
+										return sessionMatchesQuery(session);
+									});
+									const archivedSessionInput = state.showArchived
+										? state.archivedSessions.filter(session => {
+											if (!query) return true;
+											if (retainedSearchSessionIds!.has(session.id)) return true;
+											if (isChildSession(session)) return false;
+											const owningGoalId = session.goalId || session.teamGoalId || effectiveArchivedTeamGoalId(session);
+											if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
+											return isStandaloneArchivedSession(session) && filteredStandaloneArchivedSessionIds.has(session.id);
+										})
+										: [];
+									const builtTreeModel = buildSidebarTree({
+										projects: projectsForRender,
+										goals: state.goals as any,
+										sessions: liveSessionInput,
+										archivedSessions: archivedSessionInput,
+										staff: staffList,
+										showArchived: state.showArchived,
+										filters: {
+											searchQuery: state.searchQuery,
+											bypassBusyReadFilters: bypassFilters,
+											activeSessionId: activeSessionId(),
+											passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
+										},
+										projectOrder: projectsForRender.map(project => project.id),
+										viewport: "mobile",
+										layout: loadSidebarTreeLayoutPreference(),
+										expansion: sidebarTreeExpansionInput(),
+									});
+									const treeModel = visibleSearchGoalIds
+										? filterSidebarTreeModelGoalsForSearch(builtTreeModel, visibleSearchGoalIds)
+										: builtTreeModel;
+									return html`<div data-project-reorder-list>${treeModel.projects.map((projectTree, i) => {
+											const project = projectTree.project as Project;
+											const expanded = projectTree.projectNode.expanded;
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
-												<div data-project-reorder-id=${project.id} data-project-id=${project.id}>
+												<div data-project-reorder-id=${project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
 													<div
 														data-testid="project-header"
 														data-project-id=${project.id}
+														data-tree-key=${projectTree.projectNode.key}
 														class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 														@click=${() => { if (isProjectReordering()) return; toggleProjectExpanded(project.id); renderApp(); }}>
 														<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${effectiveExpanded ? "▾" : "▸"}</span></span>
@@ -544,14 +641,12 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-													${data.goals.map((goal, gi) => html`
-														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
-														${renderGoalGroup(goal)}
-													`)}
-													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
+													${renderMobileGoalForest(projectTree.goalForest)}
+													${projectTree.goalForest.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														${(() => { const _mobileUngroupedExp = projectTree.sessionsSectionNode.expanded; return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+															data-tree-key=${projectTree.sessionsSectionNode.key}
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
 															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
 															<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;margin-right:2px;">${icon(MessagesSquare, "sm")}</span>
@@ -578,18 +673,14 @@ function renderMobileLanding() {
 																${renderRolePickerDropdown()}
 															</div>
 														</div>
-														${_mobileUngroupedExp && data.sessions.length > 0 ? html`
-															<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-																${data.sessions.map(renderSessionRow)}
+														${_mobileUngroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
+															<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
+																${projectTree.ungroupedSessionNodes.map(node => renderTreeSessionNode(node))}
 															</div>
 														` : ""}
 													</div>`; })()}
-													${renderStaffSidebarSection(data.staff, project.id)}
-													${(() => {
-														const ab = archivedByProject.get(project.id);
-														if (!ab) return "";
-														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
-													})()}
+													${renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key, projectTree.staffSectionNode?.expanded)}
+													${renderMobileArchivedTreeSection(projectTree)}
 												</div>` : ""}
 												</div>
 											`;
@@ -1951,12 +2042,62 @@ export function doRenderApp(): void {
 	const connected = hasActiveSession();
 
 	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
+	const route = getRouteFromHash();
+	const routeSessionId = route.view === "session" ? route.sessionId : undefined;
+	const routeCachedSession = routeSessionId
+		? state.gatewaySessions.find(s => s.id === routeSessionId) ?? state.archivedSessions.find(s => s.id === routeSessionId)
+		: undefined;
+	const routeArchivedSession = routeCachedSession ? isArchivedSessionActionSource(routeCachedSession) : false;
+	const panelAgentInterface = state.chatPanel?.agentInterface as any;
+	const panelSessionId = typeof panelAgentInterface?.session?.sessionId === "string" ? panelAgentInterface.session.sessionId : undefined;
+	// Archived read-only panel agents may not expose `session.sessionId`; when
+	// the current route is archived or not yet cached, the route id is the only
+	// stable action source. Keep this read-only-only so live routes don't get
+	// normal live session actions until their session binding is explicit.
+	const routeHasReadOnlyPanel = Boolean(routeSessionId && panelAgentInterface?.readOnly && (
+		panelSessionId === routeSessionId
+		|| (!panelSessionId && (routeArchivedSession || !routeCachedSession))
+	));
+	const routeIsCurrentSession = Boolean(routeSessionId && (
+		state.selectedSessionId === routeSessionId
+		|| state.connectingSessionId === routeSessionId
+		|| state.remoteAgent?.gatewaySessionId === routeSessionId
+		|| routeArchivedSession
+		|| routeHasReadOnlyPanel
+	));
+	const activeSid = (routeSessionId && routeIsCurrentSession) ? routeSessionId : activeSessionId();
 	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
-	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
-	const headerTitle = activeStaffAgent?.name ?? sessionTitle;
-	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid) : undefined;
-	const hasHeaderSessionActions = Boolean(connected && state.remoteAgent && activeSession);
+	const activeSession: GatewaySession | undefined = activeSid ? (() => {
+		const cached = activeSid === routeSessionId && routeCachedSession
+			? routeCachedSession
+			: state.gatewaySessions.find(s => s.id === activeSid) ?? state.archivedSessions.find(s => s.id === activeSid);
+		if (cached) return cached;
+		const ai = panelAgentInterface;
+		const aiSessionId = typeof ai?.session?.sessionId === "string" ? ai.session.sessionId : undefined;
+		const routeReadOnlyPanelSource = activeSid === routeSessionId && routeHasReadOnlyPanel;
+		if (!ai?.readOnly || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid && !routeReadOnlyPanelSource)) return undefined;
+		return {
+			id: activeSid,
+			title: sessionTitle || "New session",
+			cwd: ai.cwd || "",
+			projectId: ai.projectId,
+			status: "archived",
+			createdAt: 0,
+			lastActivity: 0,
+			clientCount: 0,
+			goalId: ai.goalId,
+			delegateOf: ai.delegateOf,
+			teamGoalId: ai.teamGoalId,
+			assistantType: ai.assistantType,
+			readOnly: true,
+			archived: true,
+		} as GatewaySession;
+	})() : undefined;
+	const activeSessionArchived = activeSession ? isArchivedSessionActionSource(activeSession) : false;
+	const showingSessionHeader = Boolean((connected && state.remoteAgent) || (activeSessionArchived && activeSession));
+	const headerTitle = activeStaffAgent?.name ?? (sessionTitle || activeSession?.title || "New session");
+	const hasHeaderSessionActions = Boolean(activeSession && ((connected && state.remoteAgent) || activeSessionArchived));
 	const headerSessionActions = hasHeaderSessionActions && activeSession ? renderHeaderSessionActions({
 		session: activeSession,
 		displayTitle: sessionTitle || activeSession.title,
@@ -1966,7 +2107,7 @@ export function doRenderApp(): void {
 	}) : html``;
 
 	const headerLeft = () => {
-		if (connected && state.remoteAgent) {
+		if (showingSessionHeader) {
 			const backBtn = !desktop ? Button({
 				variant: "ghost",
 				size: "sm",
@@ -1980,7 +2121,6 @@ export function doRenderApp(): void {
 			}) : "";
 
 			if (!desktop) {
-				const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 				const goalId = activeSession?.goalId || activeSession?.teamGoalId;
 				const goalTitle = goalId ? state.goals.find(g => g.id === goalId)?.title : undefined;
 				// Left-aligned title layout (flex row, not absolute-centered) so
@@ -1998,7 +2138,7 @@ export function doRenderApp(): void {
 					</div>
 				`;
 			}
-			const deskSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+			const deskSession = activeSession;
 			const deskGoalId = deskSession?.goalId || deskSession?.teamGoalId;
 			const deskGoalTitle = deskGoalId ? state.goals.find(g => g.id === deskGoalId)?.title : undefined;
 			return html`
@@ -2031,7 +2171,7 @@ export function doRenderApp(): void {
 			onClick: () => { import("./settings-page.js").then((m) => m.toggleSettings()); },
 			title: "Settings",
 		});
-		if (connected && state.remoteAgent) {
+		if (showingSessionHeader) {
 			return html``;
 		}
 		return html`
@@ -2389,6 +2529,7 @@ export function doRenderApp(): void {
 						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
 						setPanelTabsForSession(state, sid, remainingLegacyTabs);
 						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
+						const { clearPersistedReviewDocuments } = await loadReviewSources();
 						clearAllAnnotations(sid);
 						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
@@ -2410,13 +2551,18 @@ export function doRenderApp(): void {
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
 					const sid = activeSessionId() || "";
-					const doc = reviewDocumentFromDecisionDetail(e.detail);
-					const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
-					if (!doc || !payload) {
-						showHeaderToast("Could not submit review decision");
-						return;
-					}
 					try {
+						const {
+							reviewDecisionPayloadFromDetail,
+							reviewDocumentFromDecisionDetail,
+							submitReviewDecision,
+						} = await loadReviewSources();
+						const doc = reviewDocumentFromDecisionDetail(e.detail);
+						const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
+						if (!doc || !payload) {
+							showHeaderToast("Could not submit review decision");
+							return;
+						}
 						await submitReviewDecision(doc, payload, {
 							sessionId: sid,
 							prompt: async (feedback) => {
@@ -2449,6 +2595,7 @@ export function doRenderApp(): void {
 					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
 					setPanelTabsForSession(state, sid, remainingLegacyTabs);
 					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
+					const { clearPersistedReviewDocuments } = await loadReviewSources();
 					clearAllAnnotations(sid);
 					clearPersistedReviewDocuments(sid);
 					if (hasMarkdownReview) {

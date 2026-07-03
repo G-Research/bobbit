@@ -55,6 +55,20 @@ async function spawnTeamMember(goalId: string): Promise<{ sessionId: string; bra
 	return { sessionId, branch: status.branch };
 }
 
+async function expandTeamMemberBranch(page: Page, goalId: string, teamLeadId: string, memberId: string): Promise<void> {
+	const goalRow = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+	await expect(goalRow).toBeVisible({ timeout: 10_000 });
+	const expandGoal = goalRow.locator(`[title="Expand goal"]`).first();
+	if (await expandGoal.isVisible().catch(() => false)) await expandGoal.click();
+
+	const leadRow = page.locator(`[data-session-id="${teamLeadId}"]`).first();
+	await expect(leadRow).toBeVisible({ timeout: 10_000 });
+	const expandAgents = leadRow.locator(`[title="Expand agents"]`).first();
+	if (await expandAgents.isVisible().catch(() => false)) await expandAgents.click();
+
+	await expect(page.locator(`[data-session-id="${memberId}"]`).first()).toBeVisible({ timeout: 10_000 });
+}
+
 async function openGitDropdown(page: Page, sessionId: string, branch: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
@@ -66,6 +80,8 @@ async function openGitDropdown(page: Page, sessionId: string, branch: string): P
 	await expect(dropdown).toBeVisible({ timeout: 5_000 });
 	await expect(dropdown.getByTestId("git-local-only-policy")).toContainText("Local-only by policy", { timeout: 5_000 });
 	await expect(dropdown).toContainText("not published automatically");
+	await page.keyboard.press("Escape");
+	await expect(dropdown).toBeHidden({ timeout: 5_000 });
 }
 
 async function terminateSessionFromSidebar(page: Page, sessionId: string): Promise<void> {
@@ -108,12 +124,15 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 			memberId = member.sessionId;
 
 			await openApp(page);
+			await expandTeamMemberBranch(page, goalId, teamLeadId, memberId);
 			await openGitDropdown(page, memberId, member.branch);
 
 			await page.reload();
 			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+			await expandTeamMemberBranch(page, goalId, teamLeadId, memberId);
 			await openGitDropdown(page, memberId, member.branch);
 
+			await expandTeamMemberBranch(page, goalId, teamLeadId, memberId);
 			await terminateSessionFromSidebar(page, memberId);
 			await expect.poll(async () => {
 				const resp = await apiFetch(`/api/sessions/${memberId}?include=archived`);

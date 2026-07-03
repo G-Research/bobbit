@@ -2,8 +2,6 @@ import {
 	state,
 	renderApp,
 	setProjectsIfChanged,
-	expandedGoals,
-	saveExpandedGoals,
 	type GatewaySession,
 	type Goal,
 	type Project,
@@ -37,6 +35,7 @@ import {
 } from "./dialogs-lazy.js";
 import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
+import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -559,16 +558,16 @@ export async function refreshSessions(): Promise<void> {
 				// lookups whenever the goal list changes so negative entries don't stick
 				// after a branch or remote becomes available.
 				clearGoalGithubLinkCache();
-				// Auto-expand only newly discovered goals that have sessions — never
-				// re-expand a goal the user has already seen (and may have collapsed).
-				for (const g of incoming) {
-					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
-						expandedGoals.add(g.id);
-						// Also expand the parent so this goal's own row is visible in the
-						// sidebar (child rows only render when the parent is expanded).
-						const parentId = (g as { parentGoalId?: string }).parentGoalId;
-						if (parentId) expandedGoals.add(parentId);
-						saveExpandedGoals();
+				// Auto-expand only newly discovered top-level goals that have live
+				// owning sessions after the initial hydration. Automatic expansion is
+				// non-explicit so it cannot override a user's explicit collapse
+				// preference. Sub-goals never auto-open themselves or their parent just
+				// because polling discovered them.
+				if (!isInitial) {
+					for (const g of incoming) {
+						if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id || s.teamGoalId === g.id)) {
+							expandSidebarTreeNode({ kind: "goal", goalId: g.id }, { explicit: false });
+						}
 					}
 				}
 
@@ -1632,10 +1631,16 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
-		const goal = await res.json();
+		const goal = await res.json() as Goal;
 		await refreshSessions();
-		expandedGoals.add(goal.id);
-		saveExpandedGoals();
+		const goalsById = new Map(state.goals.map(g => [g.id, g]));
+		let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+		const seenGoalIds = new Set<string>();
+		while (cursor && !seenGoalIds.has(cursor.id)) {
+			seenGoalIds.add(cursor.id);
+			expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+			cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
+		}
 		return goal;
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
