@@ -646,6 +646,7 @@ function renderMobileLanding() {
 													${projectTree.goalForest.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = projectTree.sessionsSectionNode.expanded; return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+															data-testid="sidebar-sessions-header"
 															data-tree-key=${projectTree.sessionsSectionNode.key}
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
 															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
@@ -667,6 +668,7 @@ function renderMobileLanding() {
 																</button>
 																<button
 																	class="p-1 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 																	title="New session with role"
 																><span class="sidebar-scale-icon">${icon(ChevronDown, "sm")}</span></button>

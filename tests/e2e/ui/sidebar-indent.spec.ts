@@ -191,6 +191,9 @@ test.describe("Sidebar tree indentation (full-stack UI)", () => {
 		await openApp(page);
 		await seedSidebarState(page, fixture);
 		await reloadAndWaitForSidebarTree(page, fixture);
+		const sessionsHeaderBox = await page.getByTestId("sidebar-sessions-header").first().boundingBox();
+		const staffHeaderBox = await page.getByTestId("sidebar-staff-header").first().boundingBox();
+		expect(Math.round(sessionsHeaderBox?.height ?? 0), "Sessions and Staff sidebar headers should match height").toBe(Math.round(staffHeaderBox?.height ?? 0));
 		await openGeneralSettings(page);
 
 		await expect(page.getByLabel("Sidebar tree indentation")).toBeVisible({ timeout: 5_000 });
