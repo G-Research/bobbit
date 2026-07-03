@@ -584,7 +584,7 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_dismiss",
 			label: "Dismiss Child Agent",
-			description: "Terminate/archive one of your child agents or report a structured non-retryable outcome. Returns { ok, status, sessionId, message, retryable } with status dismissed, already-dismissed, not-owned, not-found, or failed.",
+			description: "Dismiss your child agent by session ID; returns structured status/retryable details and treats already-dismissed as idempotent.",
 			promptSnippet: "team_dismiss - Dismiss a child agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 			parameters: Type.Object({
 				session_id: Type.String(),

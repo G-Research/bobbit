@@ -427,15 +427,18 @@ describe("TeamManager", () => {
 	// ---------------------------------------------------------------------------
 
 	describe("dismissRole", () => {
-		it("should return false for an unknown session", async () => {
+		it("should return not-found for an unknown session", async () => {
 			const sm = createMockSessionManager(new Map());
 			const team = createTeamManager(sm);
 
 			const result = await team.dismissRole("nonexistent");
-			assert.equal(result, false);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-found", sessionId: "nonexistent", retryable: false },
+			);
 		});
 
-		it("should throw when trying to dismiss the team lead", async () => {
+		it("should return not-owned when trying to dismiss the team lead", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
@@ -444,12 +447,14 @@ describe("TeamManager", () => {
 
 			const session = await team.startTeam("goal-1");
 
-			await assert.rejects(() => team.dismissRole(session.id), {
-				message: /Cannot dismiss the team lead/,
-			});
+			const result = await team.dismissRole(session.id);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-owned", sessionId: session.id, retryable: false },
+			);
 		});
 
-		it("should return false if agent not found in team entry", async () => {
+		it("should return not-found if agent not found in team entry", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
@@ -462,7 +467,10 @@ describe("TeamManager", () => {
 			(team as any).sessionToGoal.set("orphan-session", "goal-1");
 
 			const result = await team.dismissRole("orphan-session");
-			assert.equal(result, false);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-found", sessionId: "orphan-session", retryable: false },
+			);
 		});
 	});
 
@@ -1540,7 +1548,10 @@ describe("TeamManager", () => {
 
 			// Dismiss
 			const dismissed = await team.dismissRole(result.sessionId);
-			assert.equal(dismissed, true);
+			assert.deepEqual(
+				{ ok: dismissed.ok, status: dismissed.status, sessionId: dismissed.sessionId, retryable: dismissed.retryable },
+				{ ok: true, status: "dismissed", sessionId: result.sessionId, retryable: false },
+			);
 
 			// Worktree is preserved for archived session review (cleanup at purge time)
 			assert.ok(
