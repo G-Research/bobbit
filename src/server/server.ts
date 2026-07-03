@@ -10636,12 +10636,23 @@ async function handleApiRoute(
 	// OrchestrationCore), route the verb through the core so the documented verbs work
 	// on the lead's own delegate helpers. Goal-member behaviour is unchanged.
 	const teamLeadOwnChildOwner = (goalId: string, targetId: string): string | undefined => {
-		const lead = teamManager.getTeamState(goalId)?.teamLeadSessionId;
-		if (!lead) return undefined;
-		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId)) return lead;
-		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
+		const teamState = teamManager.getTeamState(goalId);
+		if (!teamState?.teamLeadSessionId) return undefined;
+		const lead = teamState.teamLeadSessionId;
+
+		// Tracked goal team members must flow through TeamManager.dismissRoleForGoal()
+		// so it can remove team-manager state, subscriptions, timers, and broadcasts.
+		// They are also registered in OrchestrationCore under the team lead, so a
+		// plain owner/child match would incorrectly route real team agents through
+		// the private team_delegate fallback.
+		if (teamState.agents.some((agent) => agent.sessionId === targetId)) return undefined;
+		const live = sessionManager.getSession(targetId) as any;
 		const persisted = sessionManager.getPersistedSession(targetId) as any;
-		return persisted?.delegateOf === lead || persisted?.parentSessionId === lead || persisted?.teamLeadSessionId === lead ? lead : undefined;
+		if (live?.teamGoalId || persisted?.teamGoalId) return undefined;
+
+		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId && h.childKind !== "team")) return lead;
+		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
+		return persisted?.delegateOf === lead || (persisted?.parentSessionId === lead && persisted?.childKind !== "team") ? lead : undefined;
 	};
 	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
 	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
