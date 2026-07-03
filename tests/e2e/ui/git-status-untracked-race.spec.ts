@@ -1,6 +1,10 @@
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
-import { createGoal, createSession, deleteGoal, deleteSession } from "../e2e-setup.js";
+import { createGoal, createSession, deleteGoal, deleteSession, registerProject, apiFetch } from "../e2e-setup.js";
 import { navigateToGoalDashboard, navigateToHash, openApp } from "./ui-helpers.js";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 function gitStatus(status: Array<{ file: string; status: string }>) {
 	return {
@@ -34,10 +38,41 @@ async function openSession(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
+type GitProject = { id: string; rootPath: string };
+const createdProjects = new Set<string>();
+const createdDirs = new Set<string>();
+
+function createGitRoot(label: string): string {
+	const dir = mkdtempSync(join(tmpdir(), `bobbit-git-status-${label}-`));
+	createdDirs.add(dir);
+	writeFileSync(join(dir, "README.md"), "# git status E2E repo\n");
+	execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "pipe" });
+	return dir;
+}
+
+async function createGitProject(label: string): Promise<GitProject> {
+	const rootPath = createGitRoot(label);
+	const project = await registerProject({ name: `git-status-${label}-${Date.now()}`, rootPath });
+	createdProjects.add(project.id);
+	return { id: project.id, rootPath };
+}
+
 test.describe("git status dropdown untracked refresh", () => {
+	test.afterEach(async () => {
+		for (const id of Array.from(createdProjects).reverse()) {
+			await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		}
+		createdProjects.clear();
+		for (const dir of Array.from(createdDirs).reverse()) rmSync(dir, { recursive: true, force: true });
+		createdDirs.clear();
+	});
+
 	test("session dropdown keeps untracked files after a late summary-only refresh while open", async ({ page }) => {
 		test.setTimeout(60_000);
-		const sessionId = await createSession();
+		const project = await createGitProject("session");
+		const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
 		let sawFetchUntracked = false;
 		let forceLateSummary = false;
 		let resolveLateSummary: (() => void) | undefined;
@@ -97,7 +132,15 @@ test.describe("git status dropdown untracked refresh", () => {
 
 	test("dashboard dropdown open requests untracked-aware git status", async ({ page }) => {
 		test.setTimeout(60_000);
-		const goal = await createGoal({ title: "Dashboard git untracked open" });
+		const project = await createGitProject("dashboard");
+		const goal = await createGoal({
+			title: "Dashboard git untracked open",
+			cwd: project.rootPath,
+			projectId: project.id,
+			worktree: false,
+			team: false,
+			autoStartTeam: false,
+		});
 		let sawFetchUntracked = false;
 		const statusRe = new RegExp(`/api/goals/${goal.id}/git-status(?:\\?.*)?$`);
 

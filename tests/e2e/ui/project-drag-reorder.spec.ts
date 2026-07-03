@@ -14,6 +14,7 @@ import { navigateToHash, openApp } from "./ui-helpers.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 375, height: 667 };
+const HEADQUARTERS_PROJECT_ID = "headquarters";
 
 type ProjectFixture = {
 	id: string;
@@ -40,6 +41,14 @@ function projectHandle(page: Page, projectId: string): Locator {
 
 function projectReorderRow(page: Page, projectId: string): Locator {
 	return page.locator(`[data-project-reorder-id="${attr(projectId)}"]`);
+}
+
+async function setHeadquartersVisible(visible: boolean): Promise<void> {
+	const resp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ showHeadquartersInProjectLists: visible }),
+	});
+	expect(resp.ok, `showHeadquartersInProjectLists=${visible}`).toBeTruthy();
 }
 
 function reorderMode(page: Page): Locator {
@@ -330,10 +339,24 @@ test.describe("Project drag reorder (browser E2E)", () => {
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 		}
 		createdProjects = [];
+		await setHeadquartersVisible(true).catch(() => {});
+	});
+
+	test("Headquarters is anchored first and has no reorder handle", async ({ page }) => {
+		await setHeadquartersVisible(true);
+		await openDesktop(page);
+		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
+			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
+		);
+		expect(headerIds[0], "Headquarters should be anchored first when visible").toBe(HEADQUARTERS_PROJECT_ID);
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 20_000 });
+		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters should be excluded from reorder rows").toHaveCount(0);
+		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters should not render a reorder handle").toHaveCount(0);
 	});
 
 	test("desktop affordances, pointer reorder persistence, live sync, cancel, and collapsed sidebar order", async ({ page }) => {
 		test.setTimeout(120_000);
+		await setHeadquartersVisible(false);
 		const alpha = await createProjectFixture("desktop-alpha");
 		const beta = await createProjectFixture("desktop-beta");
 		const gamma = await createProjectFixture("desktop-gamma");
@@ -425,6 +448,7 @@ test.describe("Project drag reorder (browser E2E)", () => {
 
 	test("mobile handle is always visible; pointer drag reorders with temporary collapse/restore and reload persistence", async ({ page }) => {
 		test.setTimeout(120_000);
+		await setHeadquartersVisible(false);
 		const alpha = await createProjectFixture("mobile-alpha");
 		const beta = await createProjectFixture("mobile-beta");
 		const gamma = await createProjectFixture("mobile-gamma");
