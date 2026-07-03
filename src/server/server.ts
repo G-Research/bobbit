@@ -12935,6 +12935,19 @@ async function handleApiRoute(
 			}
 			return n;
 		}
+		function parseBoolParam(...names: string[]): boolean | undefined {
+			let raw: string | null = null;
+			let foundName = "";
+			for (const name of names) {
+				raw = qp.get(name);
+				if (raw !== null) { foundName = name; break; }
+			}
+			if (raw === null) return undefined;
+			const normalized = raw.toLowerCase();
+			if (normalized === "1" || normalized === "true") return true;
+			if (normalized === "0" || normalized === "false") return false;
+			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
+		}
 		try {
 			const params = {
 				offset: parseIntParam("offset"),
@@ -12943,6 +12956,7 @@ async function handleApiRoute(
 				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
 				context: parseIntParam("context"),
 				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
 			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {

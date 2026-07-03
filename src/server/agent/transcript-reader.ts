@@ -19,6 +19,11 @@ export interface ReadTranscriptParams {
 	caseSensitive?: boolean;
 	context?: number;
 	verbose?: boolean;
+	/**
+	 * Backward-compatible default is true for direct reader/API callers.
+	 * The agent-facing read_session tool passes false unless explicitly opted in.
+	 */
+	includeToolResults?: boolean;
 }
 
 export interface CompactToolUse {
@@ -26,9 +31,25 @@ export interface CompactToolUse {
 	inputPreview: string;
 }
 
+export type ToolResultStatus = "ok" | "error" | "unknown";
+
+export interface ToolResultSize {
+	type: "string" | "array" | "object" | "null" | "missing" | "other";
+	chars?: number;
+	lines?: number;
+	bytes?: number;
+	blocks?: number;
+}
+
 export interface CompactToolResult {
 	name?: string;
-	preview: string;
+	toolUseId?: string;
+	/** Present only when raw tool output is intentionally omitted. */
+	omitted?: boolean;
+	/** Present only when includeToolResults is true. */
+	preview?: string;
+	status?: ToolResultStatus;
+	size?: ToolResultSize;
 }
 
 export interface CompactMessage {
@@ -137,6 +158,113 @@ function safeStringify(v: unknown): string {
 	try { return JSON.stringify(v); } catch { return String(v); }
 }
 
+function contentSize(content: unknown, hasContent = true): ToolResultSize {
+	if (!hasContent) return { type: "missing" };
+	if (content === null) return { type: "null" };
+	if (typeof content === "string") {
+		return {
+			type: "string",
+			chars: content.length,
+			lines: content.length === 0 ? 0 : content.split(/\r\n|\r|\n/).length,
+			bytes: Buffer.byteLength(content, "utf8"),
+		};
+	}
+	if (Array.isArray(content)) return { type: "array", blocks: content.length };
+	if (typeof content === "object") return { type: "object" };
+	return { type: "other" };
+}
+
+function truthyError(value: unknown): boolean | undefined {
+	if (typeof value === "boolean") return value;
+	return undefined;
+}
+
+function resultStatus(block: Record<string, unknown>, message: Record<string, unknown>): ToolResultStatus {
+	const isError = truthyError(block.is_error) ?? truthyError(block.isError) ?? truthyError(message.isError);
+	if (isError === true) return "error";
+	if (isError === false) return "ok";
+	return "unknown";
+}
+
+function blockToolUseId(block: Record<string, unknown>): string | undefined {
+	for (const key of ["tool_use_id", "toolUseId", "toolCallId", "id"]) {
+		const value = block[key];
+		if (typeof value === "string" && value) return value;
+	}
+	return undefined;
+}
+
+function blockToolName(block: Record<string, unknown>): string | undefined {
+	const name = block.name ?? block.toolName;
+	return typeof name === "string" && name ? name : undefined;
+}
+
+function buildToolNameMap(messages: RawMessage[]): Map<string, string> {
+	const map = new Map<string, string>();
+	for (const m of messages) {
+		if (!Array.isArray(m.content)) continue;
+		for (const block of m.content) {
+			if (!block || typeof block !== "object") continue;
+			const b = block as Record<string, unknown>;
+			const type = b.type;
+			const id = blockToolUseId(b);
+			const name = blockToolName(b);
+			if (id && name && (type === "tool_use" || b.toolCallId || b.toolName)) {
+				map.set(id, name);
+			}
+		}
+	}
+	return map;
+}
+
+interface RenderOptions {
+	includeToolResults: boolean;
+	toolNameById: Map<string, string>;
+}
+
+const DEFAULT_RENDER_OPTIONS: RenderOptions = {
+	includeToolResults: true,
+	toolNameById: new Map<string, string>(),
+};
+
+function toolResultMeta(
+	block: Record<string, unknown>,
+	message: Record<string, unknown>,
+	options: RenderOptions,
+): { name?: string; toolUseId?: string; status: ToolResultStatus; size: ToolResultSize } {
+	const toolUseId = blockToolUseId(block) ?? (typeof message.toolCallId === "string" ? message.toolCallId : undefined);
+	const name = blockToolName(block)
+		?? (typeof message.toolName === "string" ? message.toolName : undefined)
+		?? (toolUseId ? options.toolNameById.get(toolUseId) : undefined);
+	const hasContent = Object.prototype.hasOwnProperty.call(block, "content");
+	return {
+		...(name ? { name } : {}),
+		...(toolUseId ? { toolUseId } : {}),
+		status: resultStatus(block, message),
+		size: contentSize(block.content, hasContent),
+	};
+}
+
+function isMessageLevelToolResult(m: RawMessage): boolean {
+	return m.role === "toolResult" || m.fullMessage.role === "toolResult";
+}
+
+function messageLevelToolResultBlock(m: RawMessage): Record<string, unknown> {
+	return {
+		type: "tool_result",
+		...(typeof m.fullMessage.toolCallId === "string" ? { toolUseId: m.fullMessage.toolCallId } : {}),
+		...(typeof m.fullMessage.toolName === "string" ? { name: m.fullMessage.toolName, toolName: m.fullMessage.toolName } : {}),
+		...(typeof m.fullMessage.isError === "boolean" ? { isError: m.fullMessage.isError } : {}),
+		content: m.content,
+	};
+}
+
+function toolResultPreview(content: unknown): string {
+	return (typeof content === "string" ? content : safeStringify(content)).slice(0, PREVIEW_LIMIT);
+}
+
+const OMITTED_TOOL_RESULT_CONTENT = "[tool result omitted; pass include_tool_results:true to read_session to include it]";
+
 export function parseJsonl(content: string): RawMessage[] {
 	if (!content) return [];
 	const messages: RawMessage[] = [];
@@ -168,13 +296,16 @@ export function parseJsonl(content: string): RawMessage[] {
 
 // ── Compact rendering ──
 
-function toCompact(m: RawMessage): CompactMessage {
+function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTIONS): CompactMessage {
 	const content = m.content;
 	let text = "";
 	const toolUses: CompactToolUse[] = [];
 	const toolResults: CompactToolResult[] = [];
 
-	if (typeof content === "string") {
+	if (isMessageLevelToolResult(m) && !options.includeToolResults) {
+		const meta = toolResultMeta(messageLevelToolResultBlock(m), m.fullMessage, options);
+		toolResults.push({ ...meta, omitted: true });
+	} else if (typeof content === "string") {
 		text = content;
 	} else if (Array.isArray(content)) {
 		const textParts: string[] = [];
@@ -185,16 +316,19 @@ function toCompact(m: RawMessage): CompactMessage {
 			if (t === "text" && typeof b.text === "string") {
 				textParts.push(b.text);
 			} else if (t === "tool_use") {
-				const name = typeof b.name === "string" ? b.name : "?";
+				const name = blockToolName(b) ?? "?";
 				let inputPreview = "";
 				try { inputPreview = JSON.stringify(b.input ?? {}).slice(0, PREVIEW_LIMIT); }
 				catch { inputPreview = ""; }
 				toolUses.push({ name, inputPreview });
 			} else if (t === "tool_result") {
-				const c = b.content;
-				const preview = (typeof c === "string" ? c : safeStringify(c)).slice(0, PREVIEW_LIMIT);
-				const name = typeof b.name === "string" ? b.name : undefined;
-				toolResults.push(name ? { name, preview } : { preview });
+				const meta = toolResultMeta(b, m.fullMessage, options);
+				if (options.includeToolResults) {
+					const preview = toolResultPreview(b.content);
+					toolResults.push({ ...meta, preview });
+				} else {
+					toolResults.push({ ...meta, omitted: true });
+				}
 			}
 		}
 		text = textParts.join("\n").trim();
@@ -208,8 +342,46 @@ function toCompact(m: RawMessage): CompactMessage {
 	return out;
 }
 
-function toVerbose(m: RawMessage, includeFullMessage = false): VerboseMessage {
-	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: m.content };
+function redactVerboseContent(content: unknown, m: RawMessage, options: RenderOptions): unknown {
+	if (options.includeToolResults) return content;
+	if (isMessageLevelToolResult(m)) {
+		const block = messageLevelToolResultBlock(m);
+		const meta = toolResultMeta(block, m.fullMessage, options);
+		return [{
+			type: "tool_result",
+			...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+			...(meta.name ? { name: meta.name, toolName: meta.name } : {}),
+			...(typeof m.fullMessage.isError === "boolean" ? { isError: m.fullMessage.isError } : {}),
+			content: OMITTED_TOOL_RESULT_CONTENT,
+			contentOmitted: true,
+			resultSize: meta.size,
+			status: meta.status,
+		}];
+	}
+	if (!Array.isArray(content)) return content;
+	return content.map((block) => {
+		if (!block || typeof block !== "object") return block;
+		const b = block as Record<string, unknown>;
+		if (b.type !== "tool_result") return block;
+		const meta = toolResultMeta(b, m.fullMessage, options);
+		return {
+			...b,
+			...(meta.name && !b.name ? { name: meta.name } : {}),
+			...(meta.toolUseId && !b.toolUseId && !b.tool_use_id ? { toolUseId: meta.toolUseId } : {}),
+			content: OMITTED_TOOL_RESULT_CONTENT,
+			contentOmitted: true,
+			resultSize: meta.size,
+			status: meta.status,
+		};
+	});
+}
+
+function toVerbose(
+	m: RawMessage,
+	includeFullMessage = false,
+	options: RenderOptions = DEFAULT_RENDER_OPTIONS,
+): VerboseMessage {
+	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: redactVerboseContent(m.content, m, options) };
 	if (includeFullMessage) out.message = m.fullMessage;
 	return out;
 }
@@ -404,7 +576,7 @@ export async function readOrphanedBeforeCompaction(
 	const window = orphaned.slice(start, end);
 	const messages = params.verbose
 		? window.map((m) => toVerbose(m, /* includeFullMessage */ true))
-		: window.map(toCompact);
+		: window.map((m) => toCompact(m));
 	const nextCursor = end < total ? end : null;
 	return { total, returned: messages.length, nextCursor, messages };
 }
@@ -436,6 +608,7 @@ export async function readTranscript(
 	}
 
 	const verbose = !!params.verbose;
+	const includeToolResults = params.includeToolResults ?? true;
 	const pattern = params.pattern;
 	const caseSensitive = !!params.caseSensitive;
 
@@ -446,6 +619,7 @@ export async function readTranscript(
 
 	const all = parseJsonl(content);
 	const total = all.length;
+	const renderOptions: RenderOptions = { includeToolResults, toolNameById: buildToolNameMap(all) };
 
 	// No pattern → window over the raw transcript.
 	let workingIndices: number[];
@@ -477,7 +651,7 @@ export async function readTranscript(
 	const windowIndices = workingIndices.slice(start, end);
 	const messages: TranscriptMessage[] = windowIndices.map((i) => {
 		const raw = all[i];
-		return verbose ? toVerbose(raw) : toCompact(raw);
+		return verbose ? toVerbose(raw, false, renderOptions) : toCompact(raw, renderOptions);
 	});
 
 	const env: ReadTranscriptEnvelope = {
