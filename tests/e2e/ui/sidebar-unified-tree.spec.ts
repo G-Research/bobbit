@@ -311,13 +311,27 @@ test.describe("Unified sidebar tree representative nodes", () => {
 			await expect(archivedGroup).toHaveAttribute("data-expanded", "true");
 			await expect(sessionRow(page, fixture.archivedDelegateId)).toBeVisible({ timeout: 10_000 });
 
-			// Keyboard expand/collapse for a chevron-bearing row uses the active goal row.
+			// Keyboard expand/collapse for chevron-bearing rows works for goal rows and session-backed rows.
 			await navigateToHash(page, `#/goal/${fixture.subgoalParentId}`);
 			await expect(rowByNavId(page, `goal:${fixture.subgoalParentId}`)).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
 			await pressCtrlArrow(page, "ArrowLeft");
 			await expect(goalEntry(page, fixture.subgoalChildId)).toHaveCount(0);
 			await pressCtrlArrow(page, "ArrowRight");
 			await expect(goalEntry(page, fixture.subgoalChildId)).toBeVisible({ timeout: 10_000 });
+
+			await navigateToHash(page, `#/session/${fixture.parentSessionId}`);
+			await expect(rowByNavId(page, `session:${fixture.parentSessionId}`)).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
+			await pressCtrlArrow(page, "ArrowLeft");
+			await expect(sessionRow(page, fixture.firstClassChildId)).toHaveCount(0);
+			await expect(sessionRow(page, fixture.liveDelegateId)).toHaveCount(0);
+			await pressCtrlArrow(page, "ArrowRight");
+			await expect(sessionRow(page, fixture.firstClassChildId)).toBeVisible({ timeout: 10_000 });
+			await expect(sessionRow(page, fixture.liveDelegateId)).toBeVisible();
+
+			await navigateToHash(page, `#/session/${fixture.firstClassChildId}`);
+			await expect(rowByNavId(page, `session:${fixture.firstClassChildId}`)).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
+			await pressCtrlArrow(page, "ArrowLeft");
+			await expect(sessionRow(page, fixture.liveDelegateId)).toBeVisible();
 		} finally {
 			if (fixture.staffId) await apiFetch(`/api/staff/${fixture.staffId}`, { method: "DELETE" }).catch(() => {});
 			await teardownTeam(fixture.teamGoalId).catch(() => {});
