@@ -44,6 +44,46 @@ async function ready(page: any) {
 	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 30_000 });
 }
 
+test.describe("RemoteAgent live preference sync", () => {
+	test("preferences_changed keeps Headquarters visibility state in sync", async ({ page }) => {
+		await ready(page);
+		const r = await page.evaluate(async () => {
+			const w = window as any;
+			const ra = w.__makeAgent(w.__OPEN);
+
+			w.__setHeadquartersVisibleState(true);
+			w.__resetRenderCount();
+			await w.__serverMessage(ra, {
+				type: "preferences_changed",
+				preferences: { showHeadquartersInProjectLists: false },
+			});
+			await w.__nextRenderFrame();
+			const hidden = {
+				visible: w.__getHeadquartersVisibleState(),
+				renders: w.__renderCount(),
+			};
+
+			w.__resetRenderCount();
+			await w.__serverMessage(ra, {
+				type: "preferences_changed",
+				preferences: {},
+			});
+			await w.__nextRenderFrame();
+			const defaultVisible = {
+				visible: w.__getHeadquartersVisibleState(),
+				renders: w.__renderCount(),
+			};
+
+			return { hidden, defaultVisible };
+		});
+
+		expect(r.hidden.visible).toBe(false);
+		expect(r.hidden.renders).toBeGreaterThan(0);
+		expect(r.defaultVisible.visible).toBe(true);
+		expect(r.defaultVisible.renders).toBeGreaterThan(0);
+	});
+});
+
 test.describe("RemoteAgent provider auth recovery", () => {
 	test("stores a redacted provider_auth_required event and clears it on retry, new prompt, model switch, and agent_start", async ({ page }) => {
 		await ready(page);
