@@ -2272,6 +2272,15 @@ export class TeamManager {
 
 		const agent = entry.agents[agentIndex];
 
+		// Stamp durable ownership before terminal/archive cleanup. Duplicate dismiss
+		// classification cannot rely on sessionToGoal because successful dismiss
+		// removes that live index below.
+		this.sessionManager.updateSessionMeta(sessionId, {
+			role: agent.role,
+			teamGoalId: goalId,
+			teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+		} as any);
+
 		// Forget the worker from the OrchestrationCore runtime index (goal adapter).
 		try { this.config.orchestrationCore?.forgetChild(sessionId); } catch { /* best-effort */ }
 
@@ -2386,6 +2395,11 @@ export class TeamManager {
 		};
 		entry.agents.push(agent);
 		this.sessionToGoal.set(sessionId, goalId);
+		this.sessionManager.updateSessionMeta(sessionId, {
+			role: agent.role,
+			teamGoalId: goalId,
+			teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+		} as any);
 		this.assignUniqueColor(sessionId);
 		this.persistEntry(goalId);
 	}
