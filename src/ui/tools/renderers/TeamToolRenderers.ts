@@ -136,6 +136,49 @@ export class TeamListRenderer implements ToolRenderer {
 
 // ── team_dismiss ─────────────────────────────────────────────────────
 
+type DismissStatus = "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+
+interface DismissResult {
+	ok?: boolean;
+	status?: string;
+	sessionId?: string;
+	session_id?: string;
+	message?: string;
+	retryable?: boolean;
+}
+
+function normalizeDismissStatus(status: unknown, isError: boolean): DismissStatus {
+	const value = typeof status === "string" ? status.toLowerCase().replace(/_/g, "-") : "";
+	if (value === "dismissed" || value === "already-dismissed" || value === "not-owned" || value === "not-found" || value === "failed") return value;
+	return isError ? "failed" : "dismissed";
+}
+
+function dismissStatusText(status: DismissStatus): string {
+	const labels: Record<DismissStatus, string> = {
+		dismissed: "Dismissed agent",
+		"already-dismissed": "Agent already dismissed",
+		"not-owned": "Dismiss failed — not owned",
+		"not-found": "Dismiss failed — not found",
+		failed: "Dismiss failed",
+	};
+	return labels[status];
+}
+
+function dismissDetailClass(status: DismissStatus, skipped: boolean): string {
+	if (skipped) return "text-amber-600 dark:text-amber-400";
+	if (status === "dismissed" || status === "already-dismissed") return "text-muted-foreground";
+	return "text-destructive";
+}
+
+function renderDismissDetails(outcome: DismissResult, fallbackText: string, status: DismissStatus, skipped: boolean): TemplateResult | string {
+	const details: string[] = [];
+	if (outcome.message) details.push(outcome.message);
+	else if (fallbackText && (skipped || status !== "dismissed")) details.push(fallbackText);
+	if (typeof outcome.retryable === "boolean") details.push(outcome.retryable ? "Retry may help." : "Do not retry.");
+	if (!details.length) return "";
+	return html`<div class="mt-1 text-xs ${dismissDetailClass(status, skipped)}">${details.join(" ")}</div>`;
+}
+
 export class TeamDismissRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
@@ -145,20 +188,18 @@ export class TeamDismissRenderer implements ToolRenderer {
 			return { content: html`<div>${renderHeader(state, UserMinus, html`Dismissing agent ${sid ? renderSessionLink(sid) : ""}`)}</div>`, isCustom: false };
 		}
 
-		if (result.isError) {
-			const { text } = getResult(result);
-			const skipped = isSkippedToolResult(result);
-			return {
-				content: html`<div>
-					${renderHeader(state, UserMinus, skipped ? html`Aborted dismiss` : html`Failed to dismiss agent`)}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
-				</div>`,
-				isCustom: false,
-			};
-		}
+		const { text, data } = getResult(result);
+		const skipped = isSkippedToolResult(result);
+		const outcome = (data && typeof data === "object" ? data : {}) as DismissResult;
+		const status = skipped ? "failed" : normalizeDismissStatus(outcome.status, result.isError);
+		const sessionId = outcome.sessionId || outcome.session_id || sid;
+		const title = skipped ? "Aborted dismiss" : dismissStatusText(status);
 
 		return {
-			content: html`<div>${renderHeader(state, UserMinus, html`Dismissed agent ${sid ? renderSessionLink(sid) : ""}`)}</div>`,
+			content: html`<div>
+				${renderHeader(state, UserMinus, html`${title} ${sessionId ? renderSessionLink(sessionId) : ""}`)}
+				${renderDismissDetails(outcome, text, status, skipped)}
+			</div>`,
 			isCustom: false,
 		};
 	}
