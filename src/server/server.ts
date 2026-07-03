@@ -10655,25 +10655,37 @@ async function handleApiRoute(
 		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
 		return persisted?.delegateOf === lead || (persisted?.parentSessionId === lead && persisted?.childKind !== "team") ? lead : undefined;
 	};
+	const resolveAuthenticCallerFromSessionSecret = (): string | undefined => {
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const secretHeader = h["x-bobbit-session-secret"];
+		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+	};
+	const denyDismissNotOwned = (sessionId: string, message = "Caller session is not the team lead for this goal") => json({
+		ok: false,
+		status: "not-owned",
+		sessionId,
+		message,
+		retryable: false,
+	}, 403);
+
 	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
 	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
 	// sandbox-scoped token, so without this a same-goal agent that learns a
 	// helper child's session id could prompt/steer/abort/dismiss the team-lead's
 	// PRIVATE team_delegate child. Bind to the unforgeable per-session secret and
 	// require the AUTHENTIC caller to BE the team-lead owner. Goal-MEMBER
-	// operations (the normal /team/* path) are unaffected — this guards the
-	// own-child fallback ONLY. Returns the owner id when authorized, a `denied`
-	// sentinel when the target IS an own child but the caller is not its owner,
-	// or `undefined` when the target is not an own child (normal path continues).
+	// operations use TeamManager below; tracked team-agent dismiss has its own
+	// team-lead authz check before destructive cleanup. Returns the owner id when
+	// authorized, a `denied` sentinel when the target IS an own child but the
+	// caller is not its owner, or `undefined` when the target is not an own child
+	// (normal path continues).
 	const resolveOwnChildOwner = (goalId: string, targetId: string): { owner: string } | { denied: true } | undefined => {
 		const owner = teamLeadOwnChildOwner(goalId, targetId);
 		if (!owner) return undefined;
-		const h = req.headers as Record<string, string | string[] | undefined>;
-		const secretHeader = h["x-bobbit-session-secret"];
-		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
-		const authenticCaller = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
-		);
+		const authenticCaller = resolveAuthenticCallerFromSessionSecret();
 		if (!authenticCaller || authenticCaller !== owner) return { denied: true };
 		return { owner };
 	};
@@ -10708,6 +10720,20 @@ async function handleApiRoute(
 			const result = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
 			json(result, dismissHttpStatus(result));
 			return;
+		}
+		const teamState = teamManager.getTeamState(goalId);
+		const isTrackedTeamAgent = teamState?.agents.some((agent) => agent.sessionId === body.sessionId) ?? false;
+		if (isTrackedTeamAgent) {
+			const authz = authorizeChildrenMutation({
+				mutationClass: "orchestration",
+				isHumanOperator: false,
+				authenticCallerSessionId: resolveAuthenticCallerFromSessionSecret(),
+				teamLeadSessionId: teamState?.teamLeadSessionId,
+			});
+			if (!authz.ok) {
+				denyDismissNotOwned(body.sessionId);
+				return;
+			}
 		}
 		const result = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
 		json(result, dismissHttpStatus(result));

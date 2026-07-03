@@ -608,10 +608,11 @@ function maybeInjectOrchestrateSecret(path: string, headers: Record<string, stri
  * (mirrors `/orchestrate/*`). In production the team-lead's agent process sends
  * its BOBBIT_SESSION_SECRET (team/extension.ts). An in-process E2E test acts as
  * the team-lead by resolving the goal's team-lead session id and injecting its
- * secret. A test exercising the FOREIGN-caller DENY path supplies its OWN
- * secret (suppresses injection); the NO-secret DENY path uses `rawApiFetch`
- * (which bypasses all injectors). Goal-MEMBER `/team/*` calls are unaffected —
- * the server ignores the secret on the normal path.
+ * secret. Tracked goal-member dismiss also uses this secret for team-lead-only
+ * cleanup before TeamManager runs. A test exercising the FOREIGN-caller DENY
+ * path supplies its OWN secret (suppresses injection); the NO-secret DENY path
+ * uses `rawApiFetch` (which bypasses all injectors). Goal-MEMBER
+ * prompt/steer/abort normal paths are unaffected.
  */
 let _teamLeadResolver: ((goalId: string) => string | undefined) | undefined;
 let _teamLeadSecretStore: { getOrCreateSecret(id: string): string } | undefined;
