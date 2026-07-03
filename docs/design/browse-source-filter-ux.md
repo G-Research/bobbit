@@ -30,7 +30,8 @@ Trigger label:
 Accessible name:
 
 - `aria-label="Filter packages by source"`
-- `aria-haspopup="menu"` or `aria-haspopup="dialog"` depending on implementation pattern
+- Use a labelled popup with native form controls, not ARIA menu semantics. Prefer a `<fieldset>`/`<legend>` or labelled container; `role="dialog"`, `role="group"`, or no special role with `aria-labelledby`/`aria-label` are acceptable.
+- If `aria-haspopup` is used, prefer `aria-haspopup="dialog"`; do not use `aria-haspopup="menu"` unless implementing full ARIA menu semantics.
 - `aria-expanded="true|false"`
 - `aria-controls="market-browse-source-menu"`
 
@@ -46,7 +47,12 @@ Suggested wording:
 - `No packages match the current filters`
 - While initial browse data is loading: `Loading sources…`
 
-Counts should reflect the currently visible browse result after source filtering and search when possible. If implementation separates source and search counts, prefer clarity: `12 packs from 3 selected sources`.
+Summary count contract:
+
+- The pack count is the currently visible Browse package count after both source filtering and search filtering.
+- The source count is the number of selected supported sources; unsupported sources never count as selected sources.
+- Search-active summaries should update with the visible results, e.g. searching within 3 selected sources can change `Showing 12 packs from 3 sources` to `Showing 2 packs from 3 sources`.
+- Tests should cover summary updates while search is active.
 
 ## Menu content
 
@@ -117,22 +123,20 @@ Do not rely on color alone. Pair status color with text and, if icons are used, 
 Minimum behavior:
 
 - `Tab` focuses the Sources trigger after the search input.
-- `Enter` or `Space` opens the menu.
-- `Escape` closes the menu and returns focus to the trigger.
-- `Tab` moves through bulk actions and checkboxes in natural DOM order.
+- `Enter` or `Space` on the trigger opens/closes the popup.
+- `Escape` closes the popup and returns focus to the trigger when focus is inside the popup.
+- Clicking outside the popup closes it.
+- Browse state reset/tab teardown closes it.
+- Source selection actions, `Select all`, and `Clear` keep the popup open for multi-select work unless the user explicitly closes it.
+- `Tab` moves through bulk actions and checkboxes in normal DOM order; do not implement roving tabindex for the native checkbox version.
 - `Space` toggles the focused checkbox.
 - `Enter` activates bulk action buttons.
-- Closing the menu must not reset search or source selections.
-
-Preferred enhancement:
-
-- Arrow keys move between checkbox rows while the menu is open.
-- `Home` / `End` move to first / last row.
+- Closing the popup must not reset search or source selections.
 
 ## Screen-reader behavior
 
 - The trigger announces current state: collapsed/expanded.
-- The menu has a visible title `Sources` and an accessible label, e.g. `aria-label="Browse source filters"`.
+- The popup has a visible title `Sources` and an accessible label via `<legend>`, `aria-labelledby`, or `aria-label`, e.g. `aria-label="Browse source filters"`; do not use `role="menu"` with native buttons and checkboxes.
 - Each checkbox label includes source name and count, e.g. `Built-in packs, 8 packages`.
 - Status is included in the accessible label or description, e.g. `MCP Gateway, 4 packages, load warning`.
 - Summary text should be available as normal text and may use `aria-live="polite"` if counts update after a refresh.
@@ -182,10 +186,11 @@ Test scenarios:
 1. Open the Sources menu and verify checkbox rows render with names, counts, and statuses.
 2. Toggle an individual source and verify package list and summary update.
 3. Use `Select all` and `Clear` and verify unsupported sources are not selected.
-4. Type in search while sources are selected and verify filtering behavior is unchanged.
+4. Type in search while sources are selected and verify filtering behavior and the visible-result summary update correctly.
 5. Refresh/re-render Browse and verify existing selected sources persist while newly discovered supported sources become selected by default.
 6. Verify selected errored sources show warnings outside the menu.
 7. Verify keyboard open, toggle, bulk action activation, and Escape close behavior.
+8. Verify outside click and Browse tab teardown close the popup, while checkbox and bulk selection actions keep it open.
 
 ## Consistency rationale
 
