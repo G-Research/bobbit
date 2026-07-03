@@ -21,6 +21,23 @@ async function goalTeamDismiss(goalId: string, sessionId: string): Promise<{ sta
 	return { status: resp.status, json };
 }
 
+async function goalTeamSpawn(goalId: string): Promise<{ status: number; json: any }> {
+	const resp = await apiFetch(`/api/goals/${goalId}/team/spawn`, {
+		method: "POST",
+		body: JSON.stringify({ role: "coder", task: "structured dismiss real worker" }),
+	});
+	let json: any = undefined;
+	try { json = await resp.json(); } catch { /* empty */ }
+	return { status: resp.status, json };
+}
+
+async function goalTeamAgents(goalId: string): Promise<any[]> {
+	const resp = await apiFetch(`/api/goals/${goalId}/team/agents`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	return Array.isArray(body?.agents) ? body.agents : [];
+}
+
 function expectStructuredAlreadyDismissed(result: { status: number; json: any }, sessionId: string): void {
 	const body = result.json;
 	const valid = result.status === 200
@@ -78,20 +95,23 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 		}
 	});
 
-	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async ({ gateway }) => {
+	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async () => {
 		const goal = await createGoal({ title: "Structured real team worker dismiss", team: true });
 		let agentId: string | undefined;
 		try {
 			await startTeam(goal.id as string);
-			const spawned = await gateway.teamManager.spawnRole(goal.id as string, "coder", "structured dismiss real worker");
-			agentId = spawned.sessionId;
-			expect(gateway.teamManager.listAgents(goal.id as string).some((agent) => agent.sessionId === agentId)).toBe(true);
+			const spawned = await goalTeamSpawn(goal.id as string);
+			expect(spawned.status).toBe(201);
+			agentId = spawned.json?.sessionId as string;
+			expect(agentId).toBeTruthy();
+			expect((await goalTeamAgents(goal.id as string)).some((agent) => agent.sessionId === agentId)).toBe(true);
 
 			const first = await goalTeamDismiss(goal.id as string, agentId);
 			expect(first.status).toBe(200);
 			expect(first.json?.ok).toBe(true);
 			expect(first.json?.status).toBe("dismissed");
-			expect(gateway.teamManager.listAgents(goal.id as string).some((agent) => agent.sessionId === agentId)).toBe(false);
+			expect(first.json?.message).toContain("Team agent");
+			expect((await goalTeamAgents(goal.id as string)).some((agent) => agent.sessionId === agentId)).toBe(false);
 
 			const duplicate = await goalTeamDismiss(goal.id as string, agentId);
 			expectStructuredAlreadyDismissed(duplicate, agentId);

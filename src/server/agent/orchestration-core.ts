@@ -477,7 +477,12 @@ export class OrchestrationCore {
 
 	private addHandle(handle: ChildHandle): void {
 		const list = this.index.get(handle.ownerSessionId) ?? [];
-		if (!list.some(h => h.sessionId === handle.sessionId)) list.push(handle);
+		const existingIndex = list.findIndex(h => h.sessionId === handle.sessionId);
+		if (existingIndex === -1) {
+			list.push(handle);
+		} else {
+			list[existingIndex] = { ...list[existingIndex], ...handle };
+		}
 		this.index.set(handle.ownerSessionId, list);
 	}
 

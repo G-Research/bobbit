@@ -10644,8 +10644,11 @@ async function handleApiRoute(
 		// so it can remove team-manager state, subscriptions, timers, and broadcasts.
 		// They are also registered in OrchestrationCore under the team lead, so a
 		// plain owner/child match would incorrectly route real team agents through
-		// the private team_delegate fallback.
+		// the private team_delegate fallback. Check both the goal state snapshot and
+		// the session→goal index; tests and restart paths can observe one before the
+		// other is refreshed.
 		if (teamState.agents.some((agent) => agent.sessionId === targetId)) return undefined;
+		if (teamManager.findAgentBySessionId(targetId)) return undefined;
 		const live = sessionManager.getSession(targetId) as any;
 		const persisted = sessionManager.getPersistedSession(targetId) as any;
 		if (live?.teamGoalId || persisted?.teamGoalId) return undefined;
@@ -10695,9 +10698,19 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId" }, 400);
 			return;
 		}
+		const goalId = teamDismissMatch[1];
+		const teamResult = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
+		const canTryOwnChildFallback =
+			(teamResult.status === "not-owned" && /not a team agent for this goal/i.test(teamResult.message ?? ""))
+			|| teamResult.status === "not-found";
+		if (!canTryOwnChildFallback) {
+			json(teamResult, dismissHttpStatus(teamResult));
+			return;
+		}
+
 		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
 		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
-		const ownerResult = resolveOwnChildOwner(teamDismissMatch[1], body.sessionId);
+		const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
 		if (ownerResult) {
 			if ("denied" in ownerResult) {
 				json({ ok: false, status: "not-owned", sessionId: body.sessionId, message: "Caller session is not the owner of this child agent", retryable: false }, 403);
@@ -10707,8 +10720,7 @@ async function handleApiRoute(
 			json(result, dismissHttpStatus(result));
 			return;
 		}
-		const result = await teamManager.dismissRoleForGoal(teamDismissMatch[1], body.sessionId);
-		json(result, dismissHttpStatus(result));
+		json(teamResult, dismissHttpStatus(teamResult));
 		return;
 	}
 
