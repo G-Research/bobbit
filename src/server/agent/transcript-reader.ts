@@ -137,17 +137,17 @@ function flattenText(content: unknown): string {
 		if (!block || typeof block !== "object") continue;
 		const b = block as Record<string, unknown>;
 		const t = b.type;
-		if (t === "text" && typeof b.text === "string") {
+		if (isToolResultBlock(b)) {
+			const body = toolResultBody(b);
+			const c = body.value;
+			parts.push(`[RESULT: ${body.has ? (typeof c === "string" ? c : safeStringify(c)) : ""}]`);
+		} else if (t === "text" && typeof b.text === "string") {
 			parts.push(b.text);
 		} else if (t === "tool_use") {
 			const name = typeof b.name === "string" ? b.name : "?";
 			let input = "";
 			try { input = JSON.stringify(b.input ?? {}); } catch { input = ""; }
 			parts.push(`[TOOL: ${name} ${input}]`);
-		} else if (t === "tool_result") {
-			const body = toolResultBody(b);
-			const c = body.value;
-			parts.push(`[RESULT: ${body.has ? (typeof c === "string" ? c : safeStringify(c)) : ""}]`);
 		}
 	}
 	return parts.join(" ");
@@ -240,7 +240,7 @@ function buildToolNameMap(messages: RawMessage[]): Map<string, string> {
 			const type = b.type;
 			const id = blockToolUseId(b);
 			const name = blockToolName(b);
-			if (id && name && (type === "tool_use" || b.toolCallId || b.toolName)) {
+			if (id && name && (type === "tool_use" || type === "toolCall" || b.toolCallId || b.toolName)) {
 				map.set(id, name);
 			}
 		}
@@ -278,6 +278,12 @@ function toolResultMeta(
 
 function isToolResultRole(role: unknown): boolean {
 	return role === "toolResult" || role === "tool_result" || role === "tool";
+}
+
+function isToolResultBlock(block: unknown): block is Record<string, unknown> {
+	if (!block || typeof block !== "object") return false;
+	const b = block as Record<string, unknown>;
+	return b.type === "tool_result" || b.type === "toolResult" || isToolResultRole(b.role);
 }
 
 function firstString(source: Record<string, unknown>, keys: string[]): string | undefined {
@@ -362,15 +368,7 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 			if (!block || typeof block !== "object") continue;
 			const b = block as Record<string, unknown>;
 			const t = b.type;
-			if (t === "text" && typeof b.text === "string") {
-				textParts.push(b.text);
-			} else if (t === "tool_use") {
-				const name = blockToolName(b) ?? "?";
-				let inputPreview = "";
-				try { inputPreview = JSON.stringify(b.input ?? {}).slice(0, PREVIEW_LIMIT); }
-				catch { inputPreview = ""; }
-				toolUses.push({ name, inputPreview });
-			} else if (t === "tool_result") {
+			if (isToolResultBlock(b)) {
 				const meta = toolResultMeta(b, m.fullMessage, options);
 				if (options.includeToolResults) {
 					const body = toolResultBody(b);
@@ -379,6 +377,14 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 				} else {
 					toolResults.push({ ...meta, omitted: true });
 				}
+			} else if (t === "text" && typeof b.text === "string") {
+				textParts.push(b.text);
+			} else if (t === "tool_use") {
+				const name = blockToolName(b) ?? "?";
+				let inputPreview = "";
+				try { inputPreview = JSON.stringify(b.input ?? {}).slice(0, PREVIEW_LIMIT); }
+				catch { inputPreview = ""; }
+				toolUses.push({ name, inputPreview });
 			}
 		}
 		text = textParts.join("\n").trim();
@@ -423,7 +429,7 @@ function redactVerboseContent(content: unknown, m: RawMessage, options: RenderOp
 	return content.map((block) => {
 		if (!block || typeof block !== "object") return block;
 		const b = block as Record<string, unknown>;
-		if (b.type !== "tool_result") return block;
+		if (!isToolResultBlock(b)) return block;
 		return redactedToolResultBlock(b, m.fullMessage, options);
 	});
 }

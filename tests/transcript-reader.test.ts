@@ -248,6 +248,59 @@ describe("transcript-reader / readTranscript", () => {
 		}
 	});
 
+	it("redacts block-level camel-case tool result variants", async () => {
+		const typeSecret = "CAMEL_TYPE_TOOL_RESULT_SENTINEL";
+		const roleSecret = "CAMEL_ROLE_TOOL_RESULT_SENTINEL";
+		const j = makeJsonl([
+			{ role: "assistant", content: [
+				{ type: "toolCall", id: "tu-camel-type", name: "bash", input: { cmd: "run" } },
+				{ type: "toolCall", id: "tu-camel-role", name: "read", input: { path: "x" } },
+			] },
+			{ role: "user", content: [
+				{ type: "toolResult", tool_use_id: "tu-camel-type", content: typeSecret, isError: false },
+				{ type: "text", role: "toolResult", toolCallId: "tu-camel-role", text: roleSecret, isError: true },
+			] },
+		]);
+
+		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		assert.equal(JSON.stringify(compact).includes(typeSecret), false);
+		assert.equal(JSON.stringify(compact).includes(roleSecret), false);
+		const compactMessage = compact.messages[0] as any;
+		assert.equal(compactMessage.text, "");
+		assert.equal(compactMessage.toolResults.length, 2);
+		assert.equal(compactMessage.toolResults[0].name, "bash");
+		assert.equal(compactMessage.toolResults[0].toolUseId, "tu-camel-type");
+		assert.equal(compactMessage.toolResults[0].omitted, true);
+		assert.equal(compactMessage.toolResults[0].status, "ok");
+		assert.equal(compactMessage.toolResults[0].size.chars, typeSecret.length);
+		assert.equal(compactMessage.toolResults[1].name, "read");
+		assert.equal(compactMessage.toolResults[1].toolUseId, "tu-camel-role");
+		assert.equal(compactMessage.toolResults[1].omitted, true);
+		assert.equal(compactMessage.toolResults[1].status, "error");
+		assert.equal(compactMessage.toolResults[1].size.chars, roleSecret.length);
+
+		const pattern = await readTranscript({ pattern: roleSecret, includeToolResults: false }, reader(j));
+		assert.equal(pattern.matchCount, 1);
+		assert.equal(pattern.messages[0].index, 1);
+		assert.equal(JSON.stringify(pattern).includes(roleSecret), false);
+
+		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		assert.equal(JSON.stringify(verbose).includes(typeSecret), false);
+		assert.equal(JSON.stringify(verbose).includes(roleSecret), false);
+		const blocks = (verbose.messages[0] as any).content;
+		assert.equal(blocks[0].type, "toolResult");
+		assert.equal(blocks[0].name, "bash");
+		assert.equal(blocks[0].contentOmitted, true);
+		assert.match(blocks[0].content, /tool result omitted/);
+		assert.equal(blocks[0].resultSize.chars, typeSecret.length);
+		assert.equal(blocks[1].role, "toolResult");
+		assert.equal(blocks[1].name, "read");
+		assert.equal(blocks[1].text, undefined);
+		assert.equal(blocks[1].contentOmitted, true);
+		assert.match(blocks[1].content, /tool result omitted/);
+		assert.equal(blocks[1].resultSize.chars, roleSecret.length);
+	});
+
 	it("compact opt-in includes tool result previews", async () => {
 		const secret = "VISIBLE_TOOL_RESULT_SECRET";
 		const j = makeJsonl([
