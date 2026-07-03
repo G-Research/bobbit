@@ -778,7 +778,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const source = asText(text);
 		const normalized = arrayOf(ranges)
 			.map((range) => ({ start: Math.max(0, Math.min(source.length, Number(range.start) || 0)), end: Math.max(0, Math.min(source.length, Number(range.end) || 0)) }))
-			.filter((range) => range.end > range.start)
+			.filter((range) => range.end > range.start && !(range.start === 0 && range.end === source.length))
 			.sort((a, b) => a.start - b.start);
 		if (!normalized.length) return renderSyntaxTokens(source);
 		const parts = [];
