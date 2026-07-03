@@ -736,6 +736,10 @@ export interface ActiveVerification {
 		pidFile?: string;
 		/** Random nonce expected in the durable process-identity and heartbeat files. */
 		pidNonce?: string;
+		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
+		nonce?: string;
+		/** Container id for attached docker exec command paths (not restart-recoverable). */
+		containerId?: string;
 		/** Absolute path to the detached wrapper's periodically-refreshed heartbeat file. */
 		heartbeatFile?: string;
 		/** OS-specific process start token captured after spawn, used to reject PID reuse. */
@@ -2218,18 +2222,29 @@ export class VerificationHarness {
 		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
 	}
 
+	private _commandIdentityNonce(step: ActiveVerification["steps"][number]): string | undefined {
+		return step.pidNonce ?? step.nonce;
+	}
+
 	private _readCommandIdentityFile(step: ActiveVerification["steps"][number]): { pid?: number; ok: boolean; reason: string } {
-		if (!step.pidFile || !step.pidNonce) {
+		const expectedNonce = this._commandIdentityNonce(step);
+		if (!step.pidFile || !expectedNonce) {
 			return { ok: false, reason: "no durable command identity was recorded" };
 		}
 		let parsed: any;
 		try {
-			parsed = JSON.parse(fs.readFileSync(step.pidFile, "utf8"));
+			const raw = fs.readFileSync(step.pidFile, "utf8").trim();
+			try {
+				parsed = JSON.parse(raw);
+			} catch {
+				const [pidLine, nonceLine] = raw.split(/\r?\n/);
+				parsed = { pid: pidLine, nonce: nonceLine };
+			}
 		} catch (err) {
 			return { ok: false, reason: `command identity file is unavailable or unreadable: ${(err as Error).message}` };
 		}
 		const fileNonce = typeof parsed?.nonce === "string" ? parsed.nonce : undefined;
-		if (fileNonce !== step.pidNonce) {
+		if (fileNonce !== expectedNonce) {
 			return { ok: false, reason: "command identity nonce did not match persisted metadata" };
 		}
 		const filePid = Number(parsed?.pid);
@@ -2247,12 +2262,13 @@ export class VerificationHarness {
 	}
 
 	private _heartbeatMatchesCommandIdentity(step: ActiveVerification["steps"][number], pid: number): boolean {
-		if (!step.heartbeatFile || !step.pidNonce) return false;
+		const expectedNonce = this._commandIdentityNonce(step);
+		if (!step.heartbeatFile || !expectedNonce) return false;
 		try {
 			const stat = fs.statSync(step.heartbeatFile);
 			if (Date.now() - stat.mtimeMs > COMMAND_IDENTITY_HEARTBEAT_STALE_MS) return false;
 			const parsed = JSON.parse(fs.readFileSync(step.heartbeatFile, "utf8"));
-			return parsed?.nonce === step.pidNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
+			return parsed?.nonce === expectedNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
 		} catch {
 			return false;
 		}
@@ -2276,7 +2292,12 @@ export class VerificationHarness {
 			return { verified: true, pid, reason: "pidfile nonce and live heartbeat matched" };
 		}
 
-		return { verified: false, pid, reason: "command heartbeat was missing or stale; refusing to trust PID after restart" };
+		// Match bash_bg recovery semantics: once the pidfile nonce matches and the
+		// PID is still alive, the persisted command identity is strong enough to
+		// reattach/poll or reap on an expired deadline. A start token or live
+		// heartbeat tightens the proof when present, but older records and the
+		// Node helper path only have the durable pidfile+nonce pair.
+		return { verified: true, pid, reason: "pidfile nonce matched" };
 	}
 
 	private _killPersistedCommandSteps(active: ActiveVerification, signal: NodeJS.Signals = "SIGKILL"): void {
@@ -4354,6 +4375,7 @@ export class VerificationHarness {
 					pidFile,
 					pidNonce,
 					heartbeatFile,
+					containerId,
 					bootEpoch: useDetached ? this.bootEpoch : undefined,
 					timeoutSec,
 					expectFailure,
@@ -4813,12 +4835,19 @@ export class VerificationHarness {
 			return finalize(readExitFile());
 		}
 
-		if (step.restartRecoveryMode === "unsupported") {
-			return restartInterrupted(step.restartRecoveryUnsupportedReason ?? "This command execution path was attached to the gateway and is not restart-recoverable.");
+		const unsupportedRecoveryReason = (): string | undefined => {
+			if (step.restartRecoveryUnsupportedReason) return step.restartRecoveryUnsupportedReason;
+			if (step.containerId) return `Container command step for docker container "${step.containerId}" used attached docker exec; durable restart recovery is unsupported for this path.`;
+			if (step.restartRecoveryMode === "unsupported") return "This command execution path was attached to the gateway and is not restart-recoverable.";
+			return undefined;
+		};
+
+		if (step.restartRecoveryMode === "unsupported" || step.containerId) {
+			return restartInterrupted(unsupportedRecoveryReason());
 		}
 
 		if (!step.exitFile) {
-			return restartInterrupted("No durable command exit file path was recorded before restart.");
+			return restartInterrupted(unsupportedRecoveryReason() ?? "No durable command exit file path was recorded before restart.");
 		}
 
 		const identity = this._verifyPersistedCommandIdentity(step);
