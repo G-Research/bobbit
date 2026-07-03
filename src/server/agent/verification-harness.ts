@@ -14,6 +14,9 @@ function isPidAlive(pid: number): boolean {
 }
 
 const COMMAND_IDENTITY_HEARTBEAT_STALE_MS = 10_000;
+const COMMAND_IDENTITY_PIDFILE_RETRY_MS = 2_000;
+const COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS = 100;
+const COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES = Math.min(MAX_RETAINED_LOG_BYTES, 1024 * 1024);
 
 function readProcessStartToken(pid: number): string | undefined {
 	if (process.platform !== "linux") return undefined;
@@ -31,6 +34,64 @@ function readProcessStartToken(pid: number): string | undefined {
 
 function shellSingleQuote(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function readCommandLogTail(filePath: string | undefined, maxBytes = COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES): string {
+	if (!filePath || maxBytes <= 0) return "";
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return "";
+		const len = Math.min(stat.size, maxBytes);
+		const start = Math.max(0, stat.size - len);
+		fd = fs.openSync(filePath, "r");
+		const buf = Buffer.allocUnsafe(len);
+		const bytesRead = fs.readSync(fd, buf, 0, len, start);
+		return buf.subarray(0, bytesRead).toString("utf8");
+	} catch {
+		return "";
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+	}
+}
+
+function tailRetainCommandLogFile(filePath: string | undefined, keepBytes = MAX_RETAINED_LOG_BYTES): { truncated: boolean; bytes: number } {
+	if (!filePath || keepBytes <= 0) return { truncated: false, bytes: 0 };
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile()) return { truncated: false, bytes: 0 };
+		if (stat.size <= keepBytes) return { truncated: false, bytes: stat.size };
+		const start = Math.max(0, stat.size - keepBytes);
+		const len = stat.size - start;
+		fd = fs.openSync(filePath, "r+");
+		const buf = Buffer.allocUnsafe(len);
+		const bytesRead = fs.readSync(fd, buf, 0, len, start);
+		const retained = buf.subarray(0, bytesRead);
+		fs.ftruncateSync(fd, 0);
+		if (retained.length > 0) fs.writeSync(fd, retained, 0, retained.length, 0);
+		fs.ftruncateSync(fd, retained.length);
+		return { truncated: true, bytes: retained.length };
+	} catch {
+		return { truncated: false, bytes: 0 };
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+	}
+}
+
+function tailRetainCommandLogs(outFile?: string, errFile?: string): void {
+	tailRetainCommandLogFile(outFile);
+	tailRetainCommandLogFile(errFile);
+}
+
+function retainedCommandOutputTail(outFile?: string, errFile?: string): string {
+	const out = readCommandLogTail(outFile);
+	const err = readCommandLogTail(errFile);
+	return (out + "\n" + err).trim().slice(-5000);
 }
 import fs from "node:fs";
 import path from "node:path";
@@ -80,7 +141,6 @@ import {
 	isProviderBackoffError,
 	isRetryableGenericAgentError,
 	shouldRetryVerificationStep,
-	shouldSuppressRestartInterrupt,
 	isRestartInterruptError,
 	isRestartInterruptedStep,
 } from "./verification-logic.js";
@@ -99,6 +159,7 @@ import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
+	MAX_RETAINED_LOG_BYTES,
 	prepareGateStepDiagnosticsPaths,
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
@@ -792,6 +853,18 @@ function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; stat
 	if (step.status === "waiting" || step.status === "running") return step.status;
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
+}
+
+function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }): boolean {
+	if (step.passed || step.skipped) return false;
+	if (step.type === "command") return step.status === "waiting";
+	return isRestartInterruptedStep(step);
+}
+
+function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }>): boolean {
+	const failedSteps = steps.filter(s => !s.passed && !s.skipped);
+	if (failedSteps.length === 0) return false;
+	return failedSteps.every(isExplicitRestartInterruptedStep);
 }
 
 /**
@@ -1617,7 +1690,7 @@ export class VerificationHarness {
 		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
 			if (step.passed || step.skipped) return earliest;
 			if (persistedStatusForStep(step) !== "failed") return earliest;
-			if (isRestartInterruptedStep(step)) return earliest;
+			if (isExplicitRestartInterruptedStep(step)) return earliest;
 			const phase = step.phase ?? 0;
 			return earliest === undefined || phase < earliest ? phase : earliest;
 		}, undefined);
@@ -1634,7 +1707,7 @@ export class VerificationHarness {
 			}
 		} else {
 			const firstRestartInterruptedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-				if (step.passed || step.skipped || !isRestartInterruptedStep(step)) return earliest;
+				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
 				const phase = step.phase ?? 0;
 				return earliest === undefined || phase < earliest ? phase : earliest;
 			}, undefined);
@@ -1653,17 +1726,17 @@ export class VerificationHarness {
 		// Compute overall result
 		const allPassed = computeAllPassed(resolvedSteps as GateSignalStep[]);
 
-		// restart-interrupt suppression — Restart-interrupt suppression. If every failed step is a
-		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
-		// review/QA), don't mark the gate failed — the work being verified
-		// hasn't actually been judged. Persist the verification record honestly
+		// Restart-interrupt suppression. If every failed step is an explicit
+		// command no-verdict row or a reviewer/QA restart interruption, don't mark
+		// the gate failed — the work being verified hasn't actually been judged.
+		// Persist the verification record honestly
 		// (so `gate_status` reflects what really happened) but leave the gate
 		// `pending` so a re-signal will run a fresh verification.
 		//
 		// Predicate is conjunctive: a single real failure poisons the gate
 		// (real failures should still surface as failed even if some sibling
 		// steps got restart-interrupted).
-		const suppressedByRestart = !allPassed && shouldSuppressRestartInterrupt(resolvedSteps);
+		const suppressedByRestart = !allPassed && shouldSuppressExplicitRestartInterrupt(resolvedSteps);
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
 		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
 
@@ -1810,8 +1883,8 @@ export class VerificationHarness {
 			// timeout), DO NOT throw: a restart-interrupt must never surface as a
 			// hard gate failure. Return a step whose output is BOTH transient (so
 			// `_resumeOneVerification` routes it into `_rerunLlmReviewStep`) AND a
-			// restart-interrupt marker (so `shouldSuppressRestartInterrupt` leaves
-			// the gate `pending` when the rerun context is unavailable).
+			// restart-interrupt marker (so resume suppression leaves the gate
+			// `pending` when the rerun context is unavailable).
 			try {
 				await session.rpcClient.promptWhenReady(reminderPrompt, undefined);
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
@@ -2226,13 +2299,16 @@ export class VerificationHarness {
 		return step.pidNonce ?? step.nonce;
 	}
 
-	private _readCommandIdentityFile(step: ActiveVerification["steps"][number]): { pid?: number; ok: boolean; reason: string } {
+	private _readCommandIdentityFile(step: ActiveVerification["steps"][number]): { pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number } {
 		const expectedNonce = this._commandIdentityNonce(step);
 		if (!step.pidFile || !expectedNonce) {
-			return { ok: false, reason: "no durable command identity was recorded" };
+			return { ok: false, reason: "no durable command identity was recorded", retryable: false };
 		}
 		let parsed: any;
+		let mtimeMs: number | undefined;
 		try {
+			const stat = fs.statSync(step.pidFile);
+			mtimeMs = stat.mtimeMs;
 			const raw = fs.readFileSync(step.pidFile, "utf8").trim();
 			try {
 				parsed = JSON.parse(raw);
@@ -2241,11 +2317,11 @@ export class VerificationHarness {
 				parsed = { pid: pidLine, nonce: nonceLine };
 			}
 		} catch (err) {
-			return { ok: false, reason: `command identity file is unavailable or unreadable: ${(err as Error).message}` };
+			return { ok: false, reason: `command identity file is unavailable or unreadable: ${(err as Error).message}`, retryable: true };
 		}
 		const fileNonce = typeof parsed?.nonce === "string" ? parsed.nonce : undefined;
 		if (fileNonce !== expectedNonce) {
-			return { ok: false, reason: "command identity nonce did not match persisted metadata" };
+			return { ok: false, reason: "command identity nonce did not match persisted metadata", retryable: false, mtimeMs };
 		}
 		const filePid = Number(parsed?.pid);
 		const validFilePid = Number.isFinite(filePid) && filePid > 0 ? filePid : undefined;
@@ -2253,12 +2329,24 @@ export class VerificationHarness {
 			? step.pid
 			: (validFilePid ?? step.pid);
 		if (!pid || !Number.isFinite(pid) || pid <= 0) {
-			return { ok: false, reason: "command identity file did not contain a valid process id" };
+			return { ok: false, reason: "command identity file did not contain a valid process id", retryable: true, mtimeMs };
 		}
 		if (process.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
-			return { pid, ok: false, reason: "command identity process id did not match persisted metadata" };
+			return { pid, ok: false, reason: "command identity process id did not match persisted metadata", retryable: false, mtimeMs };
 		}
-		return { pid, ok: true, reason: "verified" };
+		return { pid, ok: true, reason: "verified", retryable: false, mtimeMs };
+	}
+
+	private async _waitForCommandIdentityFile(step: ActiveVerification["steps"][number], isStillActive: () => boolean): Promise<{ pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number }> {
+		let identity = this._readCommandIdentityFile(step);
+		if (identity.ok || !identity.retryable) return identity;
+		const deadline = Date.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
+		while (Date.now() < deadline && isStillActive()) {
+			await new Promise(r => setTimeout(r, COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS));
+			identity = this._readCommandIdentityFile(step);
+			if (identity.ok || !identity.retryable) return identity;
+		}
+		return identity;
 	}
 
 	private _heartbeatMatchesCommandIdentity(step: ActiveVerification["steps"][number], pid: number): boolean {
@@ -2274,8 +2362,11 @@ export class VerificationHarness {
 		}
 	}
 
-	private _verifyPersistedCommandIdentity(step: ActiveVerification["steps"][number]): { verified: boolean; pid?: number; reason: string } {
-		const identity = this._readCommandIdentityFile(step);
+	private _verifyPersistedCommandIdentity(
+		step: ActiveVerification["steps"][number],
+		preReadIdentity?: { pid?: number; ok: boolean; reason: string; mtimeMs?: number },
+	): { verified: boolean; pid?: number; reason: string } {
+		const identity = preReadIdentity ?? this._readCommandIdentityFile(step);
 		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
 		const pid = identity.pid;
 		if (!isPidAlive(pid)) return { verified: false, pid, reason: "command process is no longer alive" };
@@ -2292,12 +2383,19 @@ export class VerificationHarness {
 			return { verified: true, pid, reason: "pidfile nonce and live heartbeat matched" };
 		}
 
-		// Match bash_bg recovery semantics: once the pidfile nonce matches and the
-		// PID is still alive, the persisted command identity is strong enough to
-		// reattach/poll or reap on an expired deadline. A start token or live
-		// heartbeat tightens the proof when present, but older records and the
-		// Node helper path only have the durable pidfile+nonce pair.
-		return { verified: true, pid, reason: "pidfile nonce matched" };
+		// Bounded create-window proof: immediately after restart the wrapper may
+		// have published the pidfile before its first heartbeat. Treat only a
+		// freshly-written pidfile as current identity evidence; stale nonce-only
+		// records remain unverified to avoid PID-reuse kills.
+		if (identity.mtimeMs !== undefined && Date.now() - identity.mtimeMs <= COMMAND_IDENTITY_HEARTBEAT_STALE_MS) {
+			return { verified: true, pid, reason: "pidfile nonce matched and identity file was freshly written" };
+		}
+
+		return {
+			verified: false,
+			pid,
+			reason: "pidfile nonce matched, but no process start token or fresh heartbeat was available; refusing to trust a possibly reused PID",
+		};
 	}
 
 	private _killPersistedCommandSteps(active: ActiveVerification, signal: NodeJS.Signals = "SIGKILL"): void {
@@ -4306,8 +4404,6 @@ export class VerificationHarness {
 			let pidNonce: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
-			let outFd: number | undefined;
-			let errFd: number | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
 
 			if (streamCtx) {
@@ -4342,12 +4438,10 @@ export class VerificationHarness {
 					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
 						try { fs.unlinkSync(file); } catch { /* not present */ }
 					}
-					outFd = fs.openSync(outFile, "w");
-					errFd = fs.openSync(errFile, "w");
+					fs.writeFileSync(outFile, "");
+					fs.writeFileSync(errFile, "");
 				} catch (err) {
 					console.warn(`[verification] Failed to set up survival files — falling back to attached mode: ${(err as Error).message}`);
-					if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
-					if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 					useDetached = false;
 					restartRecoveryUnsupportedReason = `Detached command recovery setup failed before spawn: ${(err as Error).message}`;
 					outFile = diagnosticsPaths?.stdoutPath;
@@ -4389,18 +4483,21 @@ export class VerificationHarness {
 			// Build the command to actually run. In detached mode we wrap so
 			// the wrapper, not the gateway, owns writing the exit code atomically.
 			let cmdToRun = command;
-			if (useDetached && exitFile && pidFile && pidNonce && heartbeatFile) {
+			if (useDetached && exitFile && pidFile && pidNonce && heartbeatFile && outFile && errFile) {
 				const exitTmp = exitFile + ".tmp";
 				const pidTmp = pidFile + ".tmp";
 				const heartbeatTmp = heartbeatFile + ".tmp";
 				const nonceJson = JSON.stringify(pidNonce);
+				const qOut = shellSingleQuote(outFile);
+				const qErr = shellSingleQuote(errFile);
 				const writeIdentity = `printf '{"pid":%s,"nonce":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} > ${shellSingleQuote(pidTmp)} && mv ${shellSingleQuote(pidTmp)} ${shellSingleQuote(pidFile)}`;
 				const writeHeartbeat = `printf '{"pid":%s,"nonce":%s,"ts":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} "$(date +%s 2>/dev/null || printf 0)" > ${shellSingleQuote(heartbeatTmp)} && mv ${shellSingleQuote(heartbeatTmp)} ${shellSingleQuote(heartbeatFile)}`;
+				const trimLogs = `for __bobbit_f in ${qOut} ${qErr}; do if [ -f "$__bobbit_f" ] && [ "$(wc -c < "$__bobbit_f" 2>/dev/null || echo 0)" -gt ${MAX_RETAINED_LOG_BYTES} ]; then tail -c ${MAX_RETAINED_LOG_BYTES} "$__bobbit_f" > "$__bobbit_f.trim" 2>/dev/null && cat "$__bobbit_f.trim" > "$__bobbit_f" && rm -f "$__bobbit_f.trim"; fi; done`;
 				// Run command in a subshell so its `exit` does not short-circuit our
-				// exit-file write; capture $?, write atomically, then propagate. A
-				// wrapper-owned identity + heartbeat lets restart recovery prove the
-				// PID still belongs to this command before reattaching or killing it.
-				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( ${command}\n); __ec=$?; kill "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
+				// exit-file write; capture $?, write atomically, then propagate. The
+				// wrapper appends stdout/stderr to restart-surviving files and keeps
+				// those files tail-bounded while the gateway is down.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -4410,6 +4507,7 @@ export class VerificationHarness {
 			const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 				if (!diagnosticsPaths) return undefined;
 				try {
+					tailRetainCommandLogs(diagnosticsPaths.stdoutPath, diagnosticsPaths.stderrPath);
 					return finalizeGateStepDiagnostics({ paths: diagnosticsPaths, commandCwd: normalizedCwd, containerId });
 				} catch (err) {
 					console.warn(`[verification] Failed to finalize retained command diagnostics: ${(err as Error).message}`);
@@ -4478,7 +4576,7 @@ export class VerificationHarness {
 				} else if (useDetached) {
 					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
 						cwd: normalizedCwd,
-						stdio: ["ignore", outFd!, errFd!],
+						stdio: ["ignore", "ignore", "ignore"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 					});
@@ -4493,12 +4591,6 @@ export class VerificationHarness {
 				child = tracked.child;
 			} catch (err) {
 				spawnError = err as Error;
-			} finally {
-				// Once spawn has dup'd the FDs into the child, parent's copies are
-				// no longer needed. Closing them avoids leaks even if we don't
-				// reach the resolve path.
-				if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
-				if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 			}
 
 			if (spawnError || !child || !tracked) {
@@ -4594,8 +4686,9 @@ export class VerificationHarness {
 				let outText = stdout;
 				let errText = stderr;
 				if (useDetached && outFile && errFile) {
-					try { outText = fs.readFileSync(outFile, "utf8"); } catch { outText = stdout; }
-					try { errText = fs.readFileSync(errFile, "utf8"); } catch { errText = stderr; }
+					tailRetainCommandLogs(outFile, errFile);
+					outText = readCommandLogTail(outFile);
+					errText = readCommandLogTail(errFile);
 				}
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
 				const didTimeOut = tracked!.timedOut();
@@ -4649,14 +4742,21 @@ export class VerificationHarness {
 
 		const readNew = (filePath: string, pos: number, stream: "stdout" | "stderr"): number => {
 			try {
-				const stat = fs.statSync(filePath);
+				let stat = fs.statSync(filePath);
+				if (stat.size > MAX_RETAINED_LOG_BYTES) {
+					const retained = tailRetainCommandLogFile(filePath);
+					stat = fs.statSync(filePath);
+					pos = retained.truncated || pos > stat.size ? 0 : pos;
+				}
+				if (stat.size < pos) pos = 0;
 				if (stat.size <= pos) return pos;
 				const fd = fs.openSync(filePath, "r");
 				try {
 					const len = Math.min(stat.size - pos, 64 * 1024);
 					const buf = Buffer.allocUnsafe(len);
-					fs.readSync(fd, buf, 0, len, pos);
-					const text = buf.toString("utf8");
+					const bytesRead = fs.readSync(fd, buf, 0, len, pos);
+					if (bytesRead <= 0) return pos;
+					const text = buf.subarray(0, bytesRead).toString("utf8");
 					this.broadcastFn(ctx.goalId, {
 						type: "gate_verification_step_output",
 						goalId: ctx.goalId,
@@ -4673,7 +4773,7 @@ export class VerificationHarness {
 						s.output = (s.output || "") + text;
 						if (s.output.length > 512 * 1024) s.output = s.output.slice(-512 * 1024);
 					}
-					return pos + len;
+					return pos + bytesRead;
 				} finally {
 					try { fs.closeSync(fd); } catch { /* ignore */ }
 				}
@@ -4722,13 +4822,6 @@ export class VerificationHarness {
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
 	): Promise<ResumedVerificationStep | null> {
-		const readFiles = (): { out: string; err: string } => {
-			let out = "";
-			let err = "";
-			try { if (step.outFile) out = fs.readFileSync(step.outFile, "utf8"); } catch { /* ignore */ }
-			try { if (step.errFile) err = fs.readFileSync(step.errFile, "utf8"); } catch { /* ignore */ }
-			return { out, err };
-		};
 		const readExitFile = (): number | null => {
 			if (!step.exitFile) return null;
 			try {
@@ -4739,14 +4832,12 @@ export class VerificationHarness {
 				return null;
 			}
 		};
-		const retainedTail = (): string => {
-			const { out, err } = readFiles();
-			return (out + "\n" + err).trim().slice(-5000);
-		};
+		const retainedTail = (): string => retainedCommandOutputTail(step.outFile, step.errFile);
 		const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 			if (!step.outFile && !step.errFile) return undefined;
 			const baseDir = path.dirname(step.outFile ?? step.errFile!);
 			try {
+				tailRetainCommandLogs(step.outFile, step.errFile);
 				return finalizeGateStepDiagnostics({
 					paths: {
 						baseDir,
@@ -4850,7 +4941,12 @@ export class VerificationHarness {
 			return restartInterrupted(unsupportedRecoveryReason() ?? "No durable command exit file path was recorded before restart.");
 		}
 
-		const identity = this._verifyPersistedCommandIdentity(step);
+		const identityFile = await this._waitForCommandIdentityFile(step, () => this._isResumeStillActive(v));
+		if (!this._isResumeStillActive(v)) return null;
+		if (step.exitFile && fs.existsSync(step.exitFile)) {
+			return finalize(readExitFile());
+		}
+		const identity = this._verifyPersistedCommandIdentity(step, identityFile);
 		if (!identity.verified || !identity.pid) {
 			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
 		}
