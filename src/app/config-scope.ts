@@ -2,9 +2,11 @@
 // CONFIG SCOPE — shared project scope + origin badge helpers for config pages
 // ============================================================================
 
+import { icon } from "@mariozechner/mini-lit";
 import { html, type TemplateResult } from "lit";
 import { state } from "./state.js";
 import { gatewayFetch } from "./api.js";
+import { HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 
 export type ConfigOrigin = "builtin" | "server" | "user" | "project";
 
@@ -24,8 +26,10 @@ export function setConfigScope(scope: string): void {
 }
 
 /** Get the projectId query param for API calls, or undefined for system scope. */
-export function getConfigProjectId(): string | undefined {
-	return _configScope === "system" ? undefined : _configScope;
+export function getConfigProjectId(options?: { preserveHeadquarters?: boolean }): string | undefined {
+	if (_configScope === "system") return undefined;
+	if (isHeadquartersProject(_configScope) && !options?.preserveHeadquarters) return undefined;
+	return _configScope;
 }
 
 // ============================================================================
@@ -44,11 +48,13 @@ const BADGE_CLASSES: Record<ConfigOrigin, string> = {
  *  is rendered next to the scope badge so the entity is visibly tied to the pack it came from. */
 export function renderOriginBadge(origin?: ConfigOrigin, overrides?: ConfigOrigin, originPackName?: string | null): TemplateResult | string {
 	if (!origin) return "";
+	const label = origin === "server" ? HEADQUARTERS_PROJECT_NAME : origin;
+	const overridesLabel = overrides === "server" ? HEADQUARTERS_PROJECT_NAME : overrides;
 	return html`
 		<span class="inline-flex items-center gap-1 shrink-0">
-			<span class="config-origin-badge ${BADGE_CLASSES[origin]}">${origin}</span>
+			<span class="config-origin-badge ${BADGE_CLASSES[origin]}">${label}</span>
 			${originPackName ? html`<span class="config-origin-pack" data-testid="origin-pack-chip" title="From pack: ${originPackName}">${originPackName}</span>` : ""}
-			${overrides ? html`<span class="config-origin-overrides">overrides ${overrides}</span>` : ""}
+			${overrides ? html`<span class="config-origin-overrides">overrides ${overridesLabel}</span>` : ""}
 		</span>
 	`;
 }
@@ -56,7 +62,7 @@ export function renderOriginBadge(origin?: ConfigOrigin, overrides?: ConfigOrigi
 /** Returns true if an item is inherited (not locally defined) in the current scope. */
 export function isInherited(origin?: ConfigOrigin): boolean {
 	if (!origin) return false;
-	if (_configScope === "system") return origin === "builtin";
+	if (_configScope === "system" || isHeadquartersProject(_configScope)) return origin === "builtin";
 	return origin !== "project";
 }
 
@@ -67,24 +73,30 @@ export function isInherited(origin?: ConfigOrigin): boolean {
 /** Render the project scope row for a config page. Call `onScopeChange` when scope changes.
  *  When `excludeSystem` is true, the System tab is omitted (used by Workflows page). */
 export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope: string) => void, excludeSystem?: boolean): TemplateResult | string {
-	const projects = state.projects || [];
-	if (projects.length === 0) return "";
+	const projects = (state.projects || []).filter((project: any) => excludeSystem || !isHeadquartersProject(project));
+	if (excludeSystem && projects.length === 0) return "";
 
 	return html`
 		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
 			${excludeSystem ? "" : html`<button
-				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
-					${currentScope === "system"
+				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5
+					${currentScope === "system" || isHeadquartersProject(currentScope)
 					? "bg-background text-foreground shadow-sm border border-border"
 					: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 				@click=${() => onScopeChange("system")}
-			>System</button>`}
+			>
+				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent("headquarters"), "xs")}</span>
+				${HEADQUARTERS_PROJECT_NAME}
+			</button>`}
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
 				const isDark = document.documentElement.classList.contains("dark");
-				const color = isDark
-					? (project.colorDark || project.color || "var(--muted-foreground)")
-					: (project.colorLight || project.color || "var(--muted-foreground)");
+				const headquarters = isHeadquartersProject(project);
+				const color = headquarters
+					? "var(--primary)"
+					: isDark
+						? (project.colorDark || project.color || "var(--muted-foreground)")
+						: (project.colorLight || project.color || "var(--muted-foreground)");
 				return html`
 					<button
 						class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5
@@ -93,8 +105,10 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 							: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						@click=${() => onScopeChange(project.id)}
 					>
-						<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>
-						${project.name}
+						${headquarters
+							? html`<span data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} class="inline-flex items-center" style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>`
+							: html`<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>`}
+						${headquarters ? HEADQUARTERS_PROJECT_NAME : project.name}
 					</button>
 				`;
 			})}
@@ -142,7 +156,7 @@ export async function revertOverride(
 
 /** Get the display name for the current project scope (for button labels). */
 export function getCurrentProjectName(): string {
-	if (_configScope === "system") return "";
+	if (_configScope === "system" || isHeadquartersProject(_configScope)) return HEADQUARTERS_PROJECT_NAME;
 	const project = (state.projects || []).find((p: any) => p.id === _configScope);
 	return project?.name || "Project";
 }

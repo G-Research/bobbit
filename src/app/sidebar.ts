@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -20,6 +20,7 @@ import {
 	type Goal,
 	type Project,
 } from "./state.js";
+import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
@@ -76,7 +77,7 @@ let _suppressProjectHeaderClick = false;
 let _suppressProjectHeaderClickTimer: number | null = null;
 
 function currentProjectIds(): string[] {
-	return state.projects.map((project) => project.id);
+	return state.projects.filter((project) => !isHeadquartersProject(project)).map((project) => project.id);
 }
 
 function completeProjectOrderIds(projectIds: string[]): string[] {
@@ -99,15 +100,17 @@ function completeProjectOrderIds(projectIds: string[]): string[] {
 function orderProjectsByIds(projects: Project[], projectIds: string[]): Project[] {
 	const byId = new Map(projects.map((project) => [project.id, project]));
 	const seen = new Set<string>();
-	const ordered: Project[] = [];
+	const headquarters = projects.filter((project) => isHeadquartersProject(project));
+	const ordered: Project[] = [...headquarters];
+	for (const project of headquarters) seen.add(project.id);
 	for (const id of projectIds) {
 		const project = byId.get(id);
-		if (!project || seen.has(id)) continue;
+		if (!project || seen.has(id) || isHeadquartersProject(project)) continue;
 		seen.add(id);
 		ordered.push(project);
 	}
 	for (const project of projects) {
-		if (seen.has(project.id)) continue;
+		if (seen.has(project.id) || isHeadquartersProject(project)) continue;
 		seen.add(project.id);
 		ordered.push(project);
 	}
@@ -192,6 +195,7 @@ function beginProjectReorder(): void {
 
 export function startProjectReorder(e: PointerEvent, projectId: string): void {
 	if (e.pointerType === "mouse" && e.button !== 0) return;
+	if (isHeadquartersProject(projectId)) return;
 	e.preventDefault();
 	e.stopPropagation();
 	if (_projectReorderState) return;
@@ -379,6 +383,7 @@ export async function finishProjectReorder(cancel = false): Promise<void> {
 }
 
 export function renderProjectReorderHandle(project: Project) {
+	if (isHeadquartersProject(project)) return nothing;
 	const active = _projectReorderState?.activeId === project.id && _projectReorderState.dragging;
 	return html`
 		<button
@@ -1164,6 +1169,43 @@ export function synthStaffSessionRow(agent: typeof state.staffList[0]): GatewayS
 	return { ...live, title: agent.name, staffId: agent.id };
 }
 
+function headquartersHiddenWithNoVisibleProjects(): boolean {
+	return state.projects.length === 0 && state.showHeadquartersInProjectLists === false;
+}
+
+async function showHeadquartersInProjectListsFromSidebar(): Promise<void> {
+	state.showHeadquartersInProjectLists = true;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
+		});
+		setProjects(await fetchProjects());
+		void import("./render.js").then((m) => m.showHeaderToast("Headquarters shown in project lists."));
+	} catch {
+		state.showHeadquartersInProjectLists = false;
+		void import("./render.js").then((m) => m.showHeaderToast("Failed to show Headquarters."));
+	} finally {
+		renderApp();
+	}
+}
+
+function renderHiddenHeadquartersSidebarFallback(): TemplateResult | string {
+	if (!headquartersHiddenWithNoVisibleProjects()) return "";
+	return html`
+		<div class="mx-2 my-3 p-3 rounded-md text-center border border-border bg-secondary/20" data-testid="headquarters-hidden-sidebar-fallback">
+			<p class="text-foreground font-medium mb-1" style="font-size: 0.9167em;">Headquarters is hidden from project lists.</p>
+			<p class="text-muted-foreground mb-3" style="font-size: 0.75em;">The built-in server workspace is still available.</p>
+			<div class="flex flex-col gap-1.5">
+				<button class="px-2 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors" style="font-size: 0.8333em;" ?disabled=${state.creatingSession} @click=${() => createAndConnectSession(undefined, undefined, undefined, undefined, undefined, HEADQUARTERS_PROJECT_ID)}>Quick Session in Headquarters</button>
+				<button class="px-2 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors" style="font-size: 0.8333em;" @click=${() => { void showHeadquartersInProjectListsFromSidebar(); }}>Show Headquarters</button>
+				<button class="px-2 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors" style="font-size: 0.8333em;" @click=${() => showProjectDialog()}>Add Project</button>
+			</div>
+		</div>
+	`;
+}
+
 /** Banner above the project list listing orphaned staff (missing/system projectId). */
 function renderOrphanedStaffBanner() {
 	const orphans = state.orphanedStaff || [];
@@ -1200,6 +1242,8 @@ function renderOrphanedStaffBanner() {
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = getProjectAccentColor(project);
 	const isProvisional = !!project.provisional;
+	const isHeadquarters = isHeadquartersProject(project);
+	const projectSettingsTarget = isHeadquarters ? "system/general" : `${project.id}/general`;
 	const navId = `project:${project.id}`;
 	const navActive = getActiveNavId() === navId;
 	const reordering = isProjectReordering();
@@ -1208,7 +1252,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 		<div class="group project-header relative flex items-center gap-1 pr-1 py-0.5 rounded-md ${reordering ? "cursor-default" : "cursor-pointer"} ${reorderActive ? "project-reorder-active" : ""} ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
 			data-testid="project-header"
 			data-project-id=${project.id}
-			data-project-reorder-id=${project.id}
+			data-project-reorder-id=${isHeadquarters ? nothing : project.id}
 			data-project-reordering=${reordering ? "true" : "false"}
 			data-project-reorder-active=${reorderActive ? "true" : "false"}
 			data-nav-id=${navId}
@@ -1225,15 +1269,15 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			}}>
 			<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 			<span class="project-reorder-slot">${renderProjectReorderHandle(project)}</span>
-			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
+			<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>
 			<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
 			<button
 				type="button"
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
-				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
-				title="Project settings"
+				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", projectSettingsTarget); }}
+				title=${isHeadquarters ? "Headquarters settings" : "Project settings"}
 			>${icon(Settings, "xs")}</button>
 			<button
 				type="button"
@@ -1782,16 +1826,18 @@ export function renderSidebar() {
 							` : ""}
 						`}
 				${state.projects.length === 0 ? html`
-					<div style="padding: 1.5rem 1rem; text-align: center;">
-						<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 1.0833em;">No projects configured</p>
-						<button
-							class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
-							@click=${() => showProjectDialog()}
-						>
-							${icon(Plus, "xs")}
-							<span>Add Project</span>
-						</button>
-					</div>
+					${headquartersHiddenWithNoVisibleProjects() ? renderHiddenHeadquartersSidebarFallback() : html`
+						<div style="padding: 1.5rem 1rem; text-align: center;">
+							<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 1.0833em;">No projects available</p>
+							<button
+								class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
+								@click=${() => showProjectDialog()}
+							>
+								${icon(Plus, "xs")}
+								<span>Add Project</span>
+							</button>
+						</div>
+					`}
 				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button

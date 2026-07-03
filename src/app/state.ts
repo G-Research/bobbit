@@ -4,6 +4,7 @@ import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
+import { sortProjectsWithHeadquartersFirst, type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
 import {
 	clearSidebarTreePreference,
@@ -35,6 +36,7 @@ export interface Project {
   id: string;
   name: string;
   rootPath: string;
+  kind?: ProjectKind;
   color?: string;       // Deprecated, kept for compat
   palette?: string;
   colorLight: string;
@@ -592,6 +594,9 @@ export const state = {
 	/** Whether the splash-screen project picker (≥2 projects) is open. */
 	splashProjectPickerOpen: false,
 
+	/** Server preference: show the built-in Headquarters shortcut in normal project lists. */
+	showHeadquartersInProjectLists: true,
+
 	/** Docker sandbox status (fetched on demand) */
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
 
@@ -837,9 +842,10 @@ export function setRenderSuppressed(suppressed: boolean): void {
 /** Update the project list and ensure activeProjectId stays in sync.
  *  Defaults to the first project when no explicit selection exists. */
 export function setProjects(projects: Project[]): void {
-	state.projects = projects;
-	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
-		state.activeProjectId = projects[0]?.id ?? null;
+	const ordered = sortProjectsWithHeadquartersFirst(projects);
+	state.projects = ordered;
+	if (!state.activeProjectId || !ordered.some(p => p.id === state.activeProjectId)) {
+		state.activeProjectId = ordered[0]?.id ?? null;
 	}
 }
 

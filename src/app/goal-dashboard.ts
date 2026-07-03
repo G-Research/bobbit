@@ -6,6 +6,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
+import { isHeadquartersProject } from "./headquarters.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
@@ -1775,6 +1776,19 @@ async function handleRetrySetup(goalId: string): Promise<void> {
 	}
 }
 
+function isHeadquartersNoWorktreeGoal(goal: Goal): boolean {
+	return isHeadquartersProject(goal.projectId) && !goal.branch && !goal.worktreePath;
+}
+
+function renderHeadquartersNoWorktreeNotice(goal: Goal): TemplateResult | typeof nothing {
+	if (!isHeadquartersNoWorktreeGoal(goal)) return nothing;
+	return html`
+		<div class="setup-banner" data-testid="headquarters-no-worktree-notice" style="background:color-mix(in oklch, var(--info, var(--primary)) 10%, transparent);border-color:color-mix(in oklch, var(--info, var(--primary)) 35%, var(--border));color:var(--foreground);">
+			<span>This Headquarters goal runs in the server directory without a git worktree. Git branch and merge actions are unavailable.</span>
+		</div>
+	`;
+}
+
 function renderSetupBanner(goal: Goal): TemplateResult {
 	if (goal.setupStatus === "preparing") {
 		return html`
@@ -2093,6 +2107,7 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 function renderMetaRows(goal: Goal): TemplateResult {
 	const branch = goal.branch || "";
 	const gs = gitStatus;
+	const hideGitAffordances = isHeadquartersNoWorktreeGoal(goal);
 
 	return html`
 		<div class="meta-rows">
@@ -2119,7 +2134,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 				</div>
 			</div>
 			` : nothing}
-			${gitRepoKnown !== 'no' && (branch || gs || gitRepoKnown === 'unknown') ? html`
+			${!hideGitAffordances && gitRepoKnown !== 'no' && (branch || gs || gitRepoKnown === 'unknown') ? html`
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
 						.goalId=${goal.id}
@@ -3150,6 +3165,7 @@ export function renderGoalDashboard(): TemplateResult {
 				</div>
 			` : nothing}
 			${renderSetupBanner(currentGoal)}
+			${renderHeadquartersNoWorktreeNotice(currentGoal)}
 			${renderMetaRows(currentGoal)}
 			${renderDashboardMutationPending()}
 			${renderGatePipeline()}

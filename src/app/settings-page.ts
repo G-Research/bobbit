@@ -45,6 +45,7 @@ import {
 	resetSidebarTreeIndentPreference,
 	applySidebarTreeLayoutVars,
 } from "./state.js";
+import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
@@ -87,10 +88,16 @@ const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 ];
 
 function getActiveScope(): string {
-	return (getRouteFromHash() as any).settingsScope ?? "system";
+	const route = getRouteFromHash() as any;
+	const scope = route.settingsScope ?? "system";
+	// Headquarters is the user-facing server scope. Only Workflows currently use
+	// the explicit project id because workflow storage remains project-scoped.
+	if (isHeadquartersProject(scope) && route.settingsTab !== "workflows") return "system";
+	return scope;
 }
 
 function getTabsForScope(scope: string): { id: SettingsTab; label: string }[] {
+	if (isHeadquartersProject(scope)) return PROJECT_TABS;
 	return scope === "system" ? SYSTEM_TABS : PROJECT_TABS;
 }
 
@@ -123,6 +130,8 @@ let settingsShowTimestamps = true;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
 let settingsReplaceBobbitWithText = false;
+let settingsShowHeadquartersInProjectLists = true;
+let settingsHeadquartersVisibilityStatus: "" | "saving" | "saved" | "error" = "";
 let settingsSubgoalsEnabled = true;
 let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
@@ -2257,6 +2266,9 @@ function loadGeneralSettings() {
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					// Replace bobbit sprite with text (chat blob) — default OFF; only an explicit `true` enables.
 					settingsReplaceBobbitWithText = prefs.replaceBobbitWithText === true;
+					// Headquarters visibility — default ON; only an explicit `false` hides the shortcut.
+					settingsShowHeadquartersInProjectLists = prefs.showHeadquartersInProjectLists !== false;
+					state.showHeadquartersInProjectLists = settingsShowHeadquartersInProjectLists;
 					// Subgoals (Experimental) — default OFF; only an explicit `true` enables. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					const rawDepth = prefs.maxNestingDepth;
@@ -2389,6 +2401,37 @@ async function toggleReplaceBobbitWithText(): Promise<void> {
 			body: JSON.stringify({ replaceBobbitWithText: settingsReplaceBobbitWithText }),
 		});
 	} catch {}
+}
+
+async function setShowHeadquartersInProjectLists(checked: boolean): Promise<void> {
+	const previous = settingsShowHeadquartersInProjectLists;
+	settingsShowHeadquartersInProjectLists = checked;
+	state.showHeadquartersInProjectLists = checked;
+	settingsHeadquartersVisibilityStatus = "saving";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: checked }),
+		});
+		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		setProjects(await fetchProjects());
+		settingsHeadquartersVisibilityStatus = "saved";
+		void import("./render.js").then((m) => m.showHeaderToast(checked
+			? "Headquarters shown in project lists."
+			: "Headquarters hidden from project lists."));
+		setTimeout(() => {
+			if (settingsHeadquartersVisibilityStatus === "saved") {
+				settingsHeadquartersVisibilityStatus = "";
+				renderApp();
+			}
+		}, 2000);
+	} catch {
+		settingsShowHeadquartersInProjectLists = previous;
+		state.showHeadquartersInProjectLists = previous;
+		settingsHeadquartersVisibilityStatus = "error";
+	}
+	renderApp();
 }
 
 async function setMaxNestingDepth(raw: number): Promise<void> {
@@ -2548,6 +2591,28 @@ function renderSidebarTreeIndentControl() {
 	`;
 }
 
+function renderHeadquartersVisibilityControl() {
+	return html`
+		<label class="flex items-start gap-2 text-sm text-foreground" data-testid="headquarters-visibility-setting">
+			<input
+				type="checkbox"
+				class="mt-0.5 w-4 h-4 rounded border-input accent-primary cursor-pointer"
+				.checked=${settingsShowHeadquartersInProjectLists}
+				?disabled=${settingsHeadquartersVisibilityStatus === "saving"}
+				@change=${(e: Event) => { void setShowHeadquartersInProjectLists((e.target as HTMLInputElement).checked); }}
+			/>
+			<span class="flex flex-col gap-1">
+				<span class="text-sm font-medium text-foreground">Show Headquarters in project lists</span>
+				<span class="text-xs text-muted-foreground">
+					Displays Headquarters in the sidebar, project pickers, and project lists. Hiding it only removes the shortcut; Headquarters sessions, staff, goals, and server configuration are kept.
+				</span>
+				${settingsHeadquartersVisibilityStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}
+				${settingsHeadquartersVisibilityStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+			</span>
+		</label>
+	`;
+}
+
 function renderGeneralTab() {
 	loadGeneralSettings();
 	return html`
@@ -2556,6 +2621,7 @@ function renderGeneralTab() {
 				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
 				${renderSidebarFontScaleControl()}
 				${renderSidebarTreeIndentControl()}
+				${renderHeadquartersVisibilityControl()}
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">
@@ -2627,7 +2693,7 @@ function renderGeneralTab() {
 				<span class="text-sm font-medium text-foreground">Max subgoal depth</span>
 				<p class="text-xs text-muted-foreground">
 					Maximum nesting depth for subgoal trees. Depth 3 = root → child → grandchild.
-					Setting this higher risks runaway spawning. System setting is the ceiling —
+					Setting this higher risks runaway spawning. The Headquarters setting is the ceiling —
 					per-goal overrides can only tighten, not loosen. Range: ${MAX_NESTING_DEPTH_MIN}–${MAX_NESTING_DEPTH_MAX}.
 				</p>
 				<div class="flex items-center gap-3">
@@ -2715,7 +2781,7 @@ function renderGeneralTab() {
 				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
-				<span class="text-sm font-medium text-foreground">System prompt</span>
+				<span class="text-sm font-medium text-foreground">Default agent prompt</span>
 				<p class="text-xs text-muted-foreground">
 					Copy the shipped default to <code>.bobbit/config/system-prompt.md</code> so you can edit it.
 					If the file already exists it is left unchanged.
@@ -2725,7 +2791,7 @@ function renderGeneralTab() {
 						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
 						data-testid="general-customise-system-prompt"
 						@click=${customiseSystemPrompt}
-					>Customise system prompt</button>
+					>Customise default prompt</button>
 					${customisePromptStatus ? html`<span class="text-xs text-muted-foreground">${customisePromptStatus}</span>` : ""}
 				</div>
 			</div>
@@ -3210,19 +3276,25 @@ export function renderAccountTab() {
 }
 
 function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: string }[]) {
-	const projects = state.projects || [];
-	// Only show scope row when there are projects to choose between
-	if (projects.length === 0) return "";
+	const projects = (state.projects || []).filter((project: any) => !isHeadquartersProject(project));
+	const currentTab = getActiveTab();
+	const headquartersActive = currentScope === "system" || isHeadquartersProject(currentScope);
+	const headquartersTarget = isHeadquartersProject(currentScope) && currentTab === "workflows"
+		? `${HEADQUARTERS_PROJECT_ID}/workflows`
+		: `system/${SYSTEM_TABS[0].id}`;
 
 	return html`
 		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
 			<button
-				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
-					${currentScope === "system"
+				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5
+					${headquartersActive
 						? "bg-background text-foreground shadow-sm border border-border"
 						: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
-				@click=${() => { setHashRoute("settings", `system/${SYSTEM_TABS[0].id}`, true); }}
-			>System</button>
+				@click=${() => { setHashRoute("settings", headquartersTarget, true); }}
+			>
+				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent(HEADQUARTERS_PROJECT_ID), "xs")}</span>
+				${HEADQUARTERS_PROJECT_NAME}
+			</button>
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
 				const isDark = document.documentElement.classList.contains("dark");
@@ -3235,7 +3307,7 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						@click=${() => { setHashRoute("settings", `${project.id}/${PROJECT_TABS[0].id}`, true); }}
 					>
-						<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>
+						<span data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} class="inline-flex items-center" style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>
 						${project.name}
 					</button>
 				`;
@@ -5544,7 +5616,8 @@ export function renderSettingsPage() {
 	const currentScope = getActiveScope();
 	const tabs = getTabsForScope(currentScope);
 	const currentTab = getActiveTab();
-	const isProjectScope = currentScope !== "system";
+	const isHeadquartersScope = isHeadquartersProject(currentScope);
+	const isProjectScope = currentScope !== "system" && !isHeadquartersScope;
 
 	return html`
 		<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -5588,6 +5661,8 @@ export function renderSettingsPage() {
 						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
 						${currentTab === "workflows" ? renderProjectScopeWorkflowsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
+					` : isHeadquartersScope && currentTab === "workflows" ? html`
+						${renderProjectScopeWorkflowsTab(HEADQUARTERS_PROJECT_ID)}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}
 						${currentTab === "models" ? renderModelsTab() : ""}
