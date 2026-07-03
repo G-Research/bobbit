@@ -1,24 +1,26 @@
 # Sidebar tree expansion state
 
-Status: implemented for sidebar expansion preferences. Indentation layout seams exist in the tree builder, but no indentation preference UI is implemented.
+Status: implemented for sidebar expansion preferences. The shared tree builder and indentation layout seams are integrated; indentation preferences remain separate from expansion preferences.
 
 ## Context
 
-The sidebar renders projects, goal trees, sessions, staff, team leads, spawned children, and archived rows through one shared tree model. Expansion state used to be split across several `Set`s and localStorage keys, so polling, goal creation, keyboard navigation, and renderer-specific paths could disagree about what should be open.
+The sidebar renders projects, goal trees, sessions, staff, team leads, spawned children, and archived rows through one shared tree model. Expansion state used to be split across several `Set`s and localStorage keys, which let polling, goal creation, keyboard navigation, desktop/mobile renderers, and archived delegate paths disagree about what should be open.
 
-The current implementation centralizes sidebar disclosure preferences in `src/app/sidebar-tree-state.ts` and feeds them into `src/app/sidebar-tree-builder.ts` through the `SidebarTreeExpansionInput` seam. Renderers still own markup and row actions, but they should ask the shared API for expansion state rather than reading or writing storage directly.
+The current implementation centralizes durable disclosure preferences in `src/app/sidebar-tree-state.ts` and feeds them into `src/app/sidebar-tree-builder.ts` through `SidebarTreeExpansionInput`. Renderers still own markup and row actions, but they read `SidebarTreeNode.expanded` when a tree node is available and call the shared API for explicit toggles.
 
 ## Source map
 
 | Area | Source | Role |
 |---|---|---|
 | Expansion storage/API | `src/app/sidebar-tree-state.ts` | Single source of truth for durable sidebar tree expansion preferences and legacy migration. |
-| Tree keys and builder seam | `src/app/sidebar-tree-builder.ts` | Defines `SidebarTreeNodeKey`, `sidebarTreeKey()`, `parseSidebarTreeKey()`, defaults, expandability, tree nodes, and layout metadata. |
-| Desktop sidebar/search pruning | `src/app/sidebar.ts` | Builds the desktop tree with `sidebarTreeExpansionInput()` and applies search-only pruning/ephemeral ancestor expansion. |
-| Shared row rendering | `src/app/render-helpers.ts` | Renders goal/session/team/delegate rows from builder nodes and shared expansion helpers. |
-| Mobile/collapsed sidebar | `src/app/render.ts` | Builds mobile/collapsed views with the same tree expansion input. |
-| Keyboard navigation | `src/app/sidebar-nav.ts` | Maps nav rows to canonical tree keys and calls `isSidebarTreeExpanded()` / `setSidebarTreeExpanded()`. |
-| Refresh/create flows | `src/app/api.ts` | Uses `expandSidebarTreeNode()` for minimal top-level goal expansion and no longer mutates legacy goal sets. |
+| Tree keys and builder seam | `src/app/sidebar-tree-builder.ts` | Defines canonical keys, defaults, expansion metadata, hierarchy, and layout metadata. |
+| Tree indentation | `src/app/sidebar-tree-layout.ts` | Owns indentation preference storage and shared CSS style helpers. It is separate from expansion state. |
+| Desktop sidebar/search pruning | `src/app/sidebar.ts` | Builds the desktop/collapsed tree with shared expansion and layout inputs; applies search-only pruning/ephemeral ancestor expansion. |
+| Shared rows/archived sections | `src/app/render-helpers.ts` | Renders goals, teams, sessions, archived delegate controls, and consumes tree node expansion/layout metadata. |
+| Mobile sidebar | `src/app/render.ts` | Builds mobile tree views with the same expansion and layout inputs. |
+| Keyboard navigation | `src/app/sidebar-nav.ts` | Maps nav rows to canonical tree keys and calls the shared expansion API. |
+| Refresh/create flows | `src/app/api.ts` | Uses `expandSidebarTreeNode()` for minimal top-level goal expansion and does not mutate legacy goal sets. |
+| Compatibility re-exports | `src/app/state.ts` | Keeps existing imports working while delegating tree expansion helpers to `sidebar-tree-state.ts`. |
 
 ## Storage namespace
 
@@ -28,128 +30,121 @@ Expansion preferences are stored in one versioned safe-storage namespace:
 export const SIDEBAR_TREE_STATE_STORAGE_KEY = "bobbit-sidebar-tree-state:v1";
 ```
 
-Stored JSON shape:
+The persisted shape stores explicit preferences only:
 
 ```ts
 type SidebarTreePreference = "expanded" | "collapsed";
-
 interface SidebarTreeExpansionStateV1 {
   version: 1;
   expansion: Record<string, SidebarTreePreference>;
 }
 ```
 
-Only concrete preferences are stored, not inferred defaults. Absence from `expansion` means “resolve from the node-kind default or caller fallback.” Corrupted JSON, wrong versions, invalid canonical keys, missing storage, and unavailable/throwing storage are ignored without breaking boot; the sidebar falls back to defaults plus any readable legacy migration.
+Corrupted, missing, wrong-version, or unavailable storage is ignored without throwing. The app falls back to builder defaults plus any readable legacy migration.
 
-## Canonical keys and node separation
+## Node-key model
 
-`sidebarTreeKey()` serializes typed `SidebarTreeNodeKey` values to stable strings:
+Every durable preference uses the canonical `sidebarTreeKey()` string for a `SidebarTreeNodeKey`. That keeps identical raw IDs separated across node kinds.
 
-```text
-sidebar-tree/v1/<kind>/<url-encoded-id>[?childClass=...]
-```
+| UI node | Canonical key object |
+|---|---|
+| Project header | `{ kind: "project", projectId }` |
+| Ungrouped sessions section | `{ kind: "project-sessions", projectId }` |
+| Staff section | `{ kind: "project-staff", projectId }` |
+| Archived section | `{ kind: "project-archived", projectId }` |
+| Goal/sub-goal | `{ kind: "goal", goalId }` |
+| Team lead | `{ kind: "team-lead", sessionId }` |
+| Live first-class/delegate children group | `{ kind: "session-children", sessionId, childClass: "first-class" }` |
+| Archived delegate children group | `{ kind: "session-children", sessionId, childClass: "archived-delegate" }` |
 
-Entity IDs are URL-encoded, so callers should never split raw IDs with ad-hoc delimiters. The node kind is part of identity, which keeps otherwise identical raw IDs separate across project sections, goals, sessions, and child groups.
-
-Important expandable keys:
-
-| Node | Key shape | Why it is separate |
-|---|---|---|
-| Project header | `{ kind: "project", projectId }` | Collapses the whole project body. |
-| Sessions section | `{ kind: "project-sessions", projectId }` | Independent from the project header. |
-| Staff section | `{ kind: "project-staff", projectId }` | Independent from Sessions and the project header. |
-| Archived section | `{ kind: "project-archived", projectId }` | Controlled by Show Archived but has its own disclosure state. |
-| Goal/sub-goal | `{ kind: "goal", goalId }` | One preference follows the goal whether it renders in the project forest, archived forest, or under a team lead. |
-| Team lead | `{ kind: "team-lead", sessionId }` | Controls team/member rows for one lead session. |
-| First-class child-session parent | `{ kind: "session-children", sessionId, childClass: "first-class" }` | Used for live first-class child sessions and live delegates grouped under the parent. |
-| Archived delegate parent | `{ kind: "session-children", sessionId, childClass: "archived-delegate" }` | Separate from first-class children because archived delegate parents default collapsed. |
-
-`{ kind: "session", sessionId }` is a leaf key used for DOM/nav identity. It is not expandable and is not persisted by the expansion API.
+`{ kind: "session", sessionId }` is a leaf identity for DOM/nav use. It is not persistently expandable.
 
 ## Defaults
 
-Defaults apply only when no stored preference exists.
+Defaults apply only when no stored preference exists:
 
-| Node kind | Default |
-|---|---:|
-| Project headers | expanded |
-| Project Sessions sections | expanded |
-| Project Staff sections | expanded |
-| Project Archived sections | expanded when shown |
-| Goals and sub-goals | collapsed |
-| Team leads | expanded |
-| First-class/live delegate child-session parents | expanded |
-| Archived delegate parents | collapsed, but user-expandable |
-| Leaf sessions | non-expandable; use caller fallback |
+- Projects: expanded.
+- Ungrouped sessions: expanded.
+- Staff: expanded.
+- Archived sections: expanded once shown.
+- Goals and sub-goals: collapsed.
+- Team leads: expanded.
+- Live first-class child-session parents and live delegates: expanded through the first-class group.
+- Archived delegate parents: collapsed.
+- Leaf session nodes: use the supplied fallback/default and do not persist.
 
-Explicit preferences always win over these defaults.
+Explicit preferences always win over defaults. An explicit collapsed preference also wins over stale legacy expansion data and automatic application expansion.
 
-## Shared API seams
+## API contract
 
-Use `src/app/sidebar-tree-state.ts` rather than direct storage or legacy sets.
+`sidebar-tree-state.ts` exposes semantic helpers rather than storage primitives:
 
-Core helpers:
+- `sidebarTreeDefaultExpanded(key)`
+- `getSidebarTreePreference(key)`
+- `isSidebarTreeExpanded(key, defaultExpanded?)`
+- `setSidebarTreeExpanded(key, expanded)`
+- `toggleSidebarTreeExpanded(key)`
+- `expandSidebarTreeNode(key, opts?)`
+- `collapseSidebarTreeNode(key)`
+- `clearSidebarTreePreference(key)`
+- `sidebarTreeExpansionInput()`
+- `resetArchivedSidebarTreeExpansion(opts)`
 
-- `sidebarTreeDefaultExpanded(key)` — returns the default for a node kind.
-- `getSidebarTreePreference(key)` — returns only durable explicit state, if present.
-- `isSidebarTreeExpanded(key, defaultExpanded?)` — resolves explicit preference, then supplied/default state.
-- `setSidebarTreeExpanded(key, expanded)` / `toggleSidebarTreeExpanded(key)` / `collapseSidebarTreeNode(key)` — explicit writes for user actions.
-- `expandSidebarTreeNode(key, { explicit: false })` — application-driven expansion that must not overwrite existing preferences.
-- `clearSidebarTreePreference(key)` — removes the durable preference so defaults apply again.
-- `sidebarTreeExpansionInput()` — adapter passed to `buildSidebarTree()`.
-- `resetArchivedSidebarTreeExpansion({ archivedGoalIds, archivedSessionIds })` — clears archived goal/session-related expansion preferences when archived state is reset.
+Compatibility wrappers cover projects, ungrouped sessions, staff, archived sections, goals, team leads, first-class child parents, and archived delegate parents.
 
-Compatibility wrappers such as `isGoalExpanded()`, `setGoalExpanded()`, `isTeamLeadExpanded()`, and `setArchivedParentExpanded()` exist so render paths can stay semantic while sharing the same backing store.
+`set*`, `toggle*`, and `collapse*` are explicit user/application preferences and persist. `expandSidebarTreeNode(key, { explicit: false })` is reserved for automatic expansion and must not overwrite an existing explicit preference.
 
-## Explicit vs automatic expansion
+## Refresh and create behavior
 
-User toggles and keyboard expansion are explicit. They persist an `expanded` or `collapsed` preference for expandable nodes, including values that match the default. This matters because an explicit collapse must act as a tombstone: later polling or creation flows must not reopen it.
+`refreshSessions()` tracks new goal IDs and may auto-expand only newly discovered top-level goals with a live owning session. It does not auto-expand parent goals when a child/sub-goal appears, and it does not persist an expanded preference for newly discovered sub-goals.
 
-Application-driven expansion is narrower:
-
-- Search-driven and default-open automatic expansion is ephemeral/non-persistent; it affects only the current render pass or falls back to the default.
-- `expandSidebarTreeNode(key, { explicit: false })` does nothing when the node already has any explicit preference.
-- It also does nothing for nodes that are already expanded by default, avoiding unnecessary durable entries.
-- It may create an `expanded` preference only for an unset, default-collapsed node. Today that durable automatic exception is used by `refreshSessions()` for newly discovered top-level goals with a live owning session.
-- `refreshSessions()` does not auto-expand sub-goals and does not auto-expand parents just because a child was discovered.
-- `createGoal()` explicitly expands only newly created top-level goals. Child goals/sub-goals do not expand themselves or their parents.
+`createGoal()` explicitly expands only newly created top-level goals because the user directly created/opened that root item. Child goals/sub-goals do not expand themselves and do not expand their parent.
 
 This preserves collapsed-by-default sub-goals and prevents new child discovery from reopening a parent the user collapsed.
 
 ## Search behavior
 
-Sidebar search is an ephemeral view over the tree. When a query is active, the sidebar may retain matching goals/sessions and expand retained ancestors in the pruned in-memory model so matches are visible. That search-only expansion changes `SidebarTreeNode.expanded` for the render pass but does not call the tree-state persistence API and does not write preferences.
+Sidebar search is an ephemeral view over the tree. When a query is active, desktop and mobile search may retain matching goals/sessions and expand retained ancestors in the pruned in-memory model so matches are visible. That search-only expansion changes `SidebarTreeNode.expanded` for the render pass only; it does not call the tree-state persistence API and does not write preferences.
 
-Search can also temporarily show archived results through the archived search flow. That visibility state is separate from tree-node expansion preferences.
+Archived search visibility is also separate from tree-node expansion preferences.
+
+## Archived delegate controls
+
+Archived delegate parent groups use the canonical archived-delegate session-children key and default collapsed. Renderers show an "Archived delegates" disclosure row when archived delegates need an independent control next to live first-class children. The toggle persists through `toggleArchivedParentExpanded()` and respects `SidebarTreeNode.expanded` when rendering builder-derived trees.
 
 ## Legacy migration
 
-On module load, `sidebar-tree-state.ts` reads the new namespace first, then idempotently merges readable legacy keys into missing canonical node keys. Existing new-state preferences take precedence over stale or conflicting legacy data. Legacy keys are not removed, which keeps rollback safe and makes repeated migration non-destructive.
+On module load, `sidebar-tree-state.ts` reads the new namespace first, then idempotently merges readable legacy keys into missing canonical node keys. Existing new-state preferences take precedence over stale or conflicting legacy data. Legacy keys are not removed.
 
 Legacy mapping:
 
-| Legacy key | Migrated canonical node | Migrated preference |
-|---|---|---|
-| `bobbit-expanded-projects` entry `collapsed:<projectId>` | `project(projectId)` | `collapsed` |
-| `bobbit-expanded-projects` bare project ID | `project(projectId)` | `expanded` |
-| `bobbit-expanded-goals` | `goal(goalId)` | `expanded` |
-| `bobbit-collapsed-ungrouped` | `project-sessions(projectId)` | `collapsed` |
-| `bobbit-collapsed-staff` | `project-staff(projectId)` | `collapsed` |
-| `bobbit-archived-collapsed-projects` | `project-archived(projectId)` | `collapsed` |
-| `bobbit-collapsed-team-leads` | `team-lead(sessionId)` | `collapsed` |
-| `bobbit-collapsed-first-class-parents` | `session-children(sessionId, "first-class")` | `collapsed` |
-| `bobbit-expanded-delegate-parents` | `session-children(sessionId, "archived-delegate")` | `expanded` |
+| Legacy key | Migration |
+|---|---|
+| `bobbit-expanded-projects` | `collapsed:<projectId>` -> project collapsed; bare project IDs -> project expanded defensively. |
+| `bobbit-expanded-goals` | goal expanded. |
+| `bobbit-collapsed-ungrouped` | project-sessions collapsed. |
+| `bobbit-collapsed-staff` | project-staff collapsed. |
+| `bobbit-archived-collapsed-projects` | project-archived collapsed. |
+| `bobbit-collapsed-team-leads` | team-lead collapsed. |
+| `bobbit-collapsed-first-class-parents` | session-children/first-class collapsed. |
+| `bobbit-expanded-delegate-parents` | session-children/archived-delegate expanded. |
 
-Malformed/non-array legacy values are ignored via safe-storage fallback behavior.
+Malformed or non-array legacy values are ignored through safe-storage fallback behavior.
 
-## Indentation scope
+## Out of scope
 
-`sidebar-tree-builder.ts` exposes layout metadata and `resolveSidebarTreeLayoutPreference()` so renderers can share indentation calculations. This goal did not add an indentation preference UI or persist indentation settings in `bobbit-sidebar-tree-state:v1`; expansion preferences and layout preferences remain separate concerns.
+- `bobbit-sidebar-collapsed` is a shell preference, not a tree-node preference.
+- `bobbit-show-archived` is a visibility filter, not a disclosure preference.
+- `bobbit:sidebar-tree-indent` is the indentation preference, not a disclosure preference.
+- `_expandedNestedDepthByProject` is in-memory render state.
+- Plan-tab disclosure is separate from sidebar tree disclosure.
 
-## Verification coverage
+## Tests
 
 Relevant tests include:
 
 - `tests/sidebar-tree-state.test.ts` — defaults, explicit precedence, key separation, legacy migration, corrupted/missing storage, automatic expansion safeguards, archived delegate defaults, and archived reset behavior.
 - `tests/api-sidebar-expansion-regression.test.ts` — refresh/create flows use the unified API, auto-expand only eligible top-level goals, and do not reopen collapsed parents for new child/sub-goals.
-- Sidebar search tests cover search filtering/retention behavior without turning search expansion into durable preferences.
+- `tests/sidebar-tree-builder.test.ts` — canonical keys, builder defaults, session-child classes, and layout metadata.
+- `tests/sidebar-archived-delegates.spec.ts` — archived delegate disclosure controls.
+- `tests/ui-fixtures/sidebar-filter-search-fixture.spec.ts` — search retention/ephemeral expansion behavior.

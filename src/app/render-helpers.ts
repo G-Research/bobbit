@@ -4,6 +4,7 @@ import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, RotateCcw, Tras
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import type { GoalContext, SessionChildrenContext, SessionContext, SidebarTreeNode, TeamLeadContext } from "./sidebar-tree-builder.js";
+import { sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeLegacyGoalIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { bucketTeamChildren } from "./team-archived-bucket.js";
 import {
 	state,
@@ -431,8 +432,6 @@ function renderSessionTime(session: GatewaySession, selected = false) {
  */
 export const SESSION_ROW_PY = "py-0.5";
 
-/** Consistent indent per nesting level (px). */
-export const INDENT = 5;
 /** Width of the chevron/spacer slot (px) — same for all chevrons. */
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */
@@ -795,7 +794,7 @@ export function bucketArchivedByProject(
  * sub-goal may itself be a parent of further sub-goals (a team-lead it
  * spawned could spawn its own sub-goals). Reuses `renderGoalGroup` so the
  * row, chevron, descendant badge, and team rendering match the rest of the
- * sidebar. Indent is one INDENT step relative to the parent's
+ * sidebar. Indent is one base tree step relative to the parent's
  * tlExpanded container.
  *
  * `renderedAncestors` is the set of goal ids that have already rendered as
@@ -844,7 +843,7 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 			const isExpanded = node.expanded;
 			const nestedGoalChildren = node.children.filter(child => isGoalTreeNode(child) && child.context.renderPlacement === "archived-section") as SidebarTreeNode<GoalContext>[];
 			return html`
-				<div data-testid="sidebar-archived-row" data-depth="${node.logicalDepth}" data-goal-id="${goal.id}" data-tree-key=${node.key} data-tree-parent-key=${node.parentKey ?? nothing} data-tree-depth=${node.logicalDepth} data-tree-indent-depth=${node.indentDepth} style="padding-left:${node.indentPx}px;">
+				<div data-testid="sidebar-archived-row" data-depth="${node.logicalDepth}" data-goal-id="${goal.id}" data-tree-key=${node.key} data-tree-parent-key=${node.parentKey ?? nothing} data-tree-depth=${node.logicalDepth} data-tree-indent-depth=${node.indentDepth} style="${sidebarTreeNodeIndentStyle(node)}">
 					${isMobile
 						? html`<div class="opacity-60">${renderGoalGroup(goal, { treeNode: node })}</div>`
 						: renderGoalGroup(goal, { treeNode: node })}
@@ -852,7 +851,7 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 				${isExpanded ? nestedGoalChildren.map(renderArcTreeNode) : nothing}
 			`;
 		};
-		return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+		return html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">
 			${archivedGoalForest.map(renderArcTreeNode)}
 		</div>`;
 	}
@@ -880,11 +879,10 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 	// how live parents hide live children. The user reported sub-goal
 	// rows still showing under a collapsed archived parent.
 	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[]; displayTitleSuffix?: string }): TemplateResult => {
-		const indentPx = node.depth * 16;
 		const goal = node.goal as Goal;
 		const isExpanded = isGoalExpanded(goal.id);
 		return html`
-			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
+			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="${sidebarTreeLegacyGoalIndentStyle(node.depth)}">
 				${isMobile
 					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}</div>`
 					: renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}
@@ -892,7 +890,7 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 			${isExpanded ? node.children.map((c: any) => renderArcNode(c)) : nothing}
 		`;
 	};
-	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+	return html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">
 		${forest.map(node => renderArcNode(node))}
 	</div>`;
 }
@@ -941,7 +939,7 @@ export function renderProjectArchivedSection(
 				${archivedGoalCount > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${archivedGoalCount > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile, archivedGoalNodes) : ""}
 				${archivedGoalCount > 0 && archivedSessionCount > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedSessionCount > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				${archivedSessionCount > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${archivedSessionNodes
 						? archivedSessionNodes.map(renderTreeSessionNode)
 						: standaloneArchivedSessions.map(s => html`
@@ -1089,7 +1087,7 @@ function archivedChildrenForParent(parentSessionId: string): GatewaySession[] {
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	const children = visibleLiveChildrenForParent(parentSessionId);
 	if (children.length === 0) return "";
-	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+	return html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 		${children.map(s => isArchivedOrTerminalSession(s)
 			? html`${renderArchivedSessionRow(s)}${state.showArchived ? renderArchivedDelegates(s.id) : ""}`
 			: renderSessionRow(s))}
@@ -1117,13 +1115,13 @@ function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildren
 	const rendered = visibleGroups.map(group => {
 		const childRows = group.children.filter(isSessionTreeNode).map(renderTreeSessionNode);
 		if (group.context.childClass === "archived-delegate" && showArchivedGroupHeader) {
-			return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="padding-left:${INDENT}px;">
+			return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="${sidebarTreeBaseIndentStyle()}">
 				${renderArchivedDelegateGroupToggle(group.context.sessionId, group.expanded)}
-				${group.expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${childRows}</div>` : ""}
+				${group.expanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">${childRows}</div>` : ""}
 			</div>`;
 		}
 		if (!group.expanded) return "";
-		return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="padding-left:${INDENT}px;">
+		return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="${sidebarTreeBaseIndentStyle()}">
 			${childRows}
 		</div>`;
 	});
@@ -1207,7 +1205,7 @@ export function renderArchivedDelegates(parentSessionId: string, forceExpanded =
 	if (delegates.length === 0) return "";
 	const expanded = forceExpanded || isArchivedParentExpanded(parentSessionId);
 	if (!expanded && !opts?.showToggle) return "";
-	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+	return html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 		${opts?.showToggle ? renderArchivedDelegateGroupToggle(parentSessionId, expanded) : ""}
 		${expanded ? delegates.map(s => html`
 			${renderArchivedSessionRow(s)}
@@ -1459,7 +1457,7 @@ function renderTreeTeamLeadNode(node: SidebarTreeNode<TeamLeadContext>, rendered
 			: renderTeamLeadRow(session, childCount, expanded, node)}
 		${expanded ? renderTreeSessionChildrenGroups(childGroups, { showArchivedGroupHeader: childGroups.some(group => group.context.childClass === "archived-delegate" && group.children.length > 0) }) : ""}
 		${expanded && contentNodes.length > 0 ? html`
-			<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+			<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 				${activeNodes.map(renderChild)}
 				${activeNodes.length > 0 && archivedNodes.length > 0 ? archivedDivider(session.title) : ""}
 				${archivedNodes.map(renderChild)}
@@ -1688,7 +1686,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
 			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, false, { showToggle: true }) : ""}` : ""}
 			${tlExpanded ? html`
-				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${liveTeamChildren.map(renderSessionRow)}
 					${activeSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
 					${hasActiveAbove && hasArchivedBelow ? archivedDivider(teamLead.title) : ""}
@@ -1741,7 +1739,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 					</div>`}
 			</div>
 			${isExpanded ? html`
-				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${treeNode ? renderTreeGoalChildren() : (displaySessions.length === 0 && !isCreatingHere
 						? (goal.archived
 							? nothing
@@ -1800,7 +1798,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 								${renderArchivedSessionRow(lead, hasContent)}
 								${renderArchivedDelegates(lead.id)}
 								${expanded && hasContent ? html`
-									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+									<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 										${myMembers.map(m => html`
 											${renderArchivedSessionRow(m)}
 											${renderArchivedDelegates(m.id)}

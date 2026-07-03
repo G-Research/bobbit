@@ -44,6 +44,7 @@ import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog 
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
+import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
@@ -65,7 +66,7 @@ import "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId, renderArchivedSessionRow, renderArchivedDelegates, archivedDivider, bucketActiveArchived } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId, renderArchivedSessionRow, renderArchivedDelegates, archivedDivider, bucketActiveArchived } from "./render-helpers.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -363,7 +364,7 @@ function renderMobileGoalTreeNode(node: SidebarTreeNode<GoalContext>, archived =
 			data-testid=${archived ? "sidebar-archived-row" : nothing}
 			data-tree-key=${node.key}
 			data-goal-id=${goal.id}
-			style="padding-left:${node.indentPx}px;"
+			style="${sidebarTreeNodeIndentStyle(node)}"
 		>
 			${archived ? html`<div class="opacity-60">${goalBody}</div>` : goalBody}
 		</div>
@@ -415,9 +416,9 @@ function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): Retur
 			</button>
 			${expanded ? html`
 				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">${renderMobileGoalForest(projectTree.archivedGoalForest, true)}</div>` : ""}
+				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">${renderMobileGoalForest(projectTree.archivedGoalForest, true)}</div>` : ""}
 				${projectTree.archivedGoalForest.length > 0 && projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				${projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${projectTree.archivedSessionNodes.map(node => html`
 						<div data-tree-key=${node.key}>
 							${renderArchivedSessionRow(node.context.session as GatewaySession)}
@@ -601,6 +602,7 @@ function renderMobileLanding() {
 										},
 										projectOrder: projectsForRender.map(project => project.id),
 										viewport: "mobile",
+										layout: loadSidebarTreeLayoutPreference(),
 										expansion: sidebarTreeExpansionInput(),
 									});
 									const treeModel = visibleSearchGoalIds
@@ -644,7 +646,7 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 													${renderMobileGoalForest(projectTree.goalForest)}
 													${projectTree.goalForest.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
@@ -677,7 +679,7 @@ function renderMobileLanding() {
 															</div>
 														</div>
 														${_mobileUngroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
-															<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+															<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 																${projectTree.ungroupedSessionNodes.map(node => html`<div data-tree-key=${node.key}>${renderSessionRow(node.context.session as GatewaySession)}</div>`)}
 															</div>
 														` : ""}
