@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import YAML from "yaml";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -193,8 +194,130 @@ function dropSearchIndexesForHeadquartersMigration(stateDir: string): void {
 	}
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeLegacyIntoCurrent(legacy: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...legacy, ...current };
+	for (const [key, legacyValue] of Object.entries(legacy)) {
+		const currentValue = current[key];
+		if (isPlainRecord(legacyValue) && isPlainRecord(currentValue)) {
+			merged[key] = deepMergeLegacyIntoCurrent(legacyValue, currentValue);
+		}
+	}
+	return merged;
+}
+
+function readYamlRecord(filePath: string): Record<string, unknown> | null {
+	try {
+		if (!fs.existsSync(filePath)) return null;
+		const parsed = YAML.parse(fs.readFileSync(filePath, "utf-8"));
+		return isPlainRecord(parsed) ? parsed : null;
+	} catch (err) {
+		console.log(`[migration] Warning: could not parse YAML ${filePath}: ${err}`);
+		return null;
+	}
+}
+
+function mergeLegacyProjectYaml(legacyFile: string, targetFile: string): void {
+	const legacy = readYamlRecord(legacyFile);
+	if (!legacy) return;
+	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+	if (!fs.existsSync(targetFile)) {
+		fs.copyFileSync(legacyFile, targetFile);
+		console.log(`[migration] Preserved legacy Headquarters config ${legacyFile} → ${targetFile}`);
+		return;
+	}
+	const current = readYamlRecord(targetFile) ?? {};
+	const merged = deepMergeLegacyIntoCurrent(legacy, current);
+	if (JSON.stringify(merged) === JSON.stringify(current)) return;
+	backupForHeadquartersMigration(targetFile);
+	fs.writeFileSync(targetFile, YAML.stringify(merged), "utf-8");
+	console.log(`[migration] Merged legacy Headquarters config into ${targetFile}`);
+}
+
+function copyMissingLegacyConfig(legacyConfigDir: string, centralConfigDir: string): void {
+	if (samePath(legacyConfigDir, centralConfigDir) || !fs.existsSync(legacyConfigDir)) return;
+	const walk = (srcDir: string): void => {
+		let entries: fs.Dirent[];
+		try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const src = path.join(srcDir, entry.name);
+			const rel = path.relative(legacyConfigDir, src);
+			const dest = path.join(centralConfigDir, rel);
+			if (entry.isDirectory()) {
+				walk(src);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			if (rel.replace(/\\/g, "/") === "project.yaml") {
+				mergeLegacyProjectYaml(src, dest);
+				continue;
+			}
+			if (fs.existsSync(dest)) continue;
+			fs.mkdirSync(path.dirname(dest), { recursive: true });
+			fs.copyFileSync(src, dest);
+			console.log(`[migration] Preserved legacy Headquarters config ${src} → ${dest}`);
+		}
+	};
+	walk(legacyConfigDir);
+}
+
+function mergeLegacyJsonArrayFile(
+	legacyFile: string,
+	targetFile: string,
+	oldProjectIds: Set<string>,
+	keyFor: (item: Record<string, unknown>) => string,
+): void {
+	const legacy = readJsonArray<Record<string, unknown>>(legacyFile);
+	if (legacy.length === 0) return;
+	const rewritten = JSON.parse(JSON.stringify(legacy)) as Record<string, unknown>[];
+	rewriteProjectIdReferences(rewritten, oldProjectIds);
+	const existing = readJsonArray<Record<string, unknown>>(targetFile);
+	const seen = new Set(existing.map(keyFor).filter(Boolean));
+	let added = 0;
+	for (const item of rewritten) {
+		const key = keyFor(item);
+		if (!key || seen.has(key)) continue;
+		existing.push(item);
+		seen.add(key);
+		added++;
+	}
+	if (added === 0 && fs.existsSync(targetFile)) return;
+	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+	backupForHeadquartersMigration(targetFile);
+	fs.writeFileSync(targetFile, JSON.stringify(existing, null, 2), "utf-8");
+	console.log(`[migration] Preserved ${added} legacy Headquarters state entr${added === 1 ? "y" : "ies"} from ${legacyFile}`);
+}
+
+function preserveLegacyServerRootBobbitForHeadquarters(
+	centralStateDir: string,
+	centralConfigDir: string,
+	serverCwd: string,
+	oldProjectIds: Set<string>,
+): void {
+	if (oldProjectIds.size === 0) return;
+	const legacyBobbitDir = path.join(path.resolve(serverCwd), ".bobbit");
+	const legacyStateDir = path.join(legacyBobbitDir, "state");
+	const legacyConfigDir = path.join(legacyBobbitDir, "config");
+
+	if (!samePath(legacyStateDir, centralStateDir) && fs.existsSync(legacyStateDir)) {
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "goals.json"), path.join(centralStateDir, "goals.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "sessions.json"), path.join(centralStateDir, "sessions.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "staff.json"), path.join(centralStateDir, "staff.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "tasks.json"), path.join(centralStateDir, "tasks.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "team-state.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gateway-swarms.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gates.json"), path.join(centralStateDir, "gates.json"), oldProjectIds, item => `${String(item.goalId ?? "")}::${String(item.gateId ?? "")}`);
+	}
+
+	copyMissingLegacyConfig(legacyConfigDir, centralConfigDir);
+}
+
 function migrateHeadquartersProjectAliases(
 	centralStateDir: string,
+	centralConfigDir: string,
 	projectRegistry: ProjectRegistry,
 	serverCwd: string,
 ): { oldProjectIds: Set<string>; headquartersProject?: RegisteredProject } {
@@ -293,6 +416,7 @@ function migrateHeadquartersProjectAliases(
 	}
 
 	if (oldProjectIds.size > 0) {
+		preserveLegacyServerRootBobbitForHeadquarters(centralStateDir, centralConfigDir, serverCwd, oldProjectIds);
 		rewriteProjectIdsInJsonTree(centralStateDir, oldProjectIds);
 		dropSearchIndexesForHeadquartersMigration(centralStateDir);
 		const staleRefs = scanStaleProjectIdReferences(centralStateDir, oldProjectIds);
@@ -355,8 +479,10 @@ export function migrateToPerProjectState(
 	centralStateDir: string,
 	projectRegistry: ProjectRegistry,
 	serverCwd: string,
+	opts: { centralConfigDir?: string } = {},
 ): void {
-	const headquartersAliasMigration = migrateHeadquartersProjectAliases(centralStateDir, projectRegistry, serverCwd);
+	const centralConfigDir = opts.centralConfigDir ?? path.join(path.dirname(centralStateDir), "config");
+	const headquartersAliasMigration = migrateHeadquartersProjectAliases(centralStateDir, centralConfigDir, projectRegistry, serverCwd);
 	const markerPath = path.join(centralStateDir, MIGRATION_MARKER);
 
 	// 1. Already migrated? Headquarters id promotion still ran above because it

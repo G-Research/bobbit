@@ -71,9 +71,10 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore } = {}) {
     this.project = project;
-    if (project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters") {
+    const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
+    if (isHeadquarters) {
       this.bobbitDir = bobbitDir();
       this.stateDir = bobbitStateDir();
       this.configDir = bobbitConfigDir();
@@ -106,7 +107,9 @@ export class ProjectContext {
     // through every createGoal call (WorkflowStore-required invariant — see
     // docs/_phase-1-notes.md).
     this.roleStore = new RoleStore(this.configDir);
-    this.projectConfigStore = new ProjectConfigStore(this.configDir);
+    this.projectConfigStore = isHeadquarters && opts.headquartersProjectConfigStore
+      ? opts.headquartersProjectConfigStore
+      : new ProjectConfigStore(this.configDir);
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
