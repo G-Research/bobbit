@@ -133,6 +133,23 @@ async function sidebarTreeExpansionSnapshot(page: Page): Promise<Record<string, 
 	});
 }
 
+function archivedPreferenceKeys(ids: Record<string, string>): string[] {
+	return [
+		`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`,
+		`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`,
+		`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`,
+		`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`,
+		`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`,
+	];
+}
+
+function expectArchivedPreferencesPreserved(before: Record<string, string>, after: Record<string, string>, ids: Record<string, string>): void {
+	for (const key of archivedPreferenceKeys(ids)) {
+		expect(before[key], `${MARK}: archived tree preference ${key} is seeded`).toBeDefined();
+		expect(after[key], `${MARK}: archived tree preference ${key} is preserved`).toBe(before[key]);
+	}
+}
+
 async function expandLiveTeamLead(page: Page, teamLeadId: string, teamWorkerId: string): Promise<void> {
 	const lead = page.locator(`[data-session-id="${teamLeadId}"]`).first();
 	await expect(lead, `${VERIFIER_MARK}: live team lead renders`).toBeVisible({ timeout: 10_000 });
@@ -255,6 +272,21 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate survives Show Archived cycle`).toBeVisible({ timeout: 10_000 });
 	});
 
+	test("Show Archived off/on preserves explicit archived tree preferences", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+		await page.evaluate(() => (window as any).__setArchivedSearchPreferenceFixture());
+		const before = await sidebarTreeExpansionSnapshot(page);
+
+		await setShowArchived(page, false);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header hidden while off`).toHaveCount(0, { timeout: 5_000 });
+		await setShowArchived(page, true);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header returns after toggle on`).toBeVisible({ timeout: 10_000 });
+
+		const after = await sidebarTreeExpansionSnapshot(page);
+		expectArchivedPreferencesPreserved(before, after, ids);
+	});
+
 	test("search auto-open clear preserves explicit archived tree preferences", async ({ page }) => {
 		await loadFixture(page, { showArchived: false });
 		const ids = await fixtureIds(page);
@@ -271,11 +303,7 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
 
 		const after = await sidebarTreeExpansionSnapshot(page);
-		expect(after[`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`]).toBe(before[`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`]);
-		expect(after[`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`]).toBe(before[`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`]);
-		expect(after[`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`]).toBe(before[`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`]);
-		expect(after[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`]).toBe(before[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`]);
-		expect(after[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`]).toBe(before[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`]);
+		expectArchivedPreferencesPreserved(before, after, ids);
 	});
 
 	test("collapsed sidebar recurses into session child and delegate groups", async ({ page }) => {
