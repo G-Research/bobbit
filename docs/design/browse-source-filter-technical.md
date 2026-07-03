@@ -146,7 +146,7 @@ Add helpers near current Browse helpers:
 function supportedBrowseSources(): MarketplaceBrowseSourceState[];
 function selectedBrowseSources(): MarketplaceBrowseSourceState[];
 function browseSourceCountById(): Map<string, number>;
-function browseSourceSummary(countBySource: Map<string, number>): string;
+function browseSourceSummary(visiblePackCount: number): string;
 function browseSourceStatusLabel(src: MarketplaceBrowseSourceState): string;
 function browseSourceStatusClass(src: MarketplaceBrowseSourceState): string;
 function toggleBrowseSourceMenu(): void;
@@ -157,10 +157,14 @@ Recommended summary text:
 
 - No sources: `No sources available`
 - None selected: `Showing 0 packs from 0 sources`
-- All supported selected: `Showing ${visibleSelectedPackCount} packs from all ${selectedSupportedCount} sources`
-- Partial selection: `Showing ${visibleSelectedPackCount} packs from ${selectedCount} of ${supportedCount} sources`
+- All supported selected: `Showing ${visiblePackCount} packs from all ${selectedSupportedCount} sources`
+- Partial selection: `Showing ${visiblePackCount} packs from ${selectedCount} of ${supportedCount} sources`
 
-Use source package counts from raw `browsePacks`, not `filteredBrowsePacks()`, so the summary describes source selection independent of search. If desired, include search state in a separate results count later, not in this filter control.
+Summary count contract:
+
+- `visiblePackCount` comes from the currently visible Browse results after both source filtering and search filtering, e.g. `filteredBrowsePacks().length`.
+- `selectedCount` / `selectedSupportedCount` count selected supported sources only; unsupported sources do not contribute.
+- Search input changes must re-render the summary so `Showing N packs...` tracks the visible package list while the selected source count remains stable.
 
 ### DOM skeleton
 
@@ -175,7 +179,7 @@ Replace `.market-source-chips` with a menu block inside `renderBrowseControls()`
       type="button"
       class="market-source-menu-trigger"
       data-testid="market-source-menu-trigger"
-      aria-haspopup="menu"
+      aria-haspopup="dialog"
       aria-expanded=${browseSourceMenuOpen ? "true" : "false"}
       aria-controls="market-source-menu"
       @click=${toggleBrowseSourceMenu}
@@ -190,7 +194,7 @@ Replace `.market-source-chips` with a menu block inside `renderBrowseControls()`
         id="market-source-menu"
         class="market-source-menu"
         data-testid="market-source-menu"
-        role="menu"
+        role="dialog"
         aria-label="Browse package sources"
         @keydown=${handleBrowseSourceMenuKeydown}
       >
@@ -234,8 +238,9 @@ Replace `.market-source-chips` with a menu block inside `renderBrowseControls()`
 
 Notes:
 
-- Prefer native checkbox inputs for accessibility rather than custom `role="menuitemcheckbox"` unless roving tabindex is implemented. A button with `aria-haspopup="menu"` plus a popup containing labelled checkboxes is understandable to screen readers and keyboard users.
-- If strict ARIA menu semantics are desired, use `role="menuitemcheckbox"`, `aria-checked`, roving tabindex, and keyboard handling for ArrowUp/ArrowDown/Home/End. Native checkboxes are lower risk here.
+- Prefer native checkbox inputs for accessibility rather than custom `role="menuitemcheckbox"` unless full ARIA menu behavior is implemented.
+- Do not use `role="menu"` with native `<button>` and `<input type="checkbox">` descendants. Use a labelled popup instead: `role="dialog"`, `role="group"`, or no special role with `aria-labelledby`/`aria-label` are acceptable.
+- Prefer a `<fieldset>`/`<legend>` or labelled container for the source options so native checkboxes keep normal tab order and expected screen-reader behavior.
 - `safeId()` can reuse an existing ID sanitization utility if one exists; otherwise avoid `aria-describedby` IDs and keep all label text inside the `<label>`.
 - Import and use existing `ChevronDown` already present in `marketplace-page.ts` imports.
 
@@ -263,11 +268,14 @@ function handleBrowseSourceMenuKeydown(e: KeyboardEvent): void {
 }
 ```
 
-Use a global click-outside listener only if there is already a page-level pattern for popovers. Otherwise keep the implementation simple:
+Menu lifecycle contract:
 
-- Trigger opens/closes the menu.
-- Escape closes the menu.
-- Re-render/navigation naturally closes if `browseSourceMenuOpen` is reset when appropriate.
+- Trigger click opens the popup when closed and closes it when open.
+- `Escape` closes the popup when focus is inside it and should return focus to the trigger.
+- Clicking outside the trigger/popup closes it.
+- Browse state reset and Browse tab teardown close it by setting `browseSourceMenuOpen = false`.
+- Checkbox toggles, `Select all`, and `Clear` keep the popup open for multi-select work unless the user explicitly closes it.
+- Search changes may re-render the popup but should not close it by themselves.
 
 Recommended hardening for unsupported sources:
 
@@ -290,7 +298,7 @@ Search behavior stays unchanged: `@input` mutates `browseSearch` and calls `rend
 
 - Trigger button has visible label `Sources` and compact summary text.
 - Trigger exposes `aria-expanded` and `aria-controls`.
-- Menu has `aria-label="Browse package sources"`.
+- Popup uses labelled native-control semantics: `role="dialog"`, `role="group"`, or no special role with `aria-labelledby`/`aria-label`; do not use `role="menu"` unless replacing native controls with full ARIA menu behavior.
 - Every source row is a real checkbox with source name in the label.
 - Package count and status text are visible and included in the checkbox accessible name/description.
 - Unsupported rows are disabled with `disabled` on the input and muted styling.
@@ -491,7 +499,9 @@ Add a focused Browse source filter test using two local-dir sources:
 11. Click `market-source-clear`; assert no Browse packs and no selected sources empty state.
 12. Click `market-source-select-all`; assert both packs return.
 13. Close/reopen menu or switch Browse tab away/back to force re-render; assert checkbox selections persist across render.
-14. Keyboard check: focus trigger, press Enter or Space to open, press Escape in menu to close, assert `aria-expanded="false"`.
+14. Type a Browse search while sources are selected and assert `market-source-summary` updates to the filtered visible package count.
+15. Keyboard check: focus trigger, press Enter or Space to open, press Escape in popup to close, assert `aria-expanded="false"`.
+16. Lifecycle check: outside click and Browse tab teardown close the popup; checkbox toggles and bulk actions keep it open.
 
 Update existing `tests/e2e/ui/marketplace-mcp.spec.ts` assertions currently tied to chips:
 
@@ -527,7 +537,7 @@ Unsupported/error coverage can be unit-light but valuable in E2E if route mockin
 
 - `enabledBrowseSourceIds` has no separate “user intentionally cleared all” flag. A real `loadBrowse()` after Clear re-enables all supported sources because `before.size === 0` is treated as no prior selection. This is existing behavior; preserving it meets current semantics, but it may surprise users if a future refresh button is added.
 - `toggleBrowseSource()` currently trusts the UI to prevent unsupported toggles. Add a defensive unsupported guard to avoid accidental selection through tests or future handlers.
-- Do not change `filteredBrowsePacks()` unless summary counts require helper extraction; search semantics are already broad and should remain intact.
+- Do not change `filteredBrowsePacks()` behavior; use its result, or an equivalent helper, for the summary's visible package count so search-active summaries match the rendered package list.
 - The current server endpoint is synchronous, so `src.status === "loading"` is unlikely in normal responses. Still render loading status because the API type includes it.
 - Avoid strict ARIA menu roles unless implementing full menu keyboard behavior. Native checkboxes inside a labelled popup are simpler and more robust.
 - Existing E2E tests using chip test IDs will fail until updated, especially `tests/e2e/ui/marketplace-mcp.spec.ts`.
