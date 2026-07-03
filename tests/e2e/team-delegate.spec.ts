@@ -339,9 +339,12 @@ test.describe("team_delegate — team-lead parity", () => {
 			const agents = (await agentsResp.json()).agents ?? [];
 			expect(agents.map((a: any) => a.sessionId)).not.toContain(childId);
 
+			const leadHeaders = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(leadId!) };
+
 			// /team/prompt falls back to the core for the lead's own child.
 			const prompt = await apiFetch(`/api/goals/${goal.id}/team/prompt`, {
 				method: "POST",
+				headers: leadHeaders,
 				body: JSON.stringify({ sessionId: childId, message: "follow-up task" }),
 			});
 			expect(prompt.status).toBe(200);
@@ -350,6 +353,7 @@ test.describe("team_delegate — team-lead parity", () => {
 			// /team/dismiss falls back too (terminate + archive the own child).
 			const dismiss = await apiFetch(`/api/goals/${goal.id}/team/dismiss`, {
 				method: "POST",
+				headers: leadHeaders,
 				body: JSON.stringify({ sessionId: childId }),
 			});
 			expect(dismiss.status).toBe(200);

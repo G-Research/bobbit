@@ -10649,9 +10649,7 @@ async function handleApiRoute(
 		// other is refreshed.
 		if (teamState.agents.some((agent) => agent.sessionId === targetId)) return undefined;
 		if (teamManager.findAgentBySessionId(targetId)) return undefined;
-		const live = sessionManager.getSession(targetId) as any;
 		const persisted = sessionManager.getPersistedSession(targetId) as any;
-		if (live?.teamGoalId || persisted?.teamGoalId) return undefined;
 
 		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId && h.childKind !== "team")) return lead;
 		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
@@ -10699,15 +10697,6 @@ async function handleApiRoute(
 			return;
 		}
 		const goalId = teamDismissMatch[1];
-		const teamResult = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
-		const canTryOwnChildFallback =
-			(teamResult.status === "not-owned" && /not a team agent for this goal/i.test(teamResult.message ?? ""))
-			|| teamResult.status === "not-found";
-		if (!canTryOwnChildFallback) {
-			json(teamResult, dismissHttpStatus(teamResult));
-			return;
-		}
-
 		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
 		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
 		const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
@@ -10720,7 +10709,8 @@ async function handleApiRoute(
 			json(result, dismissHttpStatus(result));
 			return;
 		}
-		json(teamResult, dismissHttpStatus(teamResult));
+		const result = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
+		json(result, dismissHttpStatus(result));
 		return;
 	}
 
