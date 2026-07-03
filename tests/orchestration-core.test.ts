@@ -622,6 +622,40 @@ describe("OrchestrationCore — ownership scoping", () => {
 		assert.equal(core.list("owner-1").length, 0);
 	});
 
+	it("dismiss denies a live target when ownership exists only in mutable persisted metadata", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		view.live.set("victim", { id: "victim", status: "idle", cwd: "/cwd/victim" });
+		view.persisted.set("victim", { id: "victim", delegateOf: "owner-1", teamLeadSessionId: "owner-1" });
+		const core = makeCore(view);
+
+		assert.deepEqual(await core.dismiss("owner-1", "victim"), {
+			ok: false,
+			status: "not-owned",
+			sessionId: "victim",
+			message: "Child session victim is not owned by owner-1.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
+		assert.equal(view.live.get("victim")?.status, "idle");
+	});
+
+	it("dismiss remains idempotent for an already-dismissed persisted owned child", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		view.persisted.set("former-child", { id: "former-child", delegateOf: "owner-1", archived: true });
+		const core = makeCore(view);
+
+		assert.deepEqual(await core.dismiss("owner-1", "former-child"), {
+			ok: true,
+			status: "already-dismissed",
+			sessionId: "former-child",
+			message: "Child session former-child is already dismissed.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
+	});
+
 	it("steer requires the child to be streaming (else NOT_STREAMING)", async () => {
 		const view = new FakeView();
 		view.owner("owner-1");

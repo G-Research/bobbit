@@ -205,6 +205,32 @@ test.describe("team_delegate — non-blocking interactive flow", () => {
 		}
 	});
 
+	test("patching mutable ownership metadata does not authorize dismissing a live foreign session", async ({ gateway }) => {
+		const attacker = await createSession();
+		const victim = await createSession();
+		try {
+			const patch = await apiFetch(`/api/sessions/${victim}`, {
+				method: "PATCH",
+				body: JSON.stringify({ delegateOf: attacker, teamLeadSessionId: attacker }),
+			});
+			expect(patch.status).toBe(200);
+
+			const dismiss = await orchestrate(attacker, "dismiss", { childSessionId: victim });
+			expect(dismiss.status).toBe(403);
+			expect(dismiss.json).toMatchObject({
+				ok: false,
+				status: "not-owned",
+				sessionId: victim,
+				retryable: false,
+			});
+			expect(gateway.sessionManager.getSession(victim)?.status).not.toBe("terminated");
+			expect(gateway.sessionManager.isSessionLive(victim)).toBe(true);
+		} finally {
+			await deleteSession(attacker);
+			await deleteSession(victim);
+		}
+	});
+
 	test("a DIFFERENT caller is denied (403) when targeting a FOREIGN owner's children (caller→owner authz)", async ({ gateway }) => {
 		// HIGH finding: the shared gateway bearer is not enough — the orchestrate
 		// routes must bind the request to the per-session secret and require the

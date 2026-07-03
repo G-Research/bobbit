@@ -707,6 +707,15 @@ export class OrchestrationCore {
 		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
 		const rememberedOwned = rememberedOwner === ownerId;
 		const exists = !!live || !!persisted || !!rememberedOwner;
+		const isLive = this.deps.sessionManager.isSessionLive?.call(this.deps.sessionManager, childId);
+		const isCurrentlyLive = !!live && live.status !== "terminated" && persisted?.archived !== true && isLive !== false;
+
+		if (isCurrentlyLive && !handle) {
+			// Live termination is authorized only by the server-owned runtime child index.
+			// Persisted ownership fields are API-mutable, so they are used solely for
+			// already-dismissed idempotency once the target is no longer live.
+			return { ok: false, status: "not-owned", sessionId: childId, message: `Child session ${childId} is not owned by ${ownerId}.`, retryable: false };
+		}
 
 		if (!handle && !persistedOwned && !rememberedOwned) {
 			return exists
@@ -714,8 +723,7 @@ export class OrchestrationCore {
 				: { ok: false, status: "not-found", sessionId: childId, message: `Child session ${childId} was not found.`, retryable: false };
 		}
 
-		const isLive = this.deps.sessionManager.isSessionLive?.call(this.deps.sessionManager, childId);
-		if (!live || live.status === "terminated" || persisted?.archived || isLive === false) {
+		if (!isCurrentlyLive) {
 			this.dismissedChildren.set(childId, ownerId);
 			this.forgetChild(childId);
 			return { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
