@@ -19,6 +19,58 @@ function getResult(result: ToolResultMessage | undefined): { text: string; data:
 	return { text, data };
 }
 
+function parseJsonObjectFromText(text: string): any {
+	const trimmed = text.trim();
+	if (!trimmed) return null;
+	try {
+		const parsed = JSON.parse(trimmed);
+		return parsed && typeof parsed === "object" ? parsed : null;
+	} catch { /* fall through */ }
+
+	const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	if (fenced?.[1]) {
+		try {
+			const parsed = JSON.parse(fenced[1].trim());
+			return parsed && typeof parsed === "object" ? parsed : null;
+		} catch { /* fall through */ }
+	}
+
+	for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+		let depth = 0;
+		let inString = false;
+		let escape = false;
+		for (let i = start; i < text.length; i++) {
+			const ch = text[i];
+			if (escape) {
+				escape = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escape = inString;
+				continue;
+			}
+			if (ch === '"') {
+				inString = !inString;
+				continue;
+			}
+			if (inString) continue;
+			if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					try {
+						const parsed = JSON.parse(text.slice(start, i + 1));
+						return parsed && typeof parsed === "object" ? parsed : null;
+					} catch {
+						break;
+					}
+				}
+			}
+		}
+	}
+	return null;
+}
+
 function roleBadge(role: string): TemplateResult {
 	const colors: Record<string, string> = {
 		"team-lead": "bg-amber-500/20 text-amber-600 dark:text-amber-400",
@@ -40,6 +92,11 @@ function statusDot(status: string): TemplateResult {
 function truncate(s: string, max = 60): string {
 	if (!s) return "";
 	return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function shortSessionId(sessionId: string | undefined): string {
+	if (!sessionId) return "";
+	return sessionId.length > 12 ? sessionId.slice(0, 12) : sessionId;
 }
 
 // ── team_spawn ───────────────────────────────────────────────────────
@@ -145,6 +202,17 @@ interface DismissResult {
 	session_id?: string;
 	message?: string;
 	retryable?: boolean;
+	error?: string;
+}
+
+function getDismissResult(result: ToolResultMessage | undefined): { text: string; data: DismissResult } {
+	const text = result?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
+	const details = result?.details;
+	if (details && typeof details === "object" && !Array.isArray(details)) {
+		return { text, data: details as DismissResult };
+	}
+	const parsed = parseJsonObjectFromText(text);
+	return { text, data: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as DismissResult : {} };
 }
 
 function normalizeDismissStatus(status: unknown, isError: boolean): DismissStatus {
@@ -170,9 +238,15 @@ function dismissDetailClass(status: DismissStatus, skipped: boolean): string {
 	return "text-destructive";
 }
 
+function renderDismissTarget(sessionId: string | undefined): TemplateResult | string {
+	if (!sessionId) return "";
+	return html`<span class="font-mono text-xs text-muted-foreground" title="${sessionId}">${shortSessionId(sessionId)}</span> ${renderSessionLink(sessionId)}`;
+}
+
 function renderDismissDetails(outcome: DismissResult, fallbackText: string, status: DismissStatus, skipped: boolean): TemplateResult | string {
 	const details: string[] = [];
 	if (outcome.message) details.push(outcome.message);
+	else if (outcome.error) details.push(outcome.error);
 	else if (fallbackText && (skipped || status !== "dismissed")) details.push(fallbackText);
 	if (typeof outcome.retryable === "boolean") details.push(outcome.retryable ? "Retry may help." : "Do not retry.");
 	if (!details.length) return "";
@@ -185,19 +259,19 @@ export class TeamDismissRenderer implements ToolRenderer {
 		const sid = params?.session_id;
 
 		if (!result) {
-			return { content: html`<div>${renderHeader(state, UserMinus, html`Dismissing agent ${sid ? renderSessionLink(sid) : ""}`)}</div>`, isCustom: false };
+			return { content: html`<div>${renderHeader(state, UserMinus, html`Dismissing agent ${renderDismissTarget(sid)}`)}</div>`, isCustom: false };
 		}
 
-		const { text, data } = getResult(result);
+		const { text, data: outcome } = getDismissResult(result);
 		const skipped = isSkippedToolResult(result);
-		const outcome = (data && typeof data === "object" ? data : {}) as DismissResult;
 		const status = skipped ? "failed" : normalizeDismissStatus(outcome.status, result.isError);
+		const displayState = skipped ? "warning" : (status === "not-owned" || status === "not-found" || status === "failed" ? "error" : state);
 		const sessionId = outcome.sessionId || outcome.session_id || sid;
 		const title = skipped ? "Aborted dismiss" : dismissStatusText(status);
 
 		return {
 			content: html`<div>
-				${renderHeader(state, UserMinus, html`${title} ${sessionId ? renderSessionLink(sessionId) : ""}`)}
+				${renderHeader(displayState, UserMinus, html`${title} ${renderDismissTarget(sessionId)}`)}
 				${renderDismissDetails(outcome, text, status, skipped)}
 			</div>`,
 			isCustom: false,
