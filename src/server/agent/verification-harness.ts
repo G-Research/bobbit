@@ -12,6 +12,26 @@ function isPidAlive(pid: number): boolean {
 		return err?.code === "EPERM";
 	}
 }
+
+const COMMAND_IDENTITY_HEARTBEAT_STALE_MS = 10_000;
+
+function readProcessStartToken(pid: number): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const end = raw.lastIndexOf(")");
+		if (end < 0) return undefined;
+		const rest = raw.slice(end + 2).trim().split(/\s+/);
+		// /proc/<pid>/stat field 22 is starttime. `rest[0]` is field 3.
+		return rest[19] || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function shellSingleQuote(value: string): string {
+	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
 import fs from "node:fs";
 import path from "node:path";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
@@ -712,6 +732,20 @@ export interface ActiveVerification {
 		errFile?: string;
 		/** Absolute path to detached child's exit-code file (Layer 1). */
 		exitFile?: string;
+		/** Absolute path to durable process-identity file written by the detached wrapper. */
+		pidFile?: string;
+		/** Random nonce expected in the durable process-identity and heartbeat files. */
+		pidNonce?: string;
+		/** Absolute path to the detached wrapper's periodically-refreshed heartbeat file. */
+		heartbeatFile?: string;
+		/** OS-specific process start token captured after spawn, used to reject PID reuse. */
+		processStartToken?: string;
+		/** Original command deadline in epoch milliseconds. */
+		deadlineMs?: number;
+		/** Restart recovery support mode for this command execution path. */
+		restartRecoveryMode?: "detached" | "unsupported";
+		/** Clear diagnostic when the command path cannot be recovered after restart. */
+		restartRecoveryUnsupportedReason?: string;
 		/** bootEpoch of the harness that started this step (Layer 2). */
 		bootEpoch?: string;
 		/** Step timeout in seconds. */
@@ -1222,7 +1256,13 @@ export class VerificationHarness {
 			// AV quirks). Recreating on demand keeps persistence robust.
 			const dir = path.dirname(this._persistPath);
 			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(this._persistPath, JSON.stringify(data, null, 2));
+			const tmp = path.join(dir, `${path.basename(this._persistPath)}.${process.pid}.${Date.now()}.tmp`);
+			fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+			try {
+				const fd = fs.openSync(tmp, "r");
+				try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+			} catch { /* best-effort durability; rename still prevents torn JSON */ }
+			fs.renameSync(tmp, this._persistPath);
 		} catch (err) {
 			console.error("[verification] Failed to persist active verifications:", err);
 		}
@@ -1267,6 +1307,8 @@ export class VerificationHarness {
 		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
 
 		for (const v of running) {
+			this.activeVerifications.set(v.signalId, v);
+			this._persistActive();
 			try {
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
@@ -1279,6 +1321,10 @@ export class VerificationHarness {
 				await this._resumeOneVerification(v);
 			} catch (err) {
 				const errMsg = (err as Error).message;
+				if (!this._isResumeStillActive(v)) {
+					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume of ${v.signalId} stopped after cancellation/supersession: ${errMsg}`);
+					continue;
+				}
 				if (isRestartInterruptError(errMsg)) {
 					// A restart-induced resume error (cold-agent RPC timeout, agent
 					// process not yet up) must NEVER surface as a hard gate failure.
@@ -1337,14 +1383,21 @@ export class VerificationHarness {
 					}
 				}
 			} finally {
-				// Drop the in-memory entry so subsequent gate_signal calls aren't
-				// rejected by a leftover "running" step from a previous lifetime.
-				this.activeVerifications.delete(v.signalId);
+				// Drop only the entry this resume owns. If a cancellation/re-signal
+				// already removed it (or a future path replaced it), do not clobber
+				// that newer active state.
+				if (this.activeVerifications.get(v.signalId) === v) {
+					this.activeVerifications.delete(v.signalId);
+				}
+				this._persistActive();
 			}
 		}
 
-		// Clear persisted file after all verifications finalized
-		try { fs.unlinkSync(this._persistPath); } catch {}
+		if (this.activeVerifications.size === 0) {
+			try { fs.unlinkSync(this._persistPath); } catch {}
+		} else {
+			this._persistActive();
+		}
 		await this._surfaceOrphanedNonInteractiveReviewers();
 		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
 	}
@@ -1444,9 +1497,11 @@ export class VerificationHarness {
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
+		if (!this._isResumeStillActive(v)) return;
 		const resolvedSteps: ResumedVerificationStep[] = [];
 
 		for (const step of v.steps) {
+			if (!this._isResumeStillActive(v)) return;
 			if (step.status !== "running") {
 				// Already completed before restart — keep result
 				// Skipped steps (optional or phase-skipped) count as passed for overall verdict
@@ -1483,6 +1538,7 @@ export class VerificationHarness {
 				this.pendingSignoffs.set(key, resolver);
 				const outcome = await promise;
 				this.pendingSignoffs.delete(key);
+				if (!this._isResumeStillActive(v)) return;
 				let passed: boolean;
 				let output: string;
 				if ("decision" in outcome) {
@@ -1516,6 +1572,7 @@ export class VerificationHarness {
 			let resumeResult = step.type === "command"
 				? await this._resumeCommandStep(v, step)
 				: await this._tryResumeFromSession(v, step);
+			if (!this._isResumeStillActive(v)) return;
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
 			// re-run from scratch rather than giving up
@@ -1530,6 +1587,7 @@ export class VerificationHarness {
 				} else {
 					rerunResult = await this._rerunLlmReviewStep(v.goalId, v.gateId, v.signalId, step.name);
 				}
+				if (!this._isResumeStillActive(v)) return;
 				if (rerunResult) {
 					resumeResult = rerunResult;
 				}
@@ -1586,6 +1644,8 @@ export class VerificationHarness {
 			}
 		}
 
+		if (!this._isResumeStillActive(v)) return;
+
 		// Compute overall result
 		const allPassed = computeAllPassed(resolvedSteps as GateSignalStep[]);
 
@@ -1602,6 +1662,8 @@ export class VerificationHarness {
 		const suppressedByRestart = !allPassed && shouldSuppressRestartInterrupt(resolvedSteps);
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
 		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
+
+		if (!this._isResumeStillActive(v)) return;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
@@ -2152,6 +2214,85 @@ export class VerificationHarness {
 		}
 	}
 
+	private _isResumeStillActive(v: ActiveVerification): boolean {
+		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
+	}
+
+	private _readCommandIdentityFile(step: ActiveVerification["steps"][number]): { pid?: number; ok: boolean; reason: string } {
+		if (!step.pidFile || !step.pidNonce) {
+			return { ok: false, reason: "no durable command identity was recorded" };
+		}
+		let parsed: any;
+		try {
+			parsed = JSON.parse(fs.readFileSync(step.pidFile, "utf8"));
+		} catch (err) {
+			return { ok: false, reason: `command identity file is unavailable or unreadable: ${(err as Error).message}` };
+		}
+		const fileNonce = typeof parsed?.nonce === "string" ? parsed.nonce : undefined;
+		if (fileNonce !== step.pidNonce) {
+			return { ok: false, reason: "command identity nonce did not match persisted metadata" };
+		}
+		const filePid = Number(parsed?.pid);
+		const validFilePid = Number.isFinite(filePid) && filePid > 0 ? filePid : undefined;
+		const pid = process.platform === "win32" && typeof step.pid === "number"
+			? step.pid
+			: (validFilePid ?? step.pid);
+		if (!pid || !Number.isFinite(pid) || pid <= 0) {
+			return { ok: false, reason: "command identity file did not contain a valid process id" };
+		}
+		if (process.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
+			return { pid, ok: false, reason: "command identity process id did not match persisted metadata" };
+		}
+		return { pid, ok: true, reason: "verified" };
+	}
+
+	private _heartbeatMatchesCommandIdentity(step: ActiveVerification["steps"][number], pid: number): boolean {
+		if (!step.heartbeatFile || !step.pidNonce) return false;
+		try {
+			const stat = fs.statSync(step.heartbeatFile);
+			if (Date.now() - stat.mtimeMs > COMMAND_IDENTITY_HEARTBEAT_STALE_MS) return false;
+			const parsed = JSON.parse(fs.readFileSync(step.heartbeatFile, "utf8"));
+			return parsed?.nonce === step.pidNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
+		} catch {
+			return false;
+		}
+	}
+
+	private _verifyPersistedCommandIdentity(step: ActiveVerification["steps"][number]): { verified: boolean; pid?: number; reason: string } {
+		const identity = this._readCommandIdentityFile(step);
+		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
+		const pid = identity.pid;
+		if (!isPidAlive(pid)) return { verified: false, pid, reason: "command process is no longer alive" };
+
+		const currentStartToken = readProcessStartToken(pid);
+		if (step.processStartToken && currentStartToken) {
+			if (step.processStartToken !== currentStartToken) {
+				return { verified: false, pid, reason: "command process start token did not match; PID may have been reused" };
+			}
+			return { verified: true, pid, reason: "pidfile nonce and process start token matched" };
+		}
+
+		if (this._heartbeatMatchesCommandIdentity(step, pid)) {
+			return { verified: true, pid, reason: "pidfile nonce and live heartbeat matched" };
+		}
+
+		return { verified: false, pid, reason: "command heartbeat was missing or stale; refusing to trust PID after restart" };
+	}
+
+	private _killPersistedCommandSteps(active: ActiveVerification, signal: NodeJS.Signals = "SIGKILL"): void {
+		for (const step of active.steps) {
+			if (step.type !== "command" || step.status !== "running") continue;
+			const identity = this._verifyPersistedCommandIdentity(step);
+			if (!identity.verified || !identity.pid) {
+				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
+					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
+				}
+				continue;
+			}
+			try { killTreeByPid(identity.pid, signal); } catch { /* best-effort */ }
+		}
+	}
+
 	/**
 	 * Tree-kill any tracked command-step subprocess registered under the given
 	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
@@ -2207,6 +2348,7 @@ export class VerificationHarness {
 			active.overallStatus = "cancelled";
 
 			this._killTrackedForSignal(signalId);
+			this._killPersistedCommandSteps(active);
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -2256,6 +2398,7 @@ export class VerificationHarness {
 			active.overallStatus = "cancelled";
 
 			this._killTrackedForSignal(signalId);
+			this._killPersistedCommandSteps(active);
 			this._drainPendingSignoffsForSignal(signalId);
 			this.activeVerifications.delete(signalId);
 
@@ -4119,21 +4262,29 @@ export class VerificationHarness {
 
 			// Decide execution mode.
 			let useDetached = !containerId && !!streamCtx;
+			let restartRecoveryUnsupportedReason: string | undefined = containerId
+				? "Container command steps currently run through attached docker exec; durable restart recovery is not available for this path."
+				: undefined;
 
 			// On Windows without Git Bash, the resolved shell is cmd.exe which
-			// cannot execute the bash exit-file wrapper. Silently degrade to
-			// attached mode so the verification still runs, and warn once so
-			// the missing restart-survival capability is visible in the logs.
+			// cannot execute the bash exit-file wrapper. Explicitly mark the step
+			// non-restart-recoverable so a restart becomes a pending/retryable
+			// interruption, not a fabricated command verdict.
 			if (useDetached && process.platform === "win32" && !GIT_BASH) {
 				if (!VerificationHarness._warnedCmdExeDetached) {
 					VerificationHarness._warnedCmdExeDetached = true;
 					console.warn("[verification] Git Bash not found on Windows — detached command mode disabled (cmd.exe cannot run the bash exit-file wrapper). Verification command steps will not survive a gateway restart.");
 				}
+				restartRecoveryUnsupportedReason = "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path cannot be recovered after gateway restart.";
 				useDetached = false;
 			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;
 			let exitFile: string | undefined;
+			let pidFile: string | undefined;
+			let pidNonce: string | undefined;
+			let heartbeatFile: string | undefined;
+			let processStartToken: string | undefined;
 			let outFd: number | undefined;
 			let errFd: number | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
@@ -4164,8 +4315,12 @@ export class VerificationHarness {
 						errFile = path.join(stepDir, `${streamCtx.stepIndex}.err`);
 					}
 					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
-					try { fs.unlinkSync(exitFile); } catch { /* not present */ }
-					try { fs.unlinkSync(exitFile + ".tmp"); } catch { /* not present */ }
+					pidFile = path.join(stepDir, `${streamCtx.stepIndex}.pid.json`);
+					heartbeatFile = path.join(stepDir, `${streamCtx.stepIndex}.heartbeat.json`);
+					pidNonce = randomUUID();
+					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
+						try { fs.unlinkSync(file); } catch { /* not present */ }
+					}
 					outFd = fs.openSync(outFile, "w");
 					errFd = fs.openSync(errFile, "w");
 				} catch (err) {
@@ -4173,21 +4328,57 @@ export class VerificationHarness {
 					if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
 					if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 					useDetached = false;
+					restartRecoveryUnsupportedReason = `Detached command recovery setup failed before spawn: ${(err as Error).message}`;
 					outFile = diagnosticsPaths?.stdoutPath;
 					errFile = diagnosticsPaths?.stderrPath;
 					exitFile = undefined;
+					pidFile = undefined;
+					pidNonce = undefined;
+					heartbeatFile = undefined;
 				}
+			}
+
+			const stampActiveCommandStep = (patch: Partial<ActiveVerification["steps"][number]>) => {
+				if (!streamCtx) return;
+				const av = this.activeVerifications.get(streamCtx.signalId);
+				if (!av || !av.steps[streamCtx.stepIndex]) return;
+				Object.assign(av.steps[streamCtx.stepIndex], patch);
+				this._persistActive();
+			};
+
+			if (streamCtx) {
+				stampActiveCommandStep({
+					outFile,
+					errFile,
+					exitFile,
+					pidFile,
+					pidNonce,
+					heartbeatFile,
+					bootEpoch: useDetached ? this.bootEpoch : undefined,
+					timeoutSec,
+					expectFailure,
+					errorPattern,
+					commandCwd: normalizedCwd,
+					restartRecoveryMode: useDetached ? "detached" : "unsupported",
+					restartRecoveryUnsupportedReason: useDetached ? undefined : (restartRecoveryUnsupportedReason ?? "Attached command execution cannot be recovered after gateway restart."),
+				});
 			}
 
 			// Build the command to actually run. In detached mode we wrap so
 			// the wrapper, not the gateway, owns writing the exit code atomically.
 			let cmdToRun = command;
-			if (useDetached && exitFile) {
+			if (useDetached && exitFile && pidFile && pidNonce && heartbeatFile) {
 				const exitTmp = exitFile + ".tmp";
-				const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+				const pidTmp = pidFile + ".tmp";
+				const heartbeatTmp = heartbeatFile + ".tmp";
+				const nonceJson = JSON.stringify(pidNonce);
+				const writeIdentity = `printf '{"pid":%s,"nonce":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} > ${shellSingleQuote(pidTmp)} && mv ${shellSingleQuote(pidTmp)} ${shellSingleQuote(pidFile)}`;
+				const writeHeartbeat = `printf '{"pid":%s,"nonce":%s,"ts":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} "$(date +%s 2>/dev/null || printf 0)" > ${shellSingleQuote(heartbeatTmp)} && mv ${shellSingleQuote(heartbeatTmp)} ${shellSingleQuote(heartbeatFile)}`;
 				// Run command in a subshell so its `exit` does not short-circuit our
-				// exit-file write; capture $?, write atomically, then propagate.
-				cmdToRun = `( ${command}\n); __ec=$?; printf %s "$__ec" > ${sq(exitTmp)} && mv ${sq(exitTmp)} ${sq(exitFile)}; exit $__ec`;
+				// exit-file write; capture $?, write atomically, then propagate. A
+				// wrapper-owned identity + heartbeat lets restart recovery prove the
+				// PID still belongs to this command before reattaching or killing it.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( ${command}\n); __ec=$?; kill "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -4299,29 +4490,36 @@ export class VerificationHarness {
 
 			// Stamp the persisted step with everything needed for cross-restart
 			// recovery before doing anything else — if the gateway dies right
-			// now, the next boot must be able to find the child.
+			// now, the next boot must be able to verify the child identity before
+			// reattaching or killing it.
 			if (useDetached && streamCtx && child.pid != null) {
-				const av = this.activeVerifications.get(streamCtx.signalId);
-				if (av && av.steps[streamCtx.stepIndex]) {
-					const s = av.steps[streamCtx.stepIndex];
-					s.pid = child.pid;
-					s.startTimeMs = Date.now();
-					s.outFile = outFile;
-					s.errFile = errFile;
-					s.exitFile = exitFile;
-					s.bootEpoch = this.bootEpoch;
-					s.timeoutSec = timeoutSec;
-					s.expectFailure = expectFailure;
-					s.errorPattern = errorPattern;
-					s.commandCwd = normalizedCwd;
-					this._persistActive();
-				}
+				const startTimeMs = Date.now();
+				processStartToken = readProcessStartToken(child.pid);
+				stampActiveCommandStep({
+					pid: child.pid,
+					startTimeMs,
+					deadlineMs: startTimeMs + timeoutSec * 1000,
+					processStartToken,
+					outFile,
+					errFile,
+					exitFile,
+					pidFile,
+					pidNonce,
+					heartbeatFile,
+					bootEpoch: this.bootEpoch,
+					timeoutSec,
+					expectFailure,
+					errorPattern,
+					commandCwd: normalizedCwd,
+					restartRecoveryMode: "detached",
+					restartRecoveryUnsupportedReason: undefined,
+				});
 				// unref so the child does not keep the gateway alive during a
 				// graceful shutdown — we want it to survive past our exit.
 				try { child.unref(); } catch { /* ignore */ }
 				// Mark for restart-survival so killAllTracked (called from
 				// shutdown()) skips this entry. The next boot resumes via
-				// _resumeCommandStep using the persisted pid + exit file.
+				// _resumeCommandStep using durable identity + exit files.
 				tracked!.markSurvival();
 			}
 
@@ -4487,12 +4685,12 @@ export class VerificationHarness {
 	 * 1. If `exitFile` already exists — the wrapper completed before we got
 	 *    back — read it plus the stdout/stderr tails and finalize via the
 	 *    same `matchExpectFailure` / pass-fail logic the live path uses.
-	 * 2. Else if `pid` is still alive — the detached child outlived the
-	 *    gateway and is still chugging away. Poll for the exit file with
-	 *    the remaining timeout budget computed from `startedAt`.
-	 * 3. Else — process is gone and there's no exit file. There is no durable
-	 *    command verdict, so leave the gate pending/retryable instead of
-	 *    fabricating a failed command result.
+	 * 2. Else if the persisted pidfile nonce plus process-start token or live
+	 *    heartbeat verifies identity — poll for the exit file until the original
+	 *    deadline, killing only that verified process tree on timeout.
+	 * 3. Else — there is no durable command verdict or safe process identity,
+	 *    so leave the gate pending/retryable instead of fabricating a failed
+	 *    command result.
 	 *
 	 * Returns null only when a future command subtype has no restart recovery
 	 * path at all; ordinary no-status command interruptions return an explicit
@@ -4502,7 +4700,6 @@ export class VerificationHarness {
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
 	): Promise<ResumedVerificationStep | null> {
-
 		const readFiles = (): { out: string; err: string } => {
 			let out = "";
 			let err = "";
@@ -4519,6 +4716,10 @@ export class VerificationHarness {
 			} catch {
 				return null;
 			}
+		};
+		const retainedTail = (): string => {
+			const { out, err } = readFiles();
+			return (out + "\n" + err).trim().slice(-5000);
 		};
 		const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 			if (!step.outFile && !step.errFile) return undefined;
@@ -4543,18 +4744,24 @@ export class VerificationHarness {
 			if (diagnostics) result.diagnostics = diagnostics;
 			return result;
 		};
-		const restartInterrupted = () => withDiagnostics({
-			name: step.name,
-			type: step.type,
-			passed: false,
-			status: "waiting",
-			output: "Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained; please re-signal the gate to run a fresh verification.",
-			duration_ms: Date.now() - step.startedAt,
-		});
-		if (!step.exitFile && !step.pid) return restartInterrupted();
+		const restartInterrupted = (reason?: string) => {
+			const tail = retainedTail();
+			const parts = [
+				"Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained; please re-signal the gate to run a fresh verification.",
+			];
+			if (reason) parts.push(reason);
+			if (tail) parts.push(`Last retained output:\n${truncateForOutput(tail)}`);
+			return withDiagnostics({
+				name: step.name,
+				type: step.type,
+				passed: false,
+				status: "waiting",
+				output: parts.join("\n\n"),
+				duration_ms: Date.now() - step.startedAt,
+			});
+		};
 		const finalize = (code: number | null) => {
-			const { out, err } = readFiles();
-			const output = (out + "\n" + err).trim().slice(-5000);
+			const output = retainedTail();
 			let passed: boolean;
 			let displayOutput: string;
 			if (step.expectFailure) {
@@ -4573,81 +4780,111 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			});
 		};
+		const timeoutResult = () => {
+			const timeoutSec = step.timeoutSec ?? 300;
+			const marker = `[step timed out after ${timeoutSec}s — killed verified subprocess tree after restart]`;
+			const tail = retainedTail();
+			const combined = tail ? `${tail}\n${marker}` : marker;
+			if (step.expectFailure) {
+				const matched = matchExpectFailure(null, combined, step.errorPattern);
+				return withDiagnostics({
+					name: step.name,
+					type: step.type,
+					passed: matched.passed,
+					output: matched.output,
+					duration_ms: Date.now() - step.startedAt,
+				});
+			}
+			return withDiagnostics({
+				name: step.name,
+				type: step.type,
+				passed: false,
+				status: "failed",
+				output: combined,
+				duration_ms: Date.now() - step.startedAt,
+			});
+		};
 
-		// Case A: child already finished before we restarted.
+		// Case A: child already finished before we restarted. A durable exit file
+		// is a real command verdict and keeps the existing expectFailure/errorPattern
+		// semantics.
 		if (step.exitFile && fs.existsSync(step.exitFile)) {
 			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
 			return finalize(readExitFile());
 		}
 
-		// Cross-platform PID-reuse safeguard: Node doesn't expose a per-PID OS
-		// start time, so we can't directly tie a live pid back to the same
-		// process we spawned. As a pragmatic floor: if the recorded
-		// startTimeMs is older than the step's own timeout, the original
-		// child must already have exited (timeout would have killed it),
-		// so a live `step.pid` here is almost certainly a reused/recycled
-		// pid belonging to an unrelated process. Skip Case B and fall
-		// through to Case C (finalize as failed).
+		if (step.restartRecoveryMode === "unsupported") {
+			return restartInterrupted(step.restartRecoveryUnsupportedReason ?? "This command execution path was attached to the gateway and is not restart-recoverable.");
+		}
+
+		if (!step.exitFile) {
+			return restartInterrupted("No durable command exit file path was recorded before restart.");
+		}
+
+		const identity = this._verifyPersistedCommandIdentity(step);
+		if (!identity.verified || !identity.pid) {
+			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
+		}
+
 		const timeoutSec = step.timeoutSec ?? 300;
-		const pidLooksReused = typeof step.startTimeMs === "number"
-			&& (Date.now() - step.startTimeMs) > timeoutSec * 1000;
+		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + timeoutSec * 1000);
 
-		// Case B: child still running on the host.
-		if (!pidLooksReused && typeof step.pid === "number" && isPidAlive(step.pid)) {
-			const timeoutMs = timeoutSec * 1000;
-			const deadline = step.startedAt + timeoutMs;
-			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
-
-			// Tail the surviving child's stdout/stderr files so UI clients see
-			// live output during the resume wait (and so subsequent gate_status
-			// calls show the streamed tail). Mirrors the live-spawn path.
-			let stopTail: (() => void) | undefined;
-			if (step.outFile && step.errFile) {
-				const stepIndex = v.steps.indexOf(step);
-				if (stepIndex >= 0) {
-					stopTail = this._startFileTailers(step.outFile, step.errFile, {
-						goalId: v.goalId,
-						gateId: v.gateId,
-						signalId: v.signalId,
-						stepIndex,
-					});
-				}
+		const killVerifiedForTimeout = () => {
+			const current = this._verifyPersistedCommandIdentity(step);
+			if (current.verified && current.pid) {
+				try { killTreeByPid(current.pid, "SIGKILL"); } catch { /* already gone */ }
+				return true;
 			}
+			return false;
+		};
 
-			try {
-				while (Date.now() < deadline) {
-					await new Promise(r => setTimeout(r, 500));
-					if (step.exitFile && fs.existsSync(step.exitFile)) {
-						return finalize(readExitFile());
-					}
-					if (!isPidAlive(step.pid)) break;
-				}
-				// One last check after the loop
-				if (step.exitFile && fs.existsSync(step.exitFile)) {
-					return finalize(readExitFile());
-				}
-				// Timed out or process died without writing the exit file
-				// The original spawn used detached:true, so the persisted pid is
-				// also the pgid. killTreeByPid handles negative-pid kill (POSIX)
-				// and taskkill /T /F (Windows) so we reap descendants too.
-				if (step.pid) try { killTreeByPid(step.pid, "SIGKILL"); } catch { /* already dead */ }
-				return withDiagnostics({
-					name: step.name,
-					type: step.type,
-					passed: false,
-					output: "Verification command did not produce an exit code (timeout or process died after restart).",
-					duration_ms: Date.now() - step.startedAt,
+		if (Date.now() >= deadline) {
+			if (killVerifiedForTimeout()) return timeoutResult();
+			return restartInterrupted("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
+		}
+
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+
+		let stopTail: (() => void) | undefined;
+		if (step.outFile && step.errFile) {
+			const stepIndex = v.steps.indexOf(step);
+			if (stepIndex >= 0) {
+				stopTail = this._startFileTailers(step.outFile, step.errFile, {
+					goalId: v.goalId,
+					gateId: v.gateId,
+					signalId: v.signalId,
+					stepIndex,
 				});
-			} finally {
-				if (stopTail) stopTail();
 			}
 		}
 
-		// Case C: process gone, no exit file. There is no durable command
-		// verdict to map through expectFailure/error_pattern, so leave the gate
-		// pending/retryable instead of fabricating a failed command result.
-		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — leaving gate pending for re-signal`);
-		return restartInterrupted();
+		try {
+			while (Date.now() < deadline) {
+				if (!this._isResumeStillActive(v)) return null;
+				await new Promise(r => setTimeout(r, 500));
+				if (step.exitFile && fs.existsSync(step.exitFile)) {
+					return finalize(readExitFile());
+				}
+				const current = this._verifyPersistedCommandIdentity(step);
+				if (!current.verified) break;
+			}
+
+			if (!this._isResumeStillActive(v)) return null;
+			if (step.exitFile && fs.existsSync(step.exitFile)) {
+				return finalize(readExitFile());
+			}
+			if (Date.now() >= deadline) {
+				if (killVerifiedForTimeout()) return timeoutResult();
+				return restartInterrupted("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
+			}
+
+			// The process was alive and verified when resume started, but it exited or
+			// lost its durable heartbeat without writing an exit file. That is not a
+			// command verdict, so keep the gate pending/retryable.
+			return restartInterrupted("The command process stopped after restart without writing a durable exit status.");
+		} finally {
+			if (stopTail) stopTail();
+		}
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,
