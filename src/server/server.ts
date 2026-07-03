@@ -12923,18 +12923,6 @@ async function handleApiRoute(
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
 		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
-		// Authorization: caller must belong to the same project as the target.
-		// Caller session id is propagated via `x-bobbit-session-id` header by the
-		// extension; if missing, fall back to allow (e.g. UI-initiated calls go
-		// through Bearer auth which already gates by project).
-		const callerSid = req.headers["x-bobbit-session-id"];
-		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
-		if (callerSidStr) {
-			const callerPs = sessionManager.getPersistedSession(callerSidStr);
-			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
-				json({ error: "permission_denied" }, 403); return;
-			}
-		}
 
 		// Parse query params.
 		const qp = url.searchParams;
