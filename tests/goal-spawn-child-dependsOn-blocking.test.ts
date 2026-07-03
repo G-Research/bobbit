@@ -87,6 +87,22 @@ async function makeHarness(): Promise<Harness> {
 	const gateStore = new GateStore(stateDir);
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
+	goalStore.update(parent.id, {
+		branch: `goal/${parent.id}`,
+		worktreePath: tmpRoot,
+	} as any);
+	const realCreateGoal = goalManager.createGoal.bind(goalManager);
+	(goalManager as any).createGoal = async (title: string, cwd: string, opts?: any) => {
+		const goal = await realCreateGoal(title, cwd, opts);
+		if (opts?.parentGoalId) {
+			goalStore.update(goal.id, {
+				branch: `goal/${goal.id}`,
+				worktreePath: path.join(tmpRoot, "children", goal.id),
+			} as any);
+			return goalStore.get(goal.id)!;
+		}
+		return goal;
+	};
 
 	const setupCalls: string[] = [];
 	const startTeamCalls: string[] = [];
