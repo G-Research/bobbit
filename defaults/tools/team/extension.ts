@@ -142,7 +142,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_dismiss",
 		label: "Dismiss Team Agent",
-		description: "Terminate/archive a role agent or report a structured non-retryable outcome. Returns { ok, status, sessionId, message, retryable } with status dismissed, already-dismissed, not-owned, not-found, or failed.",
+		description: "Dismiss a team agent; returns structured status, sessionId, message, retryable. already-dismissed is idempotent and non-retryable.",
 		promptSnippet: "Dismiss a team agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 		parameters: Type.Object({
 			session_id: Type.String(),

@@ -86,7 +86,7 @@ export interface ServerHostAgentsApi {
 	prompt(childSessionId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
 	/** Terminate + archive an owned host.agents child.
 	 *  Returns OrchestrationCore's structured outcome so callers can distinguish
-	 *  dismissed/already-dismissed/not-found/failed from retryable failures. */
+	 *  dismissed/already-dismissed/not-owned/not-found/failed from retryability. */
 	dismiss(childSessionId: string): Promise<DismissResult>;
 	/** List the bound session's host.agents children (source-filtered). */
 	list(): Promise<Array<{ childSessionId: string; status: string; childKind: string }>>;
@@ -298,6 +298,13 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	/** The bound session's host.agents children (source-filtered). */
 	const ownHostAgentsChildren = () =>
 		requireCore().list(ownerSessionId).filter((h) => h.childKind === HOST_AGENTS_KIND);
+	const hostAgentsNotOwned = (childSessionId: string): DismissResult => ({
+		ok: false,
+		status: "not-owned",
+		sessionId: childSessionId,
+		message: `host.agents: ${childSessionId} is not a host.agents child of this session`,
+		retryable: false,
+	});
 	/** Enforce that `childSessionId` is one of THIS session's host.agents children. */
 	const requireOwnAgentsChild = (childSessionId: string): void => {
 		if (!ownHostAgentsChildren().some((h) => h.sessionId === childSessionId)) {
@@ -347,8 +354,10 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			return requireCore().prompt(ownerSessionId, childSessionId, message);
 		},
 		dismiss: async (childSessionId) => {
-			requireOwnAgentsChild(childSessionId);
-			return requireCore().dismiss(ownerSessionId, childSessionId);
+			const c = requireCore();
+			const ownedKind = c.ownedChildKind(ownerSessionId, childSessionId);
+			if (ownedKind && ownedKind !== HOST_AGENTS_KIND) return hostAgentsNotOwned(childSessionId);
+			return c.dismiss(ownerSessionId, childSessionId);
 		},
 		list: async () => ownHostAgentsChildren().map((h) => ({
 			childSessionId: h.sessionId,

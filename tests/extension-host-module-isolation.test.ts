@@ -508,7 +508,7 @@ describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			agents: {
 				spawn: async (o: { instructions: string }) => { calls.push(`spawn:${o.instructions}`); return { childSessionId: "child-1" }; },
 				prompt: async (id: string, m: string) => { calls.push(`prompt:${id}:${m}`); return { status: "dispatched" }; },
-				dismiss: async (id: string) => { calls.push(`dismiss:${id}`); return true; },
+				dismiss: async (id: string) => { calls.push(`dismiss:${id}`); return { ok: true, status: "dismissed", sessionId: id, message: `Child session ${id} dismissed.`, retryable: false }; },
 				list: async () => { calls.push("list"); return [{ childSessionId: "child-1", status: "idle", childKind: "host-agents" }]; },
 				read: async (id: string) => { calls.push(`read:${id}`); return { output: "OK" }; },
 				status: async (id: string) => { calls.push(`status:${id}`); return { status: "idle" }; },
@@ -536,7 +536,7 @@ describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			assert.equal(result.status, "idle");
 			assert.equal(result.listLen, 1);
 			assert.deepEqual(result.read, { output: "OK" });
-			assert.equal(result.dismissed, true);
+			assert.deepEqual(result.dismissed, { ok: true, status: "dismissed", sessionId: "child-1", message: "Child session child-1 dismissed.", retryable: false });
 			// No blocking `wait` is proxied (poll-based only).
 			assert.equal(result.hasWait, "undefined");
 			assert.deepEqual(calls, ["spawn:go", "prompt:child-1:more", "status:child-1", "list", "read:child-1", "dismiss:child-1"]);

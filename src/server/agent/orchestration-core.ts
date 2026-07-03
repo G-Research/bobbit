@@ -398,8 +398,8 @@ const OUTPUT_TAIL_CHARS = 1500;
 export class OrchestrationCore {
 	/** In-memory index keyed on owner session id (NOT persisted). */
 	private index = new Map<string, ChildHandle[]>();
-	/** childSessionId → ownerSessionId for idempotent duplicate dismiss classification. */
-	private dismissedChildren = new Map<string, string>();
+	/** childSessionId → owner/kind record for idempotent duplicate dismiss classification. */
+	private dismissedChildren = new Map<string, { ownerSessionId: string; childKind?: ChildKind }>();
 
 	constructor(private deps: OrchestrationCoreDeps) {}
 
@@ -636,7 +636,32 @@ export class OrchestrationCore {
 
 	/** Owner recorded by a previous successful/idempotent dismiss, if any. */
 	dismissedOwnerOf(sessionId: string): string | undefined {
-		return this.dismissedChildren.get(sessionId);
+		return this.dismissedChildren.get(sessionId)?.ownerSessionId;
+	}
+
+	/** Trusted child kind for a child owned (currently or previously) by this owner. */
+	ownedChildKind(ownerId: string, sessionId: string): ChildKind | undefined {
+		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === sessionId);
+		if (handle) return handle.childKind;
+		const persisted = this.deps.sessionManager.getPersistedSession(sessionId);
+		const remembered = this.dismissedChildren.get(sessionId);
+		if (remembered?.ownerSessionId === ownerId) {
+			return remembered.childKind ?? this.persistedChildKind(ownerId, persisted);
+		}
+		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
+		return persistedOwned ? this.persistedChildKind(ownerId, persisted) : undefined;
+	}
+
+	private persistedChildKind(ownerId: string, persisted: PersistedSessionLike | undefined): ChildKind | undefined {
+		if (!persisted) return undefined;
+		if (persisted.childKind) return persisted.childKind as ChildKind;
+		const owned = persisted.delegateOf === ownerId || persisted.parentSessionId === ownerId || persisted.teamLeadSessionId === ownerId;
+		// Old records without a source discriminator are never host.agents children.
+		return owned ? "delegate" : undefined;
+	}
+
+	private rememberDismissed(childId: string, ownerId: string, childKind: ChildKind | undefined): void {
+		this.dismissedChildren.set(childId, { ownerSessionId: ownerId, childKind });
 	}
 
 	/** Forget a child from the runtime index (cleanup after dismiss/terminate). */
@@ -721,7 +746,8 @@ export class OrchestrationCore {
 		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === childId);
 		const live = this.deps.sessionManager.getSession(childId);
 		const persisted = this.deps.sessionManager.getPersistedSession(childId);
-		const rememberedOwner = this.dismissedChildren.get(childId);
+		const remembered = this.dismissedChildren.get(childId);
+		const rememberedOwner = remembered?.ownerSessionId;
 		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
 		const rememberedOwned = rememberedOwner === ownerId;
 		const exists = !!live || !!persisted || !!rememberedOwner;
@@ -742,7 +768,7 @@ export class OrchestrationCore {
 		}
 
 		if (!isCurrentlyLive) {
-			this.dismissedChildren.set(childId, ownerId);
+			this.rememberDismissed(childId, ownerId, handle?.childKind ?? this.persistedChildKind(ownerId, persisted) ?? remembered?.childKind);
 			this.forgetChild(childId);
 			return { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
 		}
@@ -757,7 +783,7 @@ export class OrchestrationCore {
 		}
 		try {
 			const ok = await this.deps.sessionManager.terminateSession(childId);
-			this.dismissedChildren.set(childId, ownerId);
+			this.rememberDismissed(childId, ownerId, handle?.childKind ?? this.persistedChildKind(ownerId, persisted) ?? remembered?.childKind);
 			this.forgetChild(childId);
 			this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
 			return ok
