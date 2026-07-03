@@ -436,8 +436,14 @@ describe("OrchestrationCore.dismiss — stamps the generic terminal marker (Deci
 		(view as { markChildTerminal?: unknown }).markChildTerminal = undefined;
 		const core = makeCore(view);
 		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a", childKind: "host-agents" });
-		const ok = await core.dismiss("owner-1", a.sessionId);
-		assert.equal(ok, true);
+		const result = await core.dismiss("owner-1", a.sessionId);
+		assert.deepEqual(result, {
+			ok: true,
+			status: "dismissed",
+			sessionId: a.sessionId,
+			message: `Child session ${a.sessionId} dismissed.`,
+			retryable: false,
+		});
 		assert.deepEqual(view.terminated, [a.sessionId]);
 	});
 });
@@ -579,13 +585,23 @@ describe("OrchestrationCore.wait — policy all/first + terminal handling", () =
 });
 
 describe("OrchestrationCore — ownership scoping", () => {
-	it("prompt/steer/abort/dismiss reject a foreign child", async () => {
+	it("prompt/steer/abort reject a foreign child while dismiss returns structured not-owned", async () => {
 		const view = new FakeView();
 		view.owner("owner-1");
+		view.owner("other-owner");
 		const core = makeCore(view);
-		await assert.rejects(core.prompt("owner-1", "foreign", "hi"), /not owned/i);
-		await assert.rejects(core.abort("owner-1", "foreign"), /not owned/i);
-		await assert.rejects(core.dismiss("owner-1", "foreign"), /not owned/i);
+		const foreign = await core.spawn({ ownerSessionId: "other-owner", instructions: "foreign" });
+		view.live.get(foreign.sessionId)!.status = "streaming";
+		await assert.rejects(core.prompt("owner-1", foreign.sessionId, "hi"), /not owned/i);
+		await assert.rejects(core.steer("owner-1", foreign.sessionId, "hi"), /not owned/i);
+		await assert.rejects(core.abort("owner-1", foreign.sessionId), /not owned/i);
+		assert.deepEqual(await core.dismiss("owner-1", foreign.sessionId), {
+			ok: false,
+			status: "not-owned",
+			sessionId: foreign.sessionId,
+			message: `Child session ${foreign.sessionId} is not owned by owner-1.`,
+			retryable: false,
+		});
 	});
 
 	it("dismiss terminates and forgets an owned child", async () => {
@@ -594,8 +610,14 @@ describe("OrchestrationCore — ownership scoping", () => {
 		const core = makeCore(view);
 		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a" });
 		assert.equal(core.list("owner-1").length, 1);
-		const ok = await core.dismiss("owner-1", a.sessionId);
-		assert.equal(ok, true);
+		const result = await core.dismiss("owner-1", a.sessionId);
+		assert.deepEqual(result, {
+			ok: true,
+			status: "dismissed",
+			sessionId: a.sessionId,
+			message: `Child session ${a.sessionId} dismissed.`,
+			retryable: false,
+		});
 		assert.deepEqual(view.terminated, [a.sessionId]);
 		assert.equal(core.list("owner-1").length, 0);
 	});
