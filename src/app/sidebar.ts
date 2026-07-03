@@ -960,6 +960,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 		<div class="border-t border-border/30 ${mobile ? "my-0.5" : "my-1"} mx-2"></div>
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center ${mobile ? "gap-1 pl-0 pr-2 py-0.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
+				data-testid="sidebar-staff-header"
 				data-tree-key=${dataTreeKey ?? ""}
 				data-nav-id=${staffNavId}
 				data-nav-active=${staffNavActive ? "true" : "false"}
@@ -1607,6 +1608,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 		<div class="flex flex-col gap-0.5">
 			${(() => { const ungNavId = `ungrouped-header:${project.id}`; const ungActive = getActiveNavId() === ungNavId; return html`
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${ungActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+				data-testid="sidebar-sessions-header"
 				data-tree-key=${projectTree.sessionsSectionNode.key}
 				data-nav-id=${ungNavId}
 				data-nav-active=${ungActive ? "true" : "false"}
@@ -1633,6 +1635,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 					</button>
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+						style="line-height:0;"
 						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 						title="New session with role"
 					><span class="sidebar-scale-icon">${icon(ChevronDown, "xs")}</span></button>

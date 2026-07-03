@@ -15,16 +15,16 @@ The control is a numeric pixel input with a visible `px` suffix and a reset acti
 | Property | Value |
 |---|---|
 | Storage key | `bobbit:sidebar-tree-indent` |
-| Default | `16` px |
-| Range | `8`–`28` px |
+| Default | `6` px |
+| Range | `1`–`28` px |
 | Step | `1` px |
-| Reset copy | `Reset to 16 px` |
+| Reset copy | `Reset to 6 px` |
 | Scope | Current browser only |
 
 Behavior:
 
 - Values are saved in `localStorage` under `bobbit:sidebar-tree-indent`.
-- Missing, empty, non-numeric, `NaN`, or unavailable storage falls back to `16` px.
+- Missing, empty, non-numeric, `NaN`, or unavailable storage falls back to `6` px.
 - Finite out-of-range values clamp to the nearest bound.
 - Decimal values round to the nearest 1 px step.
 - Saving is best-effort: if storage writes fail, Bobbit still applies the clamped value in memory for the current page.
@@ -41,15 +41,15 @@ The setting affects only sidebar tree spacing. It does not change persisted expa
 {
   version: 1,
   indentMode: "comfortable",
-  baseIndentPx: 16,
-  nestedGoalIndentPx: 16
+  baseIndentPx: 6,
+  nestedGoalIndentPx: 6
 }
 ```
 
 Rules:
 
 - `baseIndentPx` and `nestedGoalIndentPx` both come from the clamped user preference in normal runtime use.
-- The builder also accepts partial layout objects for tests and future callers; missing values fall back to builder defaults (`baseIndentPx: 5`, `nestedGoalIndentPx: 16`) before clamping.
+- The builder also accepts partial layout objects for tests and future callers; missing values fall back to builder defaults (`baseIndentPx: 5`, `nestedGoalIndentPx: 6`) before clamping.
 - Project-forest and archived-forest goal rows use `nestedGoalIndentPx`.
 - Runtime rows under goals, sessions, team leads, delegates, and spawned child goals use `baseIndentPx`.
 - Collapsed sidebars use a derived value: `min(6, max(2, round(indent / 3)))` so nesting remains visible without pushing compact labels into overflow.
@@ -72,9 +72,9 @@ Fallback/default variables scoped under `.sidebar-root`:
 
 | Variable | Default |
 |---|---|
-| `--sidebar-tree-base-indent-default` | `5px` |
-| `--sidebar-tree-nested-goal-indent-default` | `16px` |
-| `--sidebar-tree-collapsed-indent-default` | `5px` |
+| `--sidebar-tree-base-indent-default` | `6px` |
+| `--sidebar-tree-nested-goal-indent-default` | `6px` |
+| `--sidebar-tree-collapsed-indent-default` | `2px` |
 | `--sidebar-tree-half-indent` | Half of the active base indent |
 
 Consumption should use logical padding and fallback-aware CSS, for example:
@@ -112,7 +112,7 @@ Template helpers:
 Renderer guidance:
 
 - Pass `loadSidebarTreeLayoutPreference()` into sidebar tree construction for desktop, mobile, and collapsed viewports.
-- Use helper-generated `padding-inline-start` instead of hardcoded `padding-left`, `node.depth * 16`, or direct `node.indentPx` strings.
+- Use helper-generated `padding-inline-start` instead of hardcoded `padding-left`, fixed depth multipliers, or direct `node.indentPx` strings.
 - Keep `min-w-0`, `truncate`, overflow gradients, active row classes, and chevron slot padding independent from the indent preference.
 
 ## Implementation map

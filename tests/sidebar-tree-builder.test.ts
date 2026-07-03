@@ -75,10 +75,10 @@ describe("sidebar tree key primitives", () => {
 	});
 
 	it("resolves clamped indentation defaults for builder metadata", () => {
-		assert.deepEqual(resolveSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 16 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 6 });
 		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 }), { version: 1, indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 99, nestedGoalIndentPx: Number.NaN }), { version: 1, indentMode: "spacious", baseIndentPx: 28, nestedGoalIndentPx: 16 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: -10, nestedGoalIndentPx: -1 }), { version: 1, indentMode: "comfortable", baseIndentPx: 8, nestedGoalIndentPx: 8 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 99, nestedGoalIndentPx: Number.NaN }), { version: 1, indentMode: "spacious", baseIndentPx: 28, nestedGoalIndentPx: 6 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: -10, nestedGoalIndentPx: -1 }), { version: 1, indentMode: "comfortable", baseIndentPx: 1, nestedGoalIndentPx: 1 });
 		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: 99, nestedGoalIndentPx: 99 }), { version: 1, indentMode: "comfortable", baseIndentPx: 28, nestedGoalIndentPx: 28 });
 	});
 });
@@ -167,8 +167,8 @@ describe("buildSidebarTree", () => {
 		assert.equal(childA.logicalDepth, 2);
 		assert.equal(grand.logicalDepth, 3);
 		assert.equal(root.indentPx, 0);
-		assert.equal(childA.indentPx, 16);
-		assert.equal(grand.indentPx, 32);
+		assert.equal(childA.indentPx, 6);
+		assert.equal(grand.indentPx, 12);
 		assert.equal(root.context.descendantCount, 3);
 		assert.equal(childA.context.displayTitleSuffix, "child-" );
 		assert.equal(childB.context.displayTitleSuffix, "child-" );
@@ -360,7 +360,7 @@ describe("buildSidebarTree", () => {
 		assert.equal(archivedRoot.logicalDepth, (model.projects[0].archivedSectionNode?.logicalDepth ?? 0) + 1);
 		assert.equal(archivedRoot.indentPx, 0);
 		assert.equal(archivedGrand.entityId, "archived-grand");
-		assert.equal(archivedGrand.indentPx, 16);
+		assert.equal(archivedGrand.indentPx, 6);
 	});
 
 	it("terminates malformed spawned descendant cycles before recursive subtree conversion", () => {
