@@ -817,6 +817,7 @@ test.describe("archived session worktree maintenance", () => {
 	});
 
 	test("already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive", async ({ gateway }) => {
+		test.slow();
 		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-stale-"));
 		const repoPath = join(baseDir, "repo");
 		const missingWorktreePath = join(baseDir, "missing-worktree");

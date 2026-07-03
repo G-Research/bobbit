@@ -34,7 +34,42 @@ async function openGoalAssistantProposal(page: Page) {
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 	const goalPanel = page.locator('[data-panel="goal-proposal"]').first();
 	await expect(goalPanel).toBeVisible({ timeout: 10_000 });
+	await findProposalQuote(page);
 	return goalPanel;
+}
+
+async function findProposalQuote(
+	page: Page,
+	preferredQuotes: string[] = [
+		"test goal",
+		"goal creation",
+		"validates",
+		"assistant flow",
+		"proposal",
+	],
+): Promise<string> {
+	const handle = await page.waitForFunction(
+		(preferred) => {
+			const content = document.querySelector(
+				"commentable-markdown review-document .review-document-content",
+			);
+			const text = content?.textContent ?? "";
+			if (!text.trim() || /no spec content yet/i.test(text)) return null;
+			const lower = text.toLowerCase();
+			for (const quote of preferred) {
+				const idx = lower.indexOf(quote.toLowerCase());
+				if (idx >= 0) return text.slice(idx, idx + quote.length);
+			}
+			return text.match(/[A-Za-z0-9][A-Za-z0-9'’_-]{2,}(?:\s+[A-Za-z0-9][A-Za-z0-9'’_-]{2,}){0,3}/)?.[0] ?? null;
+		},
+		preferredQuotes,
+		{ timeout: 10_000 },
+	);
+	const quote = await handle.jsonValue();
+	if (typeof quote !== "string" || !quote) {
+		throw new Error("No usable proposal quote found");
+	}
+	return quote;
 }
 
 /**
@@ -97,8 +132,9 @@ test.describe("Inline comments on goal proposal panel", () => {
 		);
 
 		// Inject an annotation as if the user had completed the popover flow.
+		const quote = await findProposalQuote(page);
 		await injectAnnotation(page, {
-			quote: "test goal",
+			quote,
 			comment: "Make this clearer",
 		});
 
@@ -134,7 +170,7 @@ test.describe("Inline comments on goal proposal panel", () => {
 		);
 		expect(captured.length).toBeGreaterThanOrEqual(1);
 		expect(captured[0]).toContain("Feedback on proposal");
-		expect(captured[0]).toContain('"test goal"');
+		expect(captured[0]).toContain(`"${quote}"`);
 		expect(captured[0]).toContain("Make this clearer");
 
 		// Badge cleared after send.
@@ -204,8 +240,9 @@ test.describe("Inline comments on goal proposal panel", () => {
 	 */
 	async function seedAnnotationWithHighlight(
 		page: Page,
-		opts: { quote: string; comment: string; bucket?: string },
+		opts: { quote?: string; comment: string; bucket?: string },
 	): Promise<string> {
+		const quote = opts.quote ?? await findProposalQuote(page);
 		return page.evaluate(
 			({ quote, comment, bucket }) => {
 				const sid = (window as any).bobbitState?.selectedSessionId as string;
@@ -292,7 +329,7 @@ test.describe("Inline comments on goal proposal panel", () => {
 				);
 				return id;
 			},
-			{ quote: opts.quote, comment: opts.comment, bucket: opts.bucket ?? "proposal:goal" },
+			{ quote, comment: opts.comment, bucket: opts.bucket ?? "proposal:goal" },
 		);
 	}
 
@@ -333,7 +370,6 @@ test.describe("Inline comments on goal proposal panel", () => {
 
 		// Seed a real annotation + highlight span.
 		await seedAnnotationWithHighlight(page, {
-			quote: "test goal",
 			comment: "Make this clearer",
 		});
 
@@ -367,9 +403,11 @@ test.describe("Inline comments on goal proposal panel", () => {
 	}) => {
 		const panel = await openGoalAssistantProposal(page);
 
-		// Seed: an annotation on "test goal" with comment "original".
+		// Seed an annotation with comment "original".
+		const seedQuote = await findProposalQuote(page);
+		const overlapQuote = seedQuote;
 		await seedAnnotationWithHighlight(page, {
-			quote: "test goal",
+			quote: seedQuote,
 			comment: "original comment",
 		});
 
@@ -377,11 +415,10 @@ test.describe("Inline comments on goal proposal panel", () => {
 			panel.locator('[data-testid="proposal-comment-count"]'),
 		).toContainText("1 comment", { timeout: 5_000 });
 
-		// Now simulate the user re-selecting OVERLAPPING text ("test")
-		// and hitting the popover. This routes through `_handleSelection`,
-		// which is the same entry point Recogito's `createAnnotation`
-		// event hits on mouseup.
-		await page.evaluate(() => {
+		// Now simulate the user re-selecting OVERLAPPING text and hitting
+		// the popover. This routes through `_handleSelection`, which is the
+		// same entry point Recogito's `createAnnotation` event hits on mouseup.
+		await page.evaluate((quote) => {
 			const rd: any = document
 				.querySelector("commentable-markdown")
 				?.querySelector("review-document");
@@ -390,9 +427,9 @@ test.describe("Inline comments on goal proposal panel", () => {
 				".review-document-content",
 			);
 			const fullText = content?.textContent ?? "";
-			const start = fullText.indexOf("test");
-			if (start < 0) throw new Error("could not find 'test' in document");
-			const end = start + "test".length;
+			const start = fullText.indexOf(quote);
+			if (start < 0) throw new Error(`could not find ${quote} in document`);
+			const end = start + quote.length;
 			// Place a real selection so `_handleSelection` can read a range
 			// rect from window.getSelection() (it reads `sel.getRangeAt(0)`).
 			const walker = document.createTreeWalker(content!, NodeFilter.SHOW_TEXT);
@@ -428,10 +465,10 @@ test.describe("Inline comments on goal proposal panel", () => {
 			rd._handleSelection({
 				id: `overlap-${Date.now()}`,
 				target: {
-					selector: [{ quote: "test", start, end }],
+					selector: [{ quote, start, end }],
 				},
 			});
-		});
+		}, overlapQuote);
 
 		// Popover must open prefilled with the EXISTING comment — the
 		// overlap must be recognised as an edit, not a brand-new annotation.
@@ -460,7 +497,8 @@ test.describe("Inline comments on goal proposal panel", () => {
 		await openGoalAssistantProposal(page);
 
 		// 1. Drive a brand-new selection — popover opens in create mode.
-		await page.evaluate(() => {
+		const createQuote = await findProposalQuote(page, ["validates", "goal creation", "test goal", "proposal"]);
+		await page.evaluate((quote) => {
 			const rd: any = document
 				.querySelector("commentable-markdown")
 				?.querySelector("review-document");
@@ -469,13 +507,14 @@ test.describe("Inline comments on goal proposal panel", () => {
 				".review-document-content",
 			);
 			const fullText = content?.textContent ?? "";
-			const start = fullText.indexOf("validates");
-			const end = start + "validates".length;
+			const start = fullText.indexOf(quote);
+			if (start < 0) throw new Error(`could not find ${quote} in document`);
+			const end = start + quote.length;
 			rd._handleSelection({
 				id: `new-${Date.now()}`,
-				target: { selector: [{ quote: "validates", start, end }] },
+				target: { selector: [{ quote, start, end }] },
 			});
-		});
+		}, createQuote);
 		const popover = page.locator("annotation-popover[open]");
 		await expect(popover).toBeVisible({ timeout: 3_000 });
 		const createLabel = await popover
@@ -492,7 +531,6 @@ test.describe("Inline comments on goal proposal panel", () => {
 
 		// 2. Seed + click highlight — popover opens in edit mode.
 		await seedAnnotationWithHighlight(page, {
-			quote: "test goal",
 			comment: "existing",
 		});
 		await page.locator(".r6o-annotation").first().dispatchEvent("click");
@@ -510,7 +548,6 @@ test.describe("Inline comments on goal proposal panel", () => {
 		await openGoalAssistantProposal(page);
 
 		await seedAnnotationWithHighlight(page, {
-			quote: "test goal",
 			comment: "to be deleted",
 		});
 		await page.locator(".r6o-annotation").first().dispatchEvent("click");
@@ -532,7 +569,6 @@ test.describe("Inline comments on goal proposal panel", () => {
 		const panel = await openGoalAssistantProposal(page);
 
 		await seedAnnotationWithHighlight(page, {
-			quote: "test goal",
 			comment: "to be deleted via hover",
 		});
 

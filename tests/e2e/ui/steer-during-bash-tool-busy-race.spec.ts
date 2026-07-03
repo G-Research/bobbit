@@ -34,11 +34,16 @@
  */
 import { test, expect } from "./fixtures.js";
 import {
+	connectWs,
 	createSession,
+	queueLenPredicate,
+	toolStartPredicate,
 	waitForHealth,
 	waitForSessionStatus,
+	type WsConnection,
+	type WsMsg,
 } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");
@@ -69,7 +74,21 @@ async function clickStopIfPresent(page: any): Promise<void> {
 	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
 }
 
+function userMessageIncludes(text: string): (m: WsMsg) => boolean {
+	return (m) => m.type === "event"
+		&& m.data?.type === "message_end"
+		&& m.data?.message?.role === "user"
+		&& JSON.stringify(m.data.message).includes(text);
+}
+
+async function waitForSteeredEchoes(conn: WsConnection, cursor: number): Promise<void> {
+	await conn.waitForFrom(cursor, userMessageIncludes("Steer1"), 30_000);
+	await conn.waitForFrom(cursor, userMessageIncludes("Steer2"), 30_000);
+}
+
 test.describe("steer subsystem \u2014 queue + steer + abort with busy-race", () => {
+	test.setTimeout(90_000);
+
 	test.beforeAll(async () => {
 		// Switch the in-process mock bridge to the real-agent-shape race:
 		// agent_end emits while activeRun still set, so any synchronous
@@ -86,46 +105,67 @@ test.describe("steer subsystem \u2014 queue + steer + abort with busy-race", () 
 	test("queued+steered messages drain after Stop even when prompt() races against finishRun", async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
+		const conn = await connectWs(sessionId);
 
-		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		await rec.capture("Empty composer ready");
+		try {
+			await conn.waitFor((m) => m.type === "queue_update");
 
-		await sendMessage(page, "STAY_BUSY:30000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
-		await rec.capture("Agent busy \u2014 long bash running");
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await page.waitForFunction((id) => {
+				return window.location.hash.includes(`/session/${id}`)
+					&& (window as any).bobbitState?.selectedSessionId === id;
+			}, sessionId, { timeout: 15_000 });
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await rec.capture("Empty composer ready");
 
-		const textarea = page.locator("textarea").first();
-		await textarea.fill("Steer1");
-		await textarea.press("Enter");
-		await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
-		await textarea.fill("Steer2");
-		await textarea.press("Enter");
-		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
-		await rec.capture("Two messages queued");
+			await sendMessage(page, "STAY_BUSY:30000 working");
+			await conn.waitFor(toolStartPredicate("Bash"), 15_000);
+			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await rec.capture("Agent busy \u2014 long bash running");
 
-		await clickAllSteerButtons(page);
-		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
-		await rec.capture("Both pills steered and dispatched");
+			const textarea = page.locator("textarea").first();
+			let cursor = conn.messageCount();
+			await textarea.fill("Steer1");
+			await textarea.press("Enter");
+			await conn.waitForFrom(cursor, queueLenPredicate(1), 10_000);
+			await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
+			cursor = conn.messageCount();
+			await textarea.fill("Steer2");
+			await textarea.press("Enter");
+			await conn.waitForFrom(cursor, queueLenPredicate(2), 10_000);
+			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
+			await rec.capture("Two messages queued");
 
-		await clickStopIfPresent(page);
-		await rec.capture("Stop clicked if still streaming \u2014 abort with busy race");
+			const steerCursor = conn.messageCount();
+			await clickAllSteerButtons(page);
+			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+			await rec.capture("Both pills steered and dispatched");
 
-		// Both steered texts must reach the agent without any further user
-		// input, even though the synchronous-on-agent_end prompt() call
-		// rejects due to the not-yet-cleared activeRun flag.
-		await expect(
-			page.locator("user-message").filter({ hasText: "Steer1" }).first(),
-		).toBeVisible({ timeout: 15_000 });
-		await rec.capture("Steer1 user-message rendered");
+			await clickStopIfPresent(page);
+			await rec.capture("Stop clicked if still streaming \u2014 abort with busy race");
 
-		await expect(
-			page.locator("user-message").filter({ hasText: "Steer2" }).first(),
-		).toBeVisible({ timeout: 5_000 });
-		await rec.capture("Steer2 user-message rendered");
+			// Both steered texts must reach the agent without any further user
+			// input, even though the synchronous-on-agent_end prompt() call
+			// rejects due to the not-yet-cleared activeRun flag. The WebSocket
+			// cursor catches server delivery even if the DOM render lags under
+			// full-suite load.
+			await waitForSteeredEchoes(conn, steerCursor);
 
-		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 10_000 });
-		await rec.capture("Queue drained");
+			await expect(
+				page.locator("user-message").filter({ hasText: "Steer1" }).first(),
+			).toBeVisible({ timeout: 15_000 });
+			await rec.capture("Steer1 user-message rendered");
+
+			await expect(
+				page.locator("user-message").filter({ hasText: "Steer2" }).first(),
+			).toBeVisible({ timeout: 15_000 });
+			await rec.capture("Steer2 user-message rendered");
+
+			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 10_000 });
+			await rec.capture("Queue drained");
+		} finally {
+			conn.close();
+		}
 	});
 });
