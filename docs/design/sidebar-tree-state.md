@@ -146,5 +146,13 @@ Relevant tests include:
 - `tests/sidebar-tree-state.test.ts` — defaults, explicit precedence, key separation, legacy migration, corrupted/missing storage, automatic expansion safeguards, archived delegate defaults, and archived reset behavior.
 - `tests/api-sidebar-expansion-regression.test.ts` — refresh/create flows use the unified API, auto-expand only eligible top-level goals, and do not reopen collapsed parents for new child/sub-goals.
 - `tests/sidebar-tree-builder.test.ts` — canonical keys, builder defaults, session-child classes, and layout metadata.
-- `tests/sidebar-archived-delegates.spec.ts` — archived delegate disclosure controls.
+- `tests/e2e/ui/sidebar-unified-tree.spec.ts` — full-stack representative coverage for project, sessions, staff, archived sections, collapsed-by-default parent goals, team leads, first-class child sessions, live delegates, archived delegate groups, standalone archived sessions, canonical tree-key attributes, and keyboard expand/collapse on goal and session-backed chevron rows.
+- `tests/e2e/ui/sidebar-tree-restart.spec.ts` — gateway restart durability for explicit collapsed/expanded tree choices and the sidebar indentation preference after reload.
+- `tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts` — archived delegate disclosure controls.
 - `tests/ui-fixtures/sidebar-filter-search-fixture.spec.ts` — search retention/ephemeral expansion behavior.
+
+Recommended focused verification when changing unified tree expansion behavior:
+
+```bash
+npx playwright test tests/e2e/ui/sidebar-unified-tree.spec.ts tests/e2e/ui/sidebar-tree-restart.spec.ts --reporter=line
+```
