@@ -8,7 +8,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const GOAL_TAB = "[data-testid='goal-proposal-tab-goal']";
 const GOAL_PANEL = "[data-testid='goal-proposal-panel-goal']";
@@ -44,16 +44,7 @@ async function waitForGoalProposal(page: Page, expectedTitle: string, options: {
 async function openNewGoalAssistantProposal(page: Page) {
 	test.setTimeout(90_000);
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 10_000 });
 	await sendChatMessage(page, "Please create a GOAL_PROPOSAL for testing");
 	await waitForGoalProposal(page, "E2E Test Goal");

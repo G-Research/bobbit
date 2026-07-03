@@ -29,7 +29,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, createSessionViaUI, navigateToHash } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
 import {
 	apiFetch,
 	connectWs,
@@ -88,12 +88,7 @@ async function reloadToLandingWithoutRestoringLastSession(page: Page): Promise<v
 
 /** Open a fresh goal-assistant session via the "+ New Goal" button. */
 async function openGoalAssistantSession(page: Page): Promise<string> {
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	await newGoalBtn.click();
-	await page.waitForURL(/#\/session\//, { timeout: 15_000 });
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	return activeSessionId(page);
 }
 

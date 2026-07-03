@@ -16,15 +16,13 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, bobbitDir, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch, bobbitDir, nonGitCwd, defaultProjectId } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
-	const resp = await apiFetch("/api/projects");
-	const data = await resp.json();
-	const projects = Array.isArray(data) ? data : (data.projects || []);
-	expect(projects.length).toBeGreaterThan(0);
-	return projects[0].id;
+	const projectId = await defaultProjectId();
+	expect(projectId).toBeTruthy();
+	return projectId!;
 }
 
 async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {

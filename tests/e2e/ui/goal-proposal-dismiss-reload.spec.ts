@@ -35,7 +35,7 @@
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 async function activeSessionId(page: Page): Promise<string> {
 	const sid = await page.evaluate(
@@ -51,10 +51,7 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 		//    `saveGoalDraft` from `onGoalProposal` AND `restoreGoalDraft`
 		//    on session attach (both gated on `assistantType === "goal"`).
 		await openApp(page);
-		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-		await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-		await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-		await newGoalBtn.click();
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
 
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 30_000 });

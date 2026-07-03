@@ -11,15 +11,13 @@
  *      the edited build_command.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
-	const resp = await apiFetch("/api/projects");
-	const data = await resp.json();
-	const projects = Array.isArray(data) ? data : (data.projects || []);
-	expect(projects.length).toBeGreaterThan(0);
-	return projects[0].id;
+	const projectId = await defaultProjectId();
+	expect(projectId).toBeTruthy();
+	return projectId!;
 }
 
 test.describe("Editable proposals — project propose → edit → accept", () => {

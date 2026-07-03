@@ -30,7 +30,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const INITIAL_SPEC_TAIL = "It validates the goal creation UI.";
 const INITIAL_SPEC_HEAD = "This is a test goal created via the assistant flow.";
@@ -72,10 +72,7 @@ async function slotSpec(page: Page): Promise<string> {
 async function openGoalAssistant(page: Page): Promise<string> {
 	test.setTimeout(120_000);
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	await newGoalBtn.click();
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 30_000 });
