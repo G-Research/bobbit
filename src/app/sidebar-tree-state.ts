@@ -91,6 +91,7 @@ function migrateLegacyState(): boolean {
 		changed = putIfMissing({ kind: "session-children", sessionId, childClass: "first-class" }, "collapsed") || changed;
 	}
 	for (const sessionId of readLegacyStringArray(LEGACY_EXPANDED_DELEGATE_PARENTS_KEY)) {
+		changed = putIfMissing({ kind: "session-children", sessionId, childClass: "delegate" }, "expanded") || changed;
 		changed = putIfMissing({ kind: "session-children", sessionId, childClass: "archived-delegate" }, "expanded") || changed;
 	}
 
@@ -190,6 +191,7 @@ export function resetArchivedSidebarTreeExpansion(opts: { archivedGoalIds: Itera
 	for (const sessionId of opts.archivedSessionIds) {
 		changed = expansionPreferences.delete(sidebarTreeKey({ kind: "team-lead", sessionId })) || changed;
 		changed = expansionPreferences.delete(sidebarTreeKey({ kind: "session-children", sessionId, childClass: "first-class" })) || changed;
+		changed = expansionPreferences.delete(sidebarTreeKey({ kind: "session-children", sessionId, childClass: "delegate" })) || changed;
 		changed = expansionPreferences.delete(sidebarTreeKey({ kind: "session-children", sessionId, childClass: "archived-delegate" })) || changed;
 	}
 	if (changed) persistSidebarTreeState();
@@ -252,15 +254,18 @@ export function toggleFirstClassParentExpanded(sessionId: string): void {
 }
 
 export function isArchivedParentExpanded(sessionId: string): boolean {
+	const delegatePreference = getSidebarTreePreference({ kind: "session-children", sessionId, childClass: "delegate" });
+	if (delegatePreference) return delegatePreference === "expanded";
 	return isSidebarTreeExpanded({ kind: "session-children", sessionId, childClass: "archived-delegate" });
 }
 
 export function setArchivedParentExpanded(sessionId: string, expanded: boolean): void {
+	setSidebarTreeExpanded({ kind: "session-children", sessionId, childClass: "delegate" }, expanded);
 	setSidebarTreeExpanded({ kind: "session-children", sessionId, childClass: "archived-delegate" }, expanded);
 }
 
 export function toggleArchivedParentExpanded(sessionId: string): void {
-	toggleSidebarTreeExpanded({ kind: "session-children", sessionId, childClass: "archived-delegate" });
+	setArchivedParentExpanded(sessionId, !isArchivedParentExpanded(sessionId));
 }
 
 export function isGoalExpanded(goalId: string): boolean {

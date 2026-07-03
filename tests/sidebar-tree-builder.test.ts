@@ -76,10 +76,10 @@ describe("sidebar tree key primitives", () => {
 
 	it("resolves clamped indentation defaults for builder metadata", () => {
 		assert.deepEqual(resolveSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 16 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 }), { version: 1, indentMode: "spacious", baseIndentPx: 5, nestedGoalIndentPx: 28 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 99, nestedGoalIndentPx: Number.NaN }), { version: 1, indentMode: "spacious", baseIndentPx: 5, nestedGoalIndentPx: 16 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: -10, nestedGoalIndentPx: -1 }), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 8 });
-		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: 99, nestedGoalIndentPx: 99 }), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: 28 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 }), { version: 1, indentMode: "spacious", baseIndentPx: 16, nestedGoalIndentPx: 28 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ indentMode: "spacious", baseIndentPx: 99, nestedGoalIndentPx: Number.NaN }), { version: 1, indentMode: "spacious", baseIndentPx: 28, nestedGoalIndentPx: 16 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: -10, nestedGoalIndentPx: -1 }), { version: 1, indentMode: "comfortable", baseIndentPx: 8, nestedGoalIndentPx: 8 });
+		assert.deepEqual(resolveSidebarTreeLayoutPreference({ baseIndentPx: 99, nestedGoalIndentPx: 99 }), { version: 1, indentMode: "comfortable", baseIndentPx: 28, nestedGoalIndentPx: 28 });
 	});
 });
 
@@ -175,7 +175,7 @@ describe("buildSidebarTree", () => {
 		assert.equal(root.defaultExpanded, false, "goal rows default collapsed; polling must not auto-open sub-goals in the builder");
 	});
 
-	it("applies custom nested goal indentation while keeping runtime child spacing fixed", () => {
+	it("applies custom indentation to nested goals and runtime child spacing", () => {
 		const goalModel = buildSidebarTree({
 			projects: [project()],
 			goals: [goal({ id: "root", createdAt: 1 }), goal({ id: "child", parentGoalId: "root", createdAt: 2 })],
@@ -207,9 +207,9 @@ describe("buildSidebarTree", () => {
 		const lead = teamRoot.children.find(n => n.kind === "team-lead")!;
 		const member = lead.children.find(n => n.kind === "session")!;
 		const spawned = runtimeModel.spawnedGoalNodesByLeadSessionId.get("lead")?.find(n => n.entityId === "spawned")!;
-		assert.equal(lead.indentPx, 5);
-		assert.equal(member.indentPx, 10);
-		assert.equal(spawned.indentPx, 10);
+		assert.equal(lead.indentPx, 14);
+		assert.equal(member.indentPx, 28);
+		assert.equal(spawned.indentPx, 28);
 	});
 
 	it("places spawned goals and descendants under the owning team lead and excludes them from project and archived forests", () => {
@@ -411,7 +411,7 @@ describe("buildSidebarTree", () => {
 		assert.deepEqual(groups.map(g => g.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId)), [["first"], ["delegate"]]);
 	});
 
-	it("keeps live delegate child sessions in the first-class group when archived rows are shown", () => {
+	it("keeps live delegate-only child sessions in a collapsed delegate group when archived rows are shown", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
 			goals: [],
@@ -423,9 +423,11 @@ describe("buildSidebarTree", () => {
 			showArchived: true,
 		});
 		const groups = model.sessionChildrenNodesBySessionId.get("parent") ?? [];
-		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["first-class"]);
+		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["delegate"]);
 		assert.deepEqual(groups[0]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["live-delegate"]);
-		assert.equal(groups[0]?.children[0]?.context.childClass, "first-class");
+		assert.equal(groups[0]?.children[0]?.context.childClass, "delegate");
+		assert.equal(groups[0]?.defaultExpanded, false);
+		assert.equal(groups[0]?.expanded, false);
 	});
 
 	it("applies filters to first-class children and routes archived first-class children to archived-delegate", () => {

@@ -8,6 +8,8 @@ import {
 	SIDEBAR_TREE_INDENT_MIN_PX,
 } from "./sidebar-tree-layout.js";
 
+export type SidebarSessionChildrenClass = "first-class" | "delegate" | "archived-delegate";
+
 export type SidebarTreeNodeKey =
 	| { kind: "project"; projectId: string }
 	| { kind: "project-sessions"; projectId: string }
@@ -15,7 +17,7 @@ export type SidebarTreeNodeKey =
 	| { kind: "project-archived"; projectId: string }
 	| { kind: "goal"; goalId: string }
 	| { kind: "team-lead"; sessionId: string }
-	| { kind: "session-children"; sessionId: string; childClass: "first-class" | "archived-delegate" }
+	| { kind: "session-children"; sessionId: string; childClass: SidebarSessionChildrenClass }
 	| { kind: "session"; sessionId: string };
 
 export type SidebarTreeNodeKind = SidebarTreeNodeKey["kind"];
@@ -176,7 +178,7 @@ export interface TeamLeadContext {
 
 export interface SessionChildrenContext {
 	sessionId: string;
-	childClass: "first-class" | "archived-delegate";
+	childClass: SidebarSessionChildrenClass;
 	childSessionKeys: string[];
 }
 
@@ -186,7 +188,7 @@ export interface SessionContext {
 	goalId?: string;
 	teamGoalId?: string;
 	isTeamLead: boolean;
-	childClass?: "first-class" | "archived-delegate";
+	childClass?: SidebarSessionChildrenClass;
 	activeCandidate: boolean;
 	matchesSearch?: boolean;
 }
@@ -253,7 +255,7 @@ export function parseSidebarTreeKey(raw: string): SidebarTreeNodeKey | null {
 	if (kind === "session-children") {
 		const params = new URLSearchParams(query);
 		const childClass = params.get("childClass");
-		if ((childClass !== "first-class" && childClass !== "archived-delegate") || Array.from(params.keys()).length !== 1) return null;
+		if ((childClass !== "first-class" && childClass !== "delegate" && childClass !== "archived-delegate") || Array.from(params.keys()).length !== 1) return null;
 		return { kind, sessionId: id, childClass };
 	}
 	if (query) return null;
@@ -277,11 +279,13 @@ export function resolveSidebarTreeLayoutPreference(input?: SidebarTreeLayoutPref
 	const mode = input?.indentMode === "compact" || input?.indentMode === "comfortable" || input?.indentMode === "spacious"
 		? input.indentMode
 		: "comfortable";
+	const baseIndentPx = clampNumber(input?.baseIndentPx ?? input?.nestedGoalIndentPx, MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_BASE_INDENT_PX);
+	const nestedGoalIndentPx = clampNumber(input?.nestedGoalIndentPx ?? input?.baseIndentPx, MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_NESTED_GOAL_INDENT_PX);
 	return {
 		version: 1,
 		indentMode: mode,
-		baseIndentPx: DEFAULT_BASE_INDENT_PX,
-		nestedGoalIndentPx: clampNumber(input?.nestedGoalIndentPx, MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_NESTED_GOAL_INDENT_PX),
+		baseIndentPx,
+		nestedGoalIndentPx,
 	};
 }
 
@@ -580,16 +584,21 @@ function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: Ses
 		...ctx.liveSessions,
 		...(ctx.includeArchived ? ctx.archivedSessions : []),
 	]).filter(s => sessionParentId(s) === parentSession.id && ctx.passesSession(s));
-	const liveChildren = childCandidates
-		.filter(s => !isArchivedOrTerminalSession(s) && (isFirstClassChildSession(s) || !!s.delegateOf))
+	const firstClassChildren = childCandidates
+		.filter(s => !isArchivedOrTerminalSession(s) && isFirstClassChildSession(s))
 		.sort(compareSessions);
-	const liveChildIds = new Set(liveChildren.map(s => s.id));
+	const liveDelegates = childCandidates
+		.filter(s => !isArchivedOrTerminalSession(s) && !!s.delegateOf && !isFirstClassChildSession(s))
+		.sort(compareSessions);
+	const liveChildren = firstClassChildren.length > 0 ? sortSessions([...firstClassChildren, ...liveDelegates]) : firstClassChildren;
+	const delegateChildren = firstClassChildren.length === 0 ? liveDelegates : [];
+	const liveChildIds = new Set([...liveChildren, ...delegateChildren].map(s => s.id));
 	const archivedDelegates = ctx.includeArchived
 		? childCandidates
 			.filter(s => !liveChildIds.has(s.id) && (isArchivedOrTerminalSession(s) || ctx.archivedSessions.includes(s)))
 			.sort(compareSessions)
 		: [];
-	for (const [childClass, children] of [["first-class", liveChildren], ["archived-delegate", archivedDelegates]] as const) {
+	for (const [childClass, children] of [["first-class", liveChildren], ["delegate", delegateChildren], ["archived-delegate", archivedDelegates]] as const) {
 		if (children.length === 0) continue;
 		const group = makeNode<SessionChildrenContext>(ctx, { kind: "session-children", sessionId: parentSession.id, childClass }, { sessionId: parentSession.id, childClass, childSessionKeys: [] }, parent.key, parent.logicalDepth + 1, parent.indentDepth + 1, (parent.indentDepth + 1) * ctx.layout.baseIndentPx);
 		for (const child of children) {
@@ -606,7 +615,7 @@ function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: Ses
 	return groupKeys;
 }
 
-function makeSessionNode(session: SessionLike, parent: SidebarTreeNode, childClass: "first-class" | "archived-delegate" | undefined, ctx: BuildContext): SidebarTreeNode<SessionContext> {
+function makeSessionNode(session: SessionLike, parent: SidebarTreeNode, childClass: SidebarSessionChildrenClass | undefined, ctx: BuildContext): SidebarTreeNode<SessionContext> {
 	const node = makeNode<SessionContext>(ctx, { kind: "session", sessionId: session.id }, {
 		session,
 		projectId: session.projectId,

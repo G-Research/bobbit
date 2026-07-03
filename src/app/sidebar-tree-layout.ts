@@ -28,19 +28,20 @@ export function clampSidebarTreeIndentPx(px: number): number {
 }
 
 export function sidebarTreeIndentPxToLayout(px: number): ResolvedSidebarTreeLayoutPreferenceV1 {
+	const indentPx = clampSidebarTreeIndentPx(px);
 	return {
 		version: 1,
 		indentMode: "comfortable",
-		baseIndentPx: SIDEBAR_TREE_BASE_INDENT_PX,
-		nestedGoalIndentPx: clampSidebarTreeIndentPx(px),
+		baseIndentPx: indentPx,
+		nestedGoalIndentPx: indentPx,
 	};
 }
 
 export function sidebarTreeCollapsedIndentPx(pxOrLayout: number | SidebarTreeLayoutPreferenceV1): number {
-	const nestedGoalIndentPx = typeof pxOrLayout === "number"
+	const indentPx = typeof pxOrLayout === "number"
 		? clampSidebarTreeIndentPx(pxOrLayout)
-		: clampSidebarTreeIndentPx(pxOrLayout.nestedGoalIndentPx ?? SIDEBAR_TREE_INDENT_DEFAULT_PX);
-	return Math.min(SIDEBAR_TREE_COLLAPSED_INDENT_MAX_PX, Math.max(2, Math.round(nestedGoalIndentPx / 3)));
+		: clampSidebarTreeIndentPx(pxOrLayout.baseIndentPx ?? pxOrLayout.nestedGoalIndentPx ?? SIDEBAR_TREE_INDENT_DEFAULT_PX);
+	return Math.min(SIDEBAR_TREE_COLLAPSED_INDENT_MAX_PX, Math.max(2, Math.round(indentPx / 3)));
 }
 
 export function loadSidebarTreeIndentPx(): number {
@@ -80,8 +81,13 @@ export function applySidebarTreeLayoutVars(pxOrLayout: number | SidebarTreeLayou
 	if (typeof document === "undefined") return;
 	const layout = typeof pxOrLayout === "number"
 		? sidebarTreeIndentPxToLayout(pxOrLayout)
-		: sidebarTreeIndentPxToLayout(pxOrLayout.nestedGoalIndentPx ?? SIDEBAR_TREE_INDENT_DEFAULT_PX);
-	document.documentElement.style.setProperty("--sidebar-tree-base-indent", `${SIDEBAR_TREE_BASE_INDENT_PX}px`);
+		: {
+			version: 1 as const,
+			indentMode: "comfortable" as const,
+			baseIndentPx: clampSidebarTreeIndentPx(pxOrLayout.baseIndentPx ?? pxOrLayout.nestedGoalIndentPx ?? SIDEBAR_TREE_INDENT_DEFAULT_PX),
+			nestedGoalIndentPx: clampSidebarTreeIndentPx(pxOrLayout.nestedGoalIndentPx ?? pxOrLayout.baseIndentPx ?? SIDEBAR_TREE_INDENT_DEFAULT_PX),
+		};
+	document.documentElement.style.setProperty("--sidebar-tree-base-indent", `${layout.baseIndentPx}px`);
 	document.documentElement.style.setProperty("--sidebar-tree-nested-goal-indent", `${layout.nestedGoalIndentPx}px`);
 	document.documentElement.style.setProperty("--sidebar-tree-collapsed-indent", `${sidebarTreeCollapsedIndentPx(layout)}px`);
 }

@@ -559,12 +559,15 @@ export async function refreshSessions(): Promise<void> {
 				// after a branch or remote becomes available.
 				clearGoalGithubLinkCache();
 				// Auto-expand only newly discovered top-level goals that have live
-				// owning sessions. Automatic expansion is non-explicit so it cannot
-				// override a user's explicit collapse preference. Sub-goals never
-				// auto-open themselves or their parent just because they were found.
-				for (const g of incoming) {
-					if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id)) {
-						expandSidebarTreeNode({ kind: "goal", goalId: g.id }, { explicit: false });
+				// owning sessions after the initial hydration. Automatic expansion is
+				// non-explicit so it cannot override a user's explicit collapse
+				// preference. Sub-goals never auto-open themselves or their parent just
+				// because polling discovered them.
+				if (!isInitial) {
+					for (const g of incoming) {
+						if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id)) {
+							expandSidebarTreeNode({ kind: "goal", goalId: g.id }, { explicit: false });
+						}
 					}
 				}
 
@@ -1630,8 +1633,13 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
 		const goal = await res.json() as Goal;
 		await refreshSessions();
-		if (!goal.parentGoalId) {
-			expandSidebarTreeNode({ kind: "goal", goalId: goal.id });
+		const goalsById = new Map(state.goals.map(g => [g.id, g]));
+		let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+		const seenGoalIds = new Set<string>();
+		while (cursor && !seenGoalIds.has(cursor.id)) {
+			seenGoalIds.add(cursor.id);
+			expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+			cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
 		}
 		return goal;
 	} catch (err) {

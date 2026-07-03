@@ -141,8 +141,10 @@ function isArchivedOrTerminalSession(session: { archived?: unknown; status?: unk
 
 function sessionChildTreeKeyForRow(sessionId: string, row: HTMLElement | null): SidebarTreeNodeKey | null {
 	if (!row || !rowHasChevron(row)) return null;
-	const hasLiveChildren = state.gatewaySessions.some(session => sessionParentId(session) === sessionId && !isArchivedOrTerminalSession(session));
-	if (hasLiveChildren) return { kind: "session-children", sessionId, childClass: "first-class" };
+	const hasFirstClassChildren = state.gatewaySessions.some(session => sessionParentId(session) === sessionId && !isArchivedOrTerminalSession(session) && !!session.parentSessionId && !session.delegateOf);
+	if (hasFirstClassChildren) return { kind: "session-children", sessionId, childClass: "first-class" };
+	const hasLiveDelegateChildren = state.gatewaySessions.some(session => sessionParentId(session) === sessionId && !isArchivedOrTerminalSession(session) && !!session.delegateOf);
+	if (hasLiveDelegateChildren) return { kind: "session-children", sessionId, childClass: "delegate" };
 	const hasArchivedChildren = [...state.gatewaySessions, ...state.archivedSessions]
 		.some(session => sessionParentId(session) === sessionId && isArchivedOrTerminalSession(session));
 	if (hasArchivedChildren) return { kind: "session-children", sessionId, childClass: "archived-delegate" };

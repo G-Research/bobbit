@@ -985,7 +985,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	// Check for children (live delegates + first-class child sessions + archived children)
 	const treeChildGroups = treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
 	const liveChildren = treeChildGroups
-		? treeChildGroups.filter(group => group.context.childClass === "first-class").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+		? treeChildGroups.filter(group => group.context.childClass === "first-class" || group.context.childClass === "delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
 		: visibleLiveChildrenForParent(session.id);
 	const archivedChildren = treeChildGroups
 		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
@@ -994,9 +994,10 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession) || !!treeChildGroups?.some(group => group.context.childClass === "first-class" && group.children.length > 0);
 	const hasArchivedChildGroup = archivedChildren.length > 0;
 	const firstClassGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "first-class" && group.expanded);
+	const delegateGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "delegate" && group.expanded);
 	const archivedGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "archived-delegate" && group.expanded);
 	const childrenExpanded = hasChildren && (treeChildGroups
-		? (hasFirstClassChild ? !!firstClassGroupExpanded : !!archivedGroupExpanded)
+		? (hasFirstClassChild ? !!firstClassGroupExpanded : !!(delegateGroupExpanded ?? archivedGroupExpanded))
 		: (hasFirstClassChild ? isFirstClassParentExpanded(session.id) : isArchivedParentExpanded(session.id)));
 	const shouldRenderChildArea = childrenExpanded || (hasFirstClassChild && hasArchivedChildGroup);
 
@@ -1059,7 +1060,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 					</div>`}
 		</div>
 		${shouldRenderChildArea ? (treeChildGroups
-			? renderTreeSessionChildrenGroups(treeChildGroups, { showArchivedGroupHeader: hasFirstClassChild && hasArchivedChildGroup })
+			? renderTreeSessionChildrenGroups(treeChildGroups, { showArchivedGroupHeader: liveChildren.length > 0 && hasArchivedChildGroup })
 			: html`${childrenExpanded ? renderLiveDelegates(session.id) : ""}${state.showArchived ? renderArchivedDelegates(session.id, false, { showToggle: hasFirstClassChild && hasArchivedChildGroup }) : ""}`) : ""}
 	`;
 }
@@ -1111,7 +1112,7 @@ function renderArchivedDelegateGroupToggle(parentSessionId: string, expanded: bo
 
 function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildrenContext>[], opts?: { showArchivedGroupHeader?: boolean }): TemplateResult | string {
 	const visibleGroups = groups.filter(group => group.children.length > 0);
-	const showArchivedGroupHeader = opts?.showArchivedGroupHeader ?? (visibleGroups.some(group => group.context.childClass === "first-class") && visibleGroups.some(group => group.context.childClass === "archived-delegate"));
+	const showArchivedGroupHeader = opts?.showArchivedGroupHeader ?? (visibleGroups.some(group => group.context.childClass === "first-class" || group.context.childClass === "delegate") && visibleGroups.some(group => group.context.childClass === "archived-delegate"));
 	const rendered = visibleGroups.map(group => {
 		const childRows = group.children.filter(isSessionTreeNode).map(renderTreeSessionNode);
 		if (group.context.childClass === "archived-delegate" && showArchivedGroupHeader) {
