@@ -11,8 +11,14 @@ import {
 	loadSidebarTreeLayoutPreference,
 	resetSidebarTreeIndentPreference,
 	saveSidebarTreeIndentPx,
+	sidebarTreeBaseIndentStyle,
 	sidebarTreeCollapsedIndentPx,
+	sidebarTreeCollapsedIndentStyle,
+	sidebarTreeHalfIndentStyle,
 	sidebarTreeIndentPxToLayout,
+	sidebarTreeLegacyGoalIndentStyle,
+	sidebarTreeNodeIndentStyle,
+	sidebarTreeTruncationIndentStyle,
 } from "../src/app/sidebar-tree-layout.ts";
 
 function installLocalStorageShim(): Map<string, string> {
@@ -87,6 +93,34 @@ describe("sidebar tree indent preference helpers", () => {
 		assert.equal(sidebarTreeCollapsedIndentPx(16), 5);
 		assert.equal(sidebarTreeCollapsedIndentPx(28), 6);
 	});
+
+	it("emits fallback-aware runtime CSS style helpers", () => {
+		assert.equal(
+			sidebarTreeBaseIndentStyle(),
+			"padding-inline-start: var(--sidebar-tree-base-indent, var(--sidebar-tree-base-indent-default));",
+		);
+		assert.equal(sidebarTreeHalfIndentStyle(), "padding-inline-start: var(--sidebar-tree-half-indent);");
+		assert.equal(
+			sidebarTreeNodeIndentStyle({ kind: "goal", indentDepth: 2, indentLevel: 99, context: { renderPlacement: "project-forest" } }),
+			"padding-inline-start: calc(var(--sidebar-tree-nested-goal-indent, var(--sidebar-tree-nested-goal-indent-default)) * 2);",
+		);
+		assert.equal(
+			sidebarTreeNodeIndentStyle({ kind: "session", indentDepth: 2, indentLevel: 99, context: {} }),
+			"padding-inline-start: calc(var(--sidebar-tree-base-indent, var(--sidebar-tree-base-indent-default)) * 2);",
+		);
+		assert.equal(
+			sidebarTreeLegacyGoalIndentStyle(1),
+			"padding-inline-start: var(--sidebar-tree-nested-goal-indent, var(--sidebar-tree-nested-goal-indent-default));",
+		);
+		assert.equal(
+			sidebarTreeTruncationIndentStyle(1),
+			"padding-inline-start: calc(var(--sidebar-tree-nested-goal-indent, var(--sidebar-tree-nested-goal-indent-default)) + var(--sidebar-header-chevron-w));",
+		);
+		assert.equal(
+			sidebarTreeCollapsedIndentStyle(2),
+			"padding-inline-start: calc(var(--sidebar-tree-collapsed-indent, var(--sidebar-tree-collapsed-indent-default)) * 2);",
+		);
+	});
 });
 
 describe("sidebar tree indent storage", () => {
@@ -118,8 +152,12 @@ describe("sidebar tree indent storage", () => {
 	it("saves clamped values and resets to the default", () => {
 		assert.equal(saveSidebarTreeIndentPx(99), SIDEBAR_TREE_INDENT_MAX_PX);
 		assert.equal(store.get(SIDEBAR_TREE_INDENT_KEY), String(SIDEBAR_TREE_INDENT_MAX_PX));
+		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_MAX_PX);
+		assert.deepEqual(loadSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: SIDEBAR_TREE_INDENT_MAX_PX });
 		assert.equal(resetSidebarTreeIndentPreference(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
 		assert.equal(store.get(SIDEBAR_TREE_INDENT_KEY), String(SIDEBAR_TREE_INDENT_DEFAULT_PX));
+		assert.equal(loadSidebarTreeIndentPx(), SIDEBAR_TREE_INDENT_DEFAULT_PX);
+		assert.deepEqual(loadSidebarTreeLayoutPreference(), { version: 1, indentMode: "comfortable", baseIndentPx: 5, nestedGoalIndentPx: SIDEBAR_TREE_INDENT_DEFAULT_PX });
 	});
 
 	it("tolerates throwing storage and still returns the effective value", () => {
@@ -137,6 +175,20 @@ describe("applySidebarTreeLayoutVars", () => {
 		assert.equal(vars.get("--sidebar-tree-base-indent"), "5px");
 		assert.equal(vars.get("--sidebar-tree-nested-goal-indent"), "24px");
 		assert.equal(vars.get("--sidebar-tree-collapsed-indent"), "6px");
+	});
+
+	it("clamps unsafe runtime variable inputs", () => {
+		let vars = installDocumentStyleShim();
+		applySidebarTreeLayoutVars({ version: 1, indentMode: "comfortable", baseIndentPx: 999, nestedGoalIndentPx: 999 });
+		assert.equal(vars.get("--sidebar-tree-base-indent"), "5px");
+		assert.equal(vars.get("--sidebar-tree-nested-goal-indent"), "28px");
+		assert.equal(vars.get("--sidebar-tree-collapsed-indent"), "6px");
+
+		vars = installDocumentStyleShim();
+		applySidebarTreeLayoutVars({ version: 1, indentMode: "comfortable", baseIndentPx: -1, nestedGoalIndentPx: Number.NaN });
+		assert.equal(vars.get("--sidebar-tree-base-indent"), "5px");
+		assert.equal(vars.get("--sidebar-tree-nested-goal-indent"), "16px");
+		assert.equal(vars.get("--sidebar-tree-collapsed-indent"), "5px");
 	});
 
 	it("is safe without document", () => {
