@@ -54,7 +54,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "nestedMatchGoal" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -177,6 +177,43 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await setSearch(page, "");
 		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps goal visible`).toBeVisible();
 		await expectSessionHidden(page, ids.collapsedParentSession, `${MARK}: clearing search restores collapsed goal behavior`);
+	});
+
+	test("search retains matching first-class and delegate child sessions with goal ownership", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expectSessionHidden(page, ids.childSessionParent, `${MARK}: child parent starts hidden behind collapsed goal`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: first-class child starts hidden behind collapsed goal`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: delegate child starts hidden behind collapsed goal`);
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "FirstClassChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for first-class child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps first-class child parent as placement container`);
+		await expectSessionVisible(page, ids.firstClassChildSession, `${MARK}: search reveals matching first-class child with goalId`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: search does not show non-matching delegate sibling broadly`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "DelegateChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for delegate child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps delegate parent as placement container`);
+		await expectSessionVisible(page, ids.delegateChildSession, `${MARK}: search reveals matching delegate child with goalId`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: search does not show non-matching first-class sibling broadly`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setFilters(page, { showArchived: true });
+		await setSearch(page, "ArchivedDelegateChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for archived delegate child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps archived delegate parent as placement container`);
+		await expectSessionVisible(page, ids.archivedDelegateChildSession, `${MARK}: search reveals matching archived delegate child with goalId/teamGoalId`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: archived delegate search keeps non-matching live child hidden`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: clearing search restores collapsed goal for first-class child`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: clearing search restores collapsed goal for delegate child`);
+		await expectSessionHidden(page, ids.archivedDelegateChildSession, `${MARK}: clearing search restores collapsed goal for archived delegate child`);
 	});
 
 	test("Show Read and Show Busy filters hide rows while search bypasses the filters", async ({ page }) => {

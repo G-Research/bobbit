@@ -1329,6 +1329,55 @@ export function filterSidebarTreeModelGoalsForSearch(model: SidebarTreeModel, vi
 	};
 }
 
+export interface SidebarSearchSessionRetention {
+	visibleGoalIds: Set<string>;
+	retainedSessionIds: Set<string>;
+}
+
+function sessionOwningGoalId(session: GatewaySession): string | undefined {
+	return session.goalId || session.teamGoalId || effectiveArchivedTeamGoalId(session);
+}
+
+export function collectSidebarSearchSessionRetention(input: {
+	visibleGoalIds: Iterable<string>;
+	goals: readonly Goal[];
+	liveSessions: readonly GatewaySession[];
+	archivedSessions: readonly GatewaySession[];
+	sessionMatchesQuery: (session: GatewaySession) => boolean;
+}): SidebarSearchSessionRetention {
+	const visibleGoalIds = new Set(input.visibleGoalIds);
+	const retainedSessionIds = new Set<string>();
+	const goalsById = new Map(input.goals.map(goal => [goal.id, goal]));
+	const sessionsById = new Map<string, GatewaySession>();
+	for (const session of [...input.liveSessions, ...input.archivedSessions]) {
+		if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
+	}
+	const addGoalAndAncestors = (goalId: string | undefined) => {
+		let current = goalId;
+		const seen = new Set<string>();
+		while (current && !seen.has(current)) {
+			seen.add(current);
+			visibleGoalIds.add(current);
+			current = goalsById.get(current)?.parentGoalId;
+		}
+	};
+	const addSessionAndParents = (session: GatewaySession) => {
+		let current: GatewaySession | undefined = session;
+		const seen = new Set<string>();
+		while (current && !seen.has(current.id)) {
+			seen.add(current.id);
+			retainedSessionIds.add(current.id);
+			addGoalAndAncestors(sessionOwningGoalId(current));
+			const parentId: string | undefined = current.parentSessionId || current.delegateOf;
+			current = parentId ? sessionsById.get(parentId) : undefined;
+		}
+	};
+	for (const session of sessionsById.values()) {
+		if (isChildSession(session) && input.sessionMatchesQuery(session)) addSessionAndParents(session);
+	}
+	return { visibleGoalIds, retainedSessionIds };
+}
+
 function renderGoalGroupFromTree(node: GoalTreeNode): TemplateResult {
 	const goal = node.context.goal as Goal;
 	return renderGoalGroup(goal, {
@@ -1471,31 +1520,43 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
+	let retainedSearchSessionIds: Set<string> | null = null;
 	if (query) {
+		const sessionMatchesQuery = (session: GatewaySession) => (session.title?.toLowerCase().includes(q) || session.role?.toLowerCase().includes(q)) ?? false;
 		const filteredLiveGoals = sidebarData.liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
 			const goalSessions = liveSessionsNoStaff.filter(s => (s.goalId === goal.id || effectiveArchivedTeamGoalId(s) === goal.id) && !isChildSession(s));
-			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+			const hasMatchingSession = goalSessions.some(sessionMatchesQuery);
 			return goalMatches || hasMatchingSession;
 		});
 		const filteredArchivedGoals = filterArchivedGoalsByQuery(sidebarData.archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
-		visibleSearchGoalIds = new Set([...filteredLiveGoals, ...filteredArchivedGoals].map(g => g.id));
+		const retention = collectSidebarSearchSessionRetention({
+			visibleGoalIds: [...filteredLiveGoals, ...filteredArchivedGoals].map(g => g.id),
+			goals: goalsForTree,
+			liveSessions: liveSessionsNoStaff,
+			archivedSessions: state.archivedSessions,
+			sessionMatchesQuery,
+		});
+		visibleSearchGoalIds = retention.visibleGoalIds;
+		retainedSearchSessionIds = retention.retainedSessionIds;
 		const filteredUngrouped = sidebarData.ungroupedSessions
 			.filter(s => passesSidebarFilters(s, s.id === activeSessionId(), true))
-			.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+			.filter(sessionMatchesQuery);
 		const filteredUngroupedIds = new Set(filteredUngrouped.map(s => s.id));
 		sessionsForTree = liveSessionsNoStaff.filter(s => {
+			if (retainedSearchSessionIds!.has(s.id)) return true;
+			if (isChildSession(s)) return false;
 			const owningGoalId = s.goalId || effectiveArchivedTeamGoalId(s);
 			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-			if (isChildSession(s)) return true;
 			return filteredUngroupedIds.has(s.id);
 		});
 		const filteredStandaloneArchived = filterArchivedSessionsByQuery(state.archivedSessions.filter(isStandaloneArchivedSession), state.searchQuery);
 		const filteredStandaloneArchivedIds = new Set(filteredStandaloneArchived.map(s => s.id));
 		archivedSessionsForTree = state.archivedSessions.filter(s => {
+			if (retainedSearchSessionIds!.has(s.id)) return true;
+			if (isChildSession(s)) return false;
 			const owningGoalId = s.goalId || s.teamGoalId || effectiveArchivedTeamGoalId(s);
 			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-			if (isChildSession(s)) return true;
 			if (isStandaloneArchivedSession(s)) return filteredStandaloneArchivedIds.has(s.id);
 			return false;
 		});
@@ -1516,7 +1577,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		filters: {
 			searchQuery: state.searchQuery,
 			activeSessionId: activeSessionId(),
-			passesSessionFilters: (session, active, bypass) => passesSidebarFilters(session as GatewaySession, active, bypass),
+			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
 			bypassBusyReadFilters: bypassFilters,
 			includeArchived: state.showArchived,
 		},

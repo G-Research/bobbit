@@ -22,6 +22,10 @@ const GOAL_ID = "sidebar-filter-goal";
 const GOAL_READ_SESSION_ID = "sidebar-filter-goal-read-session";
 const COLLAPSED_PARENT_GOAL_ID = "sidebar-filter-collapsed-parent-goal";
 const COLLAPSED_PARENT_SESSION_ID = "sidebar-filter-collapsed-parent-session";
+const CHILD_SESSION_PARENT_ID = "sidebar-filter-child-session-parent";
+const FIRST_CLASS_CHILD_SESSION_ID = "sidebar-filter-first-class-child-session";
+const DELEGATE_CHILD_SESSION_ID = "sidebar-filter-delegate-child-session";
+const ARCHIVED_DELEGATE_CHILD_SESSION_ID = "sidebar-filter-archived-delegate-child-session";
 const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
 
@@ -79,6 +83,10 @@ const IDS = {
 	goalReadSession: GOAL_READ_SESSION_ID,
 	collapsedParentGoal: `goal:${COLLAPSED_PARENT_GOAL_ID}`,
 	collapsedParentSession: COLLAPSED_PARENT_SESSION_ID,
+	childSessionParent: CHILD_SESSION_PARENT_ID,
+	firstClassChildSession: FIRST_CLASS_CHILD_SESSION_ID,
+	delegateChildSession: DELEGATE_CHILD_SESSION_ID,
+	archivedDelegateChildSession: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
 	nestedMatchGoal: `goal:${NESTED_MATCH_GOAL_ID}`,
 	archivedSession: ARCHIVED_SESSION_ID,
 };
@@ -179,6 +187,23 @@ function fixtureArchivedSessions(): GatewaySession[] {
 			archived: true,
 			archivedAt: 4_000,
 		},
+		{
+			id: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
+			title: "ArchivedDelegateChildNeedle",
+			role: "archived-delegate-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			teamGoalId: COLLAPSED_PARENT_GOAL_ID,
+			delegateOf: CHILD_SESSION_PARENT_ID,
+			status: "terminated",
+			createdAt: 83,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+			archived: true,
+			archivedAt: 4_000,
+		},
 	];
 }
 
@@ -238,6 +263,47 @@ function fixtureSessions(): GatewaySession[] {
 			goalId: COLLAPSED_PARENT_GOAL_ID,
 			status: "idle",
 			createdAt: 55,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: CHILD_SESSION_PARENT_ID,
+			title: "OpaqueChildContainer",
+			role: "container-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			status: "idle",
+			createdAt: 80,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: FIRST_CLASS_CHILD_SESSION_ID,
+			title: "FirstClassChildNeedle",
+			role: "first-class-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			parentSessionId: CHILD_SESSION_PARENT_ID,
+			status: "idle",
+			createdAt: 81,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: DELEGATE_CHILD_SESSION_ID,
+			title: "DelegateChildNeedle",
+			role: "delegate-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			delegateOf: CHILD_SESSION_PARENT_ID,
+			status: "idle",
+			createdAt: 82,
 			lastActivity: 1_000,
 			lastReadAt: 2_000,
 			clientCount: 0,

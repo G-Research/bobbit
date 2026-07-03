@@ -42,7 +42,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
@@ -438,7 +438,7 @@ function renderMobileLanding() {
 	const query = state.searchQuery.trim();
 	const queryLower = query.toLowerCase();
 	const sessionMatchesQuery = (session: GatewaySession) =>
-		session.title?.toLowerCase().includes(queryLower) || session.role?.toLowerCase().includes(queryLower);
+		(session.title?.toLowerCase().includes(queryLower) || session.role?.toLowerCase().includes(queryLower)) ?? false;
 	const matchingLiveGoals = query
 		? liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(queryLower);
@@ -450,7 +450,17 @@ function renderMobileLanding() {
 	const matchingArchivedGoals = query
 		? filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery)
 		: archivedGoals;
-	const visibleSearchGoalIds = query ? new Set([...matchingLiveGoals, ...matchingArchivedGoals].map(goal => goal.id)) : null;
+	const searchRetention = query
+		? collectSidebarSearchSessionRetention({
+			visibleGoalIds: [...matchingLiveGoals, ...matchingArchivedGoals].map(goal => goal.id),
+			goals: state.goals as any,
+			liveSessions: state.gatewaySessions,
+			archivedSessions: state.archivedSessions,
+			sessionMatchesQuery,
+		})
+		: null;
+	const visibleSearchGoalIds = searchRetention?.visibleGoalIds ?? null;
+	const retainedSearchSessionIds = searchRetention?.retainedSessionIds ?? null;
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
@@ -560,17 +570,19 @@ function renderMobileLanding() {
 									const liveSessionInput = state.gatewaySessions.filter(session => {
 										if (sidebarData.staffSessionIds.has(session.id)) return false;
 										if (!query) return true;
+										if (retainedSearchSessionIds!.has(session.id)) return true;
+										if (isChildSession(session)) return false;
 										const owningGoalId = session.goalId || effectiveArchivedTeamGoalId(session);
 										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-										if (isChildSession(session)) return true;
 										return sessionMatchesQuery(session);
 									});
 									const archivedSessionInput = state.showArchived
 										? state.archivedSessions.filter(session => {
 											if (!query) return true;
+											if (retainedSearchSessionIds!.has(session.id)) return true;
+											if (isChildSession(session)) return false;
 											const owningGoalId = session.goalId || session.teamGoalId || effectiveArchivedTeamGoalId(session);
 											if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-											if (isChildSession(session)) return true;
 											return isStandaloneArchivedSession(session) && filteredStandaloneArchivedSessionIds.has(session.id);
 										})
 										: [];
@@ -585,7 +597,7 @@ function renderMobileLanding() {
 											searchQuery: state.searchQuery,
 											bypassBusyReadFilters: bypassFilters,
 											activeSessionId: activeSessionId(),
-											passesSessionFilters: (session, active, bypass) => passesSidebarFilters(session as GatewaySession, active, bypass),
+											passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
 										},
 										projectOrder: projectsForRender.map(project => project.id),
 										viewport: "mobile",
