@@ -18,6 +18,8 @@ const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot
 const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
 const SIDEBAR_SPAWNED_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
 const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
+const SIDEBAR_TREE_STATE_SRC = path.resolve("src/app/sidebar-tree-state.ts");
+const SIDEBAR_TREE_LAYOUT_SRC = path.resolve("src/app/sidebar-tree-layout.ts");
 const TEAM_ARCHIVED_BUCKET_SRC = path.resolve("src/app/team-archived-bucket.ts");
 
 const MARK = "SIDEBAR_ARCHIVED_FIXTURE";
@@ -40,6 +42,8 @@ test.beforeAll(() => {
 			SIDEBAR_NESTING_SRC,
 			SIDEBAR_SPAWNED_SRC,
 			SIDEBAR_TREE_BUILDER_SRC,
+			SIDEBAR_TREE_STATE_SRC,
+			SIDEBAR_TREE_LAYOUT_SRC,
 			TEAM_ARCHIVED_BUCKET_SRC,
 		],
 	});
@@ -120,6 +124,13 @@ async function expectArchivedSectionPreference(page: Page, projectId: string, pr
 		if (!raw) return undefined;
 		return JSON.parse(raw).expansion?.[`sidebar-tree/v1/project-archived/${encodeURIComponent(id)}`];
 	}, projectId)).toBe(preference);
+}
+
+async function sidebarTreeExpansionSnapshot(page: Page): Promise<Record<string, string>> {
+	return page.evaluate(() => {
+		const raw = localStorage.getItem("bobbit-sidebar-tree-state:v1");
+		return raw ? (JSON.parse(raw).expansion ?? {}) : {};
+	});
 }
 
 async function expandLiveTeamLead(page: Page, teamLeadId: string, teamWorkerId: string): Promise<void> {
@@ -242,6 +253,42 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate hidden when Show Archived is off`).toHaveCount(0, { timeout: 5_000 });
 		await setShowArchived(page, true);
 		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate survives Show Archived cycle`).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("search auto-open clear preserves explicit archived tree preferences", async ({ page }) => {
+		await loadFixture(page, { showArchived: false });
+		const ids = await fixtureIds(page);
+		await page.evaluate(() => (window as any).__setArchivedSearchPreferenceFixture());
+		const before = await sidebarTreeExpansionSnapshot(page);
+
+		await page.evaluate(() => {
+			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-input", { detail: { query: "Alpha Archived" }, bubbles: true, composed: true }));
+		});
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(true);
+		await page.evaluate(() => {
+			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-clear", { bubbles: true, composed: true }));
+		});
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+
+		const after = await sidebarTreeExpansionSnapshot(page);
+		expect(after[`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`]).toBe(before[`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`]);
+		expect(after[`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`]).toBe(before[`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`]);
+		expect(after[`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`]).toBe(before[`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`]);
+		expect(after[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`]).toBe(before[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`]);
+		expect(after[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`]).toBe(before[`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`]);
+	});
+
+	test("collapsed sidebar recurses into session child and delegate groups", async ({ page }) => {
+		await loadFixture(page, { showArchived: true, collapsed: true });
+		await expect(page.getByTestId("sidebar-collapsed")).toBeVisible({ timeout: 10_000 });
+		const parent = page.locator(`button[title='Alpha Live Parent Session']`).first();
+		await expect(parent, `${MARK}: collapsed live parent session button visible`).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`button[title='Alpha Archived Delegate']`), `${MARK}: archived delegate starts collapsed`).toHaveCount(0);
+
+		await parent.locator(".sidebar-chevron-glyph").click();
+		await expect(page.locator(`button[title='Alpha Archived Delegate']`), `${MARK}: archived delegate appears under collapsed parent`).toBeVisible({ timeout: 5_000 });
+		await page.locator(`button[title='Alpha Archived Delegate'] .sidebar-chevron-glyph`).click();
+		await expect(page.locator(`button[title='Alpha Archived Nested Delegate']`), `${MARK}: nested archived delegate appears recursively`).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("collapsed sidebar exposes archived goal rows only when Show Archived is on", async ({ page }) => {

@@ -66,7 +66,7 @@ import "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId, renderArchivedSessionRow, renderArchivedDelegates, archivedDivider, bucketActiveArchived } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, renderSandboxIndicator, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId, archivedDivider, bucketActiveArchived } from "./render-helpers.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -419,12 +419,7 @@ function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): Retur
 				${projectTree.archivedGoalForest.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeHalfIndentStyle()}">${renderMobileGoalForest(projectTree.archivedGoalForest, true)}</div>` : ""}
 				${projectTree.archivedGoalForest.length > 0 && projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex items-center gap-2 ${dividerMy} mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${projectTree.archivedSessionNodes.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
-					${projectTree.archivedSessionNodes.map(node => html`
-						<div data-tree-key=${node.key}>
-							${renderArchivedSessionRow(node.context.session as GatewaySession)}
-							${renderArchivedDelegates(node.context.session.id)}
-						</div>
-					`)}
+					${projectTree.archivedSessionNodes.map(node => renderTreeSessionNode(node))}
 				</div>` : ""}
 			` : ""}
 		</div>
@@ -680,7 +675,7 @@ function renderMobileLanding() {
 														</div>
 														${_mobileUngroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
 															<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
-																${projectTree.ungroupedSessionNodes.map(node => html`<div data-tree-key=${node.key}>${renderSessionRow(node.context.session as GatewaySession)}</div>`)}
+																${projectTree.ungroupedSessionNodes.map(node => renderTreeSessionNode(node))}
 															</div>
 														` : ""}
 													</div>`; })()}

@@ -197,6 +197,7 @@ export type SidebarTreeDiagnostic =
 	| { kind: "cycle-cut"; goalId: string; parentGoalId: string; ancestorGoalIds: string[] }
 	| { kind: "duplicate-goal-id"; goalId: string }
 	| { kind: "cross-project-parent"; goalId: string; parentGoalId: string }
+	| { kind: "session-cycle-cut"; sessionId: string; parentSessionId: string; ancestorSessionIds: string[] }
 	| { kind: "duplicate-node-key"; key: string };
 
 export interface SidebarProjectTree {
@@ -291,6 +292,7 @@ export function resolveSidebarTreeLayoutPreference(input?: SidebarTreeLayoutPref
 
 export function buildSidebarTree(input: BuildSidebarTreeInput): SidebarTreeModel {
 	const ctx = createBuildContext(input);
+	diagnoseSessionParentCycles(ctx);
 	const projects = orderProjects(input.projects, input.projectOrder);
 	const projectIds = new Set(projects.map(p => p.id));
 	const goals = dedupeGoals(input.goals, ctx.diagnostics);
@@ -366,6 +368,32 @@ function createBuildContext(input: BuildSidebarTreeInput): BuildContext {
 	};
 }
 
+function diagnoseSessionParentCycles(ctx: BuildContext): void {
+	const byId = new Map<string, SessionLike>();
+	for (const session of [...ctx.liveSessions, ...ctx.archivedSessions]) {
+		if (!byId.has(session.id)) byId.set(session.id, session);
+	}
+	const reported = new Set<string>();
+	for (const session of byId.values()) {
+		const path: string[] = [];
+		let cursor: SessionLike | undefined = session;
+		while (cursor) {
+			const parentId = sessionParentId(cursor);
+			if (!parentId) break;
+			path.push(cursor.id);
+			if (path.includes(parentId)) {
+				const key = `${cursor.id}->${parentId}`;
+				if (!reported.has(key)) {
+					reported.add(key);
+					ctx.diagnostics.push({ kind: "session-cycle-cut", sessionId: parentId, parentSessionId: cursor.id, ancestorSessionIds: [...path] });
+				}
+				break;
+			}
+			cursor = byId.get(parentId);
+		}
+	}
+}
+
 function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGoalId: ReadonlyMap<string, string>, ctx: BuildContext): SidebarProjectTree {
 	const projectNode = makeNode<ProjectContext>(ctx, { kind: "project", projectId: project.id }, { project, projectId: project.id, viewport: ctx.viewport }, null, 0, 0, 0);
 	const renderableGoalIds = new Set(goals.map(g => g.id));
@@ -414,7 +442,7 @@ function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGo
 	const sessionsSectionNode = makeNode<ProjectSectionContext>(ctx, { kind: "project-sessions", projectId: project.id }, { project, projectId: project.id, section: "sessions", viewport: ctx.viewport }, projectNode.key, 1, 0, 0);
 	const ungroupedSessionNodes = ctx.liveSessions
 		.filter(s => s.projectId === project.id && !s.goalId && !s.teamGoalId && !isChildSession(s) && ctx.passesSession(s))
-		.map(s => makeSessionNode(s, sessionsSectionNode, undefined, ctx));
+		.map(s => makeSessionNode(s, sessionsSectionNode, undefined, ctx, []));
 	sessionsSectionNode.children.push(...ungroupedSessionNodes);
 	const staffRows = (ctx.input.staff ?? []).filter(s => s.projectId === project.id);
 	const staffSectionNode = staffRows.length > 0
@@ -430,7 +458,7 @@ function buildProjectTree(project: ProjectLike, goals: GoalLike[], projectIdByGo
 			.filter(isDefined);
 		archivedSessionNodes = ctx.archivedSessions
 			.filter(s => s.projectId === project.id && isStandaloneArchivedSession(s, renderableGoalIds) && ctx.passesSession(s))
-			.map(s => makeSessionNode(s, archivedSectionNode!, "archived-delegate", ctx));
+			.map(s => makeSessionNode(s, archivedSectionNode!, "archived-delegate", ctx, []));
 		archivedSectionNode.children.push(...archivedGoalForest, ...archivedSessionNodes);
 		if (archivedSectionNode.children.length > 0) registerNode(archivedSectionNode, ctx);
 	}
@@ -495,7 +523,7 @@ function appendGoalRuntimeChildren(goalNode: SidebarTreeNode<GoalContext>, proje
 		if (liveLead) {
 			appendTeamLeadNode(goalNode, liveLead, filteredLive.filter(s => s.id !== liveLead.id), false, project, spawnedCandidates, ctx);
 		} else {
-			for (const session of filteredLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx));
+			for (const session of filteredLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx, []));
 		}
 		if (!ctx.includeArchived) return;
 		const archivedForGoal = ctx.archivedSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s));
@@ -509,14 +537,14 @@ function appendGoalRuntimeChildren(goalNode: SidebarTreeNode<GoalContext>, proje
 			appendTeamLeadNode(goalNode, lead, members, true, project, spawnedCandidates, ctx);
 		});
 		if (!liveLead && archivedLeads.length === 0) {
-			for (const member of unmapped) goalNode.children.push(makeSessionNode(member, goalNode, "archived-delegate", ctx));
+			for (const member of unmapped) goalNode.children.push(makeSessionNode(member, goalNode, "archived-delegate", ctx, []));
 		}
 		return;
 	}
-	for (const session of filteredLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx));
+	for (const session of filteredLive) goalNode.children.push(makeSessionNode(session, goalNode, undefined, ctx, []));
 	if (ctx.includeArchived) {
 		for (const session of ctx.archivedSessions.filter(s => isGoalOwningSession(s, goal.id) && !isChildSession(s) && ctx.passesSession(s))) {
-			goalNode.children.push(makeSessionNode(session, goalNode, "archived-delegate", ctx));
+			goalNode.children.push(makeSessionNode(session, goalNode, "archived-delegate", ctx, []));
 		}
 	}
 }
@@ -549,14 +577,14 @@ function appendTeamLeadNode(
 		? { liveTeamChildren: [] as SessionLike[], archivedBelow: members }
 		: bucketTeamChildren(members, archivedForLiveLead, ctx.includeArchived);
 	for (const member of liveTeamChildren) {
-		const memberNode = makeSessionNode(member, node, undefined, ctx);
+		const memberNode = makeSessionNode(member, node, undefined, ctx, []);
 		node.children.push(memberNode);
 		node.context.memberSessionKeys.push(memberNode.key);
 	}
 	const spawned = selectSpawnedChildren(spawnedCandidates, goalNode.context.goal.id, lead.id, ctx.includeArchived || archivedLead, lead.id);
 	for (const childGoal of spawned.filter(g => !g.archived)) appendSpawnedGoalNode(node, childGoal, project, spawnedCandidates, ctx);
 	for (const member of archivedBelow) {
-		const memberNode = makeSessionNode(member, node, "archived-delegate", ctx);
+		const memberNode = makeSessionNode(member, node, "archived-delegate", ctx, []);
 		node.children.push(memberNode);
 		node.context.archivedMemberSessionKeys.push(memberNode.key);
 	}
@@ -578,12 +606,20 @@ function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal:
 	ctx.spawnedGoalNodesByLeadSessionId.set(leadNode.context.session.id, existing);
 }
 
-function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: SessionLike, ctx: BuildContext): string[] {
+function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: SessionLike, ctx: BuildContext, ancestorSessionIds: readonly string[] = []): string[] {
 	const groupKeys: string[] = [];
+	const parentPath = [...ancestorSessionIds, parentSession.id];
 	const childCandidates = dedupeSessionsById([
 		...ctx.liveSessions,
 		...(ctx.includeArchived ? ctx.archivedSessions : []),
-	]).filter(s => sessionParentId(s) === parentSession.id && ctx.passesSession(s));
+	]).filter(s => {
+		if (sessionParentId(s) !== parentSession.id || !ctx.passesSession(s)) return false;
+		if (parentPath.includes(s.id)) {
+			ctx.diagnostics.push({ kind: "session-cycle-cut", sessionId: s.id, parentSessionId: parentSession.id, ancestorSessionIds: parentPath });
+			return false;
+		}
+		return true;
+	});
 	const firstClassChildren = childCandidates
 		.filter(s => !isArchivedOrTerminalSession(s) && isFirstClassChildSession(s))
 		.sort(compareSessions);
@@ -602,7 +638,7 @@ function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: Ses
 		if (children.length === 0) continue;
 		const group = makeNode<SessionChildrenContext>(ctx, { kind: "session-children", sessionId: parentSession.id, childClass }, { sessionId: parentSession.id, childClass, childSessionKeys: [] }, parent.key, parent.logicalDepth + 1, parent.indentDepth + 1, (parent.indentDepth + 1) * ctx.layout.baseIndentPx);
 		for (const child of children) {
-			const childNode = makeSessionNode(child, group, childClass, ctx);
+			const childNode = makeSessionNode(child, group, childClass, ctx, parentPath);
 			group.children.push(childNode);
 			group.context.childSessionKeys.push(childNode.key);
 		}
@@ -615,7 +651,7 @@ function appendSessionChildrenGroups(parent: SidebarTreeNode, parentSession: Ses
 	return groupKeys;
 }
 
-function makeSessionNode(session: SessionLike, parent: SidebarTreeNode, childClass: SidebarSessionChildrenClass | undefined, ctx: BuildContext): SidebarTreeNode<SessionContext> {
+function makeSessionNode(session: SessionLike, parent: SidebarTreeNode, childClass: SidebarSessionChildrenClass | undefined, ctx: BuildContext, ancestorSessionIds: readonly string[]): SidebarTreeNode<SessionContext> {
 	const node = makeNode<SessionContext>(ctx, { kind: "session", sessionId: session.id }, {
 		session,
 		projectId: session.projectId,
@@ -626,7 +662,7 @@ function makeSessionNode(session: SessionLike, parent: SidebarTreeNode, childCla
 		activeCandidate: session.id === ctx.input.filters?.activeSessionId,
 		matchesSearch: matchesSearch(session.title ?? session.role ?? "", ctx.input.filters?.searchQuery),
 	}, parent.key, parent.logicalDepth + 1, parent.indentDepth + 1, (parent.indentDepth + 1) * ctx.layout.baseIndentPx);
-	appendSessionChildrenGroups(node, session, ctx);
+	appendSessionChildrenGroups(node, session, ctx, ancestorSessionIds);
 	return node;
 }
 

@@ -1129,7 +1129,7 @@ function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildren
 	return html`${rendered}`;
 }
 
-function renderTreeSessionNode(node: SidebarTreeNode<SessionContext>): TemplateResult | string {
+export function renderTreeSessionNode(node: SidebarTreeNode<SessionContext>): TemplateResult | string {
 	const session = node.context.session as GatewaySession;
 	const childGroupNodes = node.children.filter(isSessionChildrenNode);
 	const archived = node.context.childClass === "archived-delegate" || isArchivedOrTerminalSession(session);

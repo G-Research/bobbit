@@ -23,7 +23,7 @@ const createGoalSource = section(
 );
 
 const refreshAutoExpandBlock = refreshSessionsSource.match(
-	/if \(!isInitial\) \{\s*for \(const g of incoming\) \{\s*if \(!prevGoalIds\.has\(g\.id\) && !g\.parentGoalId && state\.gatewaySessions\.some\(\(s\) => s\.goalId === g\.id\)\) \{\s*expandSidebarTreeNode\(\{ kind: "goal", goalId: g\.id \}, \{ explicit: false \}\);\s*}\s*}\s*}/,
+	/if \(!isInitial\) \{\s*for \(const g of incoming\) \{\s*if \(!prevGoalIds\.has\(g\.id\) && !g\.parentGoalId && state\.gatewaySessions\.some\(\(s\) => s\.goalId === g\.id \|\| s\.teamGoalId === g\.id\)\) \{\s*expandSidebarTreeNode\(\{ kind: "goal", goalId: g\.id \}, \{ explicit: false \}\);\s*}\s*}\s*}/,
 )?.[0];
 assert.ok(refreshAutoExpandBlock, "refreshSessions auto-expand block should keep initial, top-level, and live-session guards");
 
@@ -37,7 +37,7 @@ const runRefreshAutoExpand = new Function(
 ) as (
 	incoming: Array<{ id: string; parentGoalId?: string }>,
 	prevGoalIds: Set<string>,
-	state: { gatewaySessions: Array<{ goalId?: string }> },
+	state: { gatewaySessions: Array<{ goalId?: string; teamGoalId?: string }> },
 	isInitial: boolean,
 	expandSidebarTreeNode: (key: unknown, opts?: unknown) => void,
 ) => void;
@@ -93,6 +93,22 @@ describe("api sidebar expansion regression", () => {
 		);
 
 		assert.deepEqual(calls, []);
+	});
+
+	it("refreshSessions treats teamGoalId-only live owning sessions as top-level goal owners", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+
+		runRefreshAutoExpand(
+			[{ id: "team-root" }],
+			new Set(),
+			{ gatewaySessions: [{ teamGoalId: "team-root" }] },
+			false,
+			(key, opts) => calls.push({ key, opts }),
+		);
+
+		assert.deepEqual(calls, [
+			{ key: { kind: "goal", goalId: "team-root" }, opts: { explicit: false } },
+		]);
 	});
 
 	it("refreshSessions leaves a collapsed parent closed when a new child/sub-goal appears", () => {

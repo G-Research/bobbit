@@ -1,4 +1,5 @@
 import type { SidebarTreeLayoutPreferenceV1, SidebarTreeNode } from "./sidebar-tree-builder.js";
+import { safeGetItem, safeSetItem } from "./safe-storage.js";
 
 export const SIDEBAR_TREE_INDENT_KEY = "bobbit:sidebar-tree-indent";
 export const SIDEBAR_TREE_INDENT_DEFAULT_PX = 16;
@@ -45,31 +46,22 @@ export function sidebarTreeCollapsedIndentPx(pxOrLayout: number | SidebarTreeLay
 }
 
 export function loadSidebarTreeIndentPx(): number {
-	try {
-		if (typeof localStorage === "undefined") return SIDEBAR_TREE_INDENT_DEFAULT_PX;
-		const raw = localStorage.getItem(SIDEBAR_TREE_INDENT_KEY);
-		const trimmed = raw?.trim();
-		if (!trimmed) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
-		const px = Number(trimmed);
-		if (!Number.isFinite(px)) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
-		return clampSidebarTreeIndentPx(px);
-	} catch {
-		return SIDEBAR_TREE_INDENT_DEFAULT_PX;
-	}
+	const raw = safeGetItem(SIDEBAR_TREE_INDENT_KEY);
+	const trimmed = raw?.trim();
+	if (!trimmed) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
+	const px = Number(trimmed);
+	if (!Number.isFinite(px)) return SIDEBAR_TREE_INDENT_DEFAULT_PX;
+	return clampSidebarTreeIndentPx(px);
 }
 
 export function saveSidebarTreeIndentPx(px: number): number {
 	const clamped = clampSidebarTreeIndentPx(px);
-	try {
-		if (typeof localStorage !== "undefined") localStorage.setItem(SIDEBAR_TREE_INDENT_KEY, String(clamped));
-	} catch { /* storage is best-effort */ }
+	safeSetItem(SIDEBAR_TREE_INDENT_KEY, String(clamped));
 	return clamped;
 }
 
 export function resetSidebarTreeIndentPreference(): number {
-	try {
-		if (typeof localStorage !== "undefined") localStorage.setItem(SIDEBAR_TREE_INDENT_KEY, String(SIDEBAR_TREE_INDENT_DEFAULT_PX));
-	} catch { /* storage is best-effort */ }
+	safeSetItem(SIDEBAR_TREE_INDENT_KEY, String(SIDEBAR_TREE_INDENT_DEFAULT_PX));
 	return SIDEBAR_TREE_INDENT_DEFAULT_PX;
 }
 

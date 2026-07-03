@@ -565,7 +565,7 @@ export async function refreshSessions(): Promise<void> {
 				// because polling discovered them.
 				if (!isInitial) {
 					for (const g of incoming) {
-						if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id)) {
+						if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id || s.teamGoalId === g.id)) {
 							expandSidebarTreeNode({ kind: "goal", goalId: g.id }, { explicit: false });
 						}
 					}

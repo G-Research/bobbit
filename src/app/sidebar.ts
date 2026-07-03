@@ -27,13 +27,12 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
-import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
-import { buildSidebarTree, type GoalContext, type SessionContext, type SidebarProjectTree, type SidebarTreeModel, type SidebarTreeNode, type TeamLeadContext } from "./sidebar-tree-builder.js";
+import { buildSidebarTree, type GoalContext, type SessionChildrenContext, type SessionContext, type SidebarProjectTree, type SidebarTreeModel, type SidebarTreeNode, type TeamLeadContext } from "./sidebar-tree-builder.js";
 import { safeSetItem } from "./safe-storage.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import {
@@ -45,6 +44,8 @@ import {
 	setArchivedSectionExpanded,
 	toggleTeamLeadExpanded,
 	toggleGoalExpanded,
+	setFirstClassParentExpanded,
+	setArchivedParentExpanded,
 	sidebarTreeExpansionInput,
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
@@ -1076,7 +1077,9 @@ function _revertArchivedIfSearchOpened(): void {
 	if (_archivedBySearch) {
 		state.showArchived = false;
 		_archivedBySearch = false;
-		resetArchivedExpandState();
+		// Search auto-open is ephemeral. Clearing it may unload fetched archived
+		// records, but it must never delete the user's persisted archived tree
+		// expansion choices.
 		clearArchivedSessionsState();
 	}
 }
@@ -1253,6 +1256,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 type GoalTreeNode = SidebarTreeNode<GoalContext>;
 type SessionTreeNode = SidebarTreeNode<SessionContext>;
 type TeamLeadTreeNode = SidebarTreeNode<TeamLeadContext>;
+type SessionChildrenTreeNode = SidebarTreeNode<SessionChildrenContext>;
 
 type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean; containsRuntimeSearchResult: boolean };
 
@@ -1427,12 +1431,7 @@ function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 				</div>` : ""}
 				${archivedGoals.length > 0 && archivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${archivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
-					${archivedSessions.map(node => html`
-						<div data-tree-key=${node.key}>
-							${renderArchivedSessionRow(node.context.session as GatewaySession)}
-							${renderArchivedDelegates(node.context.session.id)}
-						</div>
-					`)}
+					${archivedSessions.map(node => renderTreeSessionNode(node))}
 				</div>` : ""}
 			` : ""}
 		</div>
@@ -1643,7 +1642,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 			</div>
 			${ungroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
-					${projectTree.ungroupedSessionNodes.map(node => html`<div data-tree-key=${node.key}>${renderSessionRow(node.context.session as GatewaySession)}</div>`)}
+					${projectTree.ungroupedSessionNodes.map(node => renderTreeSessionNode(node))}
 				</div>
 			` : ""}
 			`; })()}
@@ -1851,8 +1850,53 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 		`;
 	};
 
-	const renderCollapsedSessionNode = (node: SessionTreeNode) =>
-		renderCollapsedSession(node.context.session as GatewaySession, node.key);
+	const renderCollapsedSessionChildrenGroup = (node: SessionChildrenTreeNode, archived = false): TemplateResult | string => {
+		if (node.children.length === 0) return "";
+		if (node.context.childClass === "archived-delegate" && !node.expanded) {
+			return html`
+				<button
+					data-tree-key=${node.key}
+					class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
+					title="Archived delegates"
+					@click=${(e: Event) => { e.stopPropagation(); setArchivedParentExpanded(node.context.sessionId, true); renderApp(); }}
+				>
+					<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">▸</span></span>
+					<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">ARC</span>
+				</button>
+			`;
+		}
+		return node.expanded ? html`${node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived || node.context.childClass === "archived-delegate")}</div>`)}` : "";
+	};
+
+	const renderCollapsedSessionNode = (node: SessionTreeNode) => {
+		const session = node.context.session as GatewaySession;
+		const children = node.children.filter((child): child is SessionChildrenTreeNode => child.kind === "session-children" && child.children.length > 0);
+		if (children.length === 0) return renderCollapsedSession(session, node.key);
+		const active = activeSessionId() === session.id;
+		const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+		const expanded = children.some(child => child.expanded);
+		return html`
+			<button
+				data-tree-key=${node.key}
+				class="flex items-center sidebar-action-cluster ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
+				title=${displayTitle}
+				@click=${() => { if (!active) connectToSession(session.id, true); }}
+			>
+				<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none" style="cursor:pointer;"
+					@click=${(e: Event) => {
+						e.stopPropagation();
+						const next = !expanded;
+						if (children.some(child => child.context.childClass === "first-class")) setFirstClassParentExpanded(session.id, next);
+						if (children.some(child => child.context.childClass === "delegate" || child.context.childClass === "archived-delegate")) setArchivedParentExpanded(session.id, next);
+						renderApp();
+					}}
+				><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}</span>
+				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
+			</button>
+			${expanded ? children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedSessionChildrenGroup(child)}</div>`) : ""}
+		`;
+	};
 
 	const renderCollapsedTeamLeadNode = (node: TeamLeadTreeNode) => {
 		const teamLead = node.context.session as GatewaySession;
@@ -1899,7 +1943,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 		if (node.kind === "session") return renderCollapsedSessionNode(node as SessionTreeNode);
 		if (node.kind === "team-lead") return renderCollapsedTeamLeadNode(node as TeamLeadTreeNode);
 		if (node.kind === "goal") return renderCollapsedGoalNode(node as GoalTreeNode, archived || (node as GoalTreeNode).context.archived);
-		if (node.kind === "session-children") return node.expanded ? html`${node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived)}</div>`)}` : "";
+		if (node.kind === "session-children") return renderCollapsedSessionChildrenGroup(node as SessionChildrenTreeNode, archived);
 		return "";
 	}
 

@@ -430,6 +430,22 @@ describe("buildSidebarTree", () => {
 		assert.equal(groups[0]?.expanded, false);
 	});
 
+	it("cuts recursive session parent/delegate cycles", () => {
+		const model = buildSidebarTree({
+			projects: [project()],
+			goals: [],
+			sessions: [
+				session({ id: "a", delegateOf: "c", createdAt: 1 }),
+				session({ id: "b", delegateOf: "a", createdAt: 2 }),
+				session({ id: "c", delegateOf: "b", createdAt: 3 }),
+			],
+			archivedSessions: [],
+			showArchived: true,
+		});
+		assert.equal(model.flatByKey.size, countNodes(model.projects.map(p => p.projectNode)));
+		assert.equal(model.diagnostics.some(d => d.kind === "session-cycle-cut" && d.sessionId === "a" && d.parentSessionId === "b"), true);
+	});
+
 	it("applies filters to first-class children and routes archived first-class children to archived-delegate", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
