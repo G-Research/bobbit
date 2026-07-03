@@ -51,7 +51,7 @@ class FakeView implements OrchestrationSessionView {
 		this.live.set(id, { id, status: "idle", title: opts.title, output: "" });
 		// Persist childKind/readOnly exactly as the real createDelegateSession now
 		// does (findings #1/#2) so restart-rebuild + scoping tests are faithful.
-		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind });
+		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind, instructions: opts.instructions });
 		return { id };
 	}
 	async createSession(cwd: string, _a: any, _g: any, _t: any, opts?: any): Promise<{ id: string }> {
@@ -674,14 +674,17 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 		const core = makeCore(view);
 		core.rebuildIndexFromPersisted([
 			{ id: "owner-1" },                                                    // not a child
-			{ id: "d1", delegateOf: "owner-1" },                                  // delegate child
+			{ id: "d1", delegateOf: "owner-1", childKind: "delegate", instructions: "task" }, // delegate child
+			{ id: "legacy", delegateOf: "owner-1", instructions: "old delegate" },   // legacy delegate child
+			{ id: "spoof", delegateOf: "owner-1" },                                  // mutable metadata only → skipped
+			{ id: "spoof-kind", delegateOf: "owner-1", childKind: "host-agents" },   // childKind alone is still mutable-spoofable → skipped
 			{ id: "prw", parentSessionId: "owner-1", childKind: "pr-walkthrough" }, // kinded child
 			{ id: "ha", parentSessionId: "owner-2", childKind: "host-agents" },   // other owner
 			{ id: "arch", delegateOf: "owner-1", archived: true },                // archived → skipped
 			{ id: "loose", parentSessionId: "owner-1" },                          // parent but no childKind → not a child
 		]);
 		const o1 = core.list("owner-1").map(h => h.sessionId).sort();
-		assert.deepEqual(o1, ["d1", "prw"]);
+		assert.deepEqual(o1, ["d1", "legacy", "prw"]);
 		assert.deepEqual(core.list("owner-2").map(h => h.sessionId), ["ha"]);
 		// host-agents discriminator preserved.
 		assert.equal(core.list("owner-2")[0].childKind, "host-agents");
@@ -709,6 +712,35 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 		const byKind = new Map(rebuilt.map(h => [h.sessionId, h.childKind]));
 		assert.equal(byKind.get(ha.sessionId), "host-agents");
 		assert.equal(byKind.get(del.sessionId), "delegate");
+	});
+
+	it("does not promote spoofed persisted delegateOf into live dismiss ownership after restart", async () => {
+		const view = new FakeView();
+		view.owner("attacker");
+		view.live.set("victim", { id: "victim", status: "idle", cwd: "/cwd/victim" });
+		view.persisted.set("victim", {
+			id: "victim",
+			delegateOf: "attacker",
+			teamLeadSessionId: "attacker",
+			// Simulate a real first-class child that already had childKind before the
+			// delegateOf spoof; childKind alone must not make delegateOf trusted.
+			parentSessionId: "real-owner",
+			childKind: "host-agents",
+		});
+		const core = makeCore(view);
+
+		core.rebuildIndexFromPersisted([...view.persisted.values()]);
+		assert.deepEqual(core.list("attacker"), []);
+
+		assert.deepEqual(await core.dismiss("attacker", "victim"), {
+			ok: false,
+			status: "not-owned",
+			sessionId: "victim",
+			message: "Child session victim is not owned by attacker.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
+		assert.equal(view.live.get("victim")?.status, "idle");
 	});
 });
 
@@ -751,7 +783,7 @@ describe("OrchestrationCore.remindOwnersWithLiveChildren (restart survival §4)"
 		view.owner("owner-2");
 		const core = makeCore(view);
 		core.rebuildIndexFromPersisted([
-			{ id: "d1", delegateOf: "owner-1", title: "Helper" },
+			{ id: "d1", delegateOf: "owner-1", childKind: "delegate", instructions: "task", title: "Helper" },
 			{ id: "t1", parentSessionId: "owner-2", childKind: "team" },
 		]);
 		const reminded = await core.remindOwnersWithLiveChildren(h => h.childKind !== "team");

@@ -19,9 +19,9 @@ import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionProm
 //
 // Key invariants (see the design doc):
 //   • Parent↔child linkage is DERIVED from existing persisted session fields
-//     (`delegateOf` / `parentSessionId` + `childKind`). There is NO new
-//     persisted registry. The core keeps an in-memory index keyed on owner
-//     session id, rebuilt on boot from those fields (§3).
+//     (`delegateOf` / `parentSessionId` + `childKind`) that match a server-created
+//     child shape. There is NO new persisted registry. The core keeps an in-memory
+//     index keyed on owner session id, rebuilt on boot from those fields (§3).
 //   • "Blocking-ness" is RUNTIME-ONLY, never persisted (§4).
 //   • ONE shared `wait` primitive with two policies (`all` / `first`) and
 //     terminal-child handling that never rejects the aggregate (§2.3).
@@ -245,6 +245,8 @@ export interface PersistedSessionLike {
 	id: string;
 	title?: string;
 	delegateOf?: string;
+	/** Durable delegate task; present on server-created delegate children. */
+	instructions?: string;
 	parentSessionId?: string;
 	childKind?: string;
 	archived?: boolean;
@@ -484,6 +486,22 @@ export class OrchestrationCore {
 			list[existingIndex] = { ...list[existingIndex], ...handle };
 		}
 		this.index.set(handle.ownerSessionId, list);
+	}
+
+	private trustedRestorableChild(ps: PersistedSessionLike): { ownerSessionId: string; childKind: ChildKind } | undefined {
+		if (ps.archived) return undefined;
+		if (ps.delegateOf) {
+			// `delegateOf` was historically API-mutable. Only promote it back into the
+			// trusted live-dismiss index when the row also has the server-created durable
+			// delegate task. A patched top-level or first-class child can gain delegateOf,
+			// but cannot gain `instructions` through the public metadata PATCH route.
+			if (typeof ps.instructions !== "string") return undefined;
+			return { ownerSessionId: ps.delegateOf, childKind: (ps.childKind as ChildKind) ?? "delegate" };
+		}
+		if (ps.parentSessionId && ps.childKind) {
+			return { ownerSessionId: ps.parentSessionId, childKind: ps.childKind as ChildKind };
+		}
+		return undefined;
 	}
 
 	private resolveOwnerCwd(ownerId: string): string | undefined {
@@ -848,23 +866,19 @@ export class OrchestrationCore {
 
 	/**
 	 * Rebuild the in-memory index on boot from persisted session fields (§3).
-	 * A child is any persisted session with `delegateOf` set, OR
-	 * (`parentSessionId` set AND `childKind` present). Owner = delegateOf ??
-	 * parentSessionId. Archived sessions are skipped. Blocking-ness is never
-	 * persisted, so every restored child is `blocking:false`.
+	 * A child is a non-archived persisted session whose ownership fields match a
+	 * server-created child shape. Blocking-ness is never persisted, so every
+	 * restored child is `blocking:false`.
 	 */
 	rebuildIndexFromPersisted(persisted: PersistedSessionLike[]): void {
 		this.index.clear();
 		for (const ps of persisted) {
-			if (ps.archived) continue;
-			const isChild = !!ps.delegateOf || (!!ps.parentSessionId && !!ps.childKind);
-			if (!isChild) continue;
-			const ownerSessionId = ps.delegateOf ?? ps.parentSessionId;
-			if (!ownerSessionId) continue;
+			const restored = this.trustedRestorableChild(ps);
+			if (!restored) continue;
 			this.addHandle({
 				sessionId: ps.id,
-				ownerSessionId,
-				childKind: (ps.childKind as ChildKind) ?? "delegate",
+				ownerSessionId: restored.ownerSessionId,
+				childKind: restored.childKind,
 				title: ps.title,
 				spawnedAt: Date.now(),
 				blocking: false,

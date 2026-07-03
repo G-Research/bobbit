@@ -9,7 +9,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
@@ -47,6 +47,8 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: undefined };
 	}
 
+	const dismissStatuses = new Set(["dismissed", "already-dismissed", "not-owned", "not-found", "failed"]);
+
 	function dismissText(result: any): string {
 		return [
 			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
@@ -57,18 +59,44 @@ export default function (pi: ExtensionAPI) {
 		].filter(Boolean).join("\n");
 	}
 
-	async function apiDetailed(method: string, urlPath: string, body?: unknown): Promise<{ ok: boolean; status: number; body: any }> {
+	function isStructuredDismissResult(value: unknown): value is { ok: boolean; status: string; sessionId: string; message: string; retryable: boolean } {
+		if (!value || typeof value !== "object") return false;
+		const v = value as Record<string, unknown>;
+		return typeof v.ok === "boolean"
+			&& typeof v.status === "string"
+			&& dismissStatuses.has(v.status)
+			&& typeof v.sessionId === "string"
+			&& typeof v.message === "string"
+			&& typeof v.retryable === "boolean";
+	}
+
+	function responseErrorText(body: unknown, fallback: string): string {
+		if (body && typeof body === "object" && "error" in body) return String((body as Record<string, unknown>).error);
+		if (typeof body === "string" && body.trim()) return body;
+		return fallback;
+	}
+
+	function normalizeDismissResponse(resp: { ok: boolean; status: number; body: unknown }, sessionId: string) {
+		if (isStructuredDismissResult(resp.body)) return resp.body;
+		const retryable = resp.status === 401 || resp.status === 408 || resp.status === 429 || resp.status >= 500;
+		return {
+			ok: false,
+			status: "failed",
+			sessionId,
+			message: resp.ok
+				? `team_dismiss returned an unstructured response (HTTP ${resp.status}).`
+				: `team_dismiss request failed (HTTP ${resp.status}): ${responseErrorText(resp.body, "unstructured gateway response")}`,
+			retryable,
+			httpStatus: resp.status,
+			response: resp.body,
+		};
+	}
+
+	async function apiDetailed(method: string, urlPath: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown }> {
 		const extraHeaders: Record<string, string> = {};
 		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
-		const resp = await fetch(`${creds.baseUrl}${urlPath}`, {
-			method,
-			headers: { Authorization: `Bearer ${creds.token}`, "Content-Type": "application/json", ...extraHeaders },
-			body: body !== undefined ? JSON.stringify(body) : undefined,
-		});
-		const text = await resp.text();
-		let parsed: any = text;
-		try { parsed = JSON.parse(text); } catch { /* keep text */ }
-		return { ok: resp.ok, status: resp.status, body: parsed };
+		const { ok, status, body: responseBody } = await apiCallDetailed(creds, method, urlPath, body, { extraHeaders });
+		return { ok, status, body: responseBody };
 	}
 
 	function err(msg: string) {
@@ -121,8 +149,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			try {
-				const resp = await apiDetailed("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: params.session_id });
-				return { content: [{ type: "text" as const, text: dismissText(resp.body) }], details: resp.body, isError: !resp.ok && resp.body?.status === "failed" };
+				const targetSessionId = params.session_id;
+				const resp = await apiDetailed("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: targetSessionId });
+				const result = normalizeDismissResponse(resp, targetSessionId);
+				return { content: [{ type: "text" as const, text: dismissText(result) }], details: result, isError: result.status === "failed" };
 			} catch (e: any) { return err(e.message); }
 		},
 	});
