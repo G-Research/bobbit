@@ -3818,6 +3818,29 @@ async function handleApiRoute(
 		return projectConfigStore;
 	}
 
+	type RoleMutationTarget =
+		| { scope: "server"; store: RoleStore; manager: RoleManager }
+		| { scope: "project"; store: RoleStore; projectId: string };
+
+	function roleMutationProjectId(value: unknown): string | undefined {
+		if (typeof value !== "string") return undefined;
+		const trimmed = value.trim();
+		return trimmed ? trimmed : undefined;
+	}
+
+	/**
+	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
+	 * project ids still resolve to that project's role store.
+	 */
+	function resolveRoleMutationTarget(rawProjectId: unknown): RoleMutationTarget | null {
+		const requestedProjectId = roleMutationProjectId(rawProjectId);
+		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
+		if (!effectiveProjectId) return { scope: "server", store: serverRoleStore, manager: roleManager };
+		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
+		if (!ctx) return null;
+		return { scope: "project", store: ctx.roleStore, projectId: effectiveProjectId };
+	}
+
 	/**
 	 * Resolve the host-side cwd for slash-skill discovery.
 	 * For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...)
@@ -9357,16 +9380,26 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/roles (scope-aware: body.projectId → create in that project's store)
+	// POST /api/roles (scope-aware: body.projectId → create in that project's store; Headquarters aliases server scope)
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
-		const targetProjectId = body?.projectId;
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const target = resolveRoleMutationTarget(body?.projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			if (target.scope === "server") {
+				const role = target.manager.createRole({
+					name: body?.name,
+					label: body?.label,
+					promptTemplate: body?.promptTemplate || "",
+					accessory: body?.accessory,
+					toolPolicies: body?.toolPolicies,
+					model: modelStr,
+					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
+				});
+				json(role, 201);
+			} else {
 				const now = Date.now();
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 				const role = {
 					name: body?.name,
 					label: body?.label ?? body?.name,
@@ -9381,19 +9414,7 @@ async function handleApiRoute(
 				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
 				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				ctx.roleStore.put(role);
-				json(role, 201);
-			} else {
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				const role = roleManager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
-				});
+				target.store.put(role);
 				json(role, 201);
 			}
 		} catch (err: any) {
@@ -9413,12 +9434,12 @@ async function handleApiRoute(
 		const source = resolved.find(r => r.item.name === name);
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9438,12 +9459,12 @@ async function handleApiRoute(
 		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9477,10 +9498,10 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.roleStore.get(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
@@ -9513,7 +9534,7 @@ async function handleApiRoute(
 					name,
 					updatedAt: Date.now(),
 				};
-				ctx.roleStore.put(updated);
+				target.store.put(updated);
 				json({ ok: true });
 			} else {
 				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
@@ -9525,7 +9546,7 @@ async function handleApiRoute(
 					: undefined;
 				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
 				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = roleManager.getRole(name);
+					const existing = target.manager.getRole(name);
 					if (existing) {
 						const patched = {
 							...existing,
@@ -9533,10 +9554,10 @@ async function handleApiRoute(
 							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
 							updatedAt: Date.now(),
 						};
-						serverRoleStore.put(patched);
+						target.store.put(patched);
 					}
 				}
-				const ok = roleManager.updateRole(name, {
+				const ok = target.manager.updateRole(name, {
 					label: body.label,
 					promptTemplate: body.promptTemplate,
 					accessory: body.accessory,
@@ -9559,13 +9580,13 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				ctx.roleStore.remove(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				target.store.remove(name);
 				json({ ok: true });
 			} else {
-				const ok = roleManager.deleteRole(name);
+				const ok = target.manager.deleteRole(name);
 				if (!ok) { json({ error: "Role not found" }, 404); return; }
 				json({ ok: true });
 			}
