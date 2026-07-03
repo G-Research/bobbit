@@ -82,7 +82,12 @@ test.describe("host.agents — fixture handler poll-based lifecycle (via the con
 			expect(result.listedIds).toContain(result.childSessionId);
 			// read() returned the child's output object; dismiss() cleaned it up.
 			expect(result.readIsObject).toBe(true);
-			expect(result.dismissed).toBe(true);
+			expect(result.dismissed).toMatchObject({
+				ok: true,
+				status: "dismissed",
+				sessionId: result.childSessionId,
+				retryable: false,
+			});
 			expect(result.listedAfterDismissCount).toBe(0);
 		} finally {
 			await deleteSession(owner);
