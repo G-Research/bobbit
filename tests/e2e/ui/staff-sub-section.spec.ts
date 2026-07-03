@@ -16,6 +16,8 @@ import { openApp } from "./ui-helpers.js";
 
 const STAFF_SECTION_LOCATOR = (page: Page) =>
 	page.locator("[data-testid='sidebar-expanded'] span.uppercase").filter({ hasText: /^Staff$/i });
+const STAFF_HEADER_FOR_PROJECT = (page: Page, projectId: string) =>
+	page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${projectId}"]`).first();
 
 async function resetStaffSidebarState(page: Page): Promise<void> {
 	await page.evaluate(() => {
@@ -99,7 +101,7 @@ test.describe("Per-project Staff sub-section", () => {
 		await resetStaffSidebarState(page);
 
 		// Header is visible even with zero staff so users can create their first one.
-		await expect(STAFF_SECTION_LOCATOR(page).first()).toBeVisible({ timeout: 10_000 });
+		await expect(STAFF_HEADER_FOR_PROJECT(page, project.id)).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 5_000 });
 
 		const matchStaff = await createStaffAgent(project, matchName);
@@ -127,13 +129,13 @@ test.describe("Per-project Staff sub-section", () => {
 		await searchInput.fill("");
 		await expect(page.getByText(otherName, { exact: true }).first()).toBeVisible({ timeout: 5_000 });
 
-		const header = STAFF_SECTION_LOCATOR(page).first();
+		const header = STAFF_HEADER_FOR_PROJECT(page, project.id);
 		await header.click();
-		expect(await staffCollapsed(page, project.id)).toBe(true);
+		await expect.poll(() => staffCollapsed(page, project.id), { timeout: 5_000 }).toBe(true);
 
 		await page.reload();
-		expect(await staffCollapsed(page, project.id)).toBe(true);
-		await STAFF_SECTION_LOCATOR(page).first().click();
+		await expect.poll(() => staffCollapsed(page, project.id), { timeout: 5_000 }).toBe(true);
+		await STAFF_HEADER_FOR_PROJECT(page, project.id).click();
 		await expect(page.getByText(matchName, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 
 		const retireResp = await apiFetch(`/api/staff/${matchStaff.id}`, {

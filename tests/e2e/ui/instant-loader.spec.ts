@@ -59,6 +59,19 @@ test.describe("Instant loader on session create", () => {
 			{ timeout: 10_000 },
 		);
 		await splashLabel.click();
+		// With Headquarters plus the harness default project visible, the splash
+		// Quick Session CTA opens the same project picker as other session entry
+		// points. Pick Headquarters to exercise the built-in first-run workspace;
+		// single-visible-project states still POST immediately.
+		const picker = page.locator("project-picker-popover").first();
+		if (await picker.isVisible({ timeout: 1_000 }).catch(() => false)) {
+			await picker.locator('button[data-project-id="headquarters"]').click();
+		} else {
+			const inlineHeadquartersOption = page.getByRole("button", { name: /Headquarters\s+Server workspace/i }).first();
+			if (await inlineHeadquartersOption.isVisible({ timeout: 1_000 }).catch(() => false)) {
+				await inlineHeadquartersOption.click();
+			}
+		}
 		await postStarted;
 
 		const loader = page.locator('[data-testid="bobbit-loader"]').first();
