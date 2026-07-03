@@ -70,7 +70,16 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	stateModule.saveExpandedGoals();
 
 	assert.equal(sidebarTreeState.isGoalExpanded("goal-live"), false, "save must not re-expand an explicitly collapsed goal");
-	assert.deepEqual(JSON.parse(store.get(LEGACY_EXPANDED_GOALS_KEY) ?? "[]"), ["goal-archived"]);
+	assert.deepEqual(
+		JSON.parse(store.get(LEGACY_EXPANDED_GOALS_KEY) ?? "[]"),
+		["goal-live", "goal-archived"],
+		"compatibility save must not rewrite stale durable legacy storage",
+	);
+	assert.equal(storedUnifiedExpansion(store)[sidebarTreeKey({ kind: "goal", goalId: "goal-live" })], "collapsed");
+
+	const reloadedSidebarTreeState = await import(`../src/app/sidebar-tree-state.ts?legacy-goals-reload-${Date.now()}-${Math.random()}`);
+	assert.equal(reloadedSidebarTreeState.isGoalExpanded("goal-live"), false, "stale legacy expansion must not override stored unified collapse on reload");
+	assert.equal(reloadedSidebarTreeState.getSidebarTreePreference({ kind: "goal", goalId: "goal-live" }), "collapsed");
 
 	stateModule.state.goals = [
 		{ id: "goal-live", archived: false },
@@ -81,6 +90,11 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 
 	assert.equal(sidebarTreeState.isGoalExpanded("goal-live"), false, "resetting archived expansion must not re-expand stale non-archived goals");
 	assert.equal(sidebarTreeState.getSidebarTreePreference({ kind: "goal", goalId: "goal-archived" }), undefined);
-	assert.deepEqual(JSON.parse(store.get(LEGACY_EXPANDED_GOALS_KEY) ?? "[]"), []);
+	assert.deepEqual(
+		JSON.parse(store.get(LEGACY_EXPANDED_GOALS_KEY) ?? "[]"),
+		["goal-live", "goal-archived"],
+		"archived reset must not rewrite stale durable legacy storage",
+	);
 	assert.equal(storedUnifiedExpansion(store)[sidebarTreeKey({ kind: "goal", goalId: "goal-live" })], "collapsed");
+	assert.equal(storedUnifiedExpansion(store)[sidebarTreeKey({ kind: "goal", goalId: "goal-archived" })], undefined);
 });
