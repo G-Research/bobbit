@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, defaultProject } from "./e2e-setup.js";
 
 let token: string;
 
@@ -31,9 +31,13 @@ async function api(p: string, opts?: RequestInit): Promise<Response> {
 	});
 }
 
-test("inline workflows from project.yaml drive goal creation @smoke", async ({ gateway }) => {
-	// Seed an inline workflows: block in the default project's project.yaml.
-	const configDir = path.join(gateway.bobbitDir, ".bobbit", "config");
+test("inline workflows from project.yaml drive goal creation @smoke", async () => {
+	// Seed an inline workflows: block in the normal harness default project's project.yaml.
+	// Headquarters owns the gateway bobbitDir, so normal project workflow tests must
+	// write under the default project's own .bobbit/config scope.
+	const project = await defaultProject();
+	const projectId = project.id;
+	const configDir = path.join(project.rootPath, ".bobbit", "config");
 	fs.mkdirSync(configDir, { recursive: true });
 	const yamlFile = path.join(configDir, "project.yaml");
 	const existing: Record<string, unknown> = fs.existsSync(yamlFile)
@@ -66,12 +70,6 @@ test("inline workflows from project.yaml drive goal creation @smoke", async ({ g
 		},
 	};
 	fs.writeFileSync(yamlFile, yaml.stringify(existing));
-
-	// Resolve the default project id.
-	const projResp = await api("/api/projects");
-	const projects = await projResp.json();
-	const projectId = projects.projects?.[0]?.id ?? projects[0]?.id;
-	expect(projectId).toBeTruthy();
 
 	// GET /api/workflows?projectId=... — both inline workflows must appear in the cascade.
 	// Poll briefly to absorb inline-store reload latency on Windows fs.
