@@ -145,8 +145,9 @@ function flattenText(content: unknown): string {
 			try { input = JSON.stringify(b.input ?? {}); } catch { input = ""; }
 			parts.push(`[TOOL: ${name} ${input}]`);
 		} else if (t === "tool_result") {
-			const c = b.content;
-			parts.push(`[RESULT: ${typeof c === "string" ? c : safeStringify(c)}]`);
+			const body = toolResultBody(b);
+			const c = body.value;
+			parts.push(`[RESULT: ${body.has ? (typeof c === "string" ? c : safeStringify(c)) : ""}]`);
 		}
 	}
 	return parts.join(" ");
@@ -158,6 +159,36 @@ function safeStringify(v: unknown): string {
 	try { return JSON.stringify(v); } catch { return String(v); }
 }
 
+const TOOL_RESULT_BODY_KEYS = ["content", "output", "result", "response", "text"] as const;
+type ToolResultBodyKey = typeof TOOL_RESULT_BODY_KEYS[number];
+
+function isToolResultBodyKey(key: string): key is ToolResultBodyKey {
+	return (TOOL_RESULT_BODY_KEYS as readonly string[]).includes(key);
+}
+
+function toolResultBody(block: Record<string, unknown>): { value: unknown; has: boolean; key?: ToolResultBodyKey } {
+	for (const key of TOOL_RESULT_BODY_KEYS) {
+		if (Object.prototype.hasOwnProperty.call(block, key)) return { value: block[key], has: true, key };
+	}
+	return { value: undefined, has: false };
+}
+
+function stringLineCount(value: string): number {
+	if (value.length === 0) return 0;
+	if (value.indexOf("\n") === -1 && value.indexOf("\r") === -1) return 1;
+	let lines = 1;
+	for (let i = 0; i < value.length; i++) {
+		const ch = value.charCodeAt(i);
+		if (ch === 13) {
+			lines++;
+			if (value.charCodeAt(i + 1) === 10) i++;
+		} else if (ch === 10) {
+			lines++;
+		}
+	}
+	return lines;
+}
+
 function contentSize(content: unknown, hasContent = true): ToolResultSize {
 	if (!hasContent) return { type: "missing" };
 	if (content === null) return { type: "null" };
@@ -165,7 +196,7 @@ function contentSize(content: unknown, hasContent = true): ToolResultSize {
 		return {
 			type: "string",
 			chars: content.length,
-			lines: content.length === 0 ? 0 : content.split(/\r\n|\r|\n/).length,
+			lines: stringLineCount(content),
 			bytes: Buffer.byteLength(content, "utf8"),
 		};
 	}
@@ -187,7 +218,7 @@ function resultStatus(block: Record<string, unknown>, message: Record<string, un
 }
 
 function blockToolUseId(block: Record<string, unknown>): string | undefined {
-	for (const key of ["tool_use_id", "toolUseId", "toolCallId", "id"]) {
+	for (const key of ["tool_use_id", "toolUseId", "toolCallId", "tool_call_id", "id"]) {
 		const value = block[key];
 		if (typeof value === "string" && value) return value;
 	}
@@ -236,27 +267,45 @@ function toolResultMeta(
 	const name = blockToolName(block)
 		?? (typeof message.toolName === "string" ? message.toolName : undefined)
 		?? (toolUseId ? options.toolNameById.get(toolUseId) : undefined);
-	const hasContent = Object.prototype.hasOwnProperty.call(block, "content");
+	const body = toolResultBody(block);
 	return {
 		...(name ? { name } : {}),
 		...(toolUseId ? { toolUseId } : {}),
 		status: resultStatus(block, message),
-		size: contentSize(block.content, hasContent),
+		size: contentSize(body.value, body.has),
 	};
+}
+
+function isToolResultRole(role: unknown): boolean {
+	return role === "toolResult" || role === "tool_result" || role === "tool";
+}
+
+function firstString(source: Record<string, unknown>, keys: string[]): string | undefined {
+	for (const key of keys) {
+		const value = source[key];
+		if (typeof value === "string" && value) return value;
+	}
+	return undefined;
 }
 
 function isMessageLevelToolResult(m: RawMessage): boolean {
-	return m.role === "toolResult" || m.fullMessage.role === "toolResult";
+	return isToolResultRole(m.role) || isToolResultRole(m.fullMessage.role);
 }
 
 function messageLevelToolResultBlock(m: RawMessage): Record<string, unknown> {
-	return {
-		type: "tool_result",
-		...(typeof m.fullMessage.toolCallId === "string" ? { toolUseId: m.fullMessage.toolCallId } : {}),
-		...(typeof m.fullMessage.toolName === "string" ? { name: m.fullMessage.toolName, toolName: m.fullMessage.toolName } : {}),
-		...(typeof m.fullMessage.isError === "boolean" ? { isError: m.fullMessage.isError } : {}),
-		content: m.content,
-	};
+	const block: Record<string, unknown> = { type: "tool_result" };
+	const toolUseId = firstString(m.fullMessage, ["toolCallId", "toolUseId", "tool_use_id", "tool_call_id", "id"]);
+	const name = firstString(m.fullMessage, ["toolName", "name"]);
+	if (toolUseId) block.toolUseId = toolUseId;
+	if (name) {
+		block.name = name;
+		block.toolName = name;
+	}
+	if (typeof m.fullMessage.isError === "boolean") block.isError = m.fullMessage.isError;
+	if (typeof m.fullMessage.is_error === "boolean") block.is_error = m.fullMessage.is_error;
+	const body = toolResultBody(m.fullMessage);
+	if (body.has) block.content = body.value;
+	return block;
 }
 
 function toolResultPreview(content: unknown): string {
@@ -324,7 +373,8 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 			} else if (t === "tool_result") {
 				const meta = toolResultMeta(b, m.fullMessage, options);
 				if (options.includeToolResults) {
-					const preview = toolResultPreview(b.content);
+					const body = toolResultBody(b);
+					const preview = toolResultPreview(body.value);
 					toolResults.push({ ...meta, preview });
 				} else {
 					toolResults.push({ ...meta, omitted: true });
@@ -342,37 +392,39 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 	return out;
 }
 
+function redactedToolResultBlock(
+	block: Record<string, unknown>,
+	message: Record<string, unknown>,
+	options: RenderOptions,
+): Record<string, unknown> {
+	const meta = toolResultMeta(block, message, options);
+	const redacted: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(block)) {
+		if (isToolResultBodyKey(key)) continue;
+		redacted[key] = value;
+	}
+	return {
+		...redacted,
+		...(meta.name && !redacted.name ? { name: meta.name } : {}),
+		...(meta.toolUseId && !redacted.toolUseId && !redacted.tool_use_id && !redacted.tool_call_id ? { toolUseId: meta.toolUseId } : {}),
+		content: OMITTED_TOOL_RESULT_CONTENT,
+		contentOmitted: true,
+		resultSize: meta.size,
+		status: meta.status,
+	};
+}
+
 function redactVerboseContent(content: unknown, m: RawMessage, options: RenderOptions): unknown {
 	if (options.includeToolResults) return content;
 	if (isMessageLevelToolResult(m)) {
-		const block = messageLevelToolResultBlock(m);
-		const meta = toolResultMeta(block, m.fullMessage, options);
-		return [{
-			type: "tool_result",
-			...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
-			...(meta.name ? { name: meta.name, toolName: meta.name } : {}),
-			...(typeof m.fullMessage.isError === "boolean" ? { isError: m.fullMessage.isError } : {}),
-			content: OMITTED_TOOL_RESULT_CONTENT,
-			contentOmitted: true,
-			resultSize: meta.size,
-			status: meta.status,
-		}];
+		return [redactedToolResultBlock(messageLevelToolResultBlock(m), m.fullMessage, options)];
 	}
 	if (!Array.isArray(content)) return content;
 	return content.map((block) => {
 		if (!block || typeof block !== "object") return block;
 		const b = block as Record<string, unknown>;
 		if (b.type !== "tool_result") return block;
-		const meta = toolResultMeta(b, m.fullMessage, options);
-		return {
-			...b,
-			...(meta.name && !b.name ? { name: meta.name } : {}),
-			...(meta.toolUseId && !b.toolUseId && !b.tool_use_id ? { toolUseId: meta.toolUseId } : {}),
-			content: OMITTED_TOOL_RESULT_CONTENT,
-			contentOmitted: true,
-			resultSize: meta.size,
-			status: meta.status,
-		};
+		return redactedToolResultBlock(b, m.fullMessage, options);
 	});
 }
 
@@ -415,7 +467,7 @@ function buildMatchList(
 	}
 	const matches: number[] = [];
 	for (const m of messages) {
-		const flat = flattenText(m.content);
+		const flat = isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content);
 		if (regex.test(flat)) matches.push(m.index);
 	}
 	if (context <= 0) return { matchCount: matches.length, expanded: matches.slice() };

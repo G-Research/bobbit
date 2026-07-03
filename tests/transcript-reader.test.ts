@@ -172,6 +172,82 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal((verbose.messages[0] as any).content[0].contentOmitted, true);
 	});
 
+	it("redacts output-based tool result blocks and removes body aliases", async () => {
+		const outputSecret = "OUTPUT_ALIAS_SECRET\nsecond line";
+		const resultSecret = "RESULT_ALIAS_SECRET";
+		const responseSecret = "RESPONSE_ALIAS_SECRET";
+		const textSecret = "TEXT_ALIAS_SECRET";
+		const j = makeJsonl([
+			{ role: "assistant", content: [{ type: "tool_use", id: "tu-output", name: "bash", input: { cmd: "run" } }] },
+			{ role: "user", content: [{
+				type: "tool_result",
+				tool_use_id: "tu-output",
+				output: outputSecret,
+				result: resultSecret,
+				response: responseSecret,
+				text: textSecret,
+				is_error: false,
+			}] },
+		]);
+
+		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		for (const secret of [outputSecret, resultSecret, responseSecret, textSecret]) {
+			assert.equal(JSON.stringify(compact).includes(secret), false);
+		}
+		const result = (compact.messages[0] as any).toolResults[0];
+		assert.equal(result.name, "bash");
+		assert.equal(result.toolUseId, "tu-output");
+		assert.equal(result.omitted, true);
+		assert.equal(result.preview, undefined);
+		assert.equal(result.size.type, "string");
+		assert.equal(result.size.chars, outputSecret.length);
+		assert.equal(result.size.lines, 2);
+
+		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		for (const secret of [outputSecret, resultSecret, responseSecret, textSecret]) {
+			assert.equal(JSON.stringify(verbose).includes(secret), false);
+		}
+		const block = (verbose.messages[0] as any).content[0];
+		assert.equal(block.contentOmitted, true);
+		assert.match(block.content, /tool result omitted/);
+		assert.equal(block.output, undefined);
+		assert.equal(block.result, undefined);
+		assert.equal(block.response, undefined);
+		assert.equal(block.text, undefined);
+		assert.equal(block.resultSize.type, "string");
+		assert.equal(block.resultSize.chars, outputSecret.length);
+		assert.equal(block.resultSize.lines, 2);
+	});
+
+	it("redacts message-level tool result role aliases", async () => {
+		for (const role of ["tool_result", "tool"] as const) {
+			const id = `tu-${role}`;
+			const secret = `ROLE_ALIAS_${role}_SECRET`;
+			const body = role === "tool" ? { output: secret } : { content: secret };
+			const j = [
+				JSON.stringify({ type: "message", message: { role: "assistant", content: [{ toolCallId: id, toolName: "bash", args: { cmd: "run" } }] } }),
+				JSON.stringify({ type: "message", message: { role, toolCallId: id, toolName: "bash", isError: false, ...body } }),
+			].join("\n") + "\n";
+
+			const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+			assert.equal(JSON.stringify(compact).includes(secret), false);
+			const result = (compact.messages[0] as any).toolResults[0];
+			assert.equal(result.name, "bash");
+			assert.equal(result.toolUseId, id);
+			assert.equal(result.omitted, true);
+			assert.equal(result.size.chars, secret.length);
+
+			const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+			assert.equal(JSON.stringify(verbose).includes(secret), false);
+			const block = (verbose.messages[0] as any).content[0];
+			assert.equal(block.type, "tool_result");
+			assert.equal(block.toolUseId, id);
+			assert.equal(block.name, "bash");
+			assert.equal(block.contentOmitted, true);
+			assert.match(block.content, /tool result omitted/);
+		}
+	});
+
 	it("compact opt-in includes tool result previews", async () => {
 		const secret = "VISIBLE_TOOL_RESULT_SECRET";
 		const j = makeJsonl([
