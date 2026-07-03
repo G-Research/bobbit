@@ -1182,10 +1182,14 @@ async function showHeadquartersInProjectListsFromSidebar(): Promise<void> {
 			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
 		});
 		setProjects(await fetchProjects());
-		void import("./render.js").then((m) => m.showHeaderToast("Headquarters shown in project lists."));
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
+			detail: { kind: "pending", message: "Headquarters shown in project lists." },
+		}));
 	} catch {
 		state.showHeadquartersInProjectLists = false;
-		void import("./render.js").then((m) => m.showHeaderToast("Failed to show Headquarters."));
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
+			detail: { kind: "error", message: "Failed to show Headquarters." },
+		}));
 	} finally {
 		renderApp();
 	}

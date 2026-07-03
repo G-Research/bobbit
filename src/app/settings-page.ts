@@ -2417,9 +2417,14 @@ async function setShowHeadquartersInProjectLists(checked: boolean): Promise<void
 		if (!res.ok) throw new Error(`Failed: ${res.status}`);
 		setProjects(await fetchProjects());
 		settingsHeadquartersVisibilityStatus = "saved";
-		void import("./render.js").then((m) => m.showHeaderToast(checked
-			? "Headquarters shown in project lists."
-			: "Headquarters hidden from project lists."));
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
+			detail: {
+				kind: "pending",
+				message: checked
+					? "Headquarters shown in project lists."
+					: "Headquarters hidden from project lists.",
+			},
+		}));
 		setTimeout(() => {
 			if (settingsHeadquartersVisibilityStatus === "saved") {
 				settingsHeadquartersVisibilityStatus = "";
