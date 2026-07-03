@@ -73,7 +73,7 @@ export class ProjectContext {
 
   constructor(project: RegisteredProject) {
     this.project = project;
-    if (project.id === HEADQUARTERS_PROJECT_ID) {
+    if (project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters") {
       this.bobbitDir = bobbitDir();
       this.stateDir = bobbitStateDir();
       this.configDir = bobbitConfigDir();

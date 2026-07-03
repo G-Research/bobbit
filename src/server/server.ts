@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
 	bobbitStateDir,
 	bobbitConfigDir,
+	bobbitDir,
 	getProjectRoot,
 	globalAgentDir,
 	getAgentDirApiState,
@@ -519,7 +520,19 @@ import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getB
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
+import {
+	ProjectRegistry,
+	SymlinkProjectRootError,
+	PreflightFailedError,
+	SYSTEM_PROJECT_ID,
+	HEADQUARTERS_PROJECT_ID,
+	ProjectOrderError,
+	SpecialProjectMutationError,
+	assertNormalMutableProject,
+	isHeadquartersProject,
+	isSystemProject,
+	type RegisteredProject,
+} from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -1715,10 +1728,8 @@ export function createGateway(config: GatewayConfig) {
 	initCompactionSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
-	// Project registry — persisted at server level.
-	// Zero projects is a valid state: a fresh install has no projects.json and the
-	// UI forces the user through "Add Project" before any goal/session work. Bobbit
-	// never registers a project implicitly.
+	// Project registry — persisted at server level. Every server exposes the
+	// built-in Headquarters project as the user-facing server workspace.
 	const projectRegistry = new ProjectRegistry(stateDir);
 
 	// Register the synthetic "system" project so system-scope tool-assistant
@@ -1737,6 +1748,12 @@ export function createGateway(config: GatewayConfig) {
 		projectRegistry.registerSystemProject(systemRoot);
 	} catch (err) {
 		console.warn(`[startup] Failed to register system project: ${err}`);
+	}
+
+	try {
+		projectRegistry.ensureHeadquartersProject(getProjectRoot(), { stateDir, configDir });
+	} catch (err) {
+		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
 	}
 
 	// Run one-time migration from centralized to per-project state
@@ -3672,6 +3689,34 @@ async function handleApiRoute(
 		json({ error: e.message, ...extra }, status);
 	};
 
+	const canonicalPathForCompare = (inputPath: string): string => {
+		let resolved = path.resolve(inputPath);
+		try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
+		const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const samePath = (a: string, b: string): boolean => canonicalPathForCompare(a) === canonicalPathForCompare(b);
+	const headquartersProject = (): RegisteredProject | undefined => projectRegistry.get(HEADQUARTERS_PROJECT_ID);
+	const bobbitOwnerPath = (): string => path.dirname(bobbitDir());
+	const isHeadquartersOwnedPath = (candidatePath: string): boolean => {
+		const hq = headquartersProject();
+		return (hq ? samePath(candidatePath, hq.rootPath) : samePath(candidatePath, getProjectRoot()))
+			|| samePath(candidatePath, getProjectRoot())
+			|| samePath(candidatePath, bobbitDir())
+			|| samePath(candidatePath, bobbitOwnerPath());
+	};
+	const shouldShowHeadquartersInProjectLists = (): boolean => preferencesStore.get("showHeadquartersInProjectLists") !== false;
+	const listProjectsForApi = (): RegisteredProject[] => projectRegistry.list().filter(project => {
+		if (project.hidden || isSystemProject(project)) return false;
+		if (isHeadquartersProject(project) && !shouldShowHeadquartersInProjectLists()) return false;
+		return true;
+	});
+	const writeSpecialProjectMutationError = (err: unknown): boolean => {
+		if (!(err instanceof SpecialProjectMutationError)) return false;
+		json({ error: err.message, code: err.code }, err.status);
+		return true;
+	};
+
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
 	function requireSubgoalsEnabled(): boolean {
 		// Subgoals default OFF (aligned with PR #497) — only an explicit `true` enables.
@@ -4115,6 +4160,19 @@ async function handleApiRoute(
 					return ctx?.projectConfigStore.get("worktree_root") || undefined;
 				},
 			});
+			if (isHeadquartersOwnedPath(rawPath)) {
+				for (const check of report.checks) {
+					if (check.remediation?.kind === "archive-bobbit") delete check.remediation;
+					if (check.id === "bobbit.existing") {
+						check.title = "Server .bobbit/ belongs to Headquarters";
+						check.detail = "Headquarters already represents this server workspace. Its .bobbit/ state is gateway-owned and cannot be archived from Add Project.";
+					}
+					if (check.id === "bobbit.gateway-owned") {
+						check.title = "Headquarters workspace";
+						check.detail = "Headquarters already represents the running gateway's server workspace.";
+					}
+				}
+			}
 			json(report);
 		} catch (err: any) {
 			jsonError(500, err);
@@ -4139,6 +4197,13 @@ async function handleApiRoute(
 		}
 		if (!fs.existsSync(body.rootPath)) {
 			json({ error: "rootPath does not exist" }, 400);
+			return;
+		}
+		if (isHeadquartersOwnedPath(body.rootPath)) {
+			json({
+				error: "Headquarters owns the server .bobbit state. Hide Headquarters from project lists in Settings instead of archiving it.",
+				code: "HEADQUARTERS_IMMUTABLE",
+			}, 403);
 			return;
 		}
 		// Compute gateway-owned via the same logic as the preflight check.
@@ -4401,9 +4466,7 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		// Filter out hidden projects (e.g. the synthetic "system" project) so
-		// they never appear in the client's state.projects.
-		json(projectRegistry.list().filter(p => !p.hidden && p.id !== SYSTEM_PROJECT_ID));
+		json(listProjectsForApi());
 		return;
 	}
 
@@ -4425,6 +4488,27 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+
+			if (isHeadquartersOwnedPath(body.rootPath)) {
+				const hq = headquartersProject();
+				if (hq && upsert) {
+					const ctx = projectContextManager.getOrCreate(hq.id);
+					if (ctx) {
+						ctx.gateStore.onStatusChange = () => {
+							ctx.goalStore.bumpGeneration();
+						};
+						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+					}
+					json(hq, 200);
+					return;
+				}
+				json({
+					error: "Headquarters already represents the server workspace. Hide it from project lists in Settings instead of adding it again.",
+					code: "HEADQUARTERS_ALREADY_EXISTS",
+					projectId: HEADQUARTERS_PROJECT_ID,
+				}, 409);
+				return;
+			}
 
 			// Upsert: if a project already exists at this path, return it
 			if (upsert) {
@@ -4592,7 +4676,8 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
 		const body = await readBody(req);
 		try {
-			const projects = projectRegistry.setVisibleOrder(body?.projectIds);
+			projectRegistry.setVisibleOrder(body?.projectIds);
+			const projects = listProjectsForApi();
 			broadcastToAll({ type: "projects_changed", projects });
 			json({ projects });
 		} catch (err: any) {
@@ -4633,10 +4718,19 @@ async function handleApiRoute(
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
+		if (updates.rootPath && isHeadquartersOwnedPath(updates.rootPath)) {
+			json({
+				error: "Headquarters already represents the server workspace. Select Headquarters instead of moving another project to it.",
+				code: "HEADQUARTERS_ALREADY_EXISTS",
+				projectId: HEADQUARTERS_PROJECT_ID,
+			}, 409);
+			return;
+		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4651,6 +4745,7 @@ async function handleApiRoute(
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
 		try {
+			if (project) assertNormalMutableProject(project, "removed");
 			// Drain the project's worktree pool before removing
 			await sessionManager.removeWorktreePool(projectId);
 			// Terminate all live sessions belonging to the removed project
@@ -4667,6 +4762,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4707,6 +4803,7 @@ async function handleApiRoute(
 			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -5846,7 +5943,13 @@ async function handleApiRoute(
 
 		// For project assistants, register a provisional project at the target cwd
 		if (isProjectAssistant && cwd && !resolvedProjectId) {
-			const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			let provisionalProject: RegisteredProject;
+			try {
+				provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			} catch (err) {
+				if (writeSpecialProjectMutationError(err)) return;
+				throw err;
+			}
 			provisionalProjectId = provisionalProject.id;
 			resolvedProjectId = provisionalProject.id;
 			// Ensure a ProjectContext exists for the provisional project
@@ -7881,6 +7984,7 @@ async function handleApiRoute(
 			}, 400);
 			return;
 		}
+		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
 		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
@@ -7894,8 +7998,11 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
-		json({ ok: true });
+		json(getSafePreferences());
 		broadcastPreferencesChanged();
+		if (headquartersVisibilityChanged) {
+			broadcastToAll({ type: "projects_changed", projects: listProjectsForApi() });
+		}
 		return;
 	}
 
