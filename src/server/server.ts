@@ -12972,16 +12972,6 @@ async function handleApiRoute(
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
 		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
-		// Caller-project authorisation header check — same shape as the
-		// sibling transcript route.
-		const callerSid = req.headers["x-bobbit-session-id"];
-		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
-		if (callerSidStr) {
-			const callerPs = sessionManager.getPersistedSession(callerSidStr);
-			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
-				json({ error: "permission_denied" }, 403); return;
-			}
-		}
 
 		const compactionId = url.searchParams.get("compactionId");
 		if (!compactionId) {
