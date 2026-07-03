@@ -10639,6 +10639,7 @@ async function handleApiRoute(
 		const lead = teamManager.getTeamState(goalId)?.teamLeadSessionId;
 		if (!lead) return undefined;
 		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId)) return lead;
+		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
 		const persisted = sessionManager.getPersistedSession(targetId) as any;
 		return persisted?.delegateOf === lead || persisted?.parentSessionId === lead || persisted?.teamLeadSessionId === lead ? lead : undefined;
 	};

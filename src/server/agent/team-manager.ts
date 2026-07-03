@@ -301,6 +301,8 @@ export class TeamManager {
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
+	/** sessionId → goalId for idempotent duplicate dismiss classification after live team tracking is removed. */
+	private dismissedSessionToGoal = new Map<string, string>();
 
 	/** Track last notification time per worker session to debounce rapid agent_end events. */
 	private lastNotifyTime = new Map<string, number>();
@@ -2321,6 +2323,7 @@ export class TeamManager {
 
 		// Remove from tracking
 		entry.agents.splice(agentIndex, 1);
+		this.dismissedSessionToGoal.set(sessionId, goalId);
 		this.sessionToGoal.delete(sessionId);
 		this.lastNotifyTime.delete(sessionId);
 		// Cancel any pending idle-notify timer so no nudge fires against the
@@ -2362,7 +2365,8 @@ export class TeamManager {
 	private classifyUntrackedDismiss(goalId: string | undefined, sessionId: string): DismissResult {
 		const live = this.sessionManager.getSession(sessionId) as any;
 		const persisted = (this.sessionManager as any).getPersistedSession?.(sessionId) as any;
-		const teamGoalId = live?.teamGoalId ?? persisted?.teamGoalId;
+		const rememberedGoalId = this.dismissedSessionToGoal.get(sessionId);
+		const teamGoalId = live?.teamGoalId ?? persisted?.teamGoalId ?? rememberedGoalId;
 		if (goalId && teamGoalId === goalId) {
 			return { ok: true, status: "already-dismissed", sessionId, message: `Team agent ${sessionId} is already dismissed.`, retryable: false };
 		}

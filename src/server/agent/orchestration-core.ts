@@ -396,6 +396,8 @@ const OUTPUT_TAIL_CHARS = 1500;
 export class OrchestrationCore {
 	/** In-memory index keyed on owner session id (NOT persisted). */
 	private index = new Map<string, ChildHandle[]>();
+	/** childSessionId → ownerSessionId for idempotent duplicate dismiss classification. */
+	private dismissedChildren = new Map<string, string>();
 
 	constructor(private deps: OrchestrationCoreDeps) {}
 
@@ -609,6 +611,11 @@ export class OrchestrationCore {
 		});
 	}
 
+	/** Owner recorded by a previous successful/idempotent dismiss, if any. */
+	dismissedOwnerOf(sessionId: string): string | undefined {
+		return this.dismissedChildren.get(sessionId);
+	}
+
 	/** Forget a child from the runtime index (cleanup after dismiss/terminate). */
 	forgetChild(sessionId: string): void {
 		for (const [owner, list] of this.index) {
@@ -691,10 +698,12 @@ export class OrchestrationCore {
 		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === childId);
 		const live = this.deps.sessionManager.getSession(childId);
 		const persisted = this.deps.sessionManager.getPersistedSession(childId);
+		const rememberedOwner = this.dismissedChildren.get(childId);
 		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
-		const exists = !!live || !!persisted;
+		const rememberedOwned = rememberedOwner === ownerId;
+		const exists = !!live || !!persisted || !!rememberedOwner;
 
-		if (!handle && !persistedOwned) {
+		if (!handle && !persistedOwned && !rememberedOwned) {
 			return exists
 				? { ok: false, status: "not-owned", sessionId: childId, message: `Child session ${childId} is not owned by ${ownerId}.`, retryable: false }
 				: { ok: false, status: "not-found", sessionId: childId, message: `Child session ${childId} was not found.`, retryable: false };
@@ -702,6 +711,7 @@ export class OrchestrationCore {
 
 		const isLive = this.deps.sessionManager.isSessionLive?.call(this.deps.sessionManager, childId);
 		if (!live || live.status === "terminated" || persisted?.archived || isLive === false) {
+			this.dismissedChildren.set(childId, ownerId);
 			this.forgetChild(childId);
 			return { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
 		}
@@ -716,6 +726,7 @@ export class OrchestrationCore {
 		}
 		try {
 			const ok = await this.deps.sessionManager.terminateSession(childId);
+			this.dismissedChildren.set(childId, ownerId);
 			this.forgetChild(childId);
 			this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
 			return ok
