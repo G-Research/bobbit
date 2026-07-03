@@ -1474,8 +1474,8 @@ export const actions = {
     }
 
     const transcript = await ctx.host.agents.read(childSessionId);
-    await ctx.host.agents.dismiss(childSessionId);   // terminate + archive
-    return { transcript };
+    const dismissed = await ctx.host.agents.dismiss(childSessionId); // structured DismissResult
+    return { transcript, dismissed };
   },
 };
 ```
@@ -1489,7 +1489,7 @@ The six verbs:
 | `status(childSessionId)` | Poll the child's live status (`idle` / `streaming` / `queued` / `preparing` / `terminated`). |
 | `list()` | List the bound session's `host.agents` children. |
 | `read(childSessionId, opts?)` | Read the child's transcript / output. |
-| `dismiss(childSessionId)` | Terminate + archive the child. |
+| `dismiss(childSessionId)` | Terminate + archive the child. Returns the same structured `DismissResult` (`dismissed`, `already-dismissed`, `not-owned`, `not-found`, `failed`) documented for [`team_dismiss`](orchestration.md#team_dismiss-outcomes). Inspect `retryable`; duplicate dismiss is `already-dismissed` idempotent success. |
 
 #### Poll-based — there is no blocking `wait`
 

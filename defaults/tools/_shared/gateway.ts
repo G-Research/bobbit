@@ -13,11 +13,12 @@
 //   - `getGatewayUrl()` / `getGatewayToken()` — original loud-on-missing helpers
 //     used by image-generation, MCP discovery, etc.
 //
-//   - `readGatewayCreds()` / `apiCall()` — soft-fail helpers used by team-lead
-//     and children tool extensions. `apiCall` retries transient TCP errors
-//     (ECONNRESET, EPIPE, socket hang up, UND_ERR_SOCKET, opaque "fetch failed")
-//     with 250 / 500 / 1000 ms exponential back-off, and refreshes credentials
-//     once per call on HTTP 401 to handle gateway-restart token rotation.
+//   - `readGatewayCreds()` / `apiCall()` / `apiCallDetailed()` — soft-fail helpers
+//     used by team-lead and children tool extensions. The call helpers retry
+//     transient TCP errors (ECONNRESET, EPIPE, socket hang up, UND_ERR_SOCKET,
+//     opaque "fetch failed") with 250 / 500 / 1000 ms exponential back-off, and
+//     refresh credentials once per call on HTTP 401 to handle gateway-restart token
+//     rotation.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -123,25 +124,20 @@ export interface ApiCallOpts {
 	retries?: number;
 }
 
-/**
- * Authenticated JSON fetch against the gateway. Throws on non-2xx with the
- * server-provided `error` field when present, else `HTTP <status>: <body>`.
- *
- * Resilience:
- *  - Transient TCP errors retried up to `opts.retries` times (default 3) with
- *    exponential back-off: 250 / 500 / 1000 ms.
- *  - HTTP 401 triggers ONE creds refresh (clearCredsCache + re-read disk) and
- *    one retry, not consuming a transient retry slot. If the refresh fails
- *    or the second 401 lands, the auth error is propagated.
- *  - Non-401 4xx/5xx responses are NOT retried — those are real outcomes.
- */
-export async function apiCall(
+export interface ApiCallDetailedResult {
+	ok: boolean;
+	status: number;
+	body: unknown;
+	text: string;
+}
+
+async function gatewayJsonRequest(
 	creds: { token: string; baseUrl: string },
 	method: string,
 	urlPath: string,
 	body?: unknown,
 	opts?: ApiCallOpts,
-): Promise<unknown> {
+): Promise<ApiCallDetailedResult> {
 	const maxAttempts = (opts?.retries ?? 3) + 1;
 	let lastErr: unknown;
 	let usedCreds = creds;
@@ -159,7 +155,7 @@ export async function apiCall(
 				headers,
 				body: body !== undefined ? JSON.stringify(body) : undefined,
 			});
-			// 401 → one creds-refresh + retry, then fall through to normal error handling.
+			// 401 → one creds-refresh + retry, then fall through to normal response handling.
 			if (resp.status === 401 && !didCredsRefresh) {
 				didCredsRefresh = true;
 				clearCredsCache();
@@ -167,20 +163,15 @@ export async function apiCall(
 				if (!("error" in fresh)) {
 					usedCreds = fresh;
 					console.warn(`[gateway] 401 on ${method} ${urlPath} — refreshed creds from disk and retrying`);
-					continue; // retry without consuming a transient-retry slot
+					attempt--; // retry without consuming a transient-retry slot
+					continue;
 				}
-				// Disk gone — propagate the 401 below.
+				// Disk gone — return the 401 body below.
 			}
 			const text = await resp.text();
-			let data: unknown;
-			try { data = JSON.parse(text); } catch { data = text; }
-			if (!resp.ok) {
-				const msg = typeof data === "object" && data !== null && "error" in data
-					? String((data as Record<string, unknown>).error)
-					: `HTTP ${resp.status}: ${text}`;
-				throw new Error(msg);
-			}
-			return data;
+			let parsed: unknown = text;
+			try { parsed = JSON.parse(text); } catch { /* keep raw text */ }
+			return { ok: resp.ok, status: resp.status, body: parsed, text };
 		} catch (err) {
 			lastErr = err;
 			const transient = isTransientFetchError(err);
@@ -205,6 +196,50 @@ export async function apiCall(
 		}
 	}
 	throw lastErr;
+}
+
+/**
+ * Authenticated JSON fetch against the gateway that returns status + parsed body
+ * for both success and non-2xx responses while preserving apiCall's credential
+ * refresh and transient retry behavior.
+ */
+export async function apiCallDetailed(
+	creds: { token: string; baseUrl: string },
+	method: string,
+	urlPath: string,
+	body?: unknown,
+	opts?: ApiCallOpts,
+): Promise<ApiCallDetailedResult> {
+	return gatewayJsonRequest(creds, method, urlPath, body, opts);
+}
+
+/**
+ * Authenticated JSON fetch against the gateway. Throws on non-2xx with the
+ * server-provided `error` field when present, else `HTTP <status>: <body>`.
+ *
+ * Resilience:
+ *  - Transient TCP errors retried up to `opts.retries` times (default 3) with
+ *    exponential back-off: 250 / 500 / 1000 ms.
+ *  - HTTP 401 triggers ONE creds refresh (clearCredsCache + re-read disk) and
+ *    one retry, not consuming a transient retry slot. If the refresh fails
+ *    or the second 401 lands, the auth error is propagated.
+ *  - Non-401 4xx/5xx responses are NOT retried — those are real outcomes.
+ */
+export async function apiCall(
+	creds: { token: string; baseUrl: string },
+	method: string,
+	urlPath: string,
+	body?: unknown,
+	opts?: ApiCallOpts,
+): Promise<unknown> {
+	const resp = await gatewayJsonRequest(creds, method, urlPath, body, opts);
+	if (!resp.ok) {
+		const msg = typeof resp.body === "object" && resp.body !== null && "error" in resp.body
+			? String((resp.body as Record<string, unknown>).error)
+			: `HTTP ${resp.status}: ${resp.text}`;
+		throw new Error(msg);
+	}
+	return resp.body;
 }
 
 // Test-only: allow tests to reset module-level cache between cases.

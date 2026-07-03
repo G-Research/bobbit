@@ -82,8 +82,38 @@ test.describe("host.agents — fixture handler poll-based lifecycle (via the con
 			expect(result.listedIds).toContain(result.childSessionId);
 			// read() returned the child's output object; dismiss() cleaned it up.
 			expect(result.readIsObject).toBe(true);
-			expect(result.dismissed).toBe(true);
+			expect(result.dismissed).toMatchObject({
+				ok: true,
+				status: "dismissed",
+				sessionId: result.childSessionId,
+				retryable: false,
+			});
 			expect(result.listedAfterDismissCount).toBe(0);
+		} finally {
+			await deleteSession(owner);
+		}
+	});
+
+	test("duplicate dismiss returns structured already-dismissed", async ({ gateway }) => {
+		const owner = await createSession();
+		const host = await buildHost(gateway, owner);
+		try {
+			const { childSessionId } = await host.agents.spawn({ instructions: "host-agents child" });
+			const first = await host.agents.dismiss(childSessionId);
+			expect(first).toMatchObject({
+				ok: true,
+				status: "dismissed",
+				sessionId: childSessionId,
+				retryable: false,
+			});
+			const second = await host.agents.dismiss(childSessionId);
+			expect(second).toMatchObject({
+				ok: true,
+				status: "already-dismissed",
+				sessionId: childSessionId,
+				retryable: false,
+			});
+			expect(second.message).toContain("already dismissed");
 		} finally {
 			await deleteSession(owner);
 		}
@@ -115,11 +145,17 @@ test.describe("host.agents — source-filtered scoping (own host-agents children
 			expect(listed.map((c: any) => c.childSessionId)).toEqual([hostAgentsChildId]);
 			expect(listed[0].childKind).toBe("host-agents");
 
-			// Verbs reject the delegate child (not a host.agents child).
+			// Non-dismiss verbs reject the delegate child (not a host.agents child).
 			await expect(host.agents.prompt(delegateChildId!, "hi")).rejects.toThrow(/not a host\.agents child/);
 			await expect(host.agents.read(delegateChildId!)).rejects.toThrow(/not a host\.agents child/);
-			await expect(host.agents.dismiss(delegateChildId!)).rejects.toThrow(/not a host\.agents child/);
 			await expect(host.agents.status(delegateChildId!)).rejects.toThrow(/not a host\.agents child/);
+			// Dismiss uses the structured DismissResult contract but still denies it.
+			await expect(host.agents.dismiss(delegateChildId!)).resolves.toMatchObject({
+				ok: false,
+				status: "not-owned",
+				sessionId: delegateChildId,
+				retryable: false,
+			});
 		} finally {
 			// Cleanup both children + the owner.
 			if (hostAgentsChildId) await host.agents.dismiss(hostAgentsChildId).catch(() => {});

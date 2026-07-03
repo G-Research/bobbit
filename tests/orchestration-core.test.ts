@@ -51,7 +51,7 @@ class FakeView implements OrchestrationSessionView {
 		this.live.set(id, { id, status: "idle", title: opts.title, output: "" });
 		// Persist childKind/readOnly exactly as the real createDelegateSession now
 		// does (findings #1/#2) so restart-rebuild + scoping tests are faithful.
-		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind });
+		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind, instructions: opts.instructions });
 		return { id };
 	}
 	async createSession(cwd: string, _a: any, _g: any, _t: any, opts?: any): Promise<{ id: string }> {
@@ -436,8 +436,14 @@ describe("OrchestrationCore.dismiss — stamps the generic terminal marker (Deci
 		(view as { markChildTerminal?: unknown }).markChildTerminal = undefined;
 		const core = makeCore(view);
 		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a", childKind: "host-agents" });
-		const ok = await core.dismiss("owner-1", a.sessionId);
-		assert.equal(ok, true);
+		const result = await core.dismiss("owner-1", a.sessionId);
+		assert.deepEqual(result, {
+			ok: true,
+			status: "dismissed",
+			sessionId: a.sessionId,
+			message: `Child session ${a.sessionId} dismissed.`,
+			retryable: false,
+		});
 		assert.deepEqual(view.terminated, [a.sessionId]);
 	});
 });
@@ -579,13 +585,23 @@ describe("OrchestrationCore.wait — policy all/first + terminal handling", () =
 });
 
 describe("OrchestrationCore — ownership scoping", () => {
-	it("prompt/steer/abort/dismiss reject a foreign child", async () => {
+	it("prompt/steer/abort reject a foreign child while dismiss returns structured not-owned", async () => {
 		const view = new FakeView();
 		view.owner("owner-1");
+		view.owner("other-owner");
 		const core = makeCore(view);
-		await assert.rejects(core.prompt("owner-1", "foreign", "hi"), /not owned/i);
-		await assert.rejects(core.abort("owner-1", "foreign"), /not owned/i);
-		await assert.rejects(core.dismiss("owner-1", "foreign"), /not owned/i);
+		const foreign = await core.spawn({ ownerSessionId: "other-owner", instructions: "foreign" });
+		view.live.get(foreign.sessionId)!.status = "streaming";
+		await assert.rejects(core.prompt("owner-1", foreign.sessionId, "hi"), /not owned/i);
+		await assert.rejects(core.steer("owner-1", foreign.sessionId, "hi"), /not owned/i);
+		await assert.rejects(core.abort("owner-1", foreign.sessionId), /not owned/i);
+		assert.deepEqual(await core.dismiss("owner-1", foreign.sessionId), {
+			ok: false,
+			status: "not-owned",
+			sessionId: foreign.sessionId,
+			message: `Child session ${foreign.sessionId} is not owned by owner-1.`,
+			retryable: false,
+		});
 	});
 
 	it("dismiss terminates and forgets an owned child", async () => {
@@ -594,10 +610,50 @@ describe("OrchestrationCore — ownership scoping", () => {
 		const core = makeCore(view);
 		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a" });
 		assert.equal(core.list("owner-1").length, 1);
-		const ok = await core.dismiss("owner-1", a.sessionId);
-		assert.equal(ok, true);
+		const result = await core.dismiss("owner-1", a.sessionId);
+		assert.deepEqual(result, {
+			ok: true,
+			status: "dismissed",
+			sessionId: a.sessionId,
+			message: `Child session ${a.sessionId} dismissed.`,
+			retryable: false,
+		});
 		assert.deepEqual(view.terminated, [a.sessionId]);
 		assert.equal(core.list("owner-1").length, 0);
+	});
+
+	it("dismiss denies a live target when ownership exists only in mutable persisted metadata", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		view.live.set("victim", { id: "victim", status: "idle", cwd: "/cwd/victim" });
+		view.persisted.set("victim", { id: "victim", delegateOf: "owner-1", teamLeadSessionId: "owner-1" });
+		const core = makeCore(view);
+
+		assert.deepEqual(await core.dismiss("owner-1", "victim"), {
+			ok: false,
+			status: "not-owned",
+			sessionId: "victim",
+			message: "Child session victim is not owned by owner-1.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
+		assert.equal(view.live.get("victim")?.status, "idle");
+	});
+
+	it("dismiss remains idempotent for an already-dismissed persisted owned child", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		view.persisted.set("former-child", { id: "former-child", delegateOf: "owner-1", archived: true });
+		const core = makeCore(view);
+
+		assert.deepEqual(await core.dismiss("owner-1", "former-child"), {
+			ok: true,
+			status: "already-dismissed",
+			sessionId: "former-child",
+			message: "Child session former-child is already dismissed.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
 	});
 
 	it("steer requires the child to be streaming (else NOT_STREAMING)", async () => {
@@ -618,14 +674,17 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 		const core = makeCore(view);
 		core.rebuildIndexFromPersisted([
 			{ id: "owner-1" },                                                    // not a child
-			{ id: "d1", delegateOf: "owner-1" },                                  // delegate child
+			{ id: "d1", delegateOf: "owner-1", childKind: "delegate", instructions: "task" }, // delegate child
+			{ id: "legacy", delegateOf: "owner-1", instructions: "old delegate" },   // legacy delegate child
+			{ id: "spoof", delegateOf: "owner-1" },                                  // mutable metadata only → skipped
+			{ id: "spoof-kind", delegateOf: "owner-1", childKind: "host-agents" },   // childKind alone is still mutable-spoofable → skipped
 			{ id: "prw", parentSessionId: "owner-1", childKind: "pr-walkthrough" }, // kinded child
 			{ id: "ha", parentSessionId: "owner-2", childKind: "host-agents" },   // other owner
 			{ id: "arch", delegateOf: "owner-1", archived: true },                // archived → skipped
 			{ id: "loose", parentSessionId: "owner-1" },                          // parent but no childKind → not a child
 		]);
 		const o1 = core.list("owner-1").map(h => h.sessionId).sort();
-		assert.deepEqual(o1, ["d1", "prw"]);
+		assert.deepEqual(o1, ["d1", "legacy", "prw"]);
 		assert.deepEqual(core.list("owner-2").map(h => h.sessionId), ["ha"]);
 		// host-agents discriminator preserved.
 		assert.equal(core.list("owner-2")[0].childKind, "host-agents");
@@ -653,6 +712,35 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 		const byKind = new Map(rebuilt.map(h => [h.sessionId, h.childKind]));
 		assert.equal(byKind.get(ha.sessionId), "host-agents");
 		assert.equal(byKind.get(del.sessionId), "delegate");
+	});
+
+	it("does not promote spoofed persisted delegateOf into live dismiss ownership after restart", async () => {
+		const view = new FakeView();
+		view.owner("attacker");
+		view.live.set("victim", { id: "victim", status: "idle", cwd: "/cwd/victim" });
+		view.persisted.set("victim", {
+			id: "victim",
+			delegateOf: "attacker",
+			teamLeadSessionId: "attacker",
+			// Simulate a real first-class child that already had childKind before the
+			// delegateOf spoof; childKind alone must not make delegateOf trusted.
+			parentSessionId: "real-owner",
+			childKind: "host-agents",
+		});
+		const core = makeCore(view);
+
+		core.rebuildIndexFromPersisted([...view.persisted.values()]);
+		assert.deepEqual(core.list("attacker"), []);
+
+		assert.deepEqual(await core.dismiss("attacker", "victim"), {
+			ok: false,
+			status: "not-owned",
+			sessionId: "victim",
+			message: "Child session victim is not owned by attacker.",
+			retryable: false,
+		});
+		assert.deepEqual(view.terminated, []);
+		assert.equal(view.live.get("victim")?.status, "idle");
 	});
 });
 
@@ -695,7 +783,7 @@ describe("OrchestrationCore.remindOwnersWithLiveChildren (restart survival §4)"
 		view.owner("owner-2");
 		const core = makeCore(view);
 		core.rebuildIndexFromPersisted([
-			{ id: "d1", delegateOf: "owner-1", title: "Helper" },
+			{ id: "d1", delegateOf: "owner-1", childKind: "delegate", instructions: "task", title: "Helper" },
 			{ id: "t1", parentSessionId: "owner-2", childKind: "team" },
 		]);
 		const reminded = await core.remindOwnersWithLiveChildren(h => h.childKind !== "team");

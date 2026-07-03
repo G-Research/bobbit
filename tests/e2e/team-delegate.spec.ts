@@ -205,6 +205,32 @@ test.describe("team_delegate — non-blocking interactive flow", () => {
 		}
 	});
 
+	test("patching mutable ownership metadata does not authorize dismissing a live foreign session", async ({ gateway }) => {
+		const attacker = await createSession();
+		const victim = await createSession();
+		try {
+			const patch = await apiFetch(`/api/sessions/${victim}`, {
+				method: "PATCH",
+				body: JSON.stringify({ delegateOf: attacker, teamLeadSessionId: attacker }),
+			});
+			expect(patch.status).toBe(200);
+
+			const dismiss = await orchestrate(attacker, "dismiss", { childSessionId: victim });
+			expect(dismiss.status).toBe(403);
+			expect(dismiss.json).toMatchObject({
+				ok: false,
+				status: "not-owned",
+				sessionId: victim,
+				retryable: false,
+			});
+			expect(gateway.sessionManager.getSession(victim)?.status).not.toBe("terminated");
+			expect(gateway.sessionManager.isSessionLive(victim)).toBe(true);
+		} finally {
+			await deleteSession(attacker);
+			await deleteSession(victim);
+		}
+	});
+
 	test("a DIFFERENT caller is denied (403) when targeting a FOREIGN owner's children (caller→owner authz)", async ({ gateway }) => {
 		// HIGH finding: the shared gateway bearer is not enough — the orchestrate
 		// routes must bind the request to the per-session secret and require the
@@ -339,9 +365,12 @@ test.describe("team_delegate — team-lead parity", () => {
 			const agents = (await agentsResp.json()).agents ?? [];
 			expect(agents.map((a: any) => a.sessionId)).not.toContain(childId);
 
+			const leadHeaders = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(leadId!) };
+
 			// /team/prompt falls back to the core for the lead's own child.
 			const prompt = await apiFetch(`/api/goals/${goal.id}/team/prompt`, {
 				method: "POST",
+				headers: leadHeaders,
 				body: JSON.stringify({ sessionId: childId, message: "follow-up task" }),
 			});
 			expect(prompt.status).toBe(200);
@@ -350,6 +379,7 @@ test.describe("team_delegate — team-lead parity", () => {
 			// /team/dismiss falls back too (terminate + archive the own child).
 			const dismiss = await apiFetch(`/api/goals/${goal.id}/team/dismiss`, {
 				method: "POST",
+				headers: leadHeaders,
 				body: JSON.stringify({ sessionId: childId }),
 			});
 			expect(dismiss.status).toBe(200);

@@ -69,7 +69,7 @@ function isTransientFetchError(err) {
 	return TRANSIENT_RE.test(composite);
 }
 
-export async function apiCall(creds, method, urlPath, body, opts) {
+export async function apiCallDetailed(creds, method, urlPath, body, opts) {
 	const maxAttempts = (opts?.retries ?? 3) + 1;
 	let lastErr;
 	let usedCreds = creds;
@@ -94,19 +94,14 @@ export async function apiCall(creds, method, urlPath, body, opts) {
 				if (!("error" in fresh)) {
 					usedCreds = fresh;
 					console.warn(`[gateway] 401 on ${method} ${urlPath} — refreshed creds from disk and retrying`);
+					attempt--;
 					continue;
 				}
 			}
 			const text = await resp.text();
 			let data;
 			try { data = JSON.parse(text); } catch { data = text; }
-			if (!resp.ok) {
-				const msg = typeof data === "object" && data !== null && "error" in data
-					? String(data.error)
-					: `HTTP ${resp.status}: ${text}`;
-				throw new Error(msg);
-			}
-			return data;
+			return { ok: resp.ok, status: resp.status, body: data, text };
 		} catch (err) {
 			lastErr = err;
 			const transient = isTransientFetchError(err);
@@ -131,6 +126,17 @@ export async function apiCall(creds, method, urlPath, body, opts) {
 		}
 	}
 	throw lastErr;
+}
+
+export async function apiCall(creds, method, urlPath, body, opts) {
+	const result = await apiCallDetailed(creds, method, urlPath, body, opts);
+	if (!result.ok) {
+		const msg = typeof result.body === "object" && result.body !== null && "error" in result.body
+			? String(result.body.error)
+			: `HTTP ${result.status}: ${result.text}`;
+		throw new Error(msg);
+	}
+	return result.body;
 }
 
 export function __clearCredsCacheForTesting() {

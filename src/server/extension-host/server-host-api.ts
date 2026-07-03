@@ -28,7 +28,7 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
 // import is erased at runtime (no module cycle); the gateway injects the live
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
-import type { OrchestrationCore } from "../agent/orchestration-core.js";
+import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -84,8 +84,10 @@ export interface ServerHostAgentsApi {
 	}): Promise<{ childSessionId: string }>;
 	/** Run-if-idle / queue a follow-up prompt to an owned host.agents child. */
 	prompt(childSessionId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
-	/** Terminate + archive an owned host.agents child. */
-	dismiss(childSessionId: string): Promise<boolean>;
+	/** Terminate + archive an owned host.agents child.
+	 *  Returns OrchestrationCore's structured outcome so callers can distinguish
+	 *  dismissed/already-dismissed/not-owned/not-found/failed from retryability. */
+	dismiss(childSessionId: string): Promise<DismissResult>;
 	/** List the bound session's host.agents children (source-filtered). */
 	list(): Promise<Array<{ childSessionId: string; status: string; childKind: string }>>;
 	/** Read an owned host.agents child's transcript/output. */
@@ -296,6 +298,13 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	/** The bound session's host.agents children (source-filtered). */
 	const ownHostAgentsChildren = () =>
 		requireCore().list(ownerSessionId).filter((h) => h.childKind === HOST_AGENTS_KIND);
+	const hostAgentsNotOwned = (childSessionId: string): DismissResult => ({
+		ok: false,
+		status: "not-owned",
+		sessionId: childSessionId,
+		message: `host.agents: ${childSessionId} is not a host.agents child of this session`,
+		retryable: false,
+	});
 	/** Enforce that `childSessionId` is one of THIS session's host.agents children. */
 	const requireOwnAgentsChild = (childSessionId: string): void => {
 		if (!ownHostAgentsChildren().some((h) => h.sessionId === childSessionId)) {
@@ -345,8 +354,10 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			return requireCore().prompt(ownerSessionId, childSessionId, message);
 		},
 		dismiss: async (childSessionId) => {
-			requireOwnAgentsChild(childSessionId);
-			return requireCore().dismiss(ownerSessionId, childSessionId);
+			const c = requireCore();
+			const ownedKind = c.ownedChildKind(ownerSessionId, childSessionId);
+			if (ownedKind && ownedKind !== HOST_AGENTS_KIND) return hostAgentsNotOwned(childSessionId);
+			return c.dismiss(ownerSessionId, childSessionId);
 		},
 		list: async () => ownHostAgentsChildren().map((h) => ({
 			childSessionId: h.sessionId,

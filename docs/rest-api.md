@@ -446,7 +446,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
 | `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
-| `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`) |
+| `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
 | `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
 | `POST` | `/api/goals/:id/team/prompt` | Prompt or steer a team agent, owned helper child, or direct-child goal team lead. Body `{ sessionId, message, mode?: "prompt" | "steer", workflowGateId?, inputGateIds? }`; default mode is `"steer"`. See [Session prompt tools](session-prompt-tools.md). |
@@ -473,8 +473,38 @@ client-trusted). All call the shared `OrchestrationCore` in-process. See
 | `POST` | `/api/sessions/:id/orchestrate/steer` | Backward-compatible mid-turn steer for an owned child (`409` if the child is not streaming) |
 | `POST` | `/api/sessions/:id/orchestrate/abort` | Force-abort an owned child |
 | `POST` | `/api/sessions/:id/orchestrate/wait` | Wait for the **first** awaited child to settle (chunked heartbeat, like `/wait`) |
-| `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child |
+| `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child; returns the structured dismiss result documented below |
 | `GET` | `/api/sessions/:id/children-count` | Count + list (`{ count, children: [{ id, title }] }`) the session's live **and dormant/persisted** child agents, using the same predicate as the archive cascade. Backs the non-goal archive confirmation modal's child-agent enumeration |
+
+#### Dismiss response shape
+
+Both dismiss routes return the same structured shape for valid dismiss requests:
+
+```json
+{
+  "ok": true,
+  "status": "dismissed",
+  "sessionId": "child-session-id",
+  "message": "Child session child-session-id dismissed.",
+  "retryable": false
+}
+```
+
+| `status` | HTTP | Semantics |
+|---|---:|---|
+| `dismissed` | `200` | Owned live target was terminated and archived. |
+| `already-dismissed` | `200` | Owned target is already not live or archived; this is idempotent success and should not be retried. |
+| `not-owned` | `403` | Target exists but is not owned by the caller/goal, the caller is not the authentic owner/team lead, or the target is the team lead itself. |
+| `not-found` | `404` | No live, persisted, or remembered target exists for that session id. |
+| `failed` | `500` | Real termination/archive failure; check `message` and `retryable`. |
+
+For `/api/sessions/:id/orchestrate/dismiss`, the authenticated per-session secret must
+resolve to `:id`; otherwise the route returns structured `not-owned`. For
+`/api/goals/:id/team/dismiss`, tracked team-agent cleanup is team-lead-only. The same goal
+route also supports a team lead's own non-team helper child as a fallback, but only when the
+per-session secret resolves to that team lead. See [orchestration.md — `team_dismiss`
+outcomes](orchestration.md#team_dismiss-outcomes) for duplicate-dismiss, retry, and UI/tool
+semantics.
 
 ### Tasks
 
