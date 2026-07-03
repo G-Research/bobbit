@@ -41,6 +41,7 @@ import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
+import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -68,6 +69,26 @@ export interface NestedGoalRouteDeps {
 	broadcastToAll(event: any): void;
 	/** Read the system-scope subgoal nesting prefs (subgoalsEnabled, maxNestingDepth). */
 	getSubgoalNestingPrefs(): SubgoalNestingPrefs;
+}
+
+const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+const GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+function goalMergeGitUnavailable(parent: PersistedGoal, child: PersistedGoal): Record<string, unknown> | null {
+	const parentWorktree = parent.repoWorktrees?.["."] ?? parent.worktreePath;
+	if (parent.branch && child.branch && parentWorktree) return null;
+	const message = parent.projectId === HEADQUARTERS_PROJECT_ID
+		? HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE
+		: GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE;
+	return {
+		error: `Child merge is unavailable. ${message}`,
+		code: "GOAL_GIT_UNAVAILABLE",
+		parentGoalId: parent.id,
+		childGoalId: child.id,
+		parentBranch: parent.branch ?? null,
+		childBranch: child.branch ?? null,
+		parentWorktreePath: parentWorktree ?? null,
+	};
 }
 
 /**
@@ -1053,6 +1074,8 @@ export async function tryHandleNestedGoalRoute(
 				return true;
 			}
 		}
+		const gitUnavailable = goalMergeGitUnavailable(parent, child);
+		if (gitUnavailable) { json(gitUnavailable, 409); return true; }
 		try {
 			const outcome = await goalManager.mergeChild(parentId, childId);
 			if (outcome.merged || outcome.alreadyMerged) {

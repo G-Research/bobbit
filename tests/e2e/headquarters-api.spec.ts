@@ -1,4 +1,5 @@
 import { test as base, expect } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join, resolve } from "node:path";
@@ -357,7 +358,14 @@ test.describe("Headquarters BOBBIT_DIR config aliasing", () => {
 			expect(hqPolicies.status).toBe(200);
 			expect(hqPolicies.body.Shell).toMatchObject({ policy: "ask", origin: "server" });
 
+			const serverConfigWrite = await gw.json("/api/project-config", { method: "PUT", body: JSON.stringify({ hq_shared_server_marker: "server-write" }) });
+			expect(serverConfigWrite.status).toBe(200);
+			const hqConfigAfterServerWrite = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/config`);
+			expect(hqConfigAfterServerWrite.status).toBe(200);
+			expect(hqConfigAfterServerWrite.body.hq_shared_server_marker).toBe("server-write");
+
 			const workflowBody = {
+				hq_shared_project_marker: "headquarters-write",
 				components: [{ name: "server", repo: "." }],
 				workflows: {
 					"hq-workflow": { id: "hq-workflow", name: "HQ Workflow", gates: [{ id: "one", name: "One" }] },
@@ -365,6 +373,11 @@ test.describe("Headquarters BOBBIT_DIR config aliasing", () => {
 			};
 			const putConfig = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/config`, { method: "PUT", body: JSON.stringify(workflowBody) });
 			expect(putConfig.status).toBe(200);
+			const serverConfigAfterHqWrite = await gw.json("/api/project-config");
+			expect(serverConfigAfterHqWrite.status).toBe(200);
+			expect(serverConfigAfterHqWrite.body.hq_shared_server_marker).toBe("server-write");
+			expect(serverConfigAfterHqWrite.body.hq_shared_project_marker).toBe("headquarters-write");
+
 			const hqWorkflows = await gw.json(`/api/workflows?projectId=${HEADQUARTERS_PROJECT_ID}`);
 			expect(hqWorkflows.status).toBe(200);
 			expect((hqWorkflows.body.workflows ?? hqWorkflows.body).map((wf: any) => wf.id)).toContain("hq-workflow");
@@ -416,9 +429,92 @@ test.describe("Headquarters migration", () => {
 			await gw.shutdown();
 		}
 	});
+
+	test("preserves legacy server-root .bobbit state/config when BOBBIT_DIR is redirected", async () => {
+		const serverRoot = uniqueDir("redirected-migration-root");
+		const redirectedBobbitDir = uniqueDir("redirected-migration-bobbit");
+		const oldProjectId = "old-redirected-server-root-project";
+		const now = Date.now();
+		mkdirSync(join(serverRoot, ".bobbit", "state"), { recursive: true });
+		mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
+		writeFileSync(join(serverRoot, ".bobbit", "state", "goals.json"), JSON.stringify([
+			{ id: "legacy-redirected-goal", title: "Legacy Redirected Goal", cwd: serverRoot, state: "todo", spec: "legacy redirected spec", createdAt: now, updatedAt: now, projectId: oldProjectId, setupStatus: "ready" },
+		], null, 2));
+		writeFileSync(join(serverRoot, ".bobbit", "config", "project.yaml"), [
+			"legacy_redirected_marker: preserved",
+			"workflows:",
+			"  legacy-redirected-workflow:",
+			"    id: legacy-redirected-workflow",
+			"    name: Legacy Redirected Workflow",
+			"    gates:",
+			"      - id: plan",
+			"        name: Plan",
+			"",
+		].join("\n"));
+
+		const gw = await startHeadquartersGateway({
+			serverRoot,
+			bobbitDir: redirectedBobbitDir,
+			clean: false,
+			projects: [projectRecord(oldProjectId, "Old Redirected Server Root", serverRoot, { position: 0 })],
+		});
+		try {
+			const list = await gw.json("/api/projects");
+			expect(list.status).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID]);
+			expectHeadquartersProject(list.body[0], serverRoot);
+
+			const centralGoals = JSON.parse(readFileSync(join(redirectedBobbitDir, "state", "goals.json"), "utf-8"));
+			expect(centralGoals).toHaveLength(1);
+			expect(centralGoals[0]).toMatchObject({ id: "legacy-redirected-goal", projectId: HEADQUARTERS_PROJECT_ID });
+			expect(existsSync(join(serverRoot, ".bobbit", "state", "goals.json")), "legacy root state should be preserved in place").toBe(true);
+
+			const serverConfig = await gw.json("/api/project-config");
+			expect(serverConfig.status).toBe(200);
+			expect(serverConfig.body.legacy_redirected_marker).toBe("preserved");
+			const hqWorkflows = await gw.json(`/api/workflows?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			expect(hqWorkflows.status).toBe(200);
+			expect((hqWorkflows.body.workflows ?? hqWorkflows.body).map((wf: any) => wf.id)).toContain("legacy-redirected-workflow");
+		} finally {
+			await gw.shutdown();
+		}
+	});
 });
 
 test.describe("Headquarters no-git goals", () => {
+	test("honors worktree:false for git-backed Headquarters roots", async () => {
+		const gw = await startHeadquartersGateway({ projects: [] });
+		try {
+			execFileSync("git", ["init"], { cwd: gw.serverRoot, stdio: "ignore" });
+			const workflow = { id: "hq-git-data-only", name: "HQ Git Data Only", gates: [{ id: "plan", name: "Plan", content: true }] };
+			const create = await gw.json("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Headquarters git data-only goal",
+					spec: "Verify that an explicit no-worktree Headquarters goal does not allocate a branch even when the server root is a git repo.",
+					projectId: HEADQUARTERS_PROJECT_ID,
+					cwd: gw.serverRoot,
+					worktree: false,
+					autoStartTeam: false,
+					workflowId: workflow.id,
+					workflow,
+				}),
+			});
+			expect(create.status).toBe(201);
+			expect(create.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expect(create.body.setupStatus).toBe("ready");
+			expect(create.body.branch).toBeUndefined();
+			expect(create.body.worktreePath).toBeUndefined();
+			expect(create.body.repoPath).toBeUndefined();
+
+			const gitStatus = await gw.json(`/api/goals/${create.body.id}/git-status`);
+			expect(gitStatus.status).toBe(409);
+			expect(gitStatus.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
 	test("creates a worktree:false Headquarters goal with ready setup, gates/tasks/archive basics, and clear git-dependent responses", async () => {
 		const gw = await startHeadquartersGateway({ projects: [] });
 		try {
@@ -454,12 +550,18 @@ test.describe("Headquarters no-git goals", () => {
 
 			const githubLink = await gw.json(`/api/goals/${goal.id}/github-link`);
 			expect(githubLink.status).toBe(200);
-			expect(githubLink.body).toMatchObject({ available: false, reason: "no-branch" });
-			const optionalPrStatus = await gw.request(`/api/goals/${goal.id}/pr-status?optional=1`);
-			expect([204, 400, 404, 409]).toContain(optionalPrStatus.status);
-			if (optionalPrStatus.status !== 204 && optionalPrStatus.status !== 404) {
-				const text = await optionalPrStatus.text();
-				expect(text).toMatch(/branch|worktree|git|no PR|unavailable/i);
+			expect(githubLink.body).toMatchObject({ available: false, reason: "no-worktree" });
+
+			for (const [label, response] of [
+				["git-status", await gw.json(`/api/goals/${goal.id}/git-status`)],
+				["git-diff", await gw.json(`/api/goals/${goal.id}/git-diff`)],
+				["commits", await gw.json(`/api/goals/${goal.id}/commits`)],
+				["pr-status", await gw.json(`/api/goals/${goal.id}/pr-status?optional=1`)],
+				["pr-merge", await gw.json(`/api/goals/${goal.id}/pr-merge`, { method: "POST", body: JSON.stringify({ method: "squash" }) })],
+			] as const) {
+				expect(response.status, `${label} should reject no-worktree goals clearly`).toBe(409);
+				expect(response.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+				expect(String(response.body.error)).toMatch(/worktree|branch|PR actions are unavailable/i);
 			}
 
 			const archive = await gw.json(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });

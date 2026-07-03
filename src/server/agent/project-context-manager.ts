@@ -4,6 +4,7 @@ import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
+import type { ProjectConfigStore } from "./project-config-store.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -39,7 +40,10 @@ export class ProjectContextManager {
    */
   private contextConfigurator: ((ctx: ProjectContext) => void) | null = null;
 
-  constructor(registry: ProjectRegistry) {
+  constructor(
+    registry: ProjectRegistry,
+    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore } = {},
+  ) {
     this.registry = registry;
   }
 
@@ -79,7 +83,7 @@ export class ProjectContextManager {
     const project = this.registry.get(projectId);
     if (!project) return null;
 
-    ctx = new ProjectContext(project);
+    ctx = new ProjectContext(project, this.options);
     ctx.open();
     // Propagate any post-boot dispatcher wiring to lazily-created contexts.
     if (this.goalTriggerDispatcher) {

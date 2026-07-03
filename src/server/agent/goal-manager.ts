@@ -310,10 +310,10 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown> }): Promise<PersistedGoal> {
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean }): Promise<PersistedGoal> {
 		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata } = opts ?? {};
 		const team = true;
-		const worktree = true;
+		const worktree = opts?.worktree !== false;
 		const now = Date.now();
 		const id = randomUUID();
 
@@ -770,16 +770,20 @@ export class GoalManager {
 			throw err;
 		}
 		if (!parent.branch || !child.branch) {
-			throw new Error(
+			const err = new Error(
 				`mergeChild: missing branch — parent="${parent.branch}", child="${child.branch}"`,
 			);
+			(err as any).code = "GOAL_GIT_UNAVAILABLE";
+			throw err;
 		}
 
 		// repoWorktrees["."] is canonical primary in multi-repo; worktreePath
 		// is authoritative in single-repo.
 		const parentCwd = parent.repoWorktrees?.["."] ?? parent.worktreePath;
 		if (!parentCwd) {
-			throw new Error(`mergeChild: parent ${parentGoalId} has no worktreePath`);
+			const err = new Error(`mergeChild: parent ${parentGoalId} has no worktreePath`);
+			(err as any).code = "GOAL_GIT_UNAVAILABLE";
+			throw err;
 		}
 
 		const result = await mergeChildBranchLocal(parent.branch, child.branch, parentCwd);
