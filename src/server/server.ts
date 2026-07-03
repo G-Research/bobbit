@@ -40,7 +40,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { OrchestrationCore, OrchestrationCoreError, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
+import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -10638,7 +10638,9 @@ async function handleApiRoute(
 	const teamLeadOwnChildOwner = (goalId: string, targetId: string): string | undefined => {
 		const lead = teamManager.getTeamState(goalId)?.teamLeadSessionId;
 		if (!lead) return undefined;
-		return orchestrationCore.list(lead).some(h => h.sessionId === targetId) ? lead : undefined;
+		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId)) return lead;
+		const persisted = sessionManager.getPersistedSession(targetId) as any;
+		return persisted?.delegateOf === lead || persisted?.parentSessionId === lead || persisted?.teamLeadSessionId === lead ? lead : undefined;
 	};
 	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
 	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
@@ -10685,21 +10687,16 @@ async function handleApiRoute(
 		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
 		const ownerResult = resolveOwnChildOwner(teamDismissMatch[1], body.sessionId);
 		if (ownerResult) {
-			if ("denied" in ownerResult) { denyOwnChild(); return; }
-			try {
-				const ok = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
-				json({ ok });
-			} catch (err) {
-				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+			if ("denied" in ownerResult) {
+				json({ ok: false, status: "not-owned", sessionId: body.sessionId, message: "Caller session is not the owner of this child agent", retryable: false }, 403);
+				return;
 			}
+			const result = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
+			json(result, dismissHttpStatus(result));
 			return;
 		}
-		try {
-			const ok = await teamManager.dismissRole(body.sessionId);
-			json({ ok });
-		} catch (err) {
-			jsonError(400, err);
-		}
+		const result = await teamManager.dismissRoleForGoal(teamDismissMatch[1], body.sessionId);
+		json(result, dismissHttpStatus(result));
 		return;
 	}
 
@@ -11621,6 +11618,12 @@ async function handleApiRoute(
 				typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
 			);
 			if (!authenticCaller || authenticCaller !== ownerId) {
+				if (verb === "dismiss") {
+					const deniedBody = await readBody(req).catch(() => ({}));
+					const targetId = typeof deniedBody?.childSessionId === "string" ? deniedBody.childSessionId : "unknown";
+					json({ ok: false, status: "not-owned", sessionId: targetId, message: "Caller session is not the owner of these child agents", retryable: false }, 403);
+					return;
+				}
 				json({ error: "Caller session is not the owner of these child agents", code: "NOT_OWNER" }, 403);
 				return;
 			}
@@ -11703,8 +11706,8 @@ async function handleApiRoute(
 			// POST /orchestrate/dismiss — terminate + archive own child.
 			if (verb === "dismiss") {
 				if (!body?.childSessionId) { json({ error: "Missing childSessionId" }, 400); return; }
-				const ok = await orchestrationCore.dismiss(ownerId, body.childSessionId);
-				json({ ok });
+				const result = await orchestrationCore.dismiss(ownerId, body.childSessionId);
+				json(result, dismissHttpStatus(result));
 				return;
 			}
 

@@ -160,7 +160,7 @@ export function formatElapsed(sinceMs: number): string {
 
 // Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
 import { TaskManager } from "./task-manager.js";
-import type { OrchestrationCore } from "./orchestration-core.js";
+import type { DismissResult, OrchestrationCore } from "./orchestration-core.js";
 
 
 export interface TeamAgent {
@@ -2240,25 +2240,34 @@ export class TeamManager {
 	/**
 	 * Dismiss (terminate) a role agent session and clean up its worktree.
 	 */
-	async dismissRole(sessionId: string): Promise<boolean> {
+	async dismissRole(sessionId: string): Promise<DismissResult> {
 		const goalId = this.sessionToGoal.get(sessionId);
 		if (!goalId) {
-			return false;
+			return this.classifyUntrackedDismiss(undefined, sessionId);
+		}
+		return this.dismissRoleForGoal(goalId, sessionId);
+	}
+
+	/** Dismiss a role agent for a specific goal, preserving structured authz/not-found outcomes. */
+	async dismissRoleForGoal(goalId: string, sessionId: string): Promise<DismissResult> {
+		const mappedGoalId = this.sessionToGoal.get(sessionId);
+		if (mappedGoalId && mappedGoalId !== goalId) {
+			return { ok: false, status: "not-owned", sessionId, message: `Team agent ${sessionId} belongs to a different goal.`, retryable: false };
 		}
 
 		const entry = this.teams.get(goalId);
 		if (!entry) {
-			return false;
+			return this.classifyUntrackedDismiss(goalId, sessionId);
 		}
 
-		// Don't allow dismissing the team lead via this method
+		// Don't allow dismissing the team lead via this method.
 		if (entry.teamLeadSessionId === sessionId) {
-			throw new Error("Cannot dismiss the team lead — use completeTeam() instead");
+			return { ok: false, status: "not-owned", sessionId, message: "Cannot dismiss the team lead — use completeTeam() instead.", retryable: false };
 		}
 
 		const agentIndex = entry.agents.findIndex((a) => a.sessionId === sessionId);
 		if (agentIndex === -1) {
-			return false;
+			return this.classifyUntrackedDismiss(goalId, sessionId);
 		}
 
 		const agent = entry.agents[agentIndex];
@@ -2276,18 +2285,28 @@ export class TeamManager {
 		if (goal?.repoPath && agent.worktreePath) {
 			this.sessionManager.updateSessionMeta(sessionId, {
 				worktreePath: agent.worktreePath,
-			});
+				teamGoalId: goalId,
+			} as any);
 			// Store repoPath and branch in the session store for later purge cleanup
 			const projectCtx = goalId && this.config.projectContextManager
 				? this.config.projectContextManager.getContextForGoal(goalId)
 				: null;
 			if (projectCtx) {
-				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
+				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch, teamGoalId: goalId } as any);
 			}
 		}
 
-		// Terminate the session
-		await this.sessionManager.terminateSession(sessionId);
+		let terminated = false;
+		try {
+			(this.sessionManager as any).markChildTerminal?.(sessionId);
+		} catch (err) {
+			console.error(`[team-manager] markChildTerminal failed for ${sessionId}:`, err);
+		}
+		try {
+			terminated = await this.sessionManager.terminateSession(sessionId);
+		} catch (err) {
+			return { ok: false, status: "failed", sessionId, message: `Failed to dismiss team agent ${sessionId}: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
+		}
 
 		// Worktree is preserved for archived session review — cleanup happens at purge time
 
@@ -2326,7 +2345,25 @@ export class TeamManager {
 			type: "team_agent_dismissed", goalId, sessionId, role: agent.role, name: dismissedName,
 		});
 
-		return true;
+		return terminated
+			? { ok: true, status: "dismissed", sessionId, message: `Team agent ${sessionId} dismissed.`, retryable: false }
+			: { ok: true, status: "already-dismissed", sessionId, message: `Team agent ${sessionId} is already dismissed.`, retryable: false };
+	}
+
+	private classifyUntrackedDismiss(goalId: string | undefined, sessionId: string): DismissResult {
+		const live = this.sessionManager.getSession(sessionId) as any;
+		const persisted = (this.sessionManager as any).getPersistedSession?.(sessionId) as any;
+		const teamGoalId = live?.teamGoalId ?? persisted?.teamGoalId;
+		if (goalId && teamGoalId === goalId) {
+			return { ok: true, status: "already-dismissed", sessionId, message: `Team agent ${sessionId} is already dismissed.`, retryable: false };
+		}
+		if (teamGoalId && (!goalId || teamGoalId !== goalId)) {
+			return { ok: false, status: "not-owned", sessionId, message: `Team agent ${sessionId} belongs to a different goal.`, retryable: false };
+		}
+		if (live || persisted) {
+			return { ok: false, status: "not-owned", sessionId, message: `Session ${sessionId} is not a team agent for this goal.`, retryable: false };
+		}
+		return { ok: false, status: "not-found", sessionId, message: `Team agent ${sessionId} was not found.`, retryable: false };
 	}
 
 	/**

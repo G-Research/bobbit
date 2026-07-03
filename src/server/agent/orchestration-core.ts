@@ -56,6 +56,24 @@ export type TerminalChildStatus = "terminated" | "timeout" | "failed";
 /** A child is SETTLED when its status is idle OR terminal. */
 export type ChildStatus = LiveChildStatus | TerminalChildStatus;
 
+export type DismissStatus = "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+export interface DismissResult {
+	ok: boolean;
+	status: DismissStatus;
+	sessionId: string;
+	message: string;
+	retryable: boolean;
+}
+
+export function dismissHttpStatus(result: DismissResult): number {
+	switch (result.status) {
+		case "not-owned": return 403;
+		case "not-found": return 404;
+		case "failed": return 500;
+		default: return 200;
+	}
+}
+
 const TERMINAL_STATUSES = new Set<ChildStatus>(["terminated", "timeout", "failed"]);
 export function isTerminalStatus(s: ChildStatus): boolean {
 	return TERMINAL_STATUSES.has(s);
@@ -252,6 +270,10 @@ export interface PersistedSessionLike {
 	 * pack-store keys and has NO per-pack knowledge.
 	 */
 	childTerminal?: boolean;
+	/** Goal/team adapter ownership marker for role-agent sessions. */
+	teamGoalId?: string;
+	/** Team lead session that owns a goal/team worker. */
+	teamLeadSessionId?: string;
 	/** When the terminal marker was stamped (epoch ms). */
 	terminalAt?: number;
 }
@@ -665,8 +687,25 @@ export class OrchestrationCore {
 		this.audit({ event: "abort", ownerSessionId: ownerId, childSessionId: childId });
 	}
 
-	async dismiss(ownerId: string, childId: string): Promise<boolean> {
-		this.requireOwnChild(ownerId, childId);
+	async dismiss(ownerId: string, childId: string): Promise<DismissResult> {
+		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === childId);
+		const live = this.deps.sessionManager.getSession(childId);
+		const persisted = this.deps.sessionManager.getPersistedSession(childId);
+		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
+		const exists = !!live || !!persisted;
+
+		if (!handle && !persistedOwned) {
+			return exists
+				? { ok: false, status: "not-owned", sessionId: childId, message: `Child session ${childId} is not owned by ${ownerId}.`, retryable: false }
+				: { ok: false, status: "not-found", sessionId: childId, message: `Child session ${childId} was not found.`, retryable: false };
+		}
+
+		const isLive = this.deps.sessionManager.isSessionLive?.call(this.deps.sessionManager, childId);
+		if (!live || live.status === "terminated" || persisted?.archived || isLive === false) {
+			this.forgetChild(childId);
+			return { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
+		}
+
 		// Stamp the GENERIC persisted terminal marker BEFORE terminating, so a restart
 		// between here and the terminate still lets the generic boot-reap remove the
 		// child (Decision E / Findings 3–4). Best-effort: never let it break dismiss.
@@ -675,10 +714,16 @@ export class OrchestrationCore {
 		} catch (err) {
 			console.error(`[orchestration] markChildTerminal failed for ${childId}:`, err);
 		}
-		const ok = await this.deps.sessionManager.terminateSession(childId);
-		this.forgetChild(childId);
-		this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
-		return ok;
+		try {
+			const ok = await this.deps.sessionManager.terminateSession(childId);
+			this.forgetChild(childId);
+			this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
+			return ok
+				? { ok: true, status: "dismissed", sessionId: childId, message: `Child session ${childId} dismissed.`, retryable: false }
+				: { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
+		} catch (err) {
+			return { ok: false, status: "failed", sessionId: childId, message: `Failed to dismiss child session ${childId}: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
+		}
 	}
 
 	async read(ownerId: string, childId: string, opts?: ReadTranscriptLike): Promise<unknown> {

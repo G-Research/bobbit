@@ -230,6 +230,33 @@ const extension: ExtensionFactory = (pi) => {
 		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body, { extraHeaders });
 	}
 
+	async function orchestrateDetailed(method: string, verb: string, body?: unknown): Promise<{ ok: boolean; status: number; body: any }> {
+		const credsResult = readGatewayCreds();
+		if ("error" in credsResult) throw new Error(credsResult.error);
+		const owner = ownerSessionId || "unknown";
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		const resp = await fetch(`${credsResult.baseUrl}/api/sessions/${owner}/orchestrate/${verb}`, {
+			method,
+			headers: { Authorization: `Bearer ${credsResult.token}`, "Content-Type": "application/json", ...extraHeaders },
+			body: body !== undefined ? JSON.stringify(body) : undefined,
+		});
+		const text = await resp.text();
+		let parsed: any = text;
+		try { parsed = JSON.parse(text); } catch { /* keep text */ }
+		return { ok: resp.ok, status: resp.status, body: parsed };
+	}
+
+	function dismissText(result: any): string {
+		return [
+			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
+			result?.message ? `message: ${result.message}` : undefined,
+			`retryable: ${result?.retryable === true ? "true" : "false"}`,
+			"",
+			JSON.stringify(result, null, 2),
+		].filter(Boolean).join("\n");
+	}
+
 	function ok(text: string, details?: unknown) {
 		return { content: [{ type: "text" as const, text }], details };
 	}
@@ -557,14 +584,15 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_dismiss",
 			label: "Dismiss Child Agent",
-			description: "Terminate and archive one of your child agents.",
-			promptSnippet: "team_dismiss - Dismiss (terminate + archive) a child agent by session ID.",
+			description: "Terminate/archive one of your child agents or report a structured non-retryable outcome. Returns { ok, status, sessionId, message, retryable } with status dismissed, already-dismissed, not-owned, not-found, or failed.",
+			promptSnippet: "team_dismiss - Dismiss a child agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 			}),
 			async execute(_id, params) {
 				try {
-					return ok(JSON.stringify(await orchestrate("POST", "dismiss", { childSessionId: params.session_id }), null, 2));
+					const resp = await orchestrateDetailed("POST", "dismiss", { childSessionId: params.session_id });
+					return { content: [{ type: "text" as const, text: dismissText(resp.body) }], details: resp.body, isError: !resp.ok && resp.body?.status === "failed" };
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});

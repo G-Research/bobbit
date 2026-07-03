@@ -47,6 +47,30 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: undefined };
 	}
 
+	function dismissText(result: any): string {
+		return [
+			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
+			result?.message ? `message: ${result.message}` : undefined,
+			`retryable: ${result?.retryable === true ? "true" : "false"}`,
+			"",
+			JSON.stringify(result, null, 2),
+		].filter(Boolean).join("\n");
+	}
+
+	async function apiDetailed(method: string, urlPath: string, body?: unknown): Promise<{ ok: boolean; status: number; body: any }> {
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		const resp = await fetch(`${creds.baseUrl}${urlPath}`, {
+			method,
+			headers: { Authorization: `Bearer ${creds.token}`, "Content-Type": "application/json", ...extraHeaders },
+			body: body !== undefined ? JSON.stringify(body) : undefined,
+		});
+		const text = await resp.text();
+		let parsed: any = text;
+		try { parsed = JSON.parse(text); } catch { /* keep text */ }
+		return { ok: resp.ok, status: resp.status, body: parsed };
+	}
+
 	function err(msg: string) {
 		return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
 	}
@@ -90,14 +114,15 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_dismiss",
 		label: "Dismiss Team Agent",
-		description: "Terminate a role agent and clean up its worktree.",
-		promptSnippet: "Dismiss (terminate) a team agent by session ID.",
+		description: "Terminate/archive a role agent or report a structured non-retryable outcome. Returns { ok, status, sessionId, message, retryable } with status dismissed, already-dismissed, not-owned, not-found, or failed.",
+		promptSnippet: "Dismiss a team agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: params.session_id }));
+				const resp = await apiDetailed("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: params.session_id });
+				return { content: [{ type: "text" as const, text: dismissText(resp.body) }], details: resp.body, isError: !resp.ok && resp.body?.status === "failed" };
 			} catch (e: any) { return err(e.message); }
 		},
 	});
