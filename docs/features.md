@@ -141,7 +141,7 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | # | Section | Volatile? | Source |
 |---|---------|-----------|--------|
 | 1 | **Global system prompt** | No | `.bobbit/config/system-prompt.md` (user customised) or `defaults/system-prompt.md`. Resolved by `resolveSystemPromptPath()`. See [internals.md — Config cascade](internals.md#config-cascade). |
-| 2 | **AGENTS.md / project docs** | No | From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe). |
+| 2 | **AGENTS.md / project docs** | No | From the registered project root and configured `agents` files, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe). Falls back to the session working directory only when no project root/config store is available. |
 | 3 | **Working directory** | No | Injected `# Working Directory` block with the session's `cwd`. |
 | 4 | **Tool documentation** | No | Assembled from `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). |
 | 5 | **Available Skills catalog** | No | Built from the list of skills in scope for the session. |
@@ -151,6 +151,8 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | 9 | **Dynamic Context** | Yes | Provider-supplied ambient context from the `sessionSetup` lifecycle hook, fenced in `<context-block>` envelopes. Appended last (freshest, lowest-authority). Omitted unless an active provider contributes blocks. See [lifecycle-hub.md](lifecycle-hub.md#session-setup-wiring-g13). |
 
 Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout. The same inspector section is refreshed best-effort for per-turn `beforePrompt` blocks, but those blocks reach the model through the hidden custom-message channel so provider cached system-prompt bytes stay stable across turns.
+
+Bobbit, not pi-coding-agent, owns project instruction assembly. `src/server/agent/rpc-bridge.ts::buildAgentArgs()` always launches pi with `--no-context-files` and strips caller-supplied context-file flags before appending custom args. This prevents pi's built-in upward discovery from adding parent-directory `AGENTS.md` / `CLAUDE.md` files to the runtime `systemPrompt` or `before_agent_start` hook events. The registered project's configured agent files still appear once through Bobbit's `Project AGENTS.md` section, and provider-bridge `beforePrompt` context remains unchanged: per-turn blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side messages, not by mutating `systemPrompt`.
 
 ## Reconnection
 

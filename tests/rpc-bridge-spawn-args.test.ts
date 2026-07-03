@@ -34,6 +34,31 @@ describe("buildAgentArgs", () => {
 		}
 	});
 
+	it("always includes --no-context-files so pi never auto-loads parent AGENTS.md/CLAUDE.md context", () => {
+		// Bobbit owns project instruction injection via its assembled system prompt.
+		// pi's independent context-file discovery must stay disabled on every
+		// launch path so parent-directory AGENTS.md / CLAUDE.md files cannot leak
+		// into the runtime system prompt or extension hook events.
+		for (const opts of [
+			{},
+			{ initialModel: "anthropic/claude-opus-4-8" },
+			{ initialThinkingLevel: "high" },
+			{ systemPromptPath: "/tmp/p.md", initialModel: "openai/gpt-4o", initialThinkingLevel: "xhigh" },
+			{ args: ["--tools", "read,write"] },
+		]) {
+			const args = buildAgentArgs(opts);
+			assert.ok(
+				args.includes("--no-context-files"),
+				`--no-context-files must always be present to disable pi context-file discovery, got: ${args.join(" ")}`,
+			);
+			assert.equal(
+				args.filter((a) => a === "--no-context-files").length,
+				1,
+				`exactly one --no-context-files expected, got: ${args.join(" ")}`,
+			);
+		}
+	});
+
 	it("strips a caller-supplied --approve and keeps exactly one non-overridable --no-approve", () => {
 		// pi parses trust flags last-wins; a trailing --approve would re-enable
 		// project-local .pi loading. It must be stripped, leaving the leading
@@ -84,13 +109,46 @@ describe("buildAgentArgs", () => {
 		assert.equal(args[idxTools + 1], "read", "--tools value preserved");
 	});
 
+	it("strips caller-supplied context-file flags and aliases without disturbing unrelated args", () => {
+		const args = buildAgentArgs({
+			initialModel: "anthropic/claude-3-5-sonnet",
+			args: [
+				"--context-files", "/tmp/parent/AGENTS.md",
+				"-c",
+				"--no-context-files",
+				"-nc",
+				"--tools", "read",
+				"--extension", "/foo.ts",
+			],
+		});
+
+		assert.equal(
+			args.filter((a) => a === "--no-context-files").length,
+			1,
+			`exactly one --no-context-files expected, got: ${args.join(" ")}`,
+		);
+		assert.ok(!args.includes("--context-files"), `--context-files must be stripped, got: ${args.join(" ")}`);
+		assert.ok(!args.includes("-c"), `-c context-file alias must be stripped, got: ${args.join(" ")}`);
+		assert.ok(!args.includes("-nc"), `-nc alias must be de-duplicated, got: ${args.join(" ")}`);
+		assert.ok(
+			!args.includes("/tmp/parent/AGENTS.md"),
+			`--context-files paired value must be stripped with the flag, got: ${args.join(" ")}`,
+		);
+		assert.deepEqual(args, [
+			"--mode", "rpc", "--no-approve", "--no-context-files",
+			"--model", "anthropic/claude-3-5-sonnet",
+			"--tools", "read",
+			"--extension", "/foo.ts",
+		]);
+	});
+
 	it("includes --model and --thinking when initialModel/initialThinkingLevel are set", () => {
 		const args = buildAgentArgs({
 			initialModel: "anthropic/claude-3-5-sonnet",
 			initialThinkingLevel: "high",
 		});
 		assert.deepEqual(args, [
-			"--mode", "rpc", "--no-approve",
+			"--mode", "rpc", "--no-approve", "--no-context-files",
 			"--model", "anthropic/claude-3-5-sonnet",
 			"--thinking", "high",
 		]);
@@ -156,7 +214,7 @@ describe("buildAgentArgs", () => {
 		});
 
 		assert.deepEqual(args, [
-			"--mode", "rpc", "--no-approve",
+			"--mode", "rpc", "--no-approve", "--no-context-files",
 			"--model", "anthropic/claude-opus-4-8",
 			"--thinking", "xhigh",
 		]);
