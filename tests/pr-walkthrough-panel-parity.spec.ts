@@ -157,6 +157,8 @@ const READY_BUNDLE = {
                 { id: "L16", kind: "context", oldLine: 16, newLine: 16, text: "  // keep reviewer state local" },
                 { id: "L17", kind: "del", oldLine: 17, text: "  renderCompactDiff(block);" },
                 { id: "L18", kind: "add", newLine: 18, text: "  renderReferenceDiff(block, diffMode);" },
+                { id: "L18-full-del", kind: "del", oldLine: 18, text: "legacyRenderer(block)" },
+                { id: "L18-full-add", kind: "add", newLine: 19, text: "modernReviewPanel(diffMode);" },
                 { id: "L19", kind: "context", oldLine: 18, newLine: 19, text: "  renderDiffFooter(block);" },
                 { id: "L20", kind: "context", oldLine: 19, newLine: 20, text: "  preserveReviewDecision(block.id);" },
                 { id: "L21", kind: "context", oldLine: 20, newLine: 21, text: "  persistCollapsedState(block.id);" },
@@ -933,10 +935,16 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(diffColors.addText.color, 'added code text must keep the normal syntax foreground, not turn green').toBe(diffColors.delText.color);
 		expect(diffColors.addGutter.background, 'GitHub-style added gutter should be highlighted separately from the code cell').not.toBe(diffColors.addText.background);
 		expect(diffColors.delGutter.background, 'GitHub-style deleted gutter should be highlighted separately from the code cell').not.toBe(diffColors.delText.background);
-		await expect(paired.locator('.diff-line.add .diff-word'), 'added lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
-		await expect(paired.locator('.diff-line.del .diff-word'), 'deleted lines should highlight only the changed text range like GitHub').not.toHaveCount(0);
+		await expect(paired.locator('.diff-line.add .diff-word'), 'partial added lines should keep meaningful changed-range highlights').not.toHaveCount(0);
+		await expect(paired.locator('.diff-line.del .diff-word'), 'partial deleted lines should keep meaningful changed-range highlights').not.toHaveCount(0);
 		await expect(paired.locator('.diff-line.del .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
 		await expect(paired.locator('.diff-line.add .comment-cue')).toHaveAttribute('aria-label', /Add line comment/i);
+
+		const fullLineDifferent = firstBlock.locator('.split-row:has(.diff-line[data-line-id="L18-full-del"]):has(.diff-line[data-line-id="L18-full-add"])').first();
+		await expect(fullLineDifferent.locator('.diff-line.del .line-text')).toContainText('legacyRenderer(block)');
+		await expect(fullLineDifferent.locator('.diff-line.add .line-text')).toContainText('modernReviewPanel(diffMode);');
+		await expect(fullLineDifferent.locator('.diff-line.del .diff-word'), 'split deleted rows should not wrap the entire changed line in diff-word').toHaveCount(0);
+		await expect(fullLineDifferent.locator('.diff-line.add .diff-word'), 'split added rows should not wrap the entire changed line in diff-word').toHaveCount(0);
 
 		const additionOnly = firstBlock.locator('.split-row:has(.diff-line[data-line-id="L36"])').first();
 		await expect(additionOnly.locator('.diff-line.empty')).toHaveCount(1);
@@ -994,8 +1002,13 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(firstBlock.locator('.diff-overflow > .inline-lines')).toBeVisible();
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L17"].del')).toContainText('renderCompactDiff(block);');
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18"].add')).toContainText('renderReferenceDiff(block, diffMode);');
-		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L17"].del .diff-word'), 'inline deleted rows should keep GitHub-style intraline highlights').not.toHaveCount(0);
-		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18"].add .diff-word'), 'inline added rows should keep GitHub-style intraline highlights').not.toHaveCount(0);
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L17"].del .diff-word'), 'inline partial deleted rows should keep meaningful changed-range highlights').not.toHaveCount(0);
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18"].add .diff-word'), 'inline partial added rows should keep meaningful changed-range highlights').not.toHaveCount(0);
+
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-del"].del')).toContainText('legacyRenderer(block)');
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-add"].add')).toContainText('modernReviewPanel(diffMode);');
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-del"].del .diff-word'), 'inline deleted rows should not wrap the entire changed line in diff-word').toHaveCount(0);
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-add"].add .diff-word'), 'inline added rows should not wrap the entire changed line in diff-word').toHaveCount(0);
 	});
 
 	test("ready state supports user comments, dislike gating, narrow inline default, historical file headers, and diff collapse", async ({ page }) => {
@@ -1014,8 +1027,8 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(header.locator('.diff-file-header')).toBeVisible();
 		await expect(header.locator('.caret')).toBeVisible();
 		await expect(header.locator('.diff-path')).toContainText('src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts → market-packs/pr-walkthrough/src/panel.js');
-		await expect(header.locator('.diff-add-count')).toContainText('+2');
-		await expect(header.locator('.diff-del-count')).toContainText('-1');
+		await expect(header.locator('.diff-add-count')).toContainText('+3');
+		await expect(header.locator('.diff-del-count')).toContainText('-2');
 		await expect(header.locator('a.diff-external-link, [data-testid="pr-walkthrough-external-file-link"]')).toHaveAttribute('href', /github\.com\/SuuBro\/bobbit\/blob\/fedcba/);
 
 		const dislike = page.getByRole("button", { name: "Dislike" });

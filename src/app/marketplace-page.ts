@@ -79,6 +79,7 @@ let enabledBrowseSourceIds = new Set<string>();
 let browseSearch = "";
 let browseError = "";
 let browseLoading = false;
+let browseSourceMenuOpen = false;
 
 let installed: InstalledPackWire[] = [];
 let installedError = "";
@@ -138,6 +139,7 @@ export function clearMarketplaceState(): void {
 	browseSearch = "";
 	browseError = "";
 	browseLoading = false;
+	browseSourceMenuOpen = false;
 	installed = [];
 	installedError = "";
 	conflicts = [];
@@ -853,7 +855,11 @@ function renderTabBar(): TemplateResult {
 				type="button"
 				data-testid="market-tab-${mode}"
 				class=${cls}
-				@click=${() => { activeTab = mode; renderApp(); }}
+				@click=${() => {
+					activeTab = mode;
+					if (mode !== "browse") closeBrowseSourceMenu(false);
+					renderApp();
+				}}
 			>
 				${icon(tabIcon, "xs")}
 				<span>${label}</span>
@@ -1157,7 +1163,49 @@ function filteredBrowsePacks(): BrowsePackWire[] {
 	});
 }
 
+function browseSourceCountById(): Map<string, number> {
+	const countBySource = new Map<string, number>();
+	for (const pack of browsePacks) {
+		const id = browsePackSourceId(pack);
+		if (id) countBySource.set(id, (countBySource.get(id) ?? 0) + 1);
+	}
+	return countBySource;
+}
+
+function browseSourceSummary(visiblePackCount: number, selectedSupportedCount: number, _supportedCount: number): string {
+	if (browseLoading && browseSources.length === 0) return "Loading sources…";
+	if (selectedSupportedCount === 0) return "No sources selected";
+	if (visiblePackCount === 0) return "No packages match the current filters";
+	return `Showing ${visiblePackCount} package${visiblePackCount === 1 ? "" : "s"} from ${selectedSupportedCount} source${selectedSupportedCount === 1 ? "" : "s"}`;
+}
+
+function browseSourceStatusLabel(src: MarketplaceBrowseSourceState): string {
+	if (src.status === "loading") return "Loading…";
+	if (src.status === "error") return "Error";
+	if (src.status === "unsupported") return "Unsupported";
+	return "";
+}
+
+function toggleBrowseSourceMenu(): void {
+	browseSourceMenuOpen = !browseSourceMenuOpen;
+	renderApp();
+}
+
+function closeBrowseSourceMenu(render = true): void {
+	if (!browseSourceMenuOpen) return;
+	browseSourceMenuOpen = false;
+	if (render) renderApp();
+}
+
+function handleBrowseSourceMenuKeydown(event: KeyboardEvent): void {
+	if (event.key !== "Escape" || !browseSourceMenuOpen) return;
+	event.stopPropagation();
+	closeBrowseSourceMenu();
+}
+
 function toggleBrowseSource(sourceId: string): void {
+	const source = browseSources.find((src) => src.sourceId === sourceId);
+	if (source?.status === "unsupported") return;
 	const next = new Set(enabledBrowseSourceIds);
 	if (next.has(sourceId)) next.delete(sourceId);
 	else next.add(sourceId);
@@ -1173,12 +1221,12 @@ function setAllBrowseSources(enabled: boolean): void {
 }
 
 function renderBrowseControls(): TemplateResult {
-	const countBySource = new Map<string, number>();
-	for (const pack of browsePacks) {
-		const id = browsePackSourceId(pack);
-		if (id) countBySource.set(id, (countBySource.get(id) ?? 0) + 1);
-	}
-	const allEnabled = browseSources.filter((src) => src.status !== "unsupported").every((src) => enabledBrowseSourceIds.has(src.sourceId));
+	const countBySource = browseSourceCountById();
+	const visiblePackCount = filteredBrowsePacks().length;
+	const supported = browseSources.filter((src) => src.status !== "unsupported");
+	const supportedCount = supported.length;
+	const selectedSupportedCount = supported.filter((src) => enabledBrowseSourceIds.has(src.sourceId)).length;
+	const summary = browseSourceSummary(visiblePackCount, selectedSupportedCount, supportedCount);
 	return html`
 		<div class="market-browse-controls" data-testid="market-browse-controls">
 			<div class="market-search-wrap">
@@ -1192,24 +1240,72 @@ function renderBrowseControls(): TemplateResult {
 				/>
 				${browseSearch ? html`<button class="market-search-clear" data-testid="market-browse-search-clear" title="Clear search" @click=${() => { browseSearch = ""; renderApp(); }}>×</button>` : ""}
 			</div>
-			<div class="market-source-chips" data-testid="market-browse-source-chips">
-				<button class="market-source-chip ${allEnabled ? "market-source-chip--active" : ""}" data-testid="market-source-chip-all" @click=${() => setAllBrowseSources(true)}>All ${browsePacks.length}</button>
-				<button class="market-source-chip" data-testid="market-source-chip-none" @click=${() => setAllBrowseSources(false)}>None</button>
-				${browseSources.map((src) => {
-					const enabled = enabledBrowseSourceIds.has(src.sourceId);
-					const count = countBySource.get(src.sourceId) ?? 0;
-					const status = src.status === "ok" ? "" : src.status === "loading" ? " · loading" : src.status === "error" ? " · error" : " · unsupported";
-					return html`
-						<button
-							class="market-source-chip ${enabled ? "market-source-chip--active" : "market-source-chip--off"} ${src.status === "error" ? "market-source-chip--error" : ""}"
-							data-testid="market-source-chip"
-							data-source-id=${src.sourceId}
-							?disabled=${src.status === "unsupported"}
-							@click=${() => toggleBrowseSource(src.sourceId)}
-							title=${src.error || src.sourceId}
-						>${src.sourceName} ${count}${status}</button>
-					`;
-				})}
+			<div
+				class="market-source-filter"
+				data-testid="market-browse-source-filter"
+				@click=${(e: Event) => e.stopPropagation()}
+				@keydown=${handleBrowseSourceMenuKeydown}
+			>
+				<button
+					type="button"
+					class="market-source-menu-trigger"
+					data-testid="market-source-menu-trigger"
+					aria-label="Filter packages by source"
+					aria-haspopup="dialog"
+					aria-expanded=${browseSourceMenuOpen ? "true" : "false"}
+					aria-controls="market-source-menu"
+					@click=${toggleBrowseSourceMenu}
+				>
+					<span>Sources</span>
+					<span class="market-source-summary" data-testid="market-source-summary">${summary}</span>
+					${icon(ChevronDown, "xs")}
+				</button>
+				${browseSourceMenuOpen ? html`
+					<div
+						id="market-source-menu"
+						class="market-source-menu"
+						data-testid="market-source-menu"
+						role="dialog"
+						aria-label="Browse package sources"
+					>
+						<div class="market-source-menu-actions" role="group" aria-label="Source filter actions">
+							<button type="button" class="market-source-menu-action" data-testid="market-source-select-all" @click=${() => setAllBrowseSources(true)}>Select all</button>
+							<button type="button" class="market-source-menu-action" data-testid="market-source-clear" @click=${() => setAllBrowseSources(false)}>Clear</button>
+						</div>
+						<fieldset class="market-source-menu-list">
+							<legend class="sr-only">Sources</legend>
+							${browseSources.map((src) => {
+								const unsupported = src.status === "unsupported";
+								const enabled = !unsupported && enabledBrowseSourceIds.has(src.sourceId);
+								const count = countBySource.get(src.sourceId) ?? 0;
+								const status = browseSourceStatusLabel(src);
+								const classes = [
+									"market-source-option",
+									enabled ? "market-source-option--selected" : "",
+									src.status === "error" ? "market-source-option--error" : "",
+									unsupported ? "market-source-option--disabled" : "",
+								].filter(Boolean).join(" ");
+								return html`
+									<label class=${classes} data-testid="market-source-option" data-source-id=${src.sourceId} title=${src.error || src.sourceId}>
+										<input
+											type="checkbox"
+											data-testid="market-source-checkbox"
+											data-source-id=${src.sourceId}
+											.checked=${enabled}
+											?disabled=${unsupported}
+											@change=${() => toggleBrowseSource(src.sourceId)}
+										/>
+										<span class="market-source-option-main">
+											<span class="market-source-option-name">${src.sourceName}</span>
+											<span class="market-source-option-meta" data-testid="market-source-count">${count} package${count === 1 ? "" : "s"}</span>
+										</span>
+										${status ? html`<span class="market-source-status" data-testid="market-source-status">${status}</span>` : ""}
+									</label>
+								`;
+							})}
+						</fieldset>
+					</div>
+				` : ""}
 			</div>
 		</div>
 	`;
@@ -1232,7 +1328,7 @@ function renderBrowseEmptyState(visible: BrowsePackWire[]): TemplateResult {
 	if (browseError) return html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`;
 	if (browseSources.length === 0) return html`<p class="text-sm text-muted-foreground italic">No marketplace sources yet. Add a source in Sources, then return to Browse.</p>`;
 	const selected = browseSources.filter((src) => enabledBrowseSourceIds.has(src.sourceId));
-	if (selected.length === 0) return html`<p class="text-sm text-muted-foreground italic">No sources selected. Enable a source chip to browse packages.</p>`;
+	if (selected.length === 0) return html`<p class="text-sm text-muted-foreground italic">No sources selected. Open Sources and select at least one source to browse packages.</p>`;
 	const selectedIds = new Set(selected.map((src) => src.sourceId));
 	const selectedPacks = browsePacks.filter((pack) => selectedIds.has(browsePackSourceId(pack)));
 	const allSelectedFailed = selected.every((src) => src.status === "error" || src.status === "unsupported");
@@ -1241,7 +1337,7 @@ function renderBrowseEmptyState(visible: BrowsePackWire[]): TemplateResult {
 		const okSelected = selected.filter((src) => src.status === "ok");
 		return html`<p class="text-sm text-muted-foreground italic">${okSelected.length === 1 ? `${okSelected[0].sourceName} returned no supported packages.` : "Selected sources returned no supported packages."}</p>`;
 	}
-	if (visible.length === 0) return html`<p class="text-sm text-muted-foreground italic">${browseSearch.trim() ? `No packages match “${browseSearch.trim()}” across selected sources.` : "No packages match your filters."}</p>`;
+	if (visible.length === 0) return html`<p class="text-sm text-muted-foreground italic">${browseSearch.trim() ? `No packages match “${browseSearch.trim()}” in the selected sources.` : "No packages match the current source filter."}</p>`;
 	return html``;
 }
 
@@ -1871,7 +1967,7 @@ export function renderMarketplacePage(): TemplateResult {
 				: renderInstalledPanel();
 
 	return html`
-		<div class="flex-1 flex flex-col h-full">
+		<div class="flex-1 flex flex-col h-full" @click=${() => closeBrowseSourceMenu()}>
 			${renderNavBar()}
 			${renderResearchPreviewBanner()}
 			${renderTabBar()}

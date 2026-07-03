@@ -9,7 +9,7 @@
  * Covers:
  *   - happy path: total + pagination (cursor / nextCursor)
  *   - bad compactionId \u2192 404 compaction_not_found
- *   - cross-project caller \u2192 403 permission_denied
+ *   - cross-project caller on same gateway \u2192 allowed
  *   - missing transcript \u2192 404 transcript_unavailable
  *
  * See docs/design/persist-compaction-history.md \u00a76.2.
@@ -207,7 +207,7 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 		expect((await r.json()).error).toBe("transcript_unavailable");
 	});
 
-	test("permission_denied for cross-project caller", async ({ gateway }) => {
+	test("allows a cross-project caller on the same gateway to read pre-compaction history", async ({ gateway }) => {
 		initCompactionSidecarDir(path.join(gateway.bobbitDir, "state"));
 		const sm = gateway.sessionManager as any;
 		const pcm = sm.getProjectContextManager?.() ?? sm.projectContextManager;
@@ -229,14 +229,14 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 		expect(otherProjectId).not.toBe(reg?.list?.()?.[0]?.id);
 
 		const jsonl = makeJsonl([
-			{ id: "p1", role: "user", content: "secret-1" },
-			{ id: "p2", role: "assistant", content: "secret-2" },
-			{ id: "k1", role: "user", content: "kept" },
+			{ id: "p1", role: "user", content: "pre-cross-1" },
+			{ id: "p2", role: "assistant", content: "pre-cross-2" },
+			{ id: "k1", role: "user", content: "kept-cross" },
 		]);
 		const { id: targetId } = seedSession(gateway, jsonl);
 		appendCompactionSidecarEntry(targetId, {
 			schemaVersion: 1,
-			id: "c_secret",
+			id: "c_cross_project",
 			trigger: "manual",
 			tokensBefore: 100,
 			tokensAfter: null,
@@ -248,11 +248,15 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 		});
 		const { id: callerId } = seedSession(gateway, "", { projectId: otherProjectId });
 
-		const r = await fetch(`${base()}/api/sessions/${targetId}/transcript/before-compaction?compactionId=c_secret`, {
+		const r = await fetch(`${base()}/api/sessions/${targetId}/transcript/before-compaction?compactionId=c_cross_project`, {
 			headers: authHeaders({ "x-bobbit-session-id": callerId }),
 		});
-		expect(r.status).toBe(403);
-		expect((await r.json()).error).toBe("permission_denied");
+		expect(r.status).toBe(200);
+		const body = await r.json();
+		expect(body.total).toBe(2);
+		expect(body.returned).toBe(2);
+		expect(body.nextCursor).toBeNull();
+		expect(body.messages.map((m: any) => m.text)).toEqual(["pre-cross-1", "pre-cross-2"]);
 	});
 
 	test("legacy fallback \u2014 scans for in-jsonl `type:\"compaction\"` marker when firstKeptEntryId is null", async ({ gateway }) => {

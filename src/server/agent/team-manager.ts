@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
@@ -76,6 +77,26 @@ function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
 		}
 	}
 	return out;
+}
+
+const BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS = 3;
+
+function isErroredIdleAutoRetryEligible(session: SessionInfo): boolean {
+	const errMsg = session.lastTurnErrorMessage || "";
+	if (!errMsg || isNonRetryableAgentError(errMsg)) return false;
+
+	const isBackoff = isProviderBackoffError(errMsg);
+	const isTransient = isTransientReviewError(errMsg);
+	const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
+	// OpenAI/Codex reports retryable 5xx failures with a compact `server_error`
+	// code; keep team-manager recovery consistent with the visible Retry path for
+	// that provider code without treating arbitrary unknown errors as retryable.
+	const isRetryableServerErrorCode = /\bserver_error\b/i.test(errMsg);
+	if (!isBackoff && !isTransient && !isGenericRetryable && !isRetryableServerErrorCode) return false;
+	if (isBackoff) return true;
+
+	return (session.transientRetryAttempts ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+		&& (session.consecutiveErrorTurns ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
 }
 
 async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
@@ -1077,6 +1098,8 @@ export class TeamManager {
 		label: string,
 		accounting?: { onStarted?: () => void; onNoStart?: () => void },
 	): boolean {
+		if (this.recoverErroredIdleSessionBeforeNudge(goalId, sessionId, label)) return true;
+
 		this.nudgePending.set(goalId, true);
 		if (accounting) this.pendingNudgeAccounting.set(goalId, accounting);
 
@@ -1105,6 +1128,50 @@ export class TeamManager {
 			);
 		}
 
+		return true;
+	}
+
+	private recoverErroredIdleSessionBeforeNudge(goalId: string, sessionId: string, label: string): boolean {
+		const session = this.sessionManager.getSession(sessionId);
+		if (!session || session.status !== "idle" || !session.lastTurnErrored) return false;
+
+		// Treat the errored idle state as handled by the session retry/manual Retry path.
+		// This guard prevents every team-manager watchdog from appending fresh
+		// [AUTO-NUDGE] cards behind the visible error affordance.
+		this.nudgePending.set(goalId, true);
+
+		if (session.pendingAutoRetryTimer) {
+			console.log(`[team-manager] ${label} skipped for goal ${goalId}; session ${sessionId} already has an auto-retry pending`);
+			return true;
+		}
+
+		if (!isErroredIdleAutoRetryEligible(session)) {
+			const errMsg = session.lastTurnErrorMessage || "";
+			const exhausted = (session.consecutiveErrorTurns ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+				|| (session.transientRetryAttempts ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
+			const reason = exhausted
+				? " after exhausted retries"
+				: isNonRetryableAgentError(errMsg)
+					? " for a non-retryable error"
+					: " for an unclassified error";
+			console.log(
+				`[team-manager] ${label} suppressed for errored idle session ${sessionId}; ` +
+				`manual Retry required${reason}`,
+			);
+			return true;
+		}
+
+		try {
+			const retry = this.sessionManager.retryLastPrompt(sessionId, { auto: true });
+			if (this.isThenable(retry)) {
+				void retry.catch((err) => {
+					console.error(`[team-manager] ${label} retryLastPrompt failed for goal ${goalId}:`, err);
+				});
+			}
+			console.log(`[team-manager] ${label} recovered errored idle session ${sessionId} via retryLastPrompt(auto)`);
+		} catch (err) {
+			console.error(`[team-manager] ${label} retryLastPrompt failed for goal ${goalId}:`, err);
+		}
 		return true;
 	}
 
@@ -2123,6 +2190,7 @@ export class TeamManager {
 
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+		if (this.recoverErroredIdleSessionBeforeNudge(goalId, entry.teamLeadSessionId, "Worker-idle notification")) return;
 
 		// Debounce: skip if we notified about this worker in the last 30 seconds
 		const now = Date.now();
@@ -2132,12 +2200,6 @@ export class TeamManager {
 			return;
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
-
-		// Note: we no longer suppress notifications when the team lead's last
-		// turn errored. SessionManager.enqueuePrompt / deliverLiveSteer now own
-		// the error-state policy (implicit unstick up to MAX_CONSECUTIVE_ERROR_TURNS,
-		// park afterwards). A single source of truth avoids nudges being
-		// silently dropped on the floor.
 
 		// Look up tasks assigned to the worker
 		const tasks = this.resolveTasksForSession(goalId, workerSessionId);

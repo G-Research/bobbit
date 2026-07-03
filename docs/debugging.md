@@ -1162,9 +1162,9 @@ The team-lead role no longer PUTs `prUrl` after `gh pr create` (the curl-PUT ste
 
 The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Two separate state slots and two separate `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` would alias.
 
-## `read_session` returns `permission_denied`
+## Transcript access errors
 
-Caller and target session belong to different projects. The tool extension sets the `x-bobbit-session-id` request header automatically; the server compares the two sessions' `projectId` values and rejects cross-project reads. Other structured error codes: `session_not_found`, `transcript_unavailable`, `invalid_regex`, `invalid_params`. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
+Cross-project reads are allowed for `read_session`, `GET /api/sessions/:id/transcript`, and `GET /api/sessions/:id/transcript/before-compaction` when the authenticated caller can reach the target session on the same gateway; the `x-bobbit-session-id` header no longer gates transcript access by matching `projectId`. Structured transcript-reader errors are `session_not_found`, `transcript_unavailable`, `invalid_regex`, and `invalid_params`; before-compaction history also has `compaction_not_found` and may surface `internal_error`. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
 
 ## Mobile annotation popover doesn't open after tapping "Add comment"
 

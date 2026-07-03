@@ -1222,6 +1222,8 @@ test.describe("archived session worktree maintenance", () => {
 			expect(findArchivedWorktreeItem(before, sandbox.session.id)).toMatchObject({ status: "skipped", reason: "sandbox-container-path", actionable: false });
 			expect(findArchivedWorktreeItem(before, stale.session.id)).toMatchObject({ status: "skipped", reason: "stale-worktree-directory", actionable: false });
 			expect(findArchivedWorktreeItem(before, alreadyCleaned.session.id)).toMatchObject({ status: "already-cleaned", reason: "already-cleaned", actionable: false });
+			const expectedCleaned = (before.items as any[]).filter((item) => item.status === "removable").length;
+			const expectedBranchDeleted = (before.items as any[]).filter((item) => item.status === "removable" && item.willDeleteBranch).length;
 
 			const cleanup = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
 				method: "POST",
@@ -1230,7 +1232,7 @@ test.describe("archived session worktree maintenance", () => {
 			expect(cleanup.status).toBe(200);
 			const cleanupBody = await cleanup.json();
 			expectArchivedCleanupShape(cleanupBody);
-			expect(cleanupBody.counts).toMatchObject({ cleaned: 1, branchDeleted: 1, worktreeRemoved: 1, invalidSelection: 0, notActionable: 0, failed: 0 });
+			expect(cleanupBody.counts).toMatchObject({ cleaned: expectedCleaned, branchDeleted: expectedBranchDeleted, worktreeRemoved: expectedCleaned, invalidSelection: 0, notActionable: 0, failed: 0 });
 			expect(cleanupBody.results).toContainEqual(expect.objectContaining({
 				sessionId: removable.session.id,
 				status: "cleaned",

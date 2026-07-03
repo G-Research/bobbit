@@ -276,6 +276,14 @@ async function navButtonOrder(page: Page): Promise<string[]> {
 	});
 }
 
+async function openBrowseSourcesMenu(page: Page): Promise<void> {
+	const trigger = page.locator('[data-testid="market-source-menu-trigger"]');
+	await expect(trigger).toBeVisible({ timeout: 15_000 });
+	await trigger.click();
+	await expect(trigger).toHaveAttribute("aria-expanded", "true");
+	await expect(page.locator('[data-testid="market-source-menu"]')).toBeVisible({ timeout: 15_000 });
+}
+
 test.describe("Marketplace UI", () => {
 	// ------------------------------------------------------------------
 	// §12.3 #1 — Market button visible & positioned between Workflows and
@@ -360,6 +368,138 @@ test.describe("Marketplace UI", () => {
 		// The registered source appears on the Sources tab.
 		await goToTab(page, "sources");
 		await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible();
+	});
+
+	// Browse source filter menu: checkbox popup replaces the legacy All/None/source chips.
+	test("Browse: Sources menu filters with checkboxes, bulk actions, search summary, re-render persistence, and keyboard", async ({ page }) => {
+		const repoA = makeRepo();
+		const repoB = makeRepo();
+		writePack(repoA, { name: "alpha-pack", description: "Alpha source demo pack", roles: [{ name: "alpha-role" }] });
+		writePack(repoB, { name: "beta-pack", description: "Beta source demo pack", roles: [{ name: "beta-role" }] });
+
+		await openMarket(page);
+		await registerSource(page, repoA);
+		await goToTab(page, "sources");
+		await registerSource(page, repoB);
+
+		const trigger = page.locator('[data-testid="market-source-menu-trigger"]');
+		const summary = page.locator('[data-testid="market-source-summary"]');
+		await expect(page.locator('[data-testid="market-browse-controls"]')).toBeVisible({ timeout: 15_000 });
+		await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
+		await expect(trigger).toHaveAttribute("aria-expanded", "false");
+		await expect(summary).toContainText("Showing 5 packages from 3 sources");
+		await openBrowseSourcesMenu(page);
+		const menu = page.locator('[data-testid="market-source-menu"]');
+		const sourceOptions = page.locator('[data-testid="market-source-option"]');
+		const sourceCheckboxes = page.locator('[data-testid="market-source-checkbox"]');
+		const fixtureOptions = sourceOptions.filter({ hasText: "1 package" });
+		await expect(menu).toHaveAttribute("role", "dialog");
+		await expect(sourceOptions).toHaveCount(3);
+		await expect(page.locator('[data-testid="market-source-count"]')).toHaveCount(3);
+		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "1 package" })).toHaveCount(2);
+		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "3 packages" })).toHaveCount(1);
+		await expect(sourceCheckboxes).toHaveCount(3);
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
+
+		await page.locator('[data-testid="market-source-clear"]').click();
+		await expect(menu).toBeVisible();
+		await expect(summary).toContainText("No sources selected");
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(0);
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
+		await expect(page.getByText("No sources selected. Open Sources and select at least one source to browse packages.")).toBeVisible();
+
+		await fixtureOptions.nth(1).locator('[data-testid="market-source-checkbox"]').click();
+		await expect(menu).toBeVisible();
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(1);
+		await expect(summary).toContainText("Showing 1 package from 1 source");
+		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="alpha-pack"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="beta-pack"]')).toBeVisible();
+
+		await page.locator('[data-testid="market-browse-search"]').fill("beta");
+		await expect(summary).toContainText("Showing 1 package from 1 source");
+		await expect(page.locator('[data-testid="market-browse-pack"][data-pack-name="beta-pack"]')).toBeVisible();
+		await page.locator('[data-testid="market-browse-search"]').fill("alpha");
+		await expect(summary).toContainText("No packages match the current filters");
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(0);
+		await expect(page.getByText(/No packages match “alpha” in the selected sources\./)).toBeVisible();
+		await page.locator('[data-testid="market-browse-search-clear"]').click();
+
+		await goToTab(page, "sources");
+		await goToTab(page, "browse");
+		await openBrowseSourcesMenu(page);
+		await expect(fixtureOptions.nth(0).locator('[data-testid="market-source-checkbox"]')).not.toBeChecked();
+		await expect(fixtureOptions.nth(1).locator('[data-testid="market-source-checkbox"]')).toBeChecked();
+		await expect(summary).toContainText("Showing 1 package from 1 source");
+
+		await page.locator('[data-testid="market-source-select-all"]').click();
+		await expect(menu).toBeVisible();
+		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(5);
+		await expect(summary).toContainText("Showing 5 packages from 3 sources");
+
+		await page.keyboard.press("Escape");
+		await expect(trigger).toHaveAttribute("aria-expanded", "false");
+		await expect(menu).toBeHidden();
+		await trigger.focus();
+		await page.keyboard.press("Enter");
+		await expect(trigger).toHaveAttribute("aria-expanded", "true");
+		await page.keyboard.press("Escape");
+		await expect(trigger).toHaveAttribute("aria-expanded", "false");
+		await page.keyboard.press("Space");
+		await expect(trigger).toHaveAttribute("aria-expanded", "true");
+		await page.locator('[data-testid="market-browse-panel"] h2').click();
+		await expect(trigger).toHaveAttribute("aria-expanded", "false");
+	});
+
+	test("Browse: Sources menu shows errored warnings and disabled unsupported sources", async ({ page }) => {
+		const pack = (sourceId: string, sourceName: string, name: string) => ({
+			name,
+			dirName: name,
+			description: `${sourceName} demo pack`,
+			version: "1.0.0",
+			hasTools: false,
+			browseKey: `${sourceId}:${name}`,
+			source: { id: sourceId, name: sourceName, type: "pack" },
+			contents: { roles: [], tools: [], skills: [], entrypoints: [] },
+		});
+		await page.route(/\/api\/marketplace\/browse(?:\?.*)?$/, async (route) => {
+			if (route.request().method() !== "GET") return route.fallback();
+			return route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					sources: [
+						{ sourceId: "ok-src", sourceName: "Ready source", sourceType: "pack", status: "ok" },
+						{ sourceId: "err-src", sourceName: "Errored source", sourceType: "pack", status: "error", error: "Index failed" },
+						{ sourceId: "unsupported-src", sourceName: "Unsupported source", sourceType: "pack", status: "unsupported", error: "Unsupported source type" },
+					],
+					packs: [pack("ok-src", "Ready source", "ready-pack"), pack("err-src", "Errored source", "errored-pack")],
+				}),
+			});
+		});
+
+		await openApp(page);
+		await navigateToHash(page, "#/market");
+		await goToTab(page, "browse");
+
+		await expect(page.locator('[data-testid="market-source-summary"]')).toContainText("Showing 2 packages from 2 sources", { timeout: 15_000 });
+		await expect(page.locator('[data-testid="market-browse-source-warnings"]')).toContainText("Errored source", { timeout: 15_000 });
+		await openBrowseSourcesMenu(page);
+
+		const errored = page.locator('[data-testid="market-source-option"][data-source-id="err-src"]');
+		await expect(errored.locator('[data-testid="market-source-checkbox"]')).toBeChecked();
+		await expect(errored.locator('[data-testid="market-source-status"]')).toContainText(/error|warning|failed/i);
+		const unsupported = page.locator('[data-testid="market-source-option"][data-source-id="unsupported-src"]');
+		await expect(unsupported.locator('[data-testid="market-source-checkbox"]')).toBeDisabled();
+		await expect(unsupported.locator('[data-testid="market-source-checkbox"]')).not.toBeChecked();
+		await expect(unsupported.locator('[data-testid="market-source-status"]')).toContainText(/unsupported/i);
+
+		await page.locator('[data-testid="market-source-clear"]').click();
+		await expect(page.locator('[data-testid="market-browse-source-warnings"]')).toHaveCount(0);
+		await page.locator('[data-testid="market-source-select-all"]').click();
+		await expect(errored.locator('[data-testid="market-source-checkbox"]')).toBeChecked();
+		await expect(unsupported.locator('[data-testid="market-source-checkbox"]')).not.toBeChecked();
+		await expect(page.locator('[data-testid="market-browse-source-warnings"]')).toContainText("Errored source", { timeout: 15_000 });
 	});
 
 	// §12.3 #4–6 — install to a scope; entities resolve on the config pages
