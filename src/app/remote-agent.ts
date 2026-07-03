@@ -2561,6 +2561,14 @@ export class RemoteAgent {
 					: "3";
 		}
 
+		// Apply showHeadquartersInProjectLists — default ON. The broadcast sends
+		// the full safe prefs object, so absence means the default visible state.
+		const showHeadquartersInProjectLists = prefs.showHeadquartersInProjectLists !== false;
+		if (state.showHeadquartersInProjectLists !== showHeadquartersInProjectLists) {
+			state.showHeadquartersInProjectLists = showHeadquartersInProjectLists;
+			renderApp();
+		}
+
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
 			void loadSavedBindings();
