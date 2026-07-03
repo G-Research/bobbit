@@ -16,16 +16,6 @@ import {
 	isDesktop,
 	setSidebarWidth,
 	SIDEBAR_WIDTH_DEFAULT,
-	expandedGoals,
-	isUngroupedExpanded,
-	setUngroupedExpanded,
-	isStaffExpanded,
-	setStaffSectionExpanded,
-	isArchivedSectionExpanded,
-	setArchivedSectionExpanded,
-	saveExpandedGoals,
-	toggleTeamLeadExpanded,
-	isTeamLeadExpanded,
 	getSidebarData,
 	type Goal,
 	type Project,
@@ -44,30 +34,22 @@ import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 import { buildSidebarTree, type GoalContext, type SessionContext, type SidebarProjectTree, type SidebarTreeModel, type SidebarTreeNode, type TeamLeadContext } from "./sidebar-tree-builder.js";
-import { safeSetItem, safeGetJSON } from "./safe-storage.js";
+import { safeSetItem } from "./safe-storage.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import {
+	isProjectExpanded,
+	toggleProjectExpanded,
+	setUngroupedExpanded,
+	isStaffExpanded,
+	setStaffSectionExpanded,
+	setArchivedSectionExpanded,
+	toggleTeamLeadExpanded,
+	toggleGoalExpanded,
+	sidebarTreeExpansionInput,
+} from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 
-// ============================================================================
-// PROJECT EXPANSION STATE
-// ============================================================================
-
-const EXPANDED_PROJECTS_KEY = "bobbit-expanded-projects";
-const _expandedProjects: Set<string> = new Set(
-	safeGetJSON<string[]>(EXPANDED_PROJECTS_KEY, []),
-);
-
-export function isProjectExpanded(projectId: string): boolean {
-	// Default to expanded if never toggled
-	return !_expandedProjects.has(`collapsed:${projectId}`);
-}
-
-export function toggleProjectExpanded(projectId: string): void {
-	const key = `collapsed:${projectId}`;
-	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
-	else _expandedProjects.add(key);
-	safeSetItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
-}
+export { isProjectExpanded, toggleProjectExpanded };
 
 // ============================================================================
 // PROJECT REORDER STATE
@@ -962,11 +944,11 @@ async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void>
 	}
 }
 
-export function renderStaffSidebarSection(filteredList?: typeof state.staffList, projectId?: string, dataTreeKey?: string) {
+export function renderStaffSidebarSection(filteredList?: typeof state.staffList, projectId?: string, dataTreeKey?: string, expandedOverride?: boolean) {
 	ensureStaffLoaded();
 	const list = filteredList ?? state.staffList.filter((s) => s.state !== "retired");
 	const mobile = !isDesktop();
-	const staffExpanded = isStaffExpanded(projectId || "");
+	const staffExpanded = expandedOverride ?? isStaffExpanded(projectId || "");
 	const staffProject = projectId ? state.projects.find((p) => p.id === projectId) : undefined;
 	const staffAccentColor = staffProject ? getProjectAccentColor(staffProject) : "var(--primary)";
 	// Always show the Staff section so users can create their first staff agent
@@ -1272,11 +1254,29 @@ type GoalTreeNode = SidebarTreeNode<GoalContext>;
 type SessionTreeNode = SidebarTreeNode<SessionContext>;
 type TeamLeadTreeNode = SidebarTreeNode<TeamLeadContext>;
 
-type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean };
+type SearchPrunedNode<T = unknown> = { node: SidebarTreeNode<T>; containsVisibleGoal: boolean; containsRuntimeSearchResult: boolean };
+
+function textMatchesActiveSidebarSearch(...parts: Array<string | undefined>): boolean {
+	const q = state.searchQuery.trim().toLowerCase();
+	return !!q && parts.some(part => !!part && part.toLowerCase().includes(q));
+}
+
+function runtimeNodeMatchesActiveSidebarSearch(node: SidebarTreeNode): boolean {
+	if (node.kind === "session") {
+		const context = node.context as Partial<SessionContext>;
+		return context.matchesSearch === true || textMatchesActiveSidebarSearch(context.session?.title, context.session?.role);
+	}
+	if (node.kind === "team-lead") {
+		const context = node.context as Partial<TeamLeadContext>;
+		return textMatchesActiveSidebarSearch(context.session?.title, context.session?.role);
+	}
+	return false;
+}
 
 function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: ReadonlySet<string>, keepRuntimeRows: boolean): SearchPrunedNode | null {
 	const children: SidebarTreeNode[] = [];
 	let containsVisibleGoal = false;
+	let containsRuntimeSearchResult = runtimeNodeMatchesActiveSidebarSearch(node);
 	for (const child of node.children) {
 		const pruned = child.kind === "goal"
 			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
@@ -1284,25 +1284,33 @@ function pruneRuntimeNodeForSearch(node: SidebarTreeNode, visibleGoalIds: Readon
 		if (!pruned) continue;
 		children.push(pruned.node);
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
+		containsRuntimeSearchResult ||= pruned.containsRuntimeSearchResult;
 	}
-	if (!keepRuntimeRows && !containsVisibleGoal) return null;
-	return { node: { ...node, children }, containsVisibleGoal };
+	if (!keepRuntimeRows && !containsVisibleGoal && !containsRuntimeSearchResult) return null;
+	return { node: { ...node, children, expanded: containsVisibleGoal || containsRuntimeSearchResult || node.expanded }, containsVisibleGoal, containsRuntimeSearchResult };
 }
 
 function pruneGoalNodeForSearch(node: GoalTreeNode, visibleGoalIds: ReadonlySet<string>): SearchPrunedNode<GoalContext> | null {
 	const ownMatch = visibleGoalIds.has(node.entityId);
 	const children: SidebarTreeNode[] = [];
 	let containsVisibleGoal = ownMatch;
+	let containsVisibleDescendantGoal = false;
+	let containsRuntimeSearchResult = false;
 	for (const child of node.children) {
 		const pruned = child.kind === "goal"
 			? pruneGoalNodeForSearch(child as GoalTreeNode, visibleGoalIds)
 			: pruneRuntimeNodeForSearch(child, visibleGoalIds, ownMatch);
 		if (!pruned) continue;
 		children.push(pruned.node);
+		containsVisibleDescendantGoal ||= pruned.containsVisibleGoal;
 		containsVisibleGoal ||= pruned.containsVisibleGoal;
+		containsRuntimeSearchResult ||= pruned.containsRuntimeSearchResult;
 	}
-	if (!containsVisibleGoal) return null;
-	return { node: { ...node, children }, containsVisibleGoal };
+	if (!containsVisibleGoal && !containsRuntimeSearchResult) return null;
+	// Search filtering is an ephemeral view: expand retained ancestor goals in the
+	// pruned model so matching descendants or matching runtime rows are actually
+	// rendered, without writing any persisted expansion preference.
+	return { node: { ...node, children, expanded: containsVisibleDescendantGoal || containsRuntimeSearchResult || node.expanded }, containsVisibleGoal, containsRuntimeSearchResult };
 }
 
 function filterGoalForestForSearch(nodes: readonly GoalTreeNode[], visibleGoalIds: ReadonlySet<string>): GoalTreeNode[] {
@@ -1320,6 +1328,55 @@ export function filterSidebarTreeModelGoalsForSearch(model: SidebarTreeModel, vi
 			archivedGoalForest: filterGoalForestForSearch(projectTree.archivedGoalForest, visibleGoalIds),
 		})),
 	};
+}
+
+export interface SidebarSearchSessionRetention {
+	visibleGoalIds: Set<string>;
+	retainedSessionIds: Set<string>;
+}
+
+function sessionOwningGoalId(session: GatewaySession): string | undefined {
+	return session.goalId || session.teamGoalId || effectiveArchivedTeamGoalId(session);
+}
+
+export function collectSidebarSearchSessionRetention(input: {
+	visibleGoalIds: Iterable<string>;
+	goals: readonly Goal[];
+	liveSessions: readonly GatewaySession[];
+	archivedSessions: readonly GatewaySession[];
+	sessionMatchesQuery: (session: GatewaySession) => boolean;
+}): SidebarSearchSessionRetention {
+	const visibleGoalIds = new Set(input.visibleGoalIds);
+	const retainedSessionIds = new Set<string>();
+	const goalsById = new Map(input.goals.map(goal => [goal.id, goal]));
+	const sessionsById = new Map<string, GatewaySession>();
+	for (const session of [...input.liveSessions, ...input.archivedSessions]) {
+		if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
+	}
+	const addGoalAndAncestors = (goalId: string | undefined) => {
+		let current = goalId;
+		const seen = new Set<string>();
+		while (current && !seen.has(current)) {
+			seen.add(current);
+			visibleGoalIds.add(current);
+			current = goalsById.get(current)?.parentGoalId;
+		}
+	};
+	const addSessionAndParents = (session: GatewaySession) => {
+		let current: GatewaySession | undefined = session;
+		const seen = new Set<string>();
+		while (current && !seen.has(current.id)) {
+			seen.add(current.id);
+			retainedSessionIds.add(current.id);
+			addGoalAndAncestors(sessionOwningGoalId(current));
+			const parentId: string | undefined = current.parentSessionId || current.delegateOf;
+			current = parentId ? sessionsById.get(parentId) : undefined;
+		}
+	};
+	for (const session of sessionsById.values()) {
+		if (isChildSession(session) && input.sessionMatchesQuery(session)) addSessionAndParents(session);
+	}
+	return { visibleGoalIds, retainedSessionIds };
 }
 
 function renderGoalGroupFromTree(node: GoalTreeNode): TemplateResult {
@@ -1342,7 +1399,7 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
-	const expanded = isArchivedSectionExpanded(project.id);
+	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const archivedGoals = projectTree.archivedGoalForest;
@@ -1428,7 +1485,7 @@ function renderNestedNode(
 	rowTestId = "sidebar-nested-row",
 ): TemplateResult | typeof nothing {
 	const goal = node.context.goal as Goal;
-	const isExpanded = expandedGoals.has(goal.id);
+	const isExpanded = node.expanded;
 	const activeChildren = nestedGoalChildren(node, false);
 	const archivedChildren = nestedGoalChildren(node, true);
 	const needsDivider = activeChildren.length > 0 && archivedChildren.length > 0;
@@ -1463,31 +1520,43 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
+	let retainedSearchSessionIds: Set<string> | null = null;
 	if (query) {
+		const sessionMatchesQuery = (session: GatewaySession) => (session.title?.toLowerCase().includes(q) || session.role?.toLowerCase().includes(q)) ?? false;
 		const filteredLiveGoals = sidebarData.liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
 			const goalSessions = liveSessionsNoStaff.filter(s => (s.goalId === goal.id || effectiveArchivedTeamGoalId(s) === goal.id) && !isChildSession(s));
-			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+			const hasMatchingSession = goalSessions.some(sessionMatchesQuery);
 			return goalMatches || hasMatchingSession;
 		});
 		const filteredArchivedGoals = filterArchivedGoalsByQuery(sidebarData.archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
-		visibleSearchGoalIds = new Set([...filteredLiveGoals, ...filteredArchivedGoals].map(g => g.id));
+		const retention = collectSidebarSearchSessionRetention({
+			visibleGoalIds: [...filteredLiveGoals, ...filteredArchivedGoals].map(g => g.id),
+			goals: goalsForTree,
+			liveSessions: liveSessionsNoStaff,
+			archivedSessions: state.archivedSessions,
+			sessionMatchesQuery,
+		});
+		visibleSearchGoalIds = retention.visibleGoalIds;
+		retainedSearchSessionIds = retention.retainedSessionIds;
 		const filteredUngrouped = sidebarData.ungroupedSessions
 			.filter(s => passesSidebarFilters(s, s.id === activeSessionId(), true))
-			.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+			.filter(sessionMatchesQuery);
 		const filteredUngroupedIds = new Set(filteredUngrouped.map(s => s.id));
 		sessionsForTree = liveSessionsNoStaff.filter(s => {
+			if (retainedSearchSessionIds!.has(s.id)) return true;
+			if (isChildSession(s)) return false;
 			const owningGoalId = s.goalId || effectiveArchivedTeamGoalId(s);
 			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-			if (isChildSession(s)) return true;
 			return filteredUngroupedIds.has(s.id);
 		});
 		const filteredStandaloneArchived = filterArchivedSessionsByQuery(state.archivedSessions.filter(isStandaloneArchivedSession), state.searchQuery);
 		const filteredStandaloneArchivedIds = new Set(filteredStandaloneArchived.map(s => s.id));
 		archivedSessionsForTree = state.archivedSessions.filter(s => {
+			if (retainedSearchSessionIds!.has(s.id)) return true;
+			if (isChildSession(s)) return false;
 			const owningGoalId = s.goalId || s.teamGoalId || effectiveArchivedTeamGoalId(s);
 			if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-			if (isChildSession(s)) return true;
 			if (isStandaloneArchivedSession(s)) return filteredStandaloneArchivedIds.has(s.id);
 			return false;
 		});
@@ -1509,23 +1578,11 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		filters: {
 			searchQuery: state.searchQuery,
 			activeSessionId: activeSessionId(),
-			passesSessionFilters: (session, active, bypass) => passesSidebarFilters(session as GatewaySession, active, bypass),
+			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
 			bypassBusyReadFilters: bypassFilters,
 			includeArchived: state.showArchived,
 		},
-		expansion: {
-			isExpanded: (key, defaultExpanded) => {
-				switch (key.kind) {
-					case "project": return isProjectExpanded(key.projectId);
-					case "project-sessions": return isUngroupedExpanded(key.projectId);
-					case "project-staff": return isStaffExpanded(key.projectId);
-					case "project-archived": return isArchivedSectionExpanded(key.projectId);
-					case "goal": return expandedGoals.has(key.goalId);
-					case "team-lead": return isTeamLeadExpanded(key.sessionId);
-					default: return defaultExpanded;
-				}
-			},
-		},
+		expansion: sidebarTreeExpansionInput(),
 	});
 	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
@@ -1534,7 +1591,7 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 function renderProjectContent(projectTree: SidebarProjectTree) {
 	const project = projectTree.project as Project;
 	const isProvisional = !!project.provisional;
-	const ungroupedExp = isUngroupedExpanded(project.id);
+	const ungroupedExp = projectTree.sessionsSectionNode.expanded;
 	const { active: activeNodes, archived: archivedNodes, needsDivider: needsBoundaryDivider } =
 		bucketActiveArchived(projectTree.goalForest, n => n.context.archived);
 	return html`
@@ -1591,7 +1648,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 			` : ""}
 			`; })()}
 		</div>
-		${!isProvisional ? renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key) : ""}
+		${!isProvisional ? renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key, projectTree.staffSectionNode?.expanded) : ""}
 		${!isProvisional ? renderProjectArchivedSection(projectTree) : ""}
 	`;
 }
@@ -1696,7 +1753,7 @@ export function renderSidebar() {
 						: html`
 							${sidebarTree.projects.map((projectTree, i) => {
 								const project = projectTree.project as Project;
-								const expanded = isProjectExpanded(project.id);
+								const expanded = projectTree.projectNode.expanded;
 								const effectiveExpanded = isProjectReordering() ? false : expanded;
 								return html`
 									${i > 0 ? html`<div class="project-reorder-separator border-t border-border/30 my-1 mx-2"></div>` : ""}
@@ -1800,7 +1857,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 	const renderCollapsedTeamLeadNode = (node: TeamLeadTreeNode) => {
 		const teamLead = node.context.session as GatewaySession;
 		const children = node.children;
-		const tlExpanded = isTeamLeadExpanded(teamLead.id);
+		const tlExpanded = node.expanded;
 		const tlActive = activeSessionId() === teamLead.id;
 		const tlTitle = tlActive && state.remoteAgent ? state.remoteAgent.title : teamLead.title;
 		return html`
@@ -1821,14 +1878,14 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 
 	const renderCollapsedGoalNode = (node: GoalTreeNode, archived = false): TemplateResult => {
 		const goal = node.context.goal as Goal;
-		const expanded = expandedGoals.has(goal.id);
+		const expanded = node.expanded;
 		return html`
 			<div class=${archived ? "opacity-60" : ""}>
 				<button
 					data-tree-key=${node.key}
 					class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors sidebar-action-cluster"
 					title=${goal.title}
-					@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
+					@click=${(e: Event) => { e.stopPropagation(); toggleGoalExpanded(goal.id); renderApp(); }}
 				>
 					<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 					<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
@@ -1842,7 +1899,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 		if (node.kind === "session") return renderCollapsedSessionNode(node as SessionTreeNode);
 		if (node.kind === "team-lead") return renderCollapsedTeamLeadNode(node as TeamLeadTreeNode);
 		if (node.kind === "goal") return renderCollapsedGoalNode(node as GoalTreeNode, archived || (node as GoalTreeNode).context.archived);
-		if (node.kind === "session-children") return html`${node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived)}</div>`)}`;
+		if (node.kind === "session-children") return node.expanded ? html`${node.children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child, archived)}</div>`)}` : "";
 		return "";
 	}
 
@@ -1857,8 +1914,8 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 						.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
 					const hasContent = projectTree.goalForest.length > 0 || projectTree.ungroupedSessionNodes.length > 0 || staffRows.length > 0;
 					if (!hasContent) return "";
-					const _collapsedUngroupedExp = isUngroupedExpanded(project.id);
-					const _collapsedStaffExp = isStaffExpanded(project.id);
+					const _collapsedUngroupedExp = projectTree.sessionsSectionNode.expanded;
+					const _collapsedStaffExp = projectTree.staffSectionNode?.expanded ?? isStaffExpanded(project.id);
 					return html`
 						${pi > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 						${projectTree.goalForest.map((node, i) => html`

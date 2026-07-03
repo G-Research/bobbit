@@ -5,6 +5,27 @@ import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
+import {
+	clearSidebarTreePreference,
+	getSidebarTreePreference,
+	isArchivedParentExpanded as sidebarIsArchivedParentExpanded,
+	isArchivedSectionExpanded as sidebarIsArchivedSectionExpanded,
+	isFirstClassParentExpanded as sidebarIsFirstClassParentExpanded,
+	isStaffExpanded as sidebarIsStaffExpanded,
+	isTeamLeadExpanded as sidebarIsTeamLeadExpanded,
+	isUngroupedExpanded as sidebarIsUngroupedExpanded,
+	resetArchivedSidebarTreeExpansion,
+	setArchivedParentExpanded as sidebarSetArchivedParentExpanded,
+	setArchivedSectionExpanded as sidebarSetArchivedSectionExpanded,
+	setFirstClassParentExpanded as sidebarSetFirstClassParentExpanded,
+	setGoalExpanded as sidebarSetGoalExpanded,
+	setStaffSectionExpanded as sidebarSetStaffSectionExpanded,
+	setTeamLeadExpanded as sidebarSetTeamLeadExpanded,
+	setUngroupedExpanded as sidebarSetUngroupedExpanded,
+	toggleArchivedParentExpanded as sidebarToggleArchivedParentExpanded,
+	toggleFirstClassParentExpanded as sidebarToggleFirstClassParentExpanded,
+	toggleTeamLeadExpanded as sidebarToggleTeamLeadExpanded,
+} from "./sidebar-tree-state.js";
 
 // ============================================================================
 // TYPES
@@ -598,19 +619,44 @@ try {
 } catch { /* ignore in non-window environments */ }
 
 // ============================================================================
-// EXPANDED GOALS PERSISTENCE
+// SIDEBAR TREE EXPANSION COMPATIBILITY
 // ============================================================================
 
 const EXPANDED_GOALS_KEY = "bobbit-expanded-goals";
-
-export let expandedGoals: Set<string> = new Set(
-	safeGetJSON<string[]>(EXPANDED_GOALS_KEY, []),
-);
-
-// ── Per-project collapse state (Bug 4 fix) ─────────────────────────
-// Stores collapsed project IDs. Default is expanded (not in set = expanded).
 const COLLAPSED_UNGROUPED_KEY = "bobbit-collapsed-ungrouped";
 const COLLAPSED_STAFF_KEY = "bobbit-collapsed-staff";
+const COLLAPSED_ARCHIVED_KEY = "bobbit-archived-collapsed-projects";
+const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
+const COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-parents";
+const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
+
+class SidebarExpandedGoalsSet extends Set<string> {
+	constructor(values: string[]) {
+		super();
+		for (const value of values) super.add(value);
+	}
+
+	override add(value: string): this {
+		super.add(value);
+		sidebarSetGoalExpanded(value, true);
+		return this;
+	}
+
+	override delete(value: string): boolean {
+		const deleted = super.delete(value);
+		if (deleted) clearSidebarTreePreference({ kind: "goal", goalId: value });
+		return deleted;
+	}
+
+	override clear(): void {
+		for (const value of this) clearSidebarTreePreference({ kind: "goal", goalId: value });
+		super.clear();
+	}
+}
+
+export let expandedGoals: Set<string> = new SidebarExpandedGoalsSet(
+	safeGetJSON<string[]>(EXPANDED_GOALS_KEY, []),
+);
 
 export let collapsedUngroupedProjects: Set<string> = new Set(
 	safeGetJSON<string[]>(COLLAPSED_UNGROUPED_KEY, []),
@@ -618,116 +664,127 @@ export let collapsedUngroupedProjects: Set<string> = new Set(
 export let collapsedStaffProjects: Set<string> = new Set(
 	safeGetJSON<string[]>(COLLAPSED_STAFF_KEY, []),
 );
+export let collapsedArchivedProjects: Set<string> = new Set(
+	safeGetJSON<string[]>(COLLAPSED_ARCHIVED_KEY, []),
+);
+export let collapsedTeamLeadSessions: Set<string> = new Set(
+	safeGetJSON<string[]>(COLLAPSED_TEAM_LEADS_KEY, []),
+);
+export let collapsedFirstClassParents: Set<string> = new Set(
+	safeGetJSON<string[]>(COLLAPSED_FIRST_CLASS_PARENTS_KEY, []),
+);
+const expandedDelegateParents: Set<string> = new Set(
+	safeGetJSON<string[]>(EXPANDED_DELEGATE_PARENTS_KEY, []),
+);
+
+export function saveExpandedGoals(): void {
+	const expandedGoalIds = [...expandedGoals].filter(goalId => (
+		getSidebarTreePreference({ kind: "goal", goalId }) !== "collapsed"
+	));
+	safeSetItem(EXPANDED_GOALS_KEY, JSON.stringify(expandedGoalIds));
+	for (const goalId of expandedGoalIds) sidebarSetGoalExpanded(goalId, true);
+}
 
 export function isUngroupedExpanded(projectId: string): boolean {
-	return !collapsedUngroupedProjects.has(projectId);
+	return sidebarIsUngroupedExpanded(projectId);
 }
 
 export function setUngroupedExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedUngroupedProjects.delete(projectId);
 	else collapsedUngroupedProjects.add(projectId);
 	safeSetItem(COLLAPSED_UNGROUPED_KEY, JSON.stringify([...collapsedUngroupedProjects]));
+	sidebarSetUngroupedExpanded(projectId, value);
 }
 
 export function isStaffExpanded(projectId: string): boolean {
-	return !collapsedStaffProjects.has(projectId);
+	return sidebarIsStaffExpanded(projectId);
 }
 
 export function setStaffSectionExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedStaffProjects.delete(projectId);
 	else collapsedStaffProjects.add(projectId);
 	safeSetItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
+	sidebarSetStaffSectionExpanded(projectId, value);
 }
 
-// Per-project archived section expand state. Default = expanded (so toggling
-// See Archived on immediately reveals archived items without an extra click).
-// The set stores COLLAPSED project IDs; absence = expanded. This mirrors
-// collapsedUngroupedProjects / collapsedStaffProjects.
-const COLLAPSED_ARCHIVED_KEY = "bobbit-archived-collapsed-projects";
-export let collapsedArchivedProjects: Set<string> = new Set(
-	safeGetJSON<string[]>(COLLAPSED_ARCHIVED_KEY, []),
-);
-
 export function isArchivedSectionExpanded(projectId: string): boolean {
-	return !collapsedArchivedProjects.has(projectId);
+	return sidebarIsArchivedSectionExpanded(projectId);
 }
 
 export function setArchivedSectionExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedArchivedProjects.delete(projectId);
 	else collapsedArchivedProjects.add(projectId);
 	safeSetItem(COLLAPSED_ARCHIVED_KEY, JSON.stringify([...collapsedArchivedProjects]));
+	sidebarSetArchivedSectionExpanded(projectId, value);
 }
-
-const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
-export let collapsedTeamLeadSessions: Set<string> = new Set(
-	safeGetJSON<string[]>(COLLAPSED_TEAM_LEADS_KEY, []),
-);
-
-export function saveExpandedGoals(): void {
-	safeSetItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
-}
-
 
 export function setTeamLeadExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) collapsedTeamLeadSessions.delete(sessionId);
 	else collapsedTeamLeadSessions.add(sessionId);
 	safeSetItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+	sidebarSetTeamLeadExpanded(sessionId, expanded);
 }
 
 export function toggleTeamLeadExpanded(sessionId: string): void {
-	setTeamLeadExpanded(sessionId, collapsedTeamLeadSessions.has(sessionId));
+	sidebarToggleTeamLeadExpanded(sessionId);
+	const expanded = sidebarIsTeamLeadExpanded(sessionId);
+	if (expanded) collapsedTeamLeadSessions.delete(sessionId);
+	else collapsedTeamLeadSessions.add(sessionId);
+	safeSetItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
 }
 
 export function isTeamLeadExpanded(sessionId: string): boolean {
-	return !collapsedTeamLeadSessions.has(sessionId);
+	return sidebarIsTeamLeadExpanded(sessionId);
 }
-
-const COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-parents";
-export let collapsedFirstClassParents: Set<string> = new Set(
-	safeGetJSON<string[]>(COLLAPSED_FIRST_CLASS_PARENTS_KEY, []),
-);
 
 export function setFirstClassParentExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) collapsedFirstClassParents.delete(sessionId);
 	else collapsedFirstClassParents.add(sessionId);
 	safeSetItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+	sidebarSetFirstClassParentExpanded(sessionId, expanded);
 }
 
 export function toggleFirstClassParentExpanded(sessionId: string): void {
-	setFirstClassParentExpanded(sessionId, collapsedFirstClassParents.has(sessionId));
+	sidebarToggleFirstClassParentExpanded(sessionId);
+	const expanded = sidebarIsFirstClassParentExpanded(sessionId);
+	if (expanded) collapsedFirstClassParents.delete(sessionId);
+	else collapsedFirstClassParents.add(sessionId);
+	safeSetItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
 }
 
 export function isFirstClassParentExpanded(sessionId: string): boolean {
-	return !collapsedFirstClassParents.has(sessionId);
+	return sidebarIsFirstClassParentExpanded(sessionId);
 }
-
-const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
-const expandedDelegateParents: Set<string> = new Set(
-	safeGetJSON<string[]>(EXPANDED_DELEGATE_PARENTS_KEY, []),
-);
 
 export function setArchivedParentExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) expandedDelegateParents.add(sessionId);
 	else expandedDelegateParents.delete(sessionId);
 	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+	sidebarSetArchivedParentExpanded(sessionId, expanded);
 }
 
 export function toggleArchivedParentExpanded(sessionId: string): void {
-	setArchivedParentExpanded(sessionId, !expandedDelegateParents.has(sessionId));
+	sidebarToggleArchivedParentExpanded(sessionId);
+	const expanded = sidebarIsArchivedParentExpanded(sessionId);
+	if (expanded) expandedDelegateParents.add(sessionId);
+	else expandedDelegateParents.delete(sessionId);
+	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 }
 
 export function isArchivedParentExpanded(sessionId: string): boolean {
-	return expandedDelegateParents.has(sessionId);
+	return sidebarIsArchivedParentExpanded(sessionId);
 }
 
 export function resetArchivedExpandState(): void {
-	// Remove archived goal IDs from expandedGoals
 	const archivedGoalIds = new Set(state.goals.filter(g => g.archived).map(g => g.id));
+	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
+	resetArchivedSidebarTreeExpansion({ archivedGoalIds, archivedSessionIds });
+
+	// Remove archived goal IDs from expandedGoals
 	for (const id of archivedGoalIds) expandedGoals.delete(id);
 	saveExpandedGoals();
 
 	// Remove archived session IDs from expandedDelegateParents
-	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
 	for (const id of archivedSessionIds) expandedDelegateParents.delete(id);
 	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 

@@ -10,17 +10,7 @@ import {
 	state,
 	renderApp,
 	activeSessionId,
-	expandedGoals,
-	saveExpandedGoals,
 	isDesktop,
-	toggleTeamLeadExpanded,
-	isTeamLeadExpanded,
-	toggleArchivedParentExpanded,
-	isArchivedParentExpanded,
-	toggleFirstClassParentExpanded,
-	isFirstClassParentExpanded,
-	isArchivedSectionExpanded,
-	setArchivedSectionExpanded,
 	type GatewaySession,
 	type Goal,
 	type Project,
@@ -34,6 +24,18 @@ import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
+import {
+	isArchivedParentExpanded,
+	isArchivedSectionExpanded,
+	isFirstClassParentExpanded,
+	isGoalExpanded,
+	isTeamLeadExpanded,
+	setArchivedSectionExpanded,
+	toggleArchivedParentExpanded,
+	toggleFirstClassParentExpanded,
+	toggleGoalExpanded,
+	toggleTeamLeadExpanded,
+} from "./sidebar-tree-state.js";
 
 // ============================================================================
 // FORMATTING
@@ -779,9 +781,8 @@ export function bucketArchivedByProject(
  * Render the collapsible per-project Archived subsection.
  *
  * Shared between desktop (`renderSidebar` in sidebar.ts) and mobile
- * (`renderMobileLanding` in render.ts). Collapse state is persisted via
- * `isArchivedSectionExpanded` / `setArchivedSectionExpanded` under the
- * shared localStorage key `bobbit-archived-collapsed-projects`.
+ * (`renderMobileLanding` in render.ts). Collapse state is persisted by the
+ * unified sidebar tree expansion API.
  *
  * Returns "" when showArchived is off OR the project has no archived items.
  *
@@ -839,7 +840,7 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 	if (archivedGoalForest) {
 		const renderArcTreeNode = (node: SidebarTreeNode<GoalContext>): TemplateResult => {
 			const goal = node.context.goal as Goal;
-			const isExpanded = expandedGoals.has(goal.id);
+			const isExpanded = node.expanded;
 			const nestedGoalChildren = node.children.filter(child => isGoalTreeNode(child) && child.context.renderPlacement === "archived-section") as SidebarTreeNode<GoalContext>[];
 			return html`
 				<div data-testid="sidebar-archived-row" data-depth="${node.logicalDepth}" data-goal-id="${goal.id}" data-tree-key=${node.key} data-tree-parent-key=${node.parentKey ?? nothing} data-tree-depth=${node.logicalDepth} data-tree-indent-depth=${node.indentDepth} style="${sidebarTreeNodeIndentStyle(node)}">
@@ -879,7 +880,7 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean, arc
 	// rows still showing under a collapsed archived parent.
 	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[]; displayTitleSuffix?: string }): TemplateResult => {
 		const goal = node.goal as Goal;
-		const isExpanded = expandedGoals.has(goal.id);
+		const isExpanded = isGoalExpanded(goal.id);
 		return html`
 			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="${sidebarTreeLegacyGoalIndentStyle(node.depth)}">
 				${isMobile
@@ -911,7 +912,7 @@ export function renderProjectArchivedSection(
 	const archivedGoalCount = archivedGoalNodes?.length ?? archivedGoals.length;
 	const archivedSessionCount = archivedSessionNodes?.length ?? standaloneArchivedSessions.length;
 	if (archivedGoalCount === 0 && archivedSessionCount === 0) return "";
-	const expanded = isArchivedSectionExpanded(project.id);
+	const expanded = treeOptions?.archivedSectionNode?.expanded ?? isArchivedSectionExpanded(project.id);
 	const archHeaderNavId = `archived-header:${project.id}`;
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const isMobile = variant === "mobile";
@@ -991,9 +992,13 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 		: state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
 	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession) || !!treeChildGroups?.some(group => group.context.childClass === "first-class" && group.children.length > 0);
-	const childrenExpanded = hasChildren && (hasFirstClassChild
-		? isFirstClassParentExpanded(session.id)
-		: isArchivedParentExpanded(session.id));
+	const hasArchivedChildGroup = archivedChildren.length > 0;
+	const firstClassGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "first-class" && group.expanded);
+	const archivedGroupExpanded = treeChildGroups?.some(group => group.context.childClass === "archived-delegate" && group.expanded);
+	const childrenExpanded = hasChildren && (treeChildGroups
+		? (hasFirstClassChild ? !!firstClassGroupExpanded : !!archivedGroupExpanded)
+		: (hasFirstClassChild ? isFirstClassParentExpanded(session.id) : isArchivedParentExpanded(session.id)));
+	const shouldRenderChildArea = childrenExpanded || (hasFirstClassChild && hasArchivedChildGroup);
 
 	const rowPy = SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1" : "p-0.5";
@@ -1053,9 +1058,9 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 						${buttons}
 					</div>`}
 		</div>
-		${childrenExpanded ? (treeChildGroups
-			? renderTreeSessionChildrenGroups(treeChildGroups, hasFirstClassChild)
-			: html`${renderLiveDelegates(session.id)}${state.showArchived ? renderArchivedDelegates(session.id, true) : ""}`) : ""}
+		${shouldRenderChildArea ? (treeChildGroups
+			? renderTreeSessionChildrenGroups(treeChildGroups, { showArchivedGroupHeader: hasFirstClassChild && hasArchivedChildGroup })
+			: html`${childrenExpanded ? renderLiveDelegates(session.id) : ""}${state.showArchived ? renderArchivedDelegates(session.id, false, { showToggle: hasFirstClassChild && hasArchivedChildGroup }) : ""}`) : ""}
 	`;
 }
 
@@ -1089,14 +1094,35 @@ function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	</div>`;
 }
 
-function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildrenContext>[], forceArchivedExpanded = false): TemplateResult | string {
-	const rendered = groups.map(group => {
-		const expanded = group.context.childClass === "first-class"
-			? isFirstClassParentExpanded(group.context.sessionId)
-			: forceArchivedExpanded || isArchivedParentExpanded(group.context.sessionId);
-		if (!expanded || group.children.length === 0) return "";
+function renderArchivedDelegateGroupToggle(parentSessionId: string, expanded: boolean): TemplateResult {
+	return html`<button
+		class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left text-muted-foreground hover:bg-secondary/30 hover:text-foreground rounded-md transition-colors"
+		style="padding-left:var(--sidebar-chevron-w);"
+		data-testid="sidebar-archived-delegate-group-toggle"
+		data-session-id=${parentSessionId}
+		data-expanded=${expanded ? "true" : "false"}
+		@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(parentSessionId); renderApp(); }}
+		title=${expanded ? "Collapse archived delegates" : "Expand archived delegates"}
+	>
+		<span class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+		<span class="text-muted-foreground uppercase tracking-wider font-medium" style="font-size:0.75em;">Archived delegates</span>
+	</button>`;
+}
+
+function renderTreeSessionChildrenGroups(groups: SidebarTreeNode<SessionChildrenContext>[], opts?: { showArchivedGroupHeader?: boolean }): TemplateResult | string {
+	const visibleGroups = groups.filter(group => group.children.length > 0);
+	const showArchivedGroupHeader = opts?.showArchivedGroupHeader ?? (visibleGroups.some(group => group.context.childClass === "first-class") && visibleGroups.some(group => group.context.childClass === "archived-delegate"));
+	const rendered = visibleGroups.map(group => {
+		const childRows = group.children.filter(isSessionTreeNode).map(renderTreeSessionNode);
+		if (group.context.childClass === "archived-delegate" && showArchivedGroupHeader) {
+			return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="${sidebarTreeBaseIndentStyle()}">
+				${renderArchivedDelegateGroupToggle(group.context.sessionId, group.expanded)}
+				${group.expanded ? html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">${childRows}</div>` : ""}
+			</div>`;
+		}
+		if (!group.expanded) return "";
 		return html`<div class="flex flex-col gap-0.5" data-tree-key=${group.key} data-tree-parent-key=${group.parentKey ?? nothing} data-tree-depth=${group.logicalDepth} data-tree-indent-depth=${group.indentDepth} style="${sidebarTreeBaseIndentStyle()}">
-			${group.children.filter(isSessionTreeNode).map(renderTreeSessionNode)}
+			${childRows}
 		</div>`;
 	});
 	return html`${rendered}`;
@@ -1126,7 +1152,10 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
 		: archivedChildrenForParent(session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
-	const expanded = hasChildren && isArchivedParentExpanded(session.id);
+	const treeExpanded = treeOptions?.treeNode?.kind === "team-lead"
+		? treeOptions.treeNode.expanded
+		: treeChildGroups?.some(group => group.context.childClass === "archived-delegate" && group.expanded);
+	const expanded = hasChildren && (treeExpanded ?? isArchivedParentExpanded(session.id));
 	const rowPy = SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1" : "p-0.5";
 	const actions = buildArchivedSessionSidebarActions(session, displayTitle);
@@ -1151,7 +1180,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 		>
 			${hasChildren ? html`<span
 				class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); if (treeOptions?.treeNode?.kind === "team-lead") toggleTeamLeadExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
 			><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
@@ -1170,16 +1199,18 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 }
 
 /** Render any archived delegate sessions nested under a parent session. */
-export function renderArchivedDelegates(parentSessionId: string, forceExpanded = false): TemplateResult | string {
+export function renderArchivedDelegates(parentSessionId: string, forceExpanded = false, opts?: { showToggle?: boolean }): TemplateResult | string {
 	if (!state.showArchived) return "";
-	if (!forceExpanded && !isArchivedParentExpanded(parentSessionId)) return "";
 	const delegates = archivedChildrenForParent(parentSessionId);
 	if (delegates.length === 0) return "";
+	const expanded = forceExpanded || isArchivedParentExpanded(parentSessionId);
+	if (!expanded && !opts?.showToggle) return "";
 	return html`<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
-		${delegates.map(s => html`
+		${opts?.showToggle ? renderArchivedDelegateGroupToggle(parentSessionId, expanded) : ""}
+		${expanded ? delegates.map(s => html`
 			${renderArchivedSessionRow(s)}
 			${renderArchivedDelegates(s.id)}
-		`)}
+		`) : ""}
 	</div>`;
 }
 
@@ -1409,7 +1440,7 @@ function isArchivedTreeChild(node: SidebarTreeNode): boolean {
 function renderTreeTeamLeadNode(node: SidebarTreeNode<TeamLeadContext>, renderedAncestors?: Set<string>): TemplateResult {
 	const session = node.context.session as GatewaySession;
 	const archivedLead = isArchivedOrTerminalSession(session);
-	const expanded = archivedLead ? isArchivedParentExpanded(session.id) : isTeamLeadExpanded(session.id);
+	const expanded = node.expanded;
 	const childGroups = node.children.filter(isSessionChildrenNode);
 	const contentNodes = node.children.filter(child => !isSessionChildrenNode(child));
 	const childCount = contentNodes.filter(isSessionTreeNode).length + childGroups.reduce((total, group) => total + group.children.length, 0);
@@ -1424,7 +1455,7 @@ function renderTreeTeamLeadNode(node: SidebarTreeNode<TeamLeadContext>, rendered
 		${archivedLead
 			? renderArchivedSessionRow(session, childCount > 0, { treeNode: node, childGroupNodes: childGroups })
 			: renderTeamLeadRow(session, childCount, expanded, node)}
-		${expanded ? renderTreeSessionChildrenGroups(childGroups, true) : ""}
+		${expanded ? renderTreeSessionChildrenGroups(childGroups, { showArchivedGroupHeader: childGroups.some(group => group.context.childClass === "archived-delegate" && group.children.length > 0) }) : ""}
 		${expanded && contentNodes.length > 0 ? html`
 			<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 				${activeNodes.map(renderChild)}
@@ -1453,8 +1484,8 @@ function renderTreeGoalRuntimeChild(node: SidebarTreeNode, renderedAncestors?: S
  */
 export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string; treeNode?: SidebarTreeNode<GoalContext> }) {
 	const mobile = !isDesktop();
-	const isExpanded = expandedGoals.has(goal.id);
 	const treeNode = opts?.treeNode;
+	const isExpanded = treeNode?.expanded ?? isGoalExpanded(goal.id);
 	const effectiveDescendantCount = treeNode?.context.descendantCount ?? opts?.descendantCount ?? 0;
 	const effectiveDisplayTitleSuffix = treeNode?.context.displayTitleSuffix ?? opts?.displayTitleSuffix;
 	// `goalSessions` is the full, unfiltered roster of sessions belonging to this
@@ -1520,8 +1551,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	}
 
 	const toggleExpand = () => {
-		if (isExpanded) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id);
-		saveExpandedGoals();
+		toggleGoalExpanded(goal.id);
 		renderApp();
 	};
 
@@ -1654,7 +1684,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		const hasActiveAbove = liveTeamChildren.length > 0 || activeSpawned.length > 0;
 		return html`
 			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
-			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
+			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, false, { showToggle: true }) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 					${liveTeamChildren.map(renderSessionRow)}

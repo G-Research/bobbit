@@ -18,6 +18,8 @@ const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot
 const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
 const SIDEBAR_SPAWNED_CHILDREN_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
 const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
+const SIDEBAR_TREE_STATE_SRC = path.resolve("src/app/sidebar-tree-state.ts");
+const SUBGOALS_FLAG_SRC = path.resolve("src/app/subgoals-flag.ts");
 
 const MARK = "SIDEBAR_FILTER_SEARCH_FIXTURE";
 
@@ -38,6 +40,8 @@ test.beforeAll(() => {
 			SIDEBAR_NESTING_SRC,
 			SIDEBAR_SPAWNED_CHILDREN_SRC,
 			SIDEBAR_TREE_BUILDER_SRC,
+			SIDEBAR_TREE_STATE_SRC,
+			SUBGOALS_FLAG_SRC,
 		],
 	});
 });
@@ -50,7 +54,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -137,6 +141,79 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("");
 		expect(await searchInput.evaluate((el) => document.activeElement === el), `${MARK}: Escape blurs search input`).toBe(false);
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+	});
+
+	test("search expands retained collapsed goal ancestors ephemerally", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: collapsed parent starts visible`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: matching child starts hidden behind collapsed parent`).toBeHidden();
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "NestedSearchNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search keeps ancestor chain`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: search expands ancestor in filtered model to reveal matching child`).toBeVisible();
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps parent visible`).toBeVisible();
+		await expect(page.locator(`[data-nav-id="${ids.nestedMatchGoal}"]`), `${MARK}: clearing search restores collapsed parent behavior`).toBeHidden();
+	});
+
+	test("search reveals matching runtime rows under collapsed goals without persisting expansion", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: collapsed goal starts visible`).toBeVisible();
+		await expectSessionHidden(page, ids.collapsedParentSession, `${MARK}: runtime child starts hidden behind collapsed goal`);
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "runtime-child-role-needle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search keeps collapsed goal with matching runtime row`).toBeVisible();
+		await expectSessionVisible(page, ids.collapsedParentSession, `${MARK}: search expands pruned model to reveal matching runtime role row`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: clearing search keeps goal visible`).toBeVisible();
+		await expectSessionHidden(page, ids.collapsedParentSession, `${MARK}: clearing search restores collapsed goal behavior`);
+	});
+
+	test("search retains matching first-class and delegate child sessions with goal ownership", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const storageKey = "bobbit-sidebar-tree-state:v1";
+
+		await expectSessionHidden(page, ids.childSessionParent, `${MARK}: child parent starts hidden behind collapsed goal`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: first-class child starts hidden behind collapsed goal`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: delegate child starts hidden behind collapsed goal`);
+		const beforeStorage = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+
+		await setSearch(page, "FirstClassChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for first-class child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps first-class child parent as placement container`);
+		await expectSessionVisible(page, ids.firstClassChildSession, `${MARK}: search reveals matching first-class child with goalId`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: search does not show non-matching delegate sibling broadly`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "DelegateChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for delegate child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps delegate parent as placement container`);
+		await expectSessionVisible(page, ids.delegateChildSession, `${MARK}: search reveals matching delegate child with goalId`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: search does not show non-matching first-class sibling broadly`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setFilters(page, { showArchived: true });
+		await setSearch(page, "ArchivedDelegateChildNeedle");
+		await expect(page.locator(`[data-nav-id="${ids.collapsedParentGoal}"]`), `${MARK}: search retains owning collapsed goal for archived delegate child`).toBeVisible();
+		await expectSessionVisible(page, ids.childSessionParent, `${MARK}: search keeps archived delegate parent as placement container`);
+		await expectSessionVisible(page, ids.archivedDelegateChildSession, `${MARK}: search reveals matching archived delegate child with goalId/teamGoalId`);
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: archived delegate search keeps non-matching live child hidden`);
+		await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey), { timeout: 5_000 }).toBe(beforeStorage);
+
+		await setSearch(page, "");
+		await expectSessionHidden(page, ids.firstClassChildSession, `${MARK}: clearing search restores collapsed goal for first-class child`);
+		await expectSessionHidden(page, ids.delegateChildSession, `${MARK}: clearing search restores collapsed goal for delegate child`);
+		await expectSessionHidden(page, ids.archivedDelegateChildSession, `${MARK}: clearing search restores collapsed goal for archived delegate child`);
 	});
 
 	test("Show Read and Show Busy filters hide rows while search bypasses the filters", async ({ page }) => {

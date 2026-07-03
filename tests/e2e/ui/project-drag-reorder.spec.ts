@@ -81,6 +81,7 @@ async function resetSidebarState(page: Page): Promise<void> {
 	await page.evaluate(() => {
 		try {
 			localStorage.removeItem("bobbit-sidebar-collapsed");
+			localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 			localStorage.removeItem("bobbit-expanded-projects");
 			localStorage.removeItem("bobbit-collapsed-ungrouped");
 			localStorage.removeItem("bobbit-collapsed-staff");

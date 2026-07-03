@@ -138,6 +138,7 @@ async function createSidebarVisualFixture(): Promise<{ goalTitle: string }> {
 async function resetSidebarVisualState(page: Page, goalTitle: string): Promise<void> {
 	await page.evaluate((title) => {
 		localStorage.removeItem("bobbit-sidebar-collapsed");
+		localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 		localStorage.removeItem("bobbit-expanded-projects");
 		localStorage.removeItem("bobbit-collapsed-ungrouped");
 		localStorage.removeItem("bobbit-collapsed-staff");

@@ -19,6 +19,7 @@ const STAFF_SECTION_LOCATOR = (page: Page) =>
 
 async function resetStaffSidebarState(page: Page): Promise<void> {
 	await page.evaluate(() => {
+		localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 		localStorage.removeItem("bobbit-collapsed-staff");
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 	});
@@ -68,11 +69,11 @@ async function staffPlacement(page: Page, staffName: string): Promise<{ found: b
 
 async function staffCollapsed(page: Page, projectId: string): Promise<boolean> {
 	return page.evaluate((pid) => {
-		const raw = localStorage.getItem("bobbit-collapsed-staff");
+		const raw = localStorage.getItem("bobbit-sidebar-tree-state:v1");
 		if (!raw) return false;
 		try {
-			const arr = JSON.parse(raw) as string[];
-			return Array.isArray(arr) && arr.includes(pid);
+			const state = JSON.parse(raw) as { expansion?: Record<string, string> };
+			return state.expansion?.[`sidebar-tree/v1/project-staff/${encodeURIComponent(pid)}`] === "collapsed";
 		} catch {
 			return false;
 		}

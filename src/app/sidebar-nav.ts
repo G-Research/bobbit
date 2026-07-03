@@ -21,12 +21,11 @@
 // identify it uniformly.
 // ============================================================================
 
-import { state, renderApp, expandedGoals, saveExpandedGoals, isUngroupedExpanded, setUngroupedExpanded, isStaffExpanded, setStaffSectionExpanded, isArchivedSectionExpanded, setArchivedSectionExpanded } from "./state.js";
+import { state, renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
-// sidebar.ts also imports from this module — ES modules handle the cycle
-// fine because we only reference these as function bindings at call time.
-import { isProjectExpanded as _isProjectExpanded, toggleProjectExpanded as _toggleProjectExpanded } from "./sidebar.js";
+import { isSidebarTreeExpanded, setSidebarTreeExpanded } from "./sidebar-tree-state.js";
+import type { SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
 
 export type NavKind = "project" | "goal" | "session" | "ungrouped-header" | "staff-header" | "archived-header";
 
@@ -103,38 +102,30 @@ export function isExpandableKind(kind: NavKind): boolean {
 	return kind === "project" || kind === "goal" || kind === "ungrouped-header" || kind === "staff-header" || kind === "archived-header";
 }
 
+function navItemTreeKey(item: NavItem): SidebarTreeNodeKey | null {
+	switch (item.kind) {
+		case "project": return { kind: "project", projectId: item.id };
+		case "goal": return { kind: "goal", goalId: item.id };
+		case "ungrouped-header": return { kind: "project-sessions", projectId: item.id };
+		case "staff-header": return { kind: "project-staff", projectId: item.id };
+		case "archived-header": return { kind: "project-archived", projectId: item.id };
+		case "session": return null;
+	}
+}
+
 export function isNavItemExpanded(navId: string): boolean | null {
 	const item = parseNavId(navId);
 	if (!item) return null;
-	switch (item.kind) {
-		case "project": return _isProjectExpanded(item.id);
-		case "goal": return expandedGoals.has(item.id);
-		case "ungrouped-header": return isUngroupedExpanded(item.id);
-		case "staff-header": return isStaffExpanded(item.id);
-		case "archived-header": return isArchivedSectionExpanded(item.id);
-		case "session": return null;
-	}
+	const key = navItemTreeKey(item);
+	return key ? isSidebarTreeExpanded(key) : null;
 }
 
 /** Set expansion state for an expandable group header. No-op on leaves. */
 export function setNavItemExpanded(navId: string, expanded: boolean): void {
 	const item = parseNavId(navId);
 	if (!item) return;
-	switch (item.kind) {
-		case "project": {
-			if (_isProjectExpanded(item.id) !== expanded) _toggleProjectExpanded(item.id);
-			break;
-		}
-		case "goal": {
-			if (expanded) expandedGoals.add(item.id); else expandedGoals.delete(item.id);
-			saveExpandedGoals();
-			break;
-		}
-		case "ungrouped-header": setUngroupedExpanded(item.id, expanded); break;
-		case "staff-header": setStaffSectionExpanded(item.id, expanded); break;
-		case "archived-header": setArchivedSectionExpanded(item.id, expanded); break;
-		case "session": /* not expandable here */ break;
-	}
+	const key = navItemTreeKey(item);
+	if (key) setSidebarTreeExpanded(key, expanded);
 }
 
 // ============================================================================

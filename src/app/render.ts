@@ -15,12 +15,6 @@ import {
 	isDesktop,
 	hasActiveSession,
 	activeSessionId,
-	isUngroupedExpanded,
-	setUngroupedExpanded,
-	expandedGoals,
-	isArchivedSectionExpanded,
-	setArchivedSectionExpanded,
-
 	getSidebarData,
 	setRenderSuppressed,
 	type GatewaySession,
@@ -48,11 +42,12 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
 // route. Lazy-load via the shared widgets registrar so their combined
@@ -373,7 +368,7 @@ function renderMobileGoalTreeNode(node: SidebarTreeNode<GoalContext>, archived =
 		>
 			${archived ? html`<div class="opacity-60">${goalBody}</div>` : goalBody}
 		</div>
-		${expandedGoals.has(goal.id) ? html`
+		${node.expanded ? html`
 			${activeChildren.map(child => renderMobileGoalTreeNode(child, archived))}
 			${needsDivider ? archivedDivider() : ""}
 			${archivedChildren.map(child => renderMobileGoalTreeNode(child, archived))}
@@ -400,7 +395,7 @@ function renderMobileGoalForest(nodes: readonly SidebarTreeNode<GoalContext>[], 
 function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): ReturnType<typeof html> | string {
 	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project;
-	const expanded = isArchivedSectionExpanded(project.id);
+	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
 	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const dividerMy = "my-0.5";
@@ -444,7 +439,7 @@ function renderMobileLanding() {
 	const query = state.searchQuery.trim();
 	const queryLower = query.toLowerCase();
 	const sessionMatchesQuery = (session: GatewaySession) =>
-		session.title?.toLowerCase().includes(queryLower) || session.role?.toLowerCase().includes(queryLower);
+		(session.title?.toLowerCase().includes(queryLower) || session.role?.toLowerCase().includes(queryLower)) ?? false;
 	const matchingLiveGoals = query
 		? liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(queryLower);
@@ -456,7 +451,17 @@ function renderMobileLanding() {
 	const matchingArchivedGoals = query
 		? filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery)
 		: archivedGoals;
-	const visibleSearchGoalIds = query ? new Set([...matchingLiveGoals, ...matchingArchivedGoals].map(goal => goal.id)) : null;
+	const searchRetention = query
+		? collectSidebarSearchSessionRetention({
+			visibleGoalIds: [...matchingLiveGoals, ...matchingArchivedGoals].map(goal => goal.id),
+			goals: state.goals as any,
+			liveSessions: state.gatewaySessions,
+			archivedSessions: state.archivedSessions,
+			sessionMatchesQuery,
+		})
+		: null;
+	const visibleSearchGoalIds = searchRetention?.visibleGoalIds ?? null;
+	const retainedSearchSessionIds = searchRetention?.retainedSessionIds ?? null;
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
@@ -566,17 +571,19 @@ function renderMobileLanding() {
 									const liveSessionInput = state.gatewaySessions.filter(session => {
 										if (sidebarData.staffSessionIds.has(session.id)) return false;
 										if (!query) return true;
+										if (retainedSearchSessionIds!.has(session.id)) return true;
+										if (isChildSession(session)) return false;
 										const owningGoalId = session.goalId || effectiveArchivedTeamGoalId(session);
 										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-										if (isChildSession(session)) return true;
 										return sessionMatchesQuery(session);
 									});
 									const archivedSessionInput = state.showArchived
 										? state.archivedSessions.filter(session => {
 											if (!query) return true;
+											if (retainedSearchSessionIds!.has(session.id)) return true;
+											if (isChildSession(session)) return false;
 											const owningGoalId = session.goalId || session.teamGoalId || effectiveArchivedTeamGoalId(session);
 											if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
-											if (isChildSession(session)) return true;
 											return isStandaloneArchivedSession(session) && filteredStandaloneArchivedSessionIds.has(session.id);
 										})
 										: [];
@@ -591,18 +598,19 @@ function renderMobileLanding() {
 											searchQuery: state.searchQuery,
 											bypassBusyReadFilters: bypassFilters,
 											activeSessionId: activeSessionId(),
-											passesSessionFilters: (session, active, bypass) => passesSidebarFilters(session as GatewaySession, active, bypass),
+											passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
 										},
 										projectOrder: projectsForRender.map(project => project.id),
 										viewport: "mobile",
 										layout: loadSidebarTreeLayoutPreference(),
+										expansion: sidebarTreeExpansionInput(),
 									});
 									const treeModel = visibleSearchGoalIds
 										? filterSidebarTreeModelGoalsForSearch(builtTreeModel, visibleSearchGoalIds)
 										: builtTreeModel;
 									return html`<div data-project-reorder-list>${treeModel.projects.map((projectTree, i) => {
 											const project = projectTree.project as Project;
-											const expanded = isProjectExpanded(project.id);
+											const expanded = projectTree.projectNode.expanded;
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											return html`
@@ -642,7 +650,7 @@ function renderMobileLanding() {
 													${renderMobileGoalForest(projectTree.goalForest)}
 													${projectTree.goalForest.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														${(() => { const _mobileUngroupedExp = projectTree.sessionsSectionNode.expanded; return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															data-tree-key=${projectTree.sessionsSectionNode.key}
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
 															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
@@ -676,7 +684,7 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
-													${renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key)}
+													${renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key, projectTree.staffSectionNode?.expanded)}
 													${renderMobileArchivedTreeSection(projectTree)}
 												</div>` : ""}
 												</div>
