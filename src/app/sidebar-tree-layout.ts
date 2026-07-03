@@ -2,8 +2,8 @@ import type { SidebarTreeLayoutPreferenceV1, SidebarTreeNode } from "./sidebar-t
 import { safeGetItem, safeSetItem } from "./safe-storage.js";
 
 export const SIDEBAR_TREE_INDENT_KEY = "bobbit:sidebar-tree-indent";
-export const SIDEBAR_TREE_INDENT_DEFAULT_PX = 16;
-export const SIDEBAR_TREE_INDENT_MIN_PX = 8;
+export const SIDEBAR_TREE_INDENT_DEFAULT_PX = 6;
+export const SIDEBAR_TREE_INDENT_MIN_PX = 1;
 export const SIDEBAR_TREE_INDENT_MAX_PX = 28;
 export const SIDEBAR_TREE_INDENT_STEP_PX = 1;
 export const SIDEBAR_TREE_BASE_INDENT_PX = 5;

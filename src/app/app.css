@@ -23,9 +23,9 @@ bell-toggle button {
  * Keep selectors narrow so compound plus overlays are never clipped by generic
  * sidebar SVG/span rules. */
 .sidebar-root {
-	--sidebar-tree-base-indent-default: 5px;
-	--sidebar-tree-nested-goal-indent-default: 16px;
-	--sidebar-tree-collapsed-indent-default: 5px;
+	--sidebar-tree-base-indent-default: 6px;
+	--sidebar-tree-nested-goal-indent-default: 6px;
+	--sidebar-tree-collapsed-indent-default: 2px;
 	--sidebar-tree-half-indent: calc(var(--sidebar-tree-base-indent, var(--sidebar-tree-base-indent-default)) / 2);
 	--sidebar-scale-icon-size: 1em;
 	--sidebar-compound-icon-size: 1em;
