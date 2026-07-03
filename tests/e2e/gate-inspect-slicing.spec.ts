@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'ERROR failed sentinel line '+i:'noise line '+i))"`;
@@ -326,12 +326,12 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("retains completed failed command diagnostics after reloading persisted gate stores", async ({ gateway }) => {
+	test("retains completed failed command diagnostics after reloading persisted gate stores", async () => {
 		await withGoal(async (goalId) => {
 			const post = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
 			const { GateStore } = await import("../../dist/server/agent/gate-store.js");
 			const { buildGateVerificationSnapshot } = await import("../../dist/server/gate-verification-snapshot.js");
-			const gateStoreDir = findPersistedGateStoreDir(gateway.bobbitDir, goalId);
+			const gateStoreDir = findPersistedGateStoreDir(await defaultProjectStateDir(), goalId);
 			expect(gateStoreDir, "RETAINED_GATE_DIAGNOSTICS_GATE_STORE_FILE_MISSING: persisted gates.json for the failed signal must be reconstructable after restart").toBeTruthy();
 			const reloadedGateStore = new GateStore(gateStoreDir!);
 			const reloadedGate = reloadedGateStore.getGate(goalId, "failed-retained-diagnostics-gate");
@@ -356,7 +356,7 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async ({ gateway }) => {
+	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {
 		const workflowId = makeWorkflowId();
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
@@ -441,7 +441,7 @@ test.describe("gate inspect slicing", () => {
 			expect(byPath.text).not.toContain("# Instructions");
 			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
 
-			const stateMarkerFiles = findFilesContaining(path.join(gateway.bobbitDir, "state"), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
+			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
 				.filter(file => !file.endsWith("gates.json"));
 			expect(
 				stateMarkerFiles,
@@ -540,7 +540,7 @@ test.describe("gate inspect slicing", () => {
 		}
 	});
 
-	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async ({ gateway }) => {
+	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async () => {
 		const workflowId = makeWorkflowId();
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-compact-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
@@ -577,7 +577,7 @@ test.describe("gate inspect slicing", () => {
 			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
 
-			const stateMarkerFiles = findFilesContaining(path.join(gateway.bobbitDir, "state"), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
+			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
 				.filter(file => !file.endsWith("gates.json"));
 			expect(stateMarkerFiles).not.toEqual([]);
 		} finally {

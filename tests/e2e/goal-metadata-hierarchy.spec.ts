@@ -33,7 +33,7 @@
  * deterministically in-process rather than through expensive real agents.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, createSession, defaultProjectStateDir, deleteSession, deleteGoal, nonGitCwd } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -116,7 +116,7 @@ test.describe.serial("Hierarchical goal metadata — persistence & resolver", ()
 		for (const id of created.splice(0)) await deleteGoal(id).catch(() => {});
 	});
 
-	test("metadata persists in the 201 response, GET detail, and goals.json", async ({ gateway }) => {
+	test("metadata persists in the 201 response, GET detail, and goals.json", async () => {
 		const metadata = { "bobbit.disabledTools": ["browser_navigate"], "experiment": { arm: "A", seed: 1 } };
 		const goal = await createGoalRaw({ title: "meta-persist", cwd: nonGitCwd(), metadata });
 		created.push(goal.id);
@@ -128,9 +128,9 @@ test.describe.serial("Hierarchical goal metadata — persistence & resolver", ()
 		const detail = await (await apiFetch(`/api/goals/${goal.id}`)).json();
 		expect(detail.metadata).toEqual(metadata);
 
-		// 3) persisted to goals.json on disk (project-scoped state — the default
-		// project's rootPath IS bobbitDir, so its store lives under .bobbit/state).
-		const goalsJson = path.join(gateway.bobbitDir, ".bobbit", "state", "goals.json");
+		// 3) persisted to goals.json on disk (project-scoped state for the normal
+		// harness default project, not Headquarters/server state).
+		const goalsJson = path.join(await defaultProjectStateDir(), "goals.json");
 		const goals = JSON.parse(fs.readFileSync(goalsJson, "utf-8")) as Array<Record<string, any>>;
 		const persisted = goals.find((g) => g.id === goal.id);
 		expect(persisted, "goal must be persisted to goals.json").toBeTruthy();
