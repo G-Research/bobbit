@@ -26,6 +26,7 @@ import {
 	connectWs,
 	createSession,
 	deleteSession,
+	defaultProjectId,
 	nonGitCwd,
 	agentEndPredicate,
 	type WsConnection,
@@ -34,6 +35,7 @@ import type { Page } from "@playwright/test";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_MCP_SERVER = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
+const mcpRestartPath = (projectId: string, name = "mock") => `/api/mcp-servers/${encodeURIComponent(name)}/restart?projectId=${encodeURIComponent(projectId)}`;
 
 test.setTimeout(60_000);
 
@@ -74,7 +76,7 @@ async function waitForSessionIdle(
 	).toBe("idle");
 }
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ gateway }) => {
 	// 1. Write MCP config to point at the mock MCP server
 	const mcpConfigDir = join(bobbitDir(), "config");
 	mkdirSync(mcpConfigDir, { recursive: true });
@@ -91,8 +93,12 @@ test.beforeAll(async () => {
 		"utf-8",
 	);
 
-	// 2. Restart the mock MCP server so tools are discovered
-	const restartResp = await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+	await gateway.sessionManager.initMcp(bobbitDir());
+
+	// 2. Restart the mock MCP server in the normal default project so session-scoped MCP calls discover it.
+	const projectId = await defaultProjectId();
+	expect(projectId).toBeTruthy();
+	const restartResp = await apiFetch(mcpRestartPath(projectId!), { method: "POST" });
 	expect(restartResp.status).toBe(200);
 	const restartData = await restartResp.json();
 	expect(restartData.toolCount).toBeGreaterThanOrEqual(2);
