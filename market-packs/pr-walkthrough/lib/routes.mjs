@@ -88,6 +88,7 @@ const finalPrefix = (jobId) => `${reviewPrefix(jobId)}final/`;
 const stagingPrefix = (jobId) => `${reviewPrefix(jobId)}staging/`;
 const chunkPrefix = (jobId) => `${draftPrefix(jobId)}chunks/`;
 const chunkKey = (jobId, chunkId) => `${chunkPrefix(jobId)}${chunkId}`;
+const readReceiptPrefix = (jobId) => `${draftPrefix(jobId)}read-receipts/`;
 const draftStatusKey = (jobId) => `${draftPrefix(jobId)}status`;
 const draftCheckpointKey = (jobId) => `${draftPrefix(jobId)}checkpoint`;
 const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
@@ -405,7 +406,13 @@ function structuredErrorResult(err, body = {}) {
 	const code = err && typeof err === "object" && typeof err.code === "string"
 		? err.code
 		: (/quota|too large|maxTotalBytes|STORE_QUOTA/i.test(message) ? "STORE_QUOTA_EXCEEDED" : "PRW_ROUTE_FAILED");
-	return { ok: false, code, error: message, details: err && typeof err === "object" ? err.details : undefined, jobId: normalizeJobId(body.jobId) };
+	const jobId = err && typeof err === "object" && typeof err.jobId === "string" ? err.jobId : normalizeJobId(body.jobId);
+	return { ok: false, code, error: message, details: err && typeof err === "object" ? err.details : undefined, retryable: Boolean(err && typeof err === "object" && err.retryable), jobId };
+}
+
+function attachJobId(err, jobId) {
+	if (err && typeof err === "object" && typeof jobId === "string" && !err.jobId) err.jobId = jobId;
+	return err;
 }
 
 function isObject(value) {
@@ -544,14 +551,27 @@ async function submitPrWalkthroughChunk(ctx, body) {
 async function readPrWalkthroughSubmissionStatus(ctx, body = {}) {
 	const { binding } = await resolveReviewerBinding(ctx, body);
 	const finalPayload = await ctx.host.store.get(finalPayloadKey(binding.jobId));
+	const finalized = isFinalPayload(finalPayload);
 	const chunkSummary = await summarizeChunks(ctx.host.store, binding.jobId);
+	const readReceipts = await readReadReceipts(ctx.host.store, binding.jobId);
+	const readReceiptSummary = summarizeReadReceipts(readReceipts);
+	const finalCoverage = finalized ? compactCoverageSummary(finalPayload.coverage) : undefined;
+	const draft = finalized ? undefined : await deriveDraftSynthesisStatus(ctx, binding, chunkSummary, { ...body, readReceipts });
+	const coverage = finalCoverage ?? draft?.coverage;
 	return {
 		ok: true,
 		jobId: binding.jobId,
-		phase: isFinalPayload(finalPayload) ? "submitted" : (chunkSummary.chunks.length ? "draft" : "running"),
-		finalized: isFinalPayload(finalPayload),
-		finalizedAt: isFinalPayload(finalPayload) ? finalPayload.finalizedAt : undefined,
+		phase: finalized ? "submitted" : (chunkSummary.chunks.length ? "draft" : "running"),
+		finalized,
+		finalizedAt: finalized ? finalPayload.finalizedAt : undefined,
+		cardCount: finalized ? finalPayload.cardCount : draft?.cardCount,
 		chunkSummary,
+		readReceipts: readReceiptSummary,
+		coverage,
+		finalCoverage,
+		draftCoverage: draft?.coverage,
+		draftSynthesisError: draft?.error,
+		major_remaining: coverage?.major_remaining ?? draft?.major_remaining ?? [],
 	};
 }
 
@@ -573,13 +593,18 @@ async function submitPrWalkthroughYamlCompat(ctx, body) {
 
 async function finalizePrWalkthroughSubmission(ctx, body = {}) {
 	const { binding } = await resolveReviewerBinding(ctx, body);
-	const assembled = await assembleSubmission(ctx.host.store, binding);
-	const finalPayload = await buildFinalPayload(ctx, binding, assembled.yaml, body);
+	let finalPayload;
+	try {
+		const assembled = await assembleSubmission(ctx.host.store, binding);
+		finalPayload = await buildFinalPayload(ctx, binding, assembled.yaml, body);
+	} catch (err) {
+		throw attachJobId(err, binding.jobId);
+	}
 	await ctx.host.store.put(finalPayloadKey(binding.jobId), finalPayload, FINAL_QUOTA(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, stagingPrefix(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, draftPrefix(binding.jobId));
 	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }, LEGACY_BINDING_QUOTA(ctx.sessionId)); } catch { /* legacy marker best-effort */ }
-	return { ok: true, status: "submitted", jobId: binding.jobId, changesetId: finalPayload.changesetId, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+	return { ok: true, status: "submitted", jobId: binding.jobId, changesetId: finalPayload.changesetId, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount, coverage: compactCoverageSummary(finalPayload.coverage) };
 }
 
 async function publishYamlCompat(ctx, body) {
@@ -592,14 +617,15 @@ async function publishYamlCompat(ctx, body) {
 		return { ok: true, jobId, changesetId: isFinalPayload(finalPayload) ? finalPayload.changesetId : strOf(body.changesetId) || jobId, persistedAt: isFinalPayload(finalPayload) ? finalPayload.persistedAt : undefined, cardCount: isFinalPayload(finalPayload) ? finalPayload.cardCount : 0 };
 	}
 	if (access.authorized) {
-		const finalPayload = await buildFinalPayload(ctx, access.binding || await bindingForPublish(ctx.host.store, jobId, body), yamlText, body);
+		const publishBinding = access.binding || await bindingForPublish(ctx.host.store, jobId, body);
+		const finalPayload = await buildFinalPayload(ctx, publishBinding, yamlText, body);
 		await ctx.host.store.put(finalPayloadKey(jobId), finalPayload, FINAL_QUOTA(jobId));
-		return { ok: true, jobId, changesetId: finalPayload.changesetId, persistedAt: finalPayload.persistedAt, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
+		return { ok: true, jobId, changesetId: finalPayload.changesetId, persistedAt: finalPayload.persistedAt, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount, coverage: compactCoverageSummary(finalPayload.coverage) };
 	}
 	const legacyBinding = await bindingForPublish(ctx.host.store, jobId, body, { skipFinalPayload: true });
 	const legacyPayload = await buildFinalPayload(ctx, legacyBinding, yamlText, { ...body, skipExistingFinalRead: true });
 	await writeLegacyPublishArtifacts(ctx.host.store, jobId, legacyPayload);
-	return { ok: true, jobId, changesetId: legacyPayload.changesetId, persistedAt: legacyPayload.persistedAt, finalizedAt: legacyPayload.finalizedAt, cardCount: legacyPayload.cardCount, legacy: true };
+	return { ok: true, jobId, changesetId: legacyPayload.changesetId, persistedAt: legacyPayload.persistedAt, finalizedAt: legacyPayload.finalizedAt, cardCount: legacyPayload.cardCount, coverage: compactCoverageSummary(legacyPayload.coverage), legacy: true };
 }
 
 async function bindingForPublish(store, jobId, body, opts = {}) {
@@ -621,6 +647,7 @@ async function writeLegacyPublishArtifacts(store, jobId, payload) {
 		changeset: payload.changeset,
 		cards: payload.cards,
 		warnings: payload.warnings || [],
+		coverage: payload.coverage,
 		persistedAt: payload.persistedAt,
 	}, LEGACY_CARDS_QUOTA(payload.changesetId));
 	await store.put(jobKey(jobId), {
@@ -653,6 +680,164 @@ async function summarizeChunks(store, jobId) {
 	const auditChecklist = audit ? auditChecklistItems(audit.yaml) : [];
 	if (!ids.includes("document") && !ids.some((id) => id.startsWith("chunk:")) && auditChecklist.length === 0) missing.push("chunk:<id> or audit.reviewer_checklist");
 	return { chunks, missing, nextRequired: missing[0], hasDocument: ids.includes("document"), finalized: false };
+}
+
+async function readReadReceipts(store, jobId) {
+	const keys = await store.list(readReceiptPrefix(jobId)).catch(() => []);
+	const receipts = [];
+	for (const key of Array.isArray(keys) ? keys : []) {
+		const receipt = normalizeReadReceipt(await store.get(key).catch(() => null));
+		if (receipt) receipts.push(receipt);
+	}
+	return receipts.sort((a, b) => (Number(a.readAt) || 0) - (Number(b.readAt) || 0) || String(a.id).localeCompare(String(b.id)));
+}
+
+function normalizeReadReceipt(value) {
+	if (!isObject(value)) return undefined;
+	const hunkIds = Array.isArray(value.hunkIds)
+		? value.hunkIds.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
+		: [];
+	if (!strOf(value.id) && hunkIds.length === 0) return undefined;
+	return {
+		...value,
+		id: strOf(value.id) || `receipt-${hunkIds.join("-").slice(0, 40) || "unknown"}`,
+		mode: strOf(value.mode) || "file",
+		format: strOf(value.format) || "compact",
+		hunkIds,
+		readAt: typeof value.readAt === "number" && Number.isFinite(value.readAt) ? value.readAt : 0,
+		truncated: Boolean(value.truncated),
+	};
+}
+
+function compactReadReceipt(receipt) {
+	const hunkIds = Array.isArray(receipt.hunkIds) ? receipt.hunkIds : [];
+	return {
+		id: receipt.id,
+		mode: receipt.mode,
+		format: receipt.format,
+		path: receipt.path,
+		fileIndex: receipt.fileIndex,
+		hunkOffset: receipt.hunkOffset,
+		hunkLimit: receipt.hunkLimit,
+		hunkIds: hunkIds.slice(0, 50),
+		hunkIdsTruncated: hunkIds.length > 50,
+		truncated: Boolean(receipt.truncated),
+		readAt: receipt.readAt,
+	};
+}
+
+function summarizeReadReceipts(receipts) {
+	const allHunkIds = new Set();
+	const bodyReadHunkIds = new Set();
+	let truncatedReads = 0;
+	for (const receipt of receipts) {
+		if (receipt.truncated) truncatedReads += 1;
+		for (const hunkId of receipt.hunkIds ?? []) {
+			allHunkIds.add(hunkId);
+			if (!receipt.mode || receipt.mode === "file") bodyReadHunkIds.add(hunkId);
+		}
+	}
+	const hunkIds = [...allHunkIds].sort();
+	const bodyIds = [...bodyReadHunkIds].sort();
+	return {
+		total: receipts.length,
+		recent: receipts.slice(-25).map(compactReadReceipt),
+		hunkIds: hunkIds.slice(0, 100),
+		hunkIdsTruncated: hunkIds.length > 100,
+		bodyReadHunkIds: bodyIds.slice(0, 100),
+		bodyReadHunkIdsTruncated: bodyIds.length > 100,
+		truncatedReads,
+	};
+}
+
+async function deriveDraftSynthesisStatus(ctx, binding, chunkSummary, body = {}) {
+	if (!chunkSummary || chunkSummary.missing?.length > 0 || chunkSummary.chunks.length === 0) return undefined;
+	try {
+		const assembled = await assembleSubmission(ctx.host.store, binding);
+		const payload = await buildFinalPayload(ctx, binding, assembled.yaml, { ...body, skipExistingFinalRead: true });
+		return { cardCount: payload.cardCount, coverage: compactCoverageSummary(payload.coverage) };
+	} catch (err) {
+		const error = compactSynthesisError(attachJobId(err, binding.jobId));
+		return { error, major_remaining: error.details?.major_remaining ?? [] };
+	}
+}
+
+function compactSynthesisError(err) {
+	return {
+		code: err && typeof err === "object" && typeof err.code === "string" ? err.code : "PRW_DRAFT_SYNTHESIS_FAILED",
+		error: messageOf(err),
+		retryable: Boolean(err && typeof err === "object" && err.retryable),
+		details: compactErrorDetails(err && typeof err === "object" ? err.details : undefined),
+	};
+}
+
+function compactErrorDetails(details) {
+	if (!isObject(details)) return details;
+	const out = { ...details };
+	for (const key of ["major_remaining", "majorRemaining", "conflicts", "secondaryCards", "skipCards", "primaryCards"]) {
+		if (!Array.isArray(out[key])) continue;
+		const values = out[key];
+		out[key] = values.slice(0, 50);
+		if (values.length > 50) out[`${key}Truncated`] = true;
+	}
+	return out;
+}
+
+function compactCoverageSummary(coverage, limit = 50) {
+	if (!isObject(coverage)) return undefined;
+	const records = Array.isArray(coverage.records) ? coverage.records.filter(isObject) : [];
+	const majorRemaining = Array.isArray(coverage.majorRemaining) ? coverage.majorRemaining : (Array.isArray(coverage.major_remaining) ? coverage.major_remaining : []);
+	const repeated = records.filter((record) => Number(record.repeatedReferenceCount ?? 0) > 0 || (Array.isArray(record.secondaryCardIds) && record.secondaryCardIds.length > 0));
+	const skipped = records.filter((record) => record.primaryState === "skipped" || record.state === "skipped");
+	const unread = records.filter((record) => record.primaryState === "unread" || record.state === "unread");
+	const remaining = records.filter((record) => record.primaryState === "completion-sweep-remaining" || record.state === "completion-sweep-remaining");
+	return {
+		totalHunks: numberOrZero(coverage.totalHunks),
+		primaryReviewed: numberOrZero(coverage.primaryReviewed),
+		unread: numberOrZero(coverage.unread),
+		skipped: numberOrZero(coverage.skipped),
+		completionSweepRemaining: numberOrZero(coverage.completionSweepRemaining),
+		repeatedSecondaryReferences: numberOrZero(coverage.repeatedSecondaryReferences),
+		uniqueSecondaryHunks: numberOrZero(coverage.uniqueSecondaryHunks),
+		major_remaining: majorRemaining.slice(0, limit).map(compactCoverageRecord),
+		majorRemainingTruncated: majorRemaining.length > limit,
+		repeated_refs: repeated.slice(0, limit).map(compactCoverageRecord),
+		repeatedRefsTruncated: repeated.length > limit,
+		skipped_hunks: skipped.slice(0, limit).map(compactCoverageRecord),
+		skippedHunksTruncated: skipped.length > limit,
+		unread_hunks: unread.slice(0, limit).map(compactCoverageRecord),
+		unreadHunksTruncated: unread.length > limit,
+		remaining_hunks: remaining.slice(0, limit).map(compactCoverageRecord),
+		remainingHunksTruncated: remaining.length > limit,
+	};
+}
+
+function compactCoverageRecord(record) {
+	if (!isObject(record)) return record;
+	const secondaryCardIds = Array.isArray(record.secondaryCardIds) ? record.secondaryCardIds.filter((item) => typeof item === "string") : [];
+	const readReceiptIds = Array.isArray(record.readReceiptIds) ? record.readReceiptIds.filter((item) => typeof item === "string") : [];
+	return {
+		hunkId: record.hunkId,
+		filePath: record.filePath,
+		hunkHeader: record.hunkHeader,
+		primaryState: record.primaryState ?? record.state,
+		primaryCardId: record.primaryCardId,
+		secondaryCardIds: secondaryCardIds.slice(0, 10),
+		secondaryCardIdsTruncated: secondaryCardIds.length > 10,
+		repeatedReferenceCount: numberOrZero(record.repeatedReferenceCount),
+		skippedReason: record.skippedReason,
+		readReceiptIds: readReceiptIds.slice(0, 10),
+		readReceiptIdsTruncated: readReceiptIds.length > 10,
+		generated: Boolean(record.generated),
+		binary: Boolean(record.binary),
+		truncated: Boolean(record.truncated),
+		changedLines: typeof record.changedLines === "number" ? record.changedLines : undefined,
+		fileCategory: record.fileCategory,
+	};
+}
+
+function numberOrZero(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function auditChecklistItems(yamlText) {
@@ -822,14 +1007,15 @@ async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 		catch { live = undefined; }
 	}
 	const parsedDiff = live ? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings } : {};
-	const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff);
+	const readReceipts = Array.isArray(body.readReceipts) ? body.readReceipts : await readReadReceipts(ctx.host.store, binding.jobId);
+	const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff, { readReceipts });
 	const cards = Array.isArray(result.cards) ? result.cards : [];
 	const warnings = Array.isArray(result.warnings) ? result.warnings : [];
 	const changesetId = strOf(body.changesetId) || strOf(binding.changesetId) || (live && live.changesetId) || changesetIdFromDocument(validation.document, baseSha, headSha) || binding.jobId;
 	const existing = body.skipExistingFinalRead ? null : await ctx.host.store.get(finalPayloadKey(binding.jobId));
 	const persistedAt = existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now();
 	const finalizedAt = Date.now();
-	return { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, changesetId, baseSha, headSha, yaml: yamlText, changeset: result.changeset, cards, warnings, persistedAt, finalizedAt, cardCount: cards.length };
+	return { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, changesetId, baseSha, headSha, yaml: yamlText, changeset: result.changeset, cards, warnings, coverage: result.coverage, limits: result.limits, export: result.export, persistedAt, finalizedAt, cardCount: cards.length };
 }
 
 function changesetIdFromDocument(document, baseSha, headSha) {
@@ -861,11 +1047,11 @@ function decorateChangesetWithTarget(changeset, target) {
 }
 
 function finalBundleResult(payload, jobId) {
-	return { found: true, live: false, jobId, changesetId: payload.changesetId, changeset: payload.changeset, cards: payload.cards, warnings: payload.warnings || [], cardsSource: "stored-final", persistedAt: payload.persistedAt, finalizedAt: payload.finalizedAt };
+	return { found: true, live: false, jobId, changesetId: payload.changesetId, changeset: payload.changeset, cards: payload.cards, warnings: payload.warnings || [], coverage: payload.coverage, cardCount: payload.cardCount, cardsSource: "stored-final", persistedAt: payload.persistedAt, finalizedAt: payload.finalizedAt };
 }
 
 function finalSubmittedStatus(payload, binding) {
-	return { phase: "submitted", finalized: true, yaml: payload.yaml, baseSha: payload.baseSha ?? binding.baseSha, headSha: payload.headSha ?? binding.headSha, jobId: payload.jobId, changesetId: payload.changesetId, finalizedAt: payload.finalizedAt };
+	return { phase: "submitted", finalized: true, yaml: payload.yaml, baseSha: payload.baseSha ?? binding.baseSha, headSha: payload.headSha ?? binding.headSha, jobId: payload.jobId, changesetId: payload.changesetId, finalizedAt: payload.finalizedAt, cardCount: payload.cardCount, coverage: compactCoverageSummary(payload.coverage) };
 }
 
 async function bestEffortDeletePrefix(store, prefix) {

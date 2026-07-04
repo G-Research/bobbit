@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -37,22 +38,24 @@ const sessionId = "reviewer-1";
 const packRoot = resolve("market-packs/pr-walkthrough");
 const routesModule = resolve(packRoot, "lib/routes.mjs");
 
-function reviewBinding() {
+function reviewBinding(overrides: Record<string, any> = {}) {
+	const target = { provider: "github", owner: "SuuBro", repo: "bobbit", number: 42, prUrl: "https://github.com/SuuBro/bobbit/pull/42", ...(overrides.target ?? {}) };
 	return {
 		jobId,
 		changesetId: "github:SuuBro/bobbit#42:bbbbbbb",
 		parentSessionId: "owner-1",
 		baseSha,
 		headSha,
-		target: { provider: "github", owner: "SuuBro", repo: "bobbit", number: 42, prUrl: "https://github.com/SuuBro/bobbit/pull/42" },
+		...overrides,
+		target,
 	};
 }
 
-function seedCtx() {
+function seedCtx(overrides: Record<string, any> = {}) {
 	const store = new MemoryStore();
-	const binding = reviewBinding();
-	store.data.set(`reviewers/${sessionId}`, { jobId });
-	store.data.set(`reviews/${jobId}/binding/${sessionId}`, binding);
+	const binding = reviewBinding(overrides);
+	store.data.set(`reviewers/${sessionId}`, { jobId: binding.jobId });
+	store.data.set(`reviews/${binding.jobId}/binding/${sessionId}`, binding);
 	return { ctx: { sessionId, host: { store } }, store };
 }
 
@@ -124,6 +127,70 @@ async function saveMinimumChunks(ctx: any) {
 	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
 }
 
+function git(cwd: string, args: string[]): string {
+	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function writeRepoFile(root: string, relativePath: string, content: string): void {
+	fs.mkdirSync(join(root, dirname(relativePath)), { recursive: true });
+	fs.writeFileSync(join(root, relativePath), content);
+}
+
+function routeSlug(value: string): string {
+	return String(value).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "file";
+}
+
+function routeHunks(cwd: string, base: string, head: string): Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> {
+	const diff = git(cwd, ["diff", "--no-ext-diff", "--no-color", "--unified=80", base, head]);
+	const hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> = [];
+	let blockIndex = 0;
+	let hunkIndex = 0;
+	let file = "";
+	for (const line of diff.split(/\r?\n/)) {
+		const fileMatch = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+		if (fileMatch) {
+			blockIndex += 1;
+			file = fileMatch[2];
+			hunkIndex = 0;
+			continue;
+		}
+		if (line.startsWith("@@ ")) {
+			hunkIndex += 1;
+			hunks.push({ file, hunkId: `block-${blockIndex}-${routeSlug(file)}-h${hunkIndex}`, hunkIndex: hunkIndex - 1, header: line });
+		}
+	}
+	return hunks;
+}
+
+function seedGitRepo(t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): { cwd: string; baseSha: string; headSha: string; hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> } {
+	const cwd = fs.mkdtempSync(join(os.tmpdir(), "prw-route-git-"));
+	t.after(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } });
+	git(cwd, ["init"]);
+	git(cwd, ["config", "user.name", "Test User"]);
+	git(cwd, ["config", "user.email", "test@example.invalid"]);
+	git(cwd, ["config", "core.autocrlf", "false"]);
+	for (const [file, content] of Object.entries(beforeFiles)) writeRepoFile(cwd, file, content);
+	git(cwd, ["add", "."]);
+	git(cwd, ["commit", "-m", "base"]);
+	const base = git(cwd, ["rev-parse", "HEAD"]);
+	for (const [file, content] of Object.entries(afterFiles)) writeRepoFile(cwd, file, content);
+	git(cwd, ["add", "."]);
+	git(cwd, ["commit", "-m", "head"]);
+	const head = git(cwd, ["rev-parse", "HEAD"]);
+	return { cwd, baseSha: base, headSha: head, hunks: routeHunks(cwd, base, head) };
+}
+
+async function withCwd<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+	const previous = process.cwd();
+	process.chdir(cwd);
+	try { return await fn(); }
+	finally { process.chdir(previous); }
+}
+
+function numberedLines(prefix: string, count: number, suffix = ""): string {
+	return Array.from({ length: count }, (_, index) => `${prefix}${index}${suffix}`).join("\n") + "\n";
+}
+
 test("PR walkthrough routes load under pack-root module confinement", async () => {
 	const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
 	try {
@@ -188,15 +255,213 @@ test("PR walkthrough chunks are idempotent and finalized into review-scoped payl
 	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, true, JSON.stringify(finalized));
 	assert.equal(finalized.cardCount, 3);
+	assert.equal(finalized.coverage.totalHunks, 0);
 	assert.equal(await store.get(`reviews/${jobId}/draft/chunks/context`), null);
 	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
 	assert.equal(finalPayload.jobId, jobId);
+	assert.equal(finalPayload.coverage.totalHunks, 0);
 	assert.match(finalPayload.yaml, /why_created: A/);
 
 	const bundle = await routes.bundle(ctx, { query: { jobId } });
 	assert.equal(bundle.cardsSource, "stored-final");
-	assert.equal(bundle.cardCount, undefined);
+	assert.equal(bundle.cardCount, 3);
 	assert.equal(bundle.cards.length, 3);
+});
+
+test("PR walkthrough durable finalization rejects duplicate primary hunk ownership without writing final payload", async (t) => {
+	const before = { "src/app.ts": numberedLines("old-value-", 12) };
+	const after = { "src/app.ts": numberedLines("new-value-", 12) };
+	const repo = seedGitRepo(t, after, before);
+	const hunk = repo.hunks.find((item) => item.file === "src/app.ts");
+	assert.ok(hunk, JSON.stringify(repo.hunks));
+	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	await saveRequiredChunks(ctx);
+	await saveChunk(ctx, "chunk:first", `phase: significant
+title: First owner
+reviewer_goal: Review first owner
+explanation: First explanation
+files:
+  - src/app.ts
+relevant_hunks:
+  - hunk_id: ${hunk.hunkId}
+    placement: primary
+    why_relevant: First card claims this hunk.
+suggested_concerns: []
+positive_notes: []`);
+	await saveChunk(ctx, "chunk:second", `phase: significant
+title: Second owner
+reviewer_goal: Review second owner
+explanation: Second explanation
+files:
+  - src/app.ts
+relevant_hunks:
+  - hunk_id: ${hunk.hunkId}
+    placement: primary
+    why_relevant: Second card also claims this hunk.
+suggested_concerns: []
+positive_notes: []`);
+
+	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	assert.equal(finalized.ok, false);
+	assert.equal(finalized.code, "PRW_DUPLICATE_PRIMARY_HUNK");
+	assert.equal(finalized.retryable, true);
+	assert.equal(finalized.details.conflicts[0].hunkId, hunk.hunkId);
+	assert.equal(await store.get(`reviews/${jobId}/final/payload`), null);
+});
+
+test("PR walkthrough status and final payload include read-receipt coverage summaries", async (t) => {
+	const before = {
+		"src/app.ts": numberedLines("old-app-", 10),
+		"src/skipped.ts": numberedLines("old-skip-", 10),
+	};
+	const after = {
+		"src/app.ts": numberedLines("new-app-", 10),
+		"src/skipped.ts": numberedLines("new-skip-", 10),
+	};
+	const repo = seedGitRepo(t, after, before);
+	const appHunk = repo.hunks.find((item) => item.file === "src/app.ts");
+	const skippedHunk = repo.hunks.find((item) => item.file === "src/skipped.ts");
+	assert.ok(appHunk && skippedHunk, JSON.stringify(repo.hunks));
+	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	await saveRequiredChunks(ctx);
+	await saveChunk(ctx, "chunk:primary", `phase: significant
+title: App flow
+reviewer_goal: Review app flow
+explanation: App flow explanation
+files:
+  - src/app.ts
+relevant_hunks:
+  - hunk_id: ${appHunk.hunkId}
+    placement: primary
+    why_relevant: App flow changed here.
+suggested_concerns: []
+positive_notes: []`);
+	await saveChunk(ctx, "chunk:repeat", `phase: other
+title: Repeated app note
+reviewer_goal: Cross-reference app flow
+explanation: Repeat explanation
+files:
+  - src/app.ts
+relevant_hunks:
+  - hunk_id: ${appHunk.hunkId}
+    placement: secondary
+    primary_card_id: significant-primary
+    why_relevant: Refer back to the app flow change.
+suggested_concerns: []
+positive_notes: []`);
+	await saveChunk(ctx, "chunk:skip", `phase: other
+title: Mechanical skip
+reviewer_goal: Confirm mechanical skip
+explanation: Skip explanation
+files:
+  - src/skipped.ts
+relevant_hunks:
+  - hunk_id: ${skippedHunk.hunkId}
+    placement: skip
+    skip_reason: mechanical
+    why_relevant: Mechanical rename churn.
+suggested_concerns: []
+positive_notes: []`);
+	store.data.set(`reviews/${jobId}/draft/read-receipts/rr-app`, {
+		schemaVersion: 1,
+		id: "rr-app",
+		jobId,
+		sessionId,
+		readAt: 123,
+		format: "compact",
+		mode: "file",
+		path: "src/app.ts",
+		hunkIds: [appHunk.hunkId],
+		truncated: false,
+	});
+
+	const draftStatus = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "submissionStatus" } }));
+	assert.equal(draftStatus.readReceipts.total, 1);
+	assert.deepEqual(draftStatus.readReceipts.bodyReadHunkIds, [appHunk.hunkId]);
+	assert.equal(draftStatus.draftCoverage.primaryReviewed, 1);
+	assert.equal(draftStatus.draftCoverage.skipped, 1);
+	assert.equal(draftStatus.draftCoverage.repeatedSecondaryReferences, 1);
+	assert.equal(draftStatus.draftCoverage.repeated_refs[0].hunkId, appHunk.hunkId);
+	assert.equal(draftStatus.draftCoverage.skipped_hunks[0].hunkId, skippedHunk.hunkId);
+
+	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	assert.equal(finalized.coverage.primaryReviewed, 1);
+	assert.equal(finalized.coverage.skipped, 1);
+	assert.equal(finalized.coverage.repeatedSecondaryReferences, 1);
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	assert.equal(finalPayload.coverage.primaryReviewed, 1);
+	assert.equal(finalPayload.coverage.records.find((record: any) => record.hunkId === appHunk.hunkId).readReceiptIds[0], "rr-app");
+
+	const finalStatus = await routes.publish(ctx, { body: { op: "submissionStatus" } });
+	assert.equal(finalStatus.finalized, true);
+	assert.equal(finalStatus.finalCoverage.primaryReviewed, 1);
+	assert.equal(finalStatus.finalCoverage.skipped_hunks[0].hunkId, skippedHunk.hunkId);
+	assert.equal(finalStatus.readReceipts.total, 0);
+});
+
+test("PR walkthrough durable finalization preserves more than twelve logical cards", async () => {
+	const { ctx, store } = seedCtx();
+	await saveRequiredChunks(ctx);
+	for (let index = 1; index <= 13; index += 1) {
+		await saveChunk(ctx, `chunk:item-${index}`, `phase: significant
+title: Logical card ${index}
+reviewer_goal: Review logical card ${index}
+explanation: Explanation ${index}
+files: []
+relevant_hunks: []
+suggested_concerns: []
+positive_notes: []`);
+	}
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	assert.equal(finalized.cardCount, 15);
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	assert.equal(finalPayload.cards.filter((card: any) => /^Logical card /.test(card.title)).length, 13);
+});
+
+test("PR walkthrough durable finalization blocks major completion-sweep hunks without writing final payload", async (t) => {
+	const before = { "src/app.ts": numberedLines("old-major-", 12) };
+	const after = { "src/app.ts": numberedLines("new-major-", 12) };
+	const repo = seedGitRepo(t, after, before);
+	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	await saveRequiredChunks(ctx);
+
+	const status = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "submissionStatus" } }));
+	assert.equal(status.draftSynthesisError.code, "PRW_MAJOR_REMAINING_HUNKS");
+	assert.equal(status.major_remaining[0].filePath, "src/app.ts");
+
+	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	assert.equal(finalized.ok, false);
+	assert.equal(finalized.code, "PRW_MAJOR_REMAINING_HUNKS");
+	assert.equal(finalized.retryable, true);
+	assert.equal(finalized.details.major_remaining[0].filePath, "src/app.ts");
+	assert.equal(await store.get(`reviews/${jobId}/final/payload`), null);
+});
+
+test("PR walkthrough review chunk files stay metadata-only at durable finalization", async (t) => {
+	const before = { "docs/guide.md": "old line one\nold line two\n" };
+	const after = { "docs/guide.md": "new line one\nnew line two\n" };
+	const repo = seedGitRepo(t, after, before);
+	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	await saveRequiredChunks(ctx);
+	await saveChunk(ctx, "chunk:docs", `phase: significant
+title: Docs metadata
+reviewer_goal: Review docs metadata
+explanation: Docs explanation
+files:
+  - docs/guide.md
+relevant_hunks: []
+suggested_concerns: []
+positive_notes: []`);
+
+	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	assert.equal(finalized.coverage.completionSweepRemaining, 1);
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	const docsCard = finalPayload.cards.find((card: any) => card.id === "significant-docs");
+	assert.ok(docsCard, JSON.stringify(finalPayload.cards.map((card: any) => card.id)));
+	assert.deepEqual(docsCard.diffBlocks, []);
 });
 
 test("PR walkthrough quota regression: finalize persists binding metadata after scoped review payloads exceed legacy quota", async (t) => {
