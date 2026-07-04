@@ -470,7 +470,8 @@ interface PickerItem { type: PickerItemType; id: string; }
 function _buildPickerItems(): PickerItem[] {
 	const items: PickerItem[] = [];
 	// Role is a single dropdown control (one focus stop), not one item per role.
-	items.push({ type: "role", id: "role" });
+	// No focus stop when there are no roles (the control renders as static text).
+	if (state.roles.length > 0) items.push({ type: "role", id: "role" });
 	if (!_pickerProjectId) items.push({ type: "cwd", id: "cwd" });
 	items.push({ type: "worktree", id: "worktree" });
 	items.push({ type: "create", id: "create" });

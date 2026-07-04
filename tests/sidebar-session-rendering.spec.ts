@@ -239,13 +239,14 @@ test.describe("SB-05: getSessionIndicatorType", () => {
 // SB-15: Role picker dropdown
 // ---------------------------------------------------------------------------
 test.describe("SB-15: Role picker dropdown", () => {
-	test("returns role items from roles array", async ({ page }) => {
+	test("collapses roles to a single role dropdown item", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const result = await page.evaluate(() =>
 			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }, { name: "reviewer" }])
 		);
-		expect(result).toContainEqual({ type: "role", id: "coder" });
-		expect(result).toContainEqual({ type: "role", id: "reviewer" });
+		// Roles are chosen via one dropdown control, so there is a single "role"
+		// focus stop regardless of how many roles exist.
+		expect(result.filter((i: any) => i.type === "role")).toEqual([{ type: "role", id: "role" }]);
 	});
 
 	test("always includes create button at end", async ({ page }) => {
