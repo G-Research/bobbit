@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -924,7 +924,7 @@ function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: 
 	const mappings: MountMapping[] = [
 		{
 			containerPrefix: SERVER_MARKET_PACKS_CONTAINER_DIR,
-			hostPath: scopePaths("server", getProjectRoot()).marketPacksRoot,
+			hostPath: scopePaths("server", headquartersDir()).marketPacksRoot,
 		},
 		{
 			containerPrefix: GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,

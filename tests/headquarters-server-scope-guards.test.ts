@@ -19,6 +19,36 @@ function readJson<T = any>(filePath: string): T {
 	return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
 }
 
+function writePack(root: string, packName: string, body: string, skillName = "demo"): void {
+	fs.mkdirSync(path.join(root, packName, "skills", skillName), { recursive: true });
+	fs.writeFileSync(path.join(root, packName, "pack.yaml"), [
+		`name: ${packName}`,
+		"description: test pack",
+		"version: 1.0.0",
+		"contents:",
+		"  roles: []",
+		"  tools: []",
+		`  skills: [${skillName}]`,
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(root, packName, "skills", skillName, "SKILL.md"), `---\nname: ${skillName}\ndescription: ${skillName} skill\n---\n${body}\n`, "utf-8");
+}
+
+function writeInstalledPack(root: string, packName: string, skillName = "demo"): void {
+	writePack(root, packName, "installed", skillName);
+	fs.writeFileSync(path.join(root, packName, ".pack-meta.yaml"), [
+		`packName: ${packName}`,
+		"version: 1.0.0",
+		"scope: server",
+		"sourceUrl: test",
+		"sourceRef: main",
+		"commit: test",
+		"installedAt: test",
+		"updatedAt: test",
+		"",
+	].join("\n"), "utf-8");
+}
+
 function samePath(a: string, b: string): boolean {
 	const normalize = (value: string) => {
 		let resolved = path.resolve(value);
@@ -133,6 +163,45 @@ test("startup migrates legacy server state before the project registry loads", a
 	assert.equal(fs.existsSync(path.join(headquartersState, ".headquarters-dir-migrated")), true);
 });
 
+test("server marketplace uses Headquarters config instead of same-root normal config", async (t) => {
+	const serverRoot = tmpDir("bobbit-hq-marketplace-split-");
+	writeJson(path.join(serverRoot, ".bobbit", "state", "projects.json"), [{
+		id: "same-root-normal",
+		name: "Same Root Normal",
+		rootPath: serverRoot,
+		createdAt: 1,
+		position: 2,
+	}]);
+	const sameRootMarketPacks = path.join(serverRoot, ".bobbit", "config", "market-packs");
+	writeInstalledPack(sameRootMarketPacks, "normal-only-pack");
+
+	const { baseUrl } = await startGateway(t, serverRoot);
+	const sourceRoot = path.join(serverRoot, "source-packs");
+	writePack(sourceRoot, "hq-pack", "from headquarters");
+
+	const source = await api(baseUrl, "/api/marketplace/sources", { url: sourceRoot });
+	assert.equal(source.status, 201, JSON.stringify(source.body));
+	const sourceId = source.body.source.id as string;
+	const installed = await api(baseUrl, "/api/marketplace/install", { sourceId, dirName: "hq-pack", scope: "server" });
+	assert.equal(installed.status, 201, JSON.stringify(installed.body));
+
+	const headquartersMarketPacks = path.join(serverRoot, ".bobbit", "headquarters", "config", "market-packs");
+	assert.equal(fs.existsSync(path.join(headquartersMarketPacks, "hq-pack", "pack.yaml")), true, "server install should write under Headquarters config");
+	assert.equal(fs.existsSync(path.join(sameRootMarketPacks, "hq-pack")), false, "server install must not write into same-root normal project config");
+
+	const listed = await api(baseUrl, "/api/marketplace/installed?projectId=headquarters");
+	assert.equal(listed.status, 200, JSON.stringify(listed.body));
+	const names = (listed.body.installed as Array<{ packName: string }>).map((pack) => pack.packName);
+	assert.ok(names.includes("hq-pack"), "Headquarters server pack should be listed");
+	assert.equal(names.includes("normal-only-pack"), false, "same-root normal project packs must not be listed as server/HQ packs");
+
+	const activation = await api(baseUrl, "/api/marketplace/pack-activation?scope=server&packName=hq-pack&projectId=headquarters");
+	assert.equal(activation.status, 200, JSON.stringify(activation.body));
+	assert.deepEqual(activation.body.catalogue.skills, ["demo"]);
+	const normalActivation = await api(baseUrl, "/api/marketplace/pack-activation?scope=server&packName=normal-only-pack&projectId=headquarters");
+	assert.equal(normalActivation.status, 404, "activation catalogue must not read same-root normal pack");
+});
+
 test("delegate session creation validates cwd against the parent project and defaults to parent cwd", async (t) => {
 	const serverRoot = tmpDir("bobbit-delegate-cwd-");
 	const { baseUrl } = await startGateway(t, serverRoot);
@@ -162,7 +231,20 @@ test("delegate session creation validates cwd against the parent project and def
 	assert.ok(samePath(inherited.body.cwd, parentCwd), `expected delegate cwd ${inherited.body.cwd} to match parent cwd ${parentCwd}`);
 });
 
-test("session MCP manager resolution never creates a cwd-scoped manager for projectless sessions", async () => {
+test("MCP server API requires explicit projectId", async (t) => {
+	const serverRoot = tmpDir("bobbit-mcp-api-project-required-");
+	const { baseUrl } = await startGateway(t, serverRoot);
+
+	const missing = await api(baseUrl, "/api/mcp-servers");
+	assert.equal(missing.status, 400);
+	assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
+
+	const scoped = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
+	assert.equal(scoped.status, 200, JSON.stringify(scoped.body));
+	assert.deepEqual(scoped.body, []);
+});
+
+test("session MCP manager resolution fails closed for projectless sessions", async () => {
 	const bobbitDir = tmpDir("bobbit-mcp-cwd-scope-");
 	const env = snapshotEnv(["BOBBIT_DIR", "BOBBIT_PI_DIR"]);
 	process.env.BOBBIT_DIR = bobbitDir;
@@ -180,15 +262,44 @@ test("session MCP manager resolution never creates a cwd-scoped manager for proj
 			return null;
 		};
 
-		assert.equal(manager.getMcpManagerForSession("legacy-session"), defaultManager);
-		assert.equal(await manager.ensureMcpManagerForSession("legacy-session"), defaultManager);
-		assert.deepEqual(calls, [], "projectless session should use default/null MCP manager, not cwd scope");
+		assert.equal(manager.getMcpManagerForSession("legacy-session"), null);
+		assert.equal(await manager.ensureMcpManagerForSession("legacy-session"), null);
+		assert.equal(await manager.resolveMcpManagerForSession("legacy-session"), null);
+		assert.deepEqual(calls, [], "projectless session should not use default or cwd-scoped MCP manager");
 
 		assert.equal(await manager.resolveMcpManagerForSession("legacy-session", `cwd:${path.resolve(cwd)}`), null);
 		assert.deepEqual(calls, [], "caller-supplied cwd scopeKey must not create a scoped MCP manager");
 	} finally {
 		(manager as any).sessions.clear();
 		await manager.shutdown();
+		restoreEnv(env);
+	}
+});
+
+test("Headquarters session skill catalog uses Headquarters market packs only", async () => {
+	const serverRoot = tmpDir("bobbit-hq-skill-catalog-");
+	const env = snapshotEnv(["BOBBIT_DIR", "BOBBIT_PI_DIR"]);
+	const { setProjectRoot, getProjectRoot } = await import("../src/server/bobbit-dir.ts");
+	const previousProjectRoot = getProjectRoot();
+	try {
+		delete process.env.BOBBIT_DIR;
+		delete process.env.BOBBIT_PI_DIR;
+		setProjectRoot(serverRoot);
+		const headquartersRoot = path.join(serverRoot, ".bobbit", "headquarters");
+		writeInstalledPack(path.join(serverRoot, ".bobbit", "config", "market-packs"), "normal-skill-pack", "normal-skill");
+		writeInstalledPack(path.join(headquartersRoot, "config", "market-packs"), "hq-skill-pack", "hq-skill");
+
+		const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+		const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
+		const serverStore = new ProjectConfigStore(path.join(headquartersRoot, "config"));
+		const manager = new SessionManager({ projectConfigStore: serverStore }) as any;
+		const catalog = manager.computeSkillsCatalog(undefined, headquartersRoot, serverStore, "headquarters") as Array<{ name: string }> | undefined;
+		const names = new Set((catalog ?? []).map((skill) => skill.name));
+		assert.equal(names.has("hq-skill"), true, "Headquarters skill catalog should include HQ server packs");
+		assert.equal(names.has("normal-skill"), false, "Headquarters skill catalog must not include same-root normal project packs");
+		await manager.shutdown();
+	} finally {
+		setProjectRoot(previousProjectRoot);
 		restoreEnv(env);
 	}
 });

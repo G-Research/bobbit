@@ -820,7 +820,7 @@ describe("SessionManager scoped MCP manager creation", () => {
     }
   });
 
-  it("routes no-project sessions to the default MCP manager without cwd fallback", async () => {
+  it("fails closed for no-project MCP sessions without cwd/default fallback", async () => {
     const { cwd } = tmpDirs();
     const sessionManager = new SessionManager() as any;
     const defaultMgr = { marker: "default" };
@@ -833,9 +833,9 @@ describe("SessionManager scoped MCP manager creation", () => {
     };
     sessionManager.sessions.set(sessionId, { id: sessionId, cwd });
 
-    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), defaultMgr);
-    assert.equal(sessionManager.getMcpManagerForSession(sessionId), defaultMgr);
-    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), null);
+    assert.equal(sessionManager.getMcpManagerForSession(sessionId), null);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), null);
     assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId, `cwd:${path.resolve(cwd)}`), null);
     assert.deepEqual(createMcpManagerCalls, []);
   });

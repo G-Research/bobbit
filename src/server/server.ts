@@ -13,6 +13,7 @@ import {
 	bobbitStateDir,
 	bobbitConfigDir,
 	bobbitDir,
+	headquartersDir,
 	getProjectRoot,
 	globalAgentDir,
 	getAgentDirApiState,
@@ -1947,20 +1948,20 @@ export function createGateway(config: GatewayConfig) {
 	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
 	// Sources are global to the server; the cache + sources file live under
 	// the server scope. Install/resolve derive market-pack roots from a per-
-	// scope `base` via scopePaths() (design §1.3.1). Server base is the
-	// project root (getProjectRoot()), global-user is the home dir, project is
+	// scope `base` via scopePaths() (design §1.3.1). Server/HQ base is the
+	// physical Headquarters directory, global-user is the home dir, project is
 	// each project's rootPath.
 	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
-		serverBase: getProjectRoot(),
+		serverBase: headquartersDir(),
 		globalUserBase: os.homedir(),
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
-		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
+		if (scope === "server") return { base: headquartersDir(), store: projectConfigStore };
 		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
 		// project. Headquarters is the user-facing server scope, so it intentionally
 		// has no independent project-scope market pack layer.
@@ -2361,8 +2362,7 @@ export function createGateway(config: GatewayConfig) {
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
 			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
 			if (!role) return undefined;
-			const mcpManager = sessionManager.getMcpManagerForSession(sessionId)
-				?? ((session?.projectId ?? ps?.projectId ?? session?.cwd ?? ps?.cwd) ? null : sessionManager.getMcpManager());
+			const mcpManager = sessionManager.getMcpManagerForSession(sessionId);
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
@@ -2375,7 +2375,7 @@ export function createGateway(config: GatewayConfig) {
 		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
 			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
-			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : null;
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 	});
@@ -2973,7 +2973,7 @@ export function createGateway(config: GatewayConfig) {
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
 				try {
-					await sessionManager.initMcp(process.cwd());
+					await sessionManager.initMcp(headquartersDir());
 				} catch (err) {
 					console.error('[mcp] MCP init failed:', (err as Error).message);
 				}
@@ -3880,7 +3880,7 @@ async function handleApiRoute(
 		const ctx = effectiveProjectId && projectContextManager ? projectContextManager.getOrCreate(effectiveProjectId) : undefined;
 		const hqRoot = headquartersProject()?.rootPath ?? bobbitDir();
 		return {
-			serverBase: projectId === HEADQUARTERS_PROJECT_ID ? hqRoot : getProjectRoot(),
+			serverBase: hqRoot,
 			globalUserBase: os.homedir(),
 			projectBase: ctx?.project.rootPath ?? "",
 			serverConfigStore: projectConfigStore,
@@ -8608,7 +8608,7 @@ async function handleApiRoute(
 			packName: string,
 			projectId?: string,
 		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
-			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
+			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
 			let entry = entries.find((e) => e.manifest?.name === packName);
@@ -13728,27 +13728,56 @@ async function handleApiRoute(
 	// GET /api/file-mentions — bounded file enumeration for @-mention autocomplete.
 	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
 	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const sessionId = url.searchParams.get("sessionId");
+		const rawCwd = url.searchParams.get("cwd") || undefined;
+		const sessionId = url.searchParams.get("sessionId") || undefined;
+		const rawProjectId = url.searchParams.get("projectId") || undefined;
 		const q = url.searchParams.get("q") || undefined;
 		const limitRaw = url.searchParams.get("limit");
 		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
 		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
-		// Enumerate the session's HOST worktree, NOT the project root. The
-		// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
-		// discovery but wrong here: file mentions must see the goal/session
-		// worktree's branch-local, untracked and gitignored files. worktreePath
-		// is the host path; for sandboxed sessions cwd is a container path so
-		// worktreePath is required. Fall back to the raw `cwd` param (never the
-		// project root) when no session is bound.
-		let cwd = rawCwd;
+
+		let resolvedProjectId: string;
+		let cwd: string;
+		let cwdSource: CwdOwnershipSource;
 		if (sessionId) {
 			const session = sessionManager.getSession(sessionId);
-			const persisted = sessionManager.getPersistedSession(sessionId);
-			const worktree = session?.worktreePath || persisted?.worktreePath;
-			const sessionCwd = session?.cwd || persisted?.cwd;
-			cwd = worktree || sessionCwd || rawCwd;
+			const persisted = session
+				? undefined
+				: (sessionManager.getPersistedSession(sessionId) ?? projectContextManager.getContextForSession(sessionId)?.sessionStore.get(sessionId));
+			if (!session && !persisted) {
+				json({ error: `Session "${sessionId}" not found` }, 404);
+				return;
+			}
+			const sessionProjectId = session?.projectId ?? persisted?.projectId;
+			if (!sessionProjectId) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
+				return;
+			}
+			if (rawProjectId && rawProjectId !== sessionProjectId) {
+				json({ error: "projectId does not match session projectId", code: "PROJECT_SCOPE_MISMATCH" }, 422);
+				return;
+			}
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: sessionProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+			// Enumerate the session's HOST worktree, NOT the project root. The
+			// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
+			// discovery but wrong here: file mentions must see the goal/session
+			// worktree's branch-local, untracked and gitignored files. worktreePath
+			// is the host path; for sandboxed sessions cwd is a container path so
+			// worktreePath is required.
+			cwd = session?.worktreePath || persisted?.worktreePath || session?.cwd || persisted?.cwd || rawCwd || resolvedProject.project.rootPath;
+			cwdSource = { kind: "session", sessionId };
+		} else {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+			cwd = rawCwd || resolvedProject.project.rootPath;
+			cwdSource = { kind: "user-input" };
 		}
+
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		const files = await enumerateFiles(cwd, { query: q, limit });
 		json({ files: files.map((p) => ({ path: p })) });
 		return;
@@ -15116,21 +15145,15 @@ async function handleApiRoute(
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
-		if (cwd && !projectId) {
-			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
-			if (!missing.ok) writeProjectResolutionError(missing);
-			return;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		if (cwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		}
 		const ensure = url.searchParams.get("ensure") === "true";
-		let resolvedProjectId: string | undefined;
-		if (projectId) {
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-			resolvedProjectId = resolvedProject.projectId;
-		}
-		const mcpManager = resolvedProjectId
-			? (ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId }))
-			: sessionManager.getMcpManager();
+		const resolvedProjectId = resolvedProject.projectId;
+		const mcpManager = ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId });
 		if (!mcpManager) {
 			json([]);
 			return;
@@ -15177,20 +15200,14 @@ async function handleApiRoute(
 	if (mcpRestartMatch && req.method === "POST") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
-		if (cwd && !projectId) {
-			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
-			if (!missing.ok) writeProjectResolutionError(missing);
-			return;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		if (cwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		}
-		let resolvedProjectId: string | undefined;
-		if (projectId) {
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-			resolvedProjectId = resolvedProject.projectId;
-		}
-		const mcpManager = resolvedProjectId
-			? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId })
-			: sessionManager.getMcpManager();
+		const resolvedProjectId = resolvedProject.projectId;
+		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId });
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;
@@ -15256,6 +15273,10 @@ async function handleApiRoute(
 			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
+				return;
+			}
+			if (!(mcpSession?.projectId ?? persistedSession?.projectId)) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
 				return;
 			}
 			const mcpManager = await sessionManager.resolveMcpManagerForSession(mcpSessionId, scopeKey);
@@ -15340,6 +15361,10 @@ async function handleApiRoute(
 			);
 			if (!liveSession && !persistedSession) {
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
+				return;
+			}
+			if (!(liveSession?.projectId ?? persistedSession?.projectId)) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
 				return;
 			}
 			const mcpManager = await sessionManager.resolveMcpManagerForSession(describeSessionId, scopeKey);

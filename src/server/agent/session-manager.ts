@@ -53,7 +53,7 @@ import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extensi
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
@@ -2196,12 +2196,12 @@ export class SessionManager {
 
 	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
 		if (projectId) return this.getMcpManager({ projectId, cwd });
-		return this.mcpManager;
+		return null;
 	}
 
 	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
 		if (projectId) return this.ensureMcpManager({ projectId, cwd });
-		return this.mcpManager;
+		return null;
 	}
 
 	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
@@ -2726,7 +2726,7 @@ export class SessionManager {
 			// resolve for the active project even when its root != server cwd.
 			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 			const marketContext: SkillMarketContext = {
-				serverBase: getProjectRoot(),
+				serverBase: headquartersDir(),
 				globalUserBase: os.homedir(),
 				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
