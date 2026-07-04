@@ -1,4 +1,5 @@
 import { execFile as execFileCb } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -37,7 +38,10 @@ const prwReviewerIndexKey = (sessionId: string): string => `reviewers/${sessionI
 const prwReviewPrefix = (jobId: string): string => `reviews/${jobId}/`;
 const prwReviewBindingKey = (jobId: string, childSessionId: string): string => `${prwReviewPrefix(jobId)}binding/${childSessionId}`;
 const prwFinalPayloadKey = (jobId: string): string => `${prwReviewPrefix(jobId)}final/payload`;
+const prwReadReceiptPrefix = (jobId: string): string => `${prwReviewPrefix(jobId)}draft/read-receipts/`;
+const prwReadReceiptKey = (jobId: string, receiptId: string): string => `${prwReadReceiptPrefix(jobId)}${receiptId}`;
 const prwReviewBindingQuota = (jobId: string) => ({ quotaScope: { prefix: prwReviewPrefix(jobId), profile: "default" as const } });
+const prwReviewDraftQuota = (jobId: string) => ({ quotaScope: { prefix: `${prwReviewPrefix(jobId)}draft/`, profile: "review-draft" as const } });
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -192,15 +196,18 @@ export async function handlePrWalkthroughApiRoute(
 			// FINDING 1 — trusted-host gate (restores assertTrustedGithubTarget) BEFORE
 			// any diff resolution, incl. the with-SHA local-recompute path.
 			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
-			json(await resolveAndReadBindingBundle(deps, binding, authSessionId, {
+			const readRequest = {
 				mode: input.mode,
+				format: input.format,
 				path: input.path,
 				index: input.index,
 				offset: input.offset,
 				limit: input.limit,
 				hunkOffset: input.hunkOffset,
 				hunkLimit: input.hunkLimit,
-			}));
+			};
+			const bundleRead = await resolveAndReadBindingBundle(deps, binding, authSessionId, readRequest);
+			json(await attachPrwReadReceipt(store, binding.jobId, authSessionId, readRequest, bundleRead));
 			return true;
 		}
 
@@ -981,12 +988,161 @@ function bundleReadRequestFrom(url: URL, body: unknown): ReadPrWalkthroughBundle
 		sessionId: stringValue(record.sessionId) ?? stringValue(url.searchParams.get("sessionId")) ?? "",
 		jobId: stringValue(record.jobId) ?? stringValue(url.searchParams.get("jobId")) ?? "",
 		mode: (stringValue(record.mode) ?? stringValue(url.searchParams.get("mode"))) as ReadPrWalkthroughBundleRequest["mode"],
+		format: bundleReadFormat(stringValue(record.format) ?? stringValue(url.searchParams.get("format"))),
 		path: stringValue(record.path) ?? stringValue(record.file) ?? stringValue(url.searchParams.get("path")) ?? stringValue(url.searchParams.get("file")),
 		index: numberValue(record.index) ?? numberValue(url.searchParams.get("index")),
 		offset: numberValue(record.offset) ?? numberValue(url.searchParams.get("offset")),
 		limit: numberValue(record.limit) ?? numberValue(url.searchParams.get("limit")),
 		hunkOffset: numberValue(record.hunkOffset) ?? numberValue(url.searchParams.get("hunkOffset")),
 		hunkLimit: numberValue(record.hunkLimit) ?? numberValue(url.searchParams.get("hunkLimit")),
+	};
+}
+
+function bundleReadFormat(value: string | undefined): ReadPrWalkthroughBundleRequest["format"] {
+	if (value === "compact" || value === "legacy" || value === "json") return value;
+	return undefined;
+}
+
+type PrWalkthroughReadReceipt = {
+	schemaVersion: 1;
+	id: string;
+	jobId: string;
+	sessionId: string;
+	readAt: number;
+	format: "compact" | "legacy" | "json";
+	mode: "summary" | "manifest" | "files" | "file";
+	path?: string;
+	fileIndex?: number;
+	hunkOffset?: number;
+	hunkLimit?: number;
+	hunkIds: string[];
+	returnedBytes?: number;
+	readWindow?: unknown;
+	truncated: boolean;
+};
+
+async function attachPrwReadReceipt(
+	store: PackStore,
+	jobId: string,
+	sessionId: string,
+	request: Omit<ReadPrWalkthroughBundleRequest, "sessionId" | "jobId">,
+	result: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+	const mode = bundleReadMode(result.mode, request.mode);
+	const receipt: PrWalkthroughReadReceipt = {
+		schemaVersion: 1,
+		id: `rr-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+		jobId,
+		sessionId,
+		readAt: Date.now(),
+		format: request.format ?? "json",
+		mode,
+		path: request.path,
+		fileIndex: request.index,
+		hunkOffset: request.hunkOffset ?? (mode === "file" ? request.offset : undefined),
+		hunkLimit: request.hunkLimit ?? (mode === "file" ? request.limit : undefined),
+		hunkIds: hunkIdsFromBundleReadResult(result),
+		returnedBytes: returnedBytesForBundleRead(result),
+		readWindow: result.read_window,
+		truncated: Boolean(result.truncated ?? result.hunk_truncated),
+	};
+	try {
+		await store.put(PRW_PACK_ID, prwReadReceiptKey(jobId, receipt.id), receipt, prwReviewDraftQuota(jobId));
+		if (!request.format) return result;
+		return {
+			...result,
+			read_receipt: compactReadReceipt(receipt),
+			read_receipts: await summarizeReadReceipts(store, jobId),
+		};
+	} catch (err: any) {
+		if (!request.format) return result;
+		return {
+			...result,
+			read_receipt: compactReadReceipt(receipt),
+			read_receipts: {
+				write_failed: true,
+				error: err?.message || String(err),
+			},
+		};
+	}
+}
+
+function bundleReadMode(value: unknown, fallback: unknown): PrWalkthroughReadReceipt["mode"] {
+	const mode = stringValue(value) ?? stringValue(fallback) ?? "manifest";
+	if (mode === "summary" || mode === "manifest" || mode === "files" || mode === "file") return mode;
+	return "manifest";
+}
+
+function hunkIdsFromBundleReadResult(result: Record<string, unknown>): string[] {
+	const ids = new Set<string>();
+	const addHunkId = (value: unknown) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return;
+		const record = value as Record<string, unknown>;
+		const id = stringValue(record.hunk_id) ?? stringValue(record.id);
+		if (id) ids.add(id);
+	};
+	const collectFile = (file: unknown) => {
+		if (!file || typeof file !== "object" || Array.isArray(file)) return;
+		const record = file as Record<string, unknown>;
+		if (Array.isArray(record.hunk_manifest)) record.hunk_manifest.forEach(addHunkId);
+		if (Array.isArray(record.hunks)) record.hunks.forEach(addHunkId);
+	};
+	collectFile(result.file);
+	if (Array.isArray(result.files)) result.files.forEach(collectFile);
+	return [...ids].sort();
+}
+
+function returnedBytesForBundleRead(result: Record<string, unknown>): number | undefined {
+	const readWindow = result.read_window;
+	if (readWindow && typeof readWindow === "object" && !Array.isArray(readWindow)) {
+		const returned = numberValue((readWindow as Record<string, unknown>).returnedBytes);
+		if (returned !== undefined) return returned;
+	}
+	return Buffer.byteLength(JSON.stringify(result), "utf8");
+}
+
+function compactReadReceipt(receipt: PrWalkthroughReadReceipt): Record<string, unknown> {
+	return {
+		id: receipt.id,
+		mode: receipt.mode,
+		format: receipt.format,
+		path: receipt.path,
+		fileIndex: receipt.fileIndex,
+		hunkOffset: receipt.hunkOffset,
+		hunkLimit: receipt.hunkLimit,
+		hunkIds: receipt.hunkIds.slice(0, 50),
+		hunkIdsTruncated: receipt.hunkIds.length > 50,
+		truncated: receipt.truncated,
+		readAt: receipt.readAt,
+	};
+}
+
+async function summarizeReadReceipts(store: PackStore, jobId: string): Promise<Record<string, unknown>> {
+	const prefix = prwReadReceiptPrefix(jobId);
+	const keys = await store.list(PRW_PACK_ID, prefix);
+	const recentKeys = keys.slice(-25);
+	const receipts = (await Promise.all(recentKeys.map(key => store.get<PrWalkthroughReadReceipt>(PRW_PACK_ID, key))))
+		.filter((receipt): receipt is PrWalkthroughReadReceipt => Boolean(receipt && typeof receipt === "object"));
+	const allHunkIds = new Set<string>();
+	const bodyReadHunkIds = new Set<string>();
+	let truncatedReads = 0;
+	for (const receipt of receipts) {
+		if (receipt.truncated) truncatedReads++;
+		for (const hunkId of receipt.hunkIds) {
+			allHunkIds.add(hunkId);
+			if (receipt.mode === "file") bodyReadHunkIds.add(hunkId);
+		}
+	}
+	const hunkIds = [...allHunkIds].sort();
+	const bodyIds = [...bodyReadHunkIds].sort();
+	return {
+		total: keys.length,
+		recent: receipts.map(compactReadReceipt),
+		hunkIds: hunkIds.slice(0, 100),
+		hunkIdsTruncated: hunkIds.length > 100,
+		bodyReadHunkIds: bodyIds.slice(0, 100),
+		bodyReadHunkIdsTruncated: bodyIds.length > 100,
+		truncatedReads,
 	};
 }
 
