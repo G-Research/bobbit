@@ -28,12 +28,17 @@ const BARE_BRANCH_PUSH = /git push origin \{\{branch\}\}(?!:)/;
 
 let tmpDir: string;
 let stateDir: string;
+let serverStateDir: string;
 let configDir: string;
 
 before(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-seed-test-"));
-	execFileSync("node", [SEED_SCRIPT, tmpDir], { stdio: "pipe" });
+	const env = { ...process.env };
+	delete env.BOBBIT_DIR;
+	delete env.BOBBIT_PI_DIR;
+	execFileSync("node", [SEED_SCRIPT, tmpDir], { stdio: "pipe", env });
 	stateDir = path.join(tmpDir, ".bobbit", "state");
+	serverStateDir = path.join(tmpDir, ".bobbit", "headquarters", "state");
 	configDir = path.join(tmpDir, ".bobbit", "config");
 });
 
@@ -44,6 +49,10 @@ after(() => {
 // ── Helper: read JSON file ──────────────────────────────────────────
 function readJSON(filename: string): any {
 	return JSON.parse(fs.readFileSync(path.join(stateDir, filename), "utf-8"));
+}
+
+function readServerJSON(filename: string): any {
+	return JSON.parse(fs.readFileSync(path.join(serverStateDir, filename), "utf-8"));
 }
 
 function readJSONL(filePath: string): any[] {
@@ -88,7 +97,6 @@ describe("qa-seed: file creation", () => {
 		"gates.json",
 		"tasks.json",
 		"team-state.json",
-		"projects.json",
 	];
 
 	for (const file of expectedStateFiles) {
@@ -120,6 +128,43 @@ describe("qa-seed: file creation", () => {
 			"project.yaml should exist in config dir",
 		);
 	});
+
+	it("creates server registry in Headquarters state", () => {
+		assert.ok(
+			fs.existsSync(path.join(serverStateDir, "projects.json")),
+			"projects.json should exist in Headquarters state dir",
+		);
+		assert.equal(
+			fs.existsSync(path.join(stateDir, "projects.json")),
+			false,
+			"normal project state should not contain the server registry",
+		);
+	});
+
+	it("writes server registry under BOBBIT_DIR when overridden", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-seed-hq-override-"));
+		try {
+			const hqDir = path.join(dir, "custom-headquarters");
+			const env = { ...process.env, BOBBIT_DIR: hqDir };
+			delete env.BOBBIT_PI_DIR;
+			execFileSync("node", [SEED_SCRIPT, dir], { stdio: "pipe", env });
+			assert.ok(
+				fs.existsSync(path.join(hqDir, "state", "projects.json")),
+				"projects.json should exist under custom Headquarters state dir",
+			);
+			assert.ok(
+				fs.existsSync(path.join(dir, ".bobbit", "state", "goals.json")),
+				"normal project data should remain under project-local .bobbit/state",
+			);
+			assert.equal(
+				fs.existsSync(path.join(dir, ".bobbit", "headquarters", "state", "projects.json")),
+				false,
+				"default Headquarters registry should not be created when BOBBIT_DIR is set",
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 // ── JSON validity ───────────────────────────────────────────────────
@@ -130,7 +175,6 @@ describe("qa-seed: JSON validity", () => {
 		"gates.json",
 		"tasks.json",
 		"team-state.json",
-		"projects.json",
 	];
 
 	for (const file of jsonFiles) {
@@ -139,6 +183,11 @@ describe("qa-seed: JSON validity", () => {
 			assert.ok(Array.isArray(data), `${file} should contain a JSON array`);
 		});
 	}
+
+	it("Headquarters projects.json is valid JSON", () => {
+		const data = readServerJSON("projects.json");
+		assert.ok(Array.isArray(data), "projects.json should contain a JSON array");
+	});
 });
 
 // ── JSONL validity ──────────────────────────────────────────────────
@@ -330,7 +379,7 @@ describe("qa-seed: referential integrity", () => {
 	});
 
 	it("projectId on goal matches projects.json", () => {
-		const projects = readJSON("projects.json");
+		const projects = readServerJSON("projects.json");
 		const goals = readJSON("goals.json");
 		const projectIds = new Set(projects.map((p: any) => p.id));
 		for (const goal of goals) {
@@ -344,7 +393,7 @@ describe("qa-seed: referential integrity", () => {
 	});
 
 	it("projectId on sessions matches projects.json", () => {
-		const projects = readJSON("projects.json");
+		const projects = readServerJSON("projects.json");
 		const sessions = readJSON("sessions.json");
 		const projectIds = new Set(projects.map((p: any) => p.id));
 		for (const session of sessions) {
@@ -435,7 +484,7 @@ describe("qa-seed: workflow push safety", () => {
 // ── Data shape ──────────────────────────────────────────────────────
 describe("qa-seed: data shape", () => {
 	it("produces exactly 1 project", () => {
-		const projects = readJSON("projects.json");
+		const projects = readServerJSON("projects.json");
 		assert.equal(projects.length, 1);
 		assert.ok(projects[0].id);
 		assert.ok(projects[0].name);
