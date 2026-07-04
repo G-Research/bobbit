@@ -56,6 +56,10 @@ const PROVIDER_HOOKS = new Set([
 	// provider apply per-goal filesystem treatments (content-addressed marker/
 	// cache) without per-turn cost. See docs/design/goal-metadata.md.
 	"goalProvisioned",
+	// Goal-lifecycle hook fired once a goal is marked complete (see
+	// lifecycle-hub.ts dispatchGoalCompleted). Lets a provider persist/finalize
+	// per-goal state (e.g. Hindsight memory pack) at goal completion.
+	"goalCompleted",
 ]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
