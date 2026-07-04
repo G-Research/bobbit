@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { atomicWriteJsonSync, loadJsonWithBackupFallback } from "./atomic-json.js";
 
 export interface PersistedTeamEntry {
 	goalId: string;
@@ -23,41 +24,43 @@ export interface PersistedTeamEntry {
 }
 
 export class TeamStore {
-	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private readonly legacyStoreFile: string;
 	private teams: Map<string, PersistedTeamEntry> = new Map();
+	/** Number of .bak generations to keep alongside team-state.json. */
+	private static readonly BACKUP_COUNT = 3;
 
 	constructor(stateDir: string) {
-		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "team-state.json");
 		this.legacyStoreFile = path.join(stateDir, "gateway-swarms.json");
 		this.load();
 	}
 
 	private load(): void {
-		try {
-			let filePath = this.storeFile;
-			if (!fs.existsSync(this.storeFile) && fs.existsSync(this.legacyStoreFile)) {
-				filePath = this.legacyStoreFile;
+		let data: PersistedTeamEntry[] | undefined;
+		if (fs.existsSync(this.storeFile)) {
+			data = loadJsonWithBackupFallback<PersistedTeamEntry[]>(this.storeFile, {
+				backups: TeamStore.BACKUP_COUNT,
+				onBackupUsed: (usedFile) =>
+					console.warn(`[team-store] Loaded from backup ${path.basename(usedFile)} — primary missing/corrupt`),
+			});
+		} else if (fs.existsSync(this.legacyStoreFile)) {
+			try {
+				data = JSON.parse(fs.readFileSync(this.legacyStoreFile, "utf-8"));
+			} catch (err) {
+				console.error("[team-store] Failed to load legacy team file:", err);
 			}
-			if (fs.existsSync(filePath)) {
-				const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-				if (Array.isArray(data)) {
-					for (const s of data) {
-						if (s.goalId) this.teams.set(s.goalId, s);
-					}
-				}
+		}
+		if (Array.isArray(data)) {
+			for (const s of data) {
+				if (s.goalId) this.teams.set(s.goalId, s);
 			}
-		} catch (err) {
-			console.error("[team-store] Failed to load:", err);
 		}
 	}
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
-			fs.writeFileSync(this.storeFile, JSON.stringify(Array.from(this.teams.values()), null, 2), "utf-8");
+			atomicWriteJsonSync(this.storeFile, Array.from(this.teams.values()), { backups: TeamStore.BACKUP_COUNT });
 		} catch (err) {
 			console.error("[team-store] Failed to save:", err);
 		}

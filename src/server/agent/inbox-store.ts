@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import path from "node:path";
+import { atomicWriteJsonSync, loadJsonWithBackupFallback, removeJsonWithBackups } from "./atomic-json.js";
 
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
 
@@ -43,6 +43,8 @@ export class InboxStore {
 	private byStaff: Map<string, InboxEntry[]> = new Map();
 	/** Marks the per-staff files we have already attempted to load. */
 	private loaded: Set<string> = new Set();
+	/** Number of .bak generations to keep alongside each per-staff inbox file. */
+	private static readonly BACKUP_COUNT = 3;
 
 	constructor(stateDir: string) {
 		this.inboxDir = path.join(stateDir, "inbox");
@@ -58,17 +60,17 @@ export class InboxStore {
 		}
 		this.loaded.add(staffId);
 		const file = this.fileFor(staffId);
-		try {
-			if (fs.existsSync(file)) {
-				const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as { staffId?: string; entries?: unknown };
-				if (raw && Array.isArray(raw.entries)) {
-					const entries = (raw.entries as InboxEntry[]).filter((e) => e && typeof e.id === "string");
-					this.byStaff.set(staffId, entries);
-					return entries;
-				}
-			}
-		} catch (err) {
-			console.error(`[inbox-store] Failed to load inbox for staff ${staffId}:`, err);
+		const raw = loadJsonWithBackupFallback<{ staffId?: string; entries?: unknown }>(file, {
+			backups: InboxStore.BACKUP_COUNT,
+			onBackupUsed: (usedFile) =>
+				console.warn(
+					`[inbox-store] Loaded inbox for staff ${staffId} from backup ${path.basename(usedFile)} — primary missing/corrupt`,
+				),
+		});
+		if (raw && Array.isArray(raw.entries)) {
+			const entries = (raw.entries as InboxEntry[]).filter((e) => e && typeof e.id === "string");
+			this.byStaff.set(staffId, entries);
+			return entries;
 		}
 		this.byStaff.set(staffId, []);
 		return this.byStaff.get(staffId)!;
@@ -77,12 +79,8 @@ export class InboxStore {
 	private save(staffId: string): void {
 		const entries = this.byStaff.get(staffId) ?? [];
 		try {
-			if (!fs.existsSync(this.inboxDir)) {
-				fs.mkdirSync(this.inboxDir, { recursive: true });
-			}
 			const file = this.fileFor(staffId);
-			const payload = JSON.stringify({ staffId, entries }, null, 2);
-			fs.writeFileSync(file, payload, "utf-8");
+			atomicWriteJsonSync(file, { staffId, entries }, { backups: InboxStore.BACKUP_COUNT });
 		} catch (err) {
 			console.error(`[inbox-store] Failed to save inbox for staff ${staffId}:`, err);
 		}
@@ -150,13 +148,18 @@ export class InboxStore {
 		return true;
 	}
 
-	/** Wipe the entire inbox for a staff (used when a staff is deleted). */
+	/**
+	 * Wipe the entire inbox for a staff (used when a staff is deleted).
+	 *
+	 * Must purge the rotated `.bak.N` files along with the primary: load()
+	 * falls back to backups when the primary is missing, so deleting only the
+	 * primary would resurrect the deleted inbox on the next restart.
+	 */
 	removeAll(staffId: string): void {
 		this.byStaff.set(staffId, []);
 		this.loaded.add(staffId);
-		const file = this.fileFor(staffId);
 		try {
-			if (fs.existsSync(file)) fs.unlinkSync(file);
+			removeJsonWithBackups(this.fileFor(staffId));
 		} catch (err) {
 			console.error(`[inbox-store] Failed to remove inbox for staff ${staffId}:`, err);
 		}

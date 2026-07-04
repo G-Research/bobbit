@@ -17,6 +17,12 @@ const GATES_FILE = path.join(TEST_DIR, "state", "gates.json");
 
 function clearGates() {
 	try { fs.unlinkSync(GATES_FILE); } catch { /* ignore */ }
+	// GateStore rotates .bak.N backups alongside gates.json (CON-01) — clear
+	// those too so a stale backup from a prior test isn't picked up as the
+	// "primary missing/corrupt" recovery source for the next test.
+	for (let i = 1; i <= 5; i++) {
+		try { fs.unlinkSync(`${GATES_FILE}.bak.${i}`); } catch { /* ignore */ }
+	}
 }
 
 function ensureStateDir() {

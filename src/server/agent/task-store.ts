@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import path from "node:path";
+import { atomicWriteJsonSync, loadJsonWithBackupFallback } from "./atomic-json.js";
 
 export type TaskState = "todo" | "in-progress" | "blocked" | "complete" | "skipped";
 
@@ -48,54 +48,50 @@ export function readHandoff(
  * Tasks persist across server restarts.
  */
 export class TaskStore {
-	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private tasks: Map<string, PersistedTask> = new Map();
+	/** Number of .bak generations to keep alongside tasks.json. */
+	private static readonly BACKUP_COUNT = 3;
 
 	constructor(stateDir: string) {
-		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "tasks.json");
 		this.load();
 	}
 
 	private load(): void {
-		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
-				if (Array.isArray(data)) {
-					for (const t of data) {
-						if (t.id && t.goalId && t.title && t.type && t.state) {
-							// Migrate old field names
-							if (t.workflowArtifactId && !t.workflowGateId) {
-								t.workflowGateId = t.workflowArtifactId;
-								delete t.workflowArtifactId;
-							}
-							if (t.inputArtifactIds && !t.inputGateIds) {
-								t.inputGateIds = t.inputArtifactIds;
-								delete t.inputArtifactIds;
-							}
-							// Migrate commitSha -> headSha
-							if (t.commitSha && !t.headSha) {
-								t.headSha = t.commitSha;
-							}
-							delete t.commitSha;
-							this.tasks.set(t.id, t);
-						}
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy-field migration below needs loose typing, matching prior JSON.parse(...) behavior
+		const data = loadJsonWithBackupFallback<any[]>(this.storeFile, {
+			backups: TaskStore.BACKUP_COUNT,
+			onBackupUsed: (usedFile) =>
+				console.warn(`[task-store] Loaded from backup ${path.basename(usedFile)} — primary missing/corrupt`),
+		});
+		if (Array.isArray(data)) {
+			for (const t of data) {
+				if (t.id && t.goalId && t.title && t.type && t.state) {
+					// Migrate old field names
+					if (t.workflowArtifactId && !t.workflowGateId) {
+						t.workflowGateId = t.workflowArtifactId;
+						delete t.workflowArtifactId;
 					}
+					if (t.inputArtifactIds && !t.inputGateIds) {
+						t.inputGateIds = t.inputArtifactIds;
+						delete t.inputArtifactIds;
+					}
+					// Migrate commitSha -> headSha
+					if (t.commitSha && !t.headSha) {
+						t.headSha = t.commitSha;
+					}
+					delete t.commitSha;
+					this.tasks.set(t.id, t);
 				}
 			}
-		} catch (err) {
-			console.error("[task-store] Failed to load persisted tasks:", err);
 		}
 	}
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
 			const data = Array.from(this.tasks.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			atomicWriteJsonSync(this.storeFile, data, { backups: TaskStore.BACKUP_COUNT });
 		} catch (err) {
 			console.error("[task-store] Failed to save tasks:", err);
 		}
