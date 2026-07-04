@@ -425,7 +425,7 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 
 ### 3.7 Re-generation flow
 
-When the user adds/removes/renames a component in Settings → project tab, the project assistant offers to regenerate workflows. The proposal panel renders a sub-section diff scoped to `workflows:` (see §8.6). Hand edits are merged: any hand-added gate not in the regenerated set is preserved with a comment marker.
+When the user adds/removes/renames a component in Settings → project tab, the project assistant offers to regenerate workflows. The proposal panel shows the regenerated `workflows` via the structured per-field editors in `src/app/proposal-panels.ts::projectProposalPanel()` (the sub-section YAML diff originally designed for this was never shipped — see the historical note in §8.6). Hand edits are merged: any hand-added gate not in the regenerated set is preserved with a comment marker.
 
 ---
 
@@ -927,7 +927,7 @@ be built directly in `proposal-panels.ts`.
 - `src/server/agent/task-store.ts` — `gitHandoff` field + read-helper; migration.
 - `src/server/server.ts` — multi-repo `git-status`/`git-diff`; `propose_project` schema; manual-pass endpoint.
 - `src/server/skills/git.ts` — generalized `createWorktree` callers; `setupWorktreeDeps` thin wrapper kept for legacy.
-- `src/ui/components/ProjectPickerPopover.ts`, `SettingsView.ts`, `ProjectProposalPanel.ts`, `GitStatusWidget.ts`, `GoalCreationDialog.ts`, `AgentInterface.ts` — UI surface §8.
+- `src/ui/components/ProjectPickerPopover.ts`, `SettingsView.ts`, `ProjectProposalPanel.ts` (since removed as dead code — see §8.6), `GitStatusWidget.ts`, `GoalCreationDialog.ts`, `AgentInterface.ts` — UI surface §8.
 - `defaults/tools/proposals/extension.ts` — `propose_project` schema (§8.5).
 - `AGENTS.md` — Worktrees, Git conventions sections.
 - `docs/internals.md` — multi-repo, components, inline workflows, sandbox layout, pool, sweeper.
