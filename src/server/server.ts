@@ -950,7 +950,7 @@ async function deleteRemoteGoalBranches(
 	})));
 }
 
-const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
 const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
 
 function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {
@@ -6165,18 +6165,36 @@ async function handleApiRoute(
 		resolvedProject = resolved.project;
 		const resolvedProjectContext = projectContextManager.getOrCreate(resolvedProjectId);
 
-		if (!explicitCwd && !goalForSession && !reattemptGoalId && !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
+		// Server-scope assistants (role/tool) resolve to the hidden `system`
+		// project, which has no user-facing root. They must operate strictly
+		// under the Headquarters workspace directory (bobbitDir()), which is a
+		// distinct location from the server run dir / system project rootPath.
+		const isSystemScopeAssistant = isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID;
+		if (!explicitCwd && !goalForSession && !reattemptGoalId && !isSystemScopeAssistant) {
 			cwd = resolvedProject.rootPath;
-		} else if (!explicitCwd && !goalForSession && !reattemptGoalId && isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID) {
-			// Server-scope assistants (role/tool) resolve to the hidden `system`
-			// project, which has no user-facing root. Default their cwd to the
-			// Headquarters workspace directory rather than the server run dir so
-			// they operate under the Headquarters scope. cwd validation is skipped
-			// for this system-assistant case below.
-			cwd = bobbitDir();
+		} else if (isSystemScopeAssistant && !goalForSession && !reattemptGoalId) {
+			// Never trust a caller-supplied cwd to escape the Headquarters scope
+			// for a server-scope assistant. Default to the Headquarters directory
+			// and, when an explicit cwd is provided, require it to be inside the
+			// Headquarters directory (validated against the Headquarters project
+			// scope, whose rootPath IS bobbitDir()) — reject otherwise.
+			const hqDir = bobbitDir();
+			if (explicitCwd) {
+				const hqCwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, HEADQUARTERS_PROJECT_ID, explicitCwd, { kind: "user-input" });
+				if (!hqCwdValidation.ok) {
+					json({ error: `cwd must be inside the Headquarters directory (${hqDir})`, code: "CWD_OUTSIDE_PROJECT" }, 422);
+					return;
+				}
+				cwd = explicitCwd;
+			} else {
+				cwd = hqDir;
+			}
 		}
 
-		const shouldValidateCwd = !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID);
+		// System-scope assistants were already constrained to the Headquarters
+		// directory above; all other scopes must validate the resolved cwd
+		// against the resolved project scope (never bypassed).
+		const shouldValidateCwd = !isSystemScopeAssistant;
 		if (shouldValidateCwd) {
 			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
 			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
@@ -7123,6 +7141,19 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const prevSpec = putGoal?.spec ?? "";
+			// The goal id already fixes the project scope; a caller-supplied cwd
+			// update must still be constrained to that scope (Headquarters dir for
+			// HQ goals, or the normal project root / an owned worktree for normal
+			// goals). Reuse the ownership-aware validator used for session/team
+			// creation rather than forwarding body.cwd unchecked.
+			if (typeof body.cwd === "string" && body.cwd.trim().length > 0) {
+				const goalProjectId = putGoal?.projectId
+					?? projectContextManager.getContextForGoal(id)?.project.id;
+				if (goalProjectId) {
+					const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, goalProjectId, body.cwd, { kind: "goal", goalId: id });
+					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+				}
+			}
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
