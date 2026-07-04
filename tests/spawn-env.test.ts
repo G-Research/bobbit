@@ -45,15 +45,16 @@ describe("session-setup spawn env contract", () => {
 			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 			"utf-8",
 		);
-		// Verify the env-spread shape spreads caller env first, then the
+		// Verify the env-spread shape defaults cache retention first (lowest
+		// precedence — see cache-retention.ts), then spreads caller env, then the
 		// gateway-owned BOBBIT_SESSION_ID + per-session BOBBIT_SESSION_SECRET so a
 		// caller-supplied toolEnv key can NEVER clobber the session identity or its
 		// capability secret (which would let a child impersonate another session for
 		// the binding-routed PR-walkthrough tool routes). Provider env is merged
 		// afterward with existing env precedence preserved.
 		assert.ok(
-			/env:\s*\{\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
-			"bridge env must spread caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
+			/env:\s*\{\s*\.\.\.resolveCacheRetentionEnv\(\),\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
+			"bridge env must default cache retention, then spread caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
 		);
 		assert.ok(
 			/mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\),\s*\}\)/.test(src),

@@ -52,6 +52,7 @@ import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { resolveCacheRetentionEnv } from "./cache-retention.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 export interface PiExtensionDiagnostic {
@@ -564,7 +565,15 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// identity or capability secret (which would let a child impersonate another
 		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
 		// unit test in tests/session-setup-env.test.ts.
+		//
+		// resolveCacheRetentionEnv() is spread FIRST (lowest precedence within
+		// this map): it resolves the prompt-cache retention env
+		// (BOBBIT_CACHE_RETENTION > operator-set PI_CACHE_RETENTION in the
+		// gateway env > default "long"; see cache-retention.ts), and a
+		// caller-supplied toolEnv can still override the resolved value
+		// per-session (e.g. for an A/B run) without touching identity keys.
 		env: {
+			...resolveCacheRetentionEnv(),
 			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
 			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),

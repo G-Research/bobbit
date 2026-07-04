@@ -683,6 +683,13 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
+		// Forwards the Anthropic prompt-cache retention preference (see
+		// cache-retention.ts) into the sandboxed process's env — pi-ai reads
+		// this env var directly (anthropic.js resolveCacheRetention), same as
+		// the non-sandboxed spawn path below.
+		if (this.options.env?.PI_CACHE_RETENTION) {
+			execArgs.push("-e", `PI_CACHE_RETENTION=${this.options.env.PI_CACHE_RETENTION}`);
+		}
 		if (this.options.gatewayToken) {
 			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}
