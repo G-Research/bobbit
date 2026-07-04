@@ -6176,19 +6176,17 @@ async function handleApiRoute(
 		if (!explicitCwd && !goalForSession && !reattemptGoalId && !isSystemScopeAssistant) {
 			cwd = resolvedProject.rootPath;
 		} else if (isSystemScopeAssistant && !goalForSession && !reattemptGoalId) {
-			// Never trust a caller-supplied cwd to escape the Headquarters scope
-			// for a server-scope assistant. Default to the Headquarters directory
-			// and, when an explicit cwd is provided, require it to be inside the
-			// Headquarters directory (validated against the Headquarters project
-			// scope, whose rootPath IS bobbitDir()) — reject otherwise.
+			// Server-scope assistants (role/tool) must always create successfully
+			// regardless of the caller-supplied cwd — they operate strictly under
+			// the Headquarters workspace directory (bobbitDir()). Coerce the cwd:
+			// honor an explicit cwd only when it is inside the Headquarters
+			// directory (validated against the Headquarters project scope, whose
+			// rootPath IS bobbitDir()); otherwise force it to the Headquarters
+			// directory. Never reject a server-scope assistant over its cwd.
 			const hqDir = bobbitDir();
 			if (explicitCwd) {
 				const hqCwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, HEADQUARTERS_PROJECT_ID, explicitCwd, { kind: "user-input" });
-				if (!hqCwdValidation.ok) {
-					json({ error: `cwd must be inside the Headquarters directory (${hqDir})`, code: "CWD_OUTSIDE_PROJECT" }, 422);
-					return;
-				}
-				cwd = explicitCwd;
+				cwd = hqCwdValidation.ok ? explicitCwd : hqDir;
 			} else {
 				cwd = hqDir;
 			}
