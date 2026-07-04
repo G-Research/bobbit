@@ -749,7 +749,7 @@ export class ProjectRegistry {
    * Register a provisional project (used by project assistant sessions).
    * Provisional projects are real persisted projects with `provisional: true`.
    * For scaffolding (Path C), the rootPath may not exist yet — skip existence check.
-   * Deduplicates: if a provisional project already exists at the same rootPath, reuse it.
+   * Deduplicates: if a normal or provisional project already exists at the same canonical rootPath, reuse it.
    */
   registerProvisional(name: string, rootPath: string): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
@@ -764,15 +764,18 @@ export class ProjectRegistry {
       if (sym.symlink) rootPath = sym.canonical;
     }
 
-    // Deduplicate: reuse existing provisional project at same path
+    // Deduplicate by canonical root. Project-assistant setup should attach to
+    // an existing visible normal/provisional scope instead of creating a second
+    // project at the same path. Hidden/system anchors remain internal and do
+    // not block provisioning; Headquarters' physical directory stays immutable.
     const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
-      if (p.provisional && path.resolve(p.rootPath) === normalized) {
-        return p;
-      }
-      if (sameProjectPath(p.rootPath, normalized) && isHeadquartersProject(p)) {
+      if (!sameProjectPath(p.rootPath, normalized)) continue;
+      if (isHeadquartersProject(p)) {
         assertNormalMutableProject(p, "used as a provisional project");
       }
+      if (p.hidden || isSystemProject(p)) continue;
+      return p;
     }
 
     // Scaffold .bobbit directories only if rootPath exists

@@ -382,6 +382,35 @@ test.describe("Headquarters same-root split API", () => {
 		}
 	});
 
+	test("project assistant at the server run directory reuses the same-root normal project", async () => {
+		const gw = await startWithNormalSameRoot();
+		let sessionId: string | undefined;
+		try {
+			const created = await gw.json("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ assistantType: "project", cwd: gw.serverRoot }),
+			});
+			expect(created.status, created.text).toBe(201);
+			sessionId = created.body.id;
+			expect(created.body.provisionalProjectId).toBe(SAME_ROOT_PROJECT_ID);
+
+			const session = await gw.json(`/api/sessions/${sessionId}`);
+			expect(session.status, session.text).toBe(200);
+			expect(session.body.projectId).toBe(SAME_ROOT_PROJECT_ID);
+			expectSamePath(session.body.cwd, gw.serverRoot, "same-root project assistant cwd");
+
+			const list = await gw.json("/api/projects");
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expect(list.body.find((p: any) => p.id === SAME_ROOT_PROJECT_ID)?.provisional).not.toBe(true);
+			const storedProjects = readJsonFile(join(gw.headquartersDir, "state", "projects.json"));
+			expect(storedProjects.filter((p: any) => samePath(String(p.rootPath), gw.serverRoot) && !p.hidden).map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID]);
+		} finally {
+			if (sessionId) await gw.request(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
+			await gw.shutdown();
+		}
+	});
+
 	test("Quick Session creation uses projectId as the scope and separates Headquarters from same-root project state", async () => {
 		const gw = await startWithNormalSameRoot();
 		try {
