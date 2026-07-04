@@ -143,6 +143,20 @@ function safePersistedHostAgentSessionFile(filePath: string | undefined): string
 	return resolveReadablePersistedAgentSessionFile(filePath);
 }
 
+function extractClaudeCodeSessionId(value: any): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	for (const key of ["claudeCodeSessionId", "session_id"] as const) {
+		const candidate = value[key];
+		if (typeof candidate === "string" && candidate.trim()) return candidate;
+	}
+	return extractClaudeCodeSessionId(value.data) ?? extractClaudeCodeSessionId(value.result) ?? extractClaudeCodeSessionId(value.metadata);
+}
+
+function canResumeClaudeCodeSession(ps: Pick<PersistedSession, "runtime" | "modelProvider" | "claudeCodeSessionId"> | undefined): boolean {
+	if (!ps || typeof ps.claudeCodeSessionId !== "string" || !ps.claudeCodeSessionId.trim()) return false;
+	return resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
+}
+
 export function switchSessionPathForAgent(ps: PersistedSession): string {
 	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
 	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
@@ -1033,6 +1047,54 @@ type RestoreCoordinator = {
 	generation: number;
 	promise: Promise<SessionInfo | undefined>;
 };
+
+function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
+	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
+	let timestamp: number | undefined;
+	if (typeof envelopeTs === "number" && Number.isFinite(envelopeTs)) timestamp = envelopeTs < 10_000_000_000 ? envelopeTs * 1000 : envelopeTs;
+	else if (typeof envelopeTs === "string") {
+		const parsed = Date.parse(envelopeTs);
+		if (Number.isFinite(parsed)) timestamp = parsed;
+	}
+	return timestamp === undefined ? message : { ...message, timestamp };
+}
+
+function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
+	const askToolIds = new Set<string>();
+	for (const message of messages as any[]) {
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
+			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
+		}
+	}
+	return messages.map((message: any) => {
+		if (message?.role !== "toolResult") return message;
+		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
+		const text = stringifyPersistedToolResultContent(message.content).trim();
+		if (text !== "Answer questions?") return message;
+		const rest = { ...message };
+		delete rest.error;
+		return {
+			...rest,
+			isError: false,
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
+		};
+	});
+}
+
+function stringifyPersistedToolResultContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content.map((item: any) => {
+			if (typeof item === "string") return item;
+			if (item?.type === "text" && typeof item.text === "string") return item.text;
+			try { return JSON.stringify(item); } catch { return String(item); }
+		}).join("\n");
+	}
+	if (content == null) return "";
+	try { return JSON.stringify(content); } catch { return String(content); }
+}
 
 type IdleWaiter = {
 	resolve: () => void;
@@ -3645,6 +3707,29 @@ export class SessionManager {
 			});
 	}
 
+	private persistClaudeCodeMessageToTranscript(session: SessionInfo, event: any): void {
+		if (event?.type !== "message_end" || !event.message) return;
+		const store = this.resolveStoreForSession(session.id);
+		const ps = store.get(session.id);
+		if (resolveSessionRuntime({ runtime: ps?.runtime, modelProvider: ps?.modelProvider }) !== "claude-code") return;
+		let agentSessionFile = ps?.agentSessionFile;
+		if (!agentSessionFile) {
+			agentSessionFile = path.join(bobbitStateDir(), "claude-code-transcripts", `${session.id}.jsonl`);
+			store.update(session.id, { agentSessionFile });
+		}
+		try {
+			fs.mkdirSync(path.dirname(agentSessionFile), { recursive: true });
+			fs.appendFileSync(agentSessionFile, JSON.stringify({
+				type: "message",
+				id: event.message.id,
+				ts: new Date().toISOString(),
+				message: event.message,
+			}) + "\n");
+		} catch (err) {
+			console.warn(`[session-manager] Failed to persist Claude Code transcript for ${session.id}:`, err);
+		}
+	}
+
 	/**
 	 * Handle agent events that track error state and control queue draining.
 	 * Called from every event listener before broadcasting.
@@ -3652,6 +3737,12 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		const claudeCodeSessionId = extractClaudeCodeSessionId(event);
+		if (claudeCodeSessionId) {
+			this.resolveStoreForSession(session.id).update(session.id, { runtime: "claude-code", claudeCodeSessionId });
+		}
+		this.persistClaudeCodeMessageToTranscript(session, event);
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -4639,7 +4730,7 @@ export class SessionManager {
 		// Zombie-archive guard: a record with neither an agent session file nor a role
 		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
 		// instead of throwing opaquely on every Restart click.
-		if (!ps.agentSessionFile && !ps.role) {
+		if (!ps.agentSessionFile && !ps.role && !canResumeClaudeCodeSession(ps)) {
 			console.warn(
 				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
 				`(no agentSessionFile, no role) — archiving instead of restarting.`,
@@ -4787,7 +4878,7 @@ export class SessionManager {
 		// in restoreSession() — no delegate-specific registry.
 		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
-			if (!ps.agentSessionFile) {
+			if (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps)) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -4911,7 +5002,7 @@ export class SessionManager {
 		// No projectId and no goalId: session predates multi-project and cannot be
 		// safely assigned to any project at runtime. Skip restore rather than
 		// silently dumping it into an arbitrary "default" project.
-		if (!ps.projectId && !ps.goalId) {
+		if (!ps.projectId && !ps.goalId && !canResumeClaudeCodeSession(ps)) {
 			console.warn(`[session-manager] Session ${ps.id} has no projectId and predates multi-project — skipping restore`);
 			return;
 		}
@@ -4958,7 +5049,7 @@ export class SessionManager {
 				return;
 			}
 		}
-		if (!ps.agentSessionFile) {
+		if (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps)) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
 			const recovered = this.recoverSessionFile(ps);
@@ -6078,33 +6169,60 @@ export class SessionManager {
 		return texts.join("\n\n");
 	}
 
+	private async getPersistedSessionMessages(sessionId: string, opts?: { claudeCodeOnly?: boolean; archivedOnly?: boolean }): Promise<unknown[]> {
+		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
+		if (!ps?.agentSessionFile) return [];
+		if (opts?.archivedOnly && !ps.archived) return [];
+		const isClaudeCode = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
+		if (opts?.claudeCodeOnly && !isClaudeCode) return [];
+		try {
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return [];
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
+			if (!content) return [];
+			const messages: unknown[] = [];
+			for (const line of content.split(/\r?\n/)) {
+				if (!line.trim()) continue;
+				try {
+					const entry = JSON.parse(line);
+					if (entry.type === "message" && entry.message) messages.push(isClaudeCode ? withPersistedClaudeCodeMessageTimestamp(entry.message, entry.ts) : entry.message);
+				} catch { /* skip malformed line */ }
+			}
+			return isClaudeCode ? normalizePersistedClaudeCodeAskMessages(messages) : messages;
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Claude Code resumes from Claude's session id instead of replaying Bobbit's
+	 * JSONL into the bridge, so immediately after gateway restart the live bridge
+	 * can have an empty/new-only in-memory snapshot. Prefer the persisted Claude
+	 * transcript fallback when it contains more complete history.
+	 */
+	async hydrateClaudeCodeSnapshotMessages(sessionId: string, liveData: unknown): Promise<unknown> {
+		const persisted = await this.getPersistedSessionMessages(sessionId, { claudeCodeOnly: true });
+		if (persisted.length === 0) return liveData;
+		const liveMessages = Array.isArray(liveData)
+			? liveData
+			: (liveData && typeof liveData === "object" && Array.isArray((liveData as any).messages) ? (liveData as any).messages : []);
+		if (persisted.length <= liveMessages.length) return liveData;
+		const messages = truncateLargeToolContentInMessages(persisted) as unknown[];
+		if (Array.isArray(liveData)) return messages;
+		if (liveData && typeof liveData === "object") return { ...(liveData as Record<string, unknown>), messages };
+		return { messages };
+	}
+
 	/**
 	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
 	 * transcript file. Used as the H1 fallback so a child that completed before a
 	 * restart can still be collected via team_wait without a live process.
 	 */
 	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
-		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-		if (!ps?.agentSessionFile) return "";
-		try {
-			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-			if (!safeFile) return "";
-			trustPersistedAgentSessionFile(safeFile);
-			const ctx = sessionFsContextForAgentFile(ps, safeFile);
-			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
-			if (!content) return "";
-			const messages: unknown[] = [];
-			for (const line of content.split(/\r?\n/)) {
-				if (!line.trim()) continue;
-				try {
-					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) messages.push(entry.message);
-				} catch { /* skip malformed line */ }
-			}
-			return this.extractAssistantText(messages);
-		} catch {
-			return "";
-		}
+		const messages = await this.getPersistedSessionMessages(sessionId);
+		return this.extractAssistantText(messages);
 	}
 
 	/**
@@ -6341,6 +6459,10 @@ export class SessionManager {
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
+		const persisted = this.resolveStoreForSession(session.id).get(session.id);
+		if (resolveSessionRuntime({ runtime: persisted?.runtime, modelProvider: persisted?.modelProvider }) === "claude-code") {
+			return;
+		}
 		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
 		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 
@@ -7786,32 +7908,8 @@ export class SessionManager {
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
-		const ps = this.resolveStoreForId(id)?.get(id);
-		if (!ps?.archived || !ps.agentSessionFile) return [];
-		try {
-			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-			if (!safeFile) return [];
-			trustPersistedAgentSessionFile(safeFile);
-			const ctx = sessionFsContextForAgentFile(ps, safeFile);
-			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
-			if (!content) return [];
-			const lines = content.trim().split("\n");
-			const messages: unknown[] = [];
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) {
-						messages.push(entry.message);
-					}
-				} catch {
-					// Skip malformed lines
-				}
-			}
-			return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
-		} catch {
-			return [];
-		}
+		const messages = await this.getPersistedSessionMessages(id, { archivedOnly: true });
+		return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
 	}
 
 	/** List archived sessions in the same format as listSessions(). */
@@ -9086,7 +9184,7 @@ export class SessionManager {
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
+			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this._restoreSessionCoalesced(ps)
 					.then(() => {

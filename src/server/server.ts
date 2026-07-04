@@ -485,6 +485,37 @@ import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 // Entries are also refilled from the transcript check, so survive process
 // restarts via the transcript fallback in findAskResponseAnswers.
 const askSubmittedToolUseIds = new Set<string>();
+
+export async function loadHydratedMessagesForAskSubmit(
+	sessionManager: Pick<SessionManager, "hydrateClaudeCodeSnapshotMessages">,
+	sessionId: string,
+	session: { rpcClient: { getMessages: () => Promise<any> } },
+): Promise<any[]> {
+	const msgsResp = await session.rpcClient.getMessages();
+	const liveData = msgsResp?.data;
+	const hydrated = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, liveData);
+	const raw = Array.isArray(hydrated)
+		? hydrated
+		: (hydrated && typeof hydrated === "object" && Array.isArray((hydrated as any).messages) ? (hydrated as any).messages : undefined);
+	return Array.isArray(raw) ? raw : [];
+}
+
+export function findAskUserChoicesQuestions(messages: any[], toolUseId: string): UserQuestion[] | null {
+	for (const m of messages) {
+		if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
+		for (const b of m.content) {
+			if (!b) continue;
+			const isToolUse = b.type === "toolCall" || b.type === "tool_use";
+			if (!isToolUse) continue;
+			if (b.name !== "ask_user_choices") continue;
+			if (b.id !== toolUseId) continue;
+			const args = b.arguments ?? b.input;
+			if (args && Array.isArray(args.questions)) return args.questions as UserQuestion[];
+		}
+	}
+	return null;
+}
+
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -15581,9 +15612,7 @@ async function handleApiRoute(
 		// and to detect duplicate submits (multi-tab / network retry).
 		let messages: any[] = [];
 		try {
-			const msgsResp = await session.rpcClient.getMessages();
-			const raw = msgsResp?.data?.messages || msgsResp?.data;
-			if (Array.isArray(raw)) messages = raw;
+			messages = await loadHydratedMessagesForAskSubmit(sessionManager, sessionId, session);
 		} catch (e: any) {
 			json({ error: `Could not load transcript: ${e?.message || String(e)}` }, 500);
 			return;
@@ -15607,23 +15636,7 @@ async function handleApiRoute(
 		}
 
 		// Locate the ask_user_choices tool_use block; use its input to cross-validate.
-		let matchedQuestions: UserQuestion[] | null = null;
-		for (const m of messages) {
-			if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
-			for (const b of m.content) {
-				if (!b) continue;
-				const isToolUse = b.type === "toolCall" || b.type === "tool_use";
-				if (!isToolUse) continue;
-				if (b.name !== "ask_user_choices") continue;
-				if (b.id !== toolUseId) continue;
-				const args = b.arguments ?? b.input;
-				if (args && Array.isArray(args.questions)) {
-					matchedQuestions = args.questions as UserQuestion[];
-				}
-				break;
-			}
-			if (matchedQuestions) break;
-		}
+		const matchedQuestions = findAskUserChoicesQuestions(messages, toolUseId);
 		if (!matchedQuestions) {
 			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
 			return;
