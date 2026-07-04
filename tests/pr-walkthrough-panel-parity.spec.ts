@@ -216,6 +216,114 @@ const READY_BUNDLE = {
   ],
 };
 
+const NARRATIVE_DIFF_BLOCK = {
+  id: "auth-session-block",
+  filePath: "src/auth/session.ts",
+  status: "modified",
+  hunks: [
+    {
+      id: "h-auth",
+      header: "@@ -8,6 +8,9 @@ createSession",
+      lines: [
+        { id: "auth-ctx-1", kind: "context", oldLine: 8, newLine: 8, text: "export function createSession(input) {" },
+        { id: "auth-del-1", kind: "del", oldLine: 9, text: "  persist(input);" },
+        { id: "auth-add-1", kind: "add", newLine: 9, text: "  validateExpiry(input.token);" },
+        { id: "auth-add-2", kind: "add", newLine: 10, text: "  persist(input);" },
+        { id: "auth-ctx-2", kind: "context", oldLine: 10, newLine: 11, text: "}" },
+      ],
+    },
+    {
+      id: "h-extra",
+      header: "@@ -40,3 +43,6 @@ renderMetricsPanel",
+      lines: [
+        { id: "extra-add-1", kind: "add", newLine: 44, text: "renderMetricsPanel();" },
+      ],
+    },
+  ],
+};
+
+const fillerCards = Array.from({ length: 11 }, (_, index) => ({
+  id: "logical-card-" + (index + 3),
+  phaseId: "other",
+  navLabel: "Logic " + (index + 3),
+  title: "Logical filler " + (index + 3),
+  summary: "Small plumbing card included to prove the rail is not capped at twelve cards.",
+  diffBlocks: [],
+  suggestedComments: [],
+}));
+
+const NARRATIVE_BUNDLE = {
+  found: true,
+  persistedAt: "2026-07-04T12:00:00.000Z",
+  changeset: {
+    provider: "github",
+    owner: "SuuBro",
+    repo: "bobbit",
+    number: 77,
+    url: "https://github.com/SuuBro/bobbit/pull/77",
+    prTitle: "Narrative PR walkthrough",
+    title: "Narrative PR walkthrough",
+    baseSha: "1111111111111111",
+    headSha: "2222222222222222",
+    filesChanged: 2,
+    additions: 6,
+    deletions: 1,
+  },
+  cards: [
+    {
+      id: "auth-flow",
+      phaseId: "significant",
+      navLabel: "Auth flow",
+      title: "Auth flow",
+      summary: "The expiry guard now sits before persistence.",
+      diffBlocks: [NARRATIVE_DIFF_BLOCK],
+      hunkPlacements: [
+        { hunkId: "h-auth", blockId: "auth-session-block", filePath: "src/auth/session.ts", hunkHeader: "@@ -8,6 +8,9 @@ createSession", placement: "primary", defaultExpanded: true, whyRelevant: "Expiry validation moved before persistence." },
+      ],
+      narrative: [
+        { id: "setup", type: "text", body: "Review the session creation order before accepting the auth flow change." },
+        { id: "auth-diff", type: "diff", hunkIds: ["h-auth"] },
+        { id: "auth-note", type: "note", anchor: { hunkId: "h-auth" }, body: "Persistence now depends on the expiry guard passing first." },
+        { id: "auth-question", type: "suggested_comment", severity: "question", intent: "inline", anchor: { hunkId: "h-auth", lineRange: "+9..+10" }, body: "Should this tolerate bounded clock skew before rejecting the token?" },
+        { id: "auth-checks", type: "checklist", items: ["Expired tokens cannot be persisted.", "The old direct persist path is gone."] },
+      ],
+      suggestedComments: [],
+    },
+    {
+      id: "auth-revisit",
+      phaseId: "significant",
+      navLabel: "Auth revisit",
+      title: "Auth revisit",
+      summary: "A later risk card points back to the auth hunk without duplicating it expanded.",
+      diffBlocks: [{ ...NARRATIVE_DIFF_BLOCK, hunks: [NARRATIVE_DIFF_BLOCK.hunks[0]] }],
+      hunkPlacements: [
+        { hunkId: "h-auth", blockId: "auth-session-block", filePath: "src/auth/session.ts", hunkHeader: "@@ -8,6 +8,9 @@ createSession", placement: "secondary", defaultExpanded: false, primaryCardId: "auth-flow", primaryCardTitle: "Auth flow" },
+      ],
+      narrative: [
+        { id: "risk-setup", type: "text", body: "This risk note reuses the auth hunk only as supporting evidence." },
+        { id: "risk-diff", type: "diff", hunkIds: ["h-auth"] },
+        { id: "risk-comment", type: "suggested_comment", severity: "non_blocking", intent: "summary", anchor: { hunkId: "h-auth" }, body: "Mention the clock-skew decision in the summary if policy is unclear." },
+      ],
+      suggestedComments: [],
+    },
+    ...fillerCards,
+    {
+      id: "audit-completion",
+      phaseId: "audit",
+      navLabel: "Coverage",
+      title: "Completion sweep",
+      summary: "The final card reports coverage instead of hiding major behavior.",
+      diffBlocks: [],
+      suggestedComments: [],
+      coverage: {
+        summary: { primaryReviewed: 1, repeatedSecondaryReferences: 1, skipped: 1, unread: 0, completionSweepRemaining: 1 },
+        completionSweepRemaining: [{ hunkId: "h-plumbing", filePath: "scripts/release.js", hunkHeader: "@@ -1,3 +1,4 @@" }],
+        skippedHunks: [{ hunkId: "h-generated", filePath: "src/generated/api.ts", skipReason: "generated" }],
+      },
+    },
+  ],
+};
+
 function scheduleRender() {
   if (renderQueued) return;
   renderQueued = true;
@@ -227,6 +335,7 @@ function scheduleRender() {
 
 function jobForMode(mode) {
   if (mode === "ready") return "job-ready";
+  if (mode === "narrative") return "job-narrative";
   if (mode === "finalized") return "job-finalized";
   if (mode === "draft") return "job-draft";
   if (mode === "publish-error") return "job-publish-error";
@@ -271,7 +380,7 @@ function makeHost(mode) {
       }
       if (route === "recover") return { found: true, yaml: READY_YAML, baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
       if (route === "publish") return { ok: true };
-      if (route === "bundle") return READY_BUNDLE;
+      if (route === "bundle") return mode === "narrative" ? NARRATIVE_BUNDLE : READY_BUNDLE;
       if (route === "status") return { phase: "submitted", yaml: READY_YAML, baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
       return undefined;
     },
@@ -290,6 +399,7 @@ window.__renderPrwDraft = () => renderPanel({ __sessionId: "child-draft", jobId:
 window.__renderPrwPublishError = () => renderPanel({ __sessionId: "child-publish-error", jobId: "job-publish-error" }, makeHost("publish-error"));
 window.__renderPrwMissing = () => renderPanel({ __sessionId: "child-missing", jobId: "job-missing" }, { store: { async get() { return undefined; }, async put() {} }, requestRender: scheduleRender });
 window.__renderPrwReady = () => renderPanel({ __sessionId: "child-ready", jobId: "job-ready" }, makeHost("ready"));
+window.__renderPrwNarrative = () => renderPanel({ __sessionId: "child-narrative", jobId: "job-narrative" }, makeHost("narrative"));
 window.__renderPrwFinalizedReady = () => renderPanel({ __sessionId: "child-finalized", jobId: "job-finalized" }, makeHost("finalized"));
 window.__clearPrwMemory = () => {
   routeCalls.length = 0;
@@ -344,6 +454,11 @@ async function loadFixture(page: any) {
 async function renderReady(page: any) {
 	await loadFixture(page);
 	await page.evaluate(() => (window as any).__renderPrwReady());
+}
+
+async function renderNarrative(page: any) {
+	await loadFixture(page);
+	await page.evaluate(() => (window as any).__renderPrwNarrative());
 }
 
 async function expectRenderedReadyPanel(page: any) {
@@ -897,6 +1012,64 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		const missing = await page.evaluate(() => (window as any).__prwMissingReadyParityAffordances());
 		expect(missing, `PR walkthrough panel parity affordances missing: ${(missing as string[]).join(", ")}`).toEqual([]);
+	});
+
+	test("narrative cards render interleaved blocks and only referenced hunks", async ({ page }) => {
+		await renderNarrative(page);
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Auth flow");
+
+		const directNarrativeBlocks = await page.locator('[data-testid="prw-narrative"]').evaluate((element: HTMLElement) => Array.from(element.children).map((child) => (child as HTMLElement).dataset.testid));
+		expect(directNarrativeBlocks).toEqual([
+			"prw-narrative-text",
+			"prw-narrative-diff",
+			"prw-narrative-note",
+			"prw-narrative-suggested-comment",
+			"prw-narrative-checklist",
+		]);
+		await expect(page.locator('[data-testid="prw-narrative-diff"] [data-testid="pr-walkthrough-diff-block"]')).toHaveCount(1);
+		await expect(page.locator('[data-testid="prw-narrative-diff"]')).toContainText("validateExpiry");
+		await expect(page.locator('[data-testid="prw-narrative"]')).not.toContainText("renderMetricsPanel");
+		await expect(page.locator('[data-testid="prw-narrative-note"]')).toContainText("Persistence now depends");
+		await expect(page.locator('[data-testid="prw-narrative-suggested-comment"]')).toContainText("bounded clock skew");
+	});
+
+	test("secondary narrative hunks collapse by default, expand on demand, and persist", async ({ page }) => {
+		await renderNarrative(page);
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await page.locator('[data-testid="pr-walkthrough-card-step"][data-card-id="auth-revisit"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Auth revisit");
+
+		const secondaryBlock = page.locator('[data-testid="pr-walkthrough-diff-block"][data-hunk-placement="secondary"]').first();
+		await expect(secondaryBlock).toBeVisible();
+		await expect(secondaryBlock).toHaveAttribute("data-expanded", "false");
+		await expect(secondaryBlock).toContainText("Also shown in Card 1: Auth flow");
+		await expect(secondaryBlock.locator('.diff-overflow')).toHaveCount(0);
+
+		await secondaryBlock.locator('[data-testid="pr-walkthrough-diff-toggle"]').click();
+		await expect(secondaryBlock).toHaveAttribute("data-expanded", "true");
+		await expect(secondaryBlock.locator('.diff-overflow')).toHaveCount(1);
+
+		await page.evaluate(() => {
+			(window as any).__clearPrwMemory();
+			(window as any).__renderPrwNarrative();
+		});
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Auth revisit");
+		await expect(page.locator('[data-testid="pr-walkthrough-diff-block"][data-hunk-placement="secondary"]').first()).toHaveAttribute("data-expanded", "true");
+	});
+
+	test("narrative rail keeps more than twelve logical cards and renders coverage", async ({ page }) => {
+		await renderNarrative(page);
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="pr-walkthrough-card-step"]')).toHaveCount(14);
+
+		await page.locator('[data-testid="pr-walkthrough-card-step"][data-card-id="audit-completion"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Completion sweep");
+		await expect(page.locator('[data-testid="prw-coverage-summary"]')).toContainText("Primary reviewed");
+		await expect(page.locator('[data-testid="prw-coverage-summary"]')).toContainText("Completion sweep");
+		await expect(page.locator('[data-testid="prw-completion-sweep"]')).toContainText("scripts/release.js");
+		await expect(page.locator('[data-testid="prw-skipped-hunks"]')).toContainText("generated");
 	});
 
 	test("side-by-side diff uses the historical compact split-grid renderer", async ({ page }) => {
