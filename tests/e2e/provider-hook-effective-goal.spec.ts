@@ -27,8 +27,8 @@ const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provi
 const PACK_NAME = "provider-demo";
 const SPEC = "E2E provider-hook effective-goal spec — non-placeholder spec text so the goal route accepts it.";
 
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(fixturePackDir, packDir, { recursive: true });
 	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [

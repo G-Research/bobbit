@@ -31,9 +31,9 @@ function writeMeta(packDir: string): void {
 }
 
 // Copy the source-of-truth fixture pack (pack.yaml + providers/ + lib/) into the
-// per-gateway server-scope market-packs dir, preserving subdir structure.
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+// per-gateway Headquarters config market-packs dir, preserving subdir structure.
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(fixturePackDir, packDir, { recursive: true });
 	writeMeta(packDir);

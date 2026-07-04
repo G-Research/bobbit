@@ -108,8 +108,8 @@ function writeMeta(packDir: string): void {
 	);
 }
 
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(PACK_SRC, packDir, { recursive: true });
 	writeMeta(packDir);
