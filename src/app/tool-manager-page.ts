@@ -11,6 +11,7 @@ import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 
 // ============================================================================
 // CONSTANTS
@@ -531,13 +532,12 @@ async function createToolAssistantSession(): Promise<void> {
 	renderApp();
 	try {
 		// Bind the tool-assistant session to whichever scope the Tools page is
-		// currently editing. System scope routes to the synthetic "system"
-		// project that the server registers at startup; project scope routes
-		// to that project. Either way the POST always carries a projectId so
+		// currently editing. System scope is the user-facing Headquarters
+		// workspace; project scope routes to that project. Either way the POST always carries a projectId so
 		// the server's resolveProjectForRequest() never 400s on a missing
 		// project.
 		const scope = getConfigScope();
-		const projectId = scope === "system" ? "system" : scope;
+		const projectId = scope === "system" ? HEADQUARTERS_PROJECT_ID : scope;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ toolAssistant: true, projectId }),

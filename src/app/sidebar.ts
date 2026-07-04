@@ -20,7 +20,7 @@ import {
 	type Goal,
 	type Project,
 } from "./state.js";
-import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_HELPER_TEXT, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
@@ -472,6 +472,20 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 	renderApp();
 }
 
+function createRolePickerSession(): void {
+	state.rolePickerOpen = false;
+	const cwd = _pickerCwd || undefined;
+	const worktree = _pickerWorktree;
+	const sandboxed = _pickerSandbox || undefined;
+	const projectId = _pickerProjectId;
+	_pickerCwd = "";
+	_pickerCwdDropdownOpen = false;
+	_pickerSandbox = false;
+	_pickerProjectId = undefined;
+	_pickerProjectName = undefined;
+	createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree, sandboxed, projectId);
+}
+
 export function renderRolePickerDropdown() {
 	if (!state.rolePickerOpen) return "";
 
@@ -479,19 +493,7 @@ export function renderRolePickerDropdown() {
 		_pickerRole = _pickerRole === roleName ? "" : roleName;
 		renderApp();
 	};
-	const doCreate = () => {
-		state.rolePickerOpen = false;
-		const cwd = _pickerCwd || undefined;
-		const worktree = _pickerWorktree;
-		const sandboxed = _pickerSandbox || undefined;
-		const projectId = _pickerProjectId;
-		_pickerCwd = "";
-		_pickerCwdDropdownOpen = false;
-		_pickerSandbox = false;
-		_pickerProjectId = undefined;
-		_pickerProjectName = undefined;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree, sandboxed, projectId);
-	};
+	const doCreate = () => createRolePickerSession();
 
 	// All roles including general (the server default)
 	const allRoles = state.roles;
@@ -683,12 +685,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			renderApp();
 		} else {
 			// create button or no focus — create session
-			state.rolePickerOpen = false;
-			const cwd = _pickerCwd || undefined;
-			const worktree = _pickerWorktree;
-			_pickerCwd = "";
-			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree);
+			createRolePickerSession();
 		}
 		return;
 	}
@@ -703,12 +700,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			_pickerWorktree = !_pickerWorktree;
 			renderApp();
 		} else if (focusedItem.type === "create") {
-			state.rolePickerOpen = false;
-			const cwd = _pickerCwd || undefined;
-			const worktree = _pickerWorktree;
-			_pickerCwd = "";
-			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree);
+			createRolePickerSession();
 		}
 		return;
 	}
@@ -863,23 +855,25 @@ export function reloadStaffList(): Promise<void> {
 /**
  * Open a new staff-creation assistant session, anchored to the given project.
  *
- * Always supplies `projectId` + `cwd` so the server's POST /api/sessions can
- * resolve a real project context (see surface-staff-in-sessions design §5).
+ * Always supplies `projectId`; `cwd` is included only for normal projects so
+ * Headquarters can use the server default Headquarters directory.
  * For callers outside a project bucket use {@link startNewStaffFlow}.
  */
 export async function createStaffAssistantSession(
 	e: Event,
-	opts: { projectId: string; cwd: string },
+	opts: { projectId: string; cwd?: string },
 ): Promise<void> {
 	e.stopPropagation();
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
 	try {
+		const body: Record<string, unknown> = { assistantType: "staff", projectId: opts.projectId };
+		if (opts.cwd) body.cwd = opts.cwd;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ assistantType: "staff", projectId: opts.projectId, cwd: opts.cwd }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
@@ -907,7 +901,7 @@ export async function startNewStaffFlow(e: Event, projectIdHint?: string): Promi
 	if (projectIdHint) {
 		const proj = state.projects.find(p => p.id === projectIdHint);
 		if (proj) {
-			return createStaffAssistantSession(e, { projectId: proj.id, cwd: proj.rootPath });
+			return createStaffAssistantSession(e, { projectId: proj.id, cwd: defaultCwdForProjectSession(proj) });
 		}
 		console.warn("[sidebar] startNewStaffFlow: project hint not found:", projectIdHint);
 	}
@@ -915,12 +909,12 @@ export async function startNewStaffFlow(e: Event, projectIdHint?: string): Promi
 	if (projects.length === 0) { showProjectDialog(); return; }
 	if (projects.length === 1) {
 		const only = projects[0];
-		return createStaffAssistantSession(e, { projectId: only.id, cwd: only.rootPath });
+		return createStaffAssistantSession(e, { projectId: only.id, cwd: defaultCwdForProjectSession(only) });
 	}
 	showProjectPickerPopover(anchor, (pickedId: string) => {
 		const picked = state.projects.find(p => p.id === pickedId);
 		if (!picked) return;
-		void createStaffAssistantSession(e, { projectId: picked.id, cwd: picked.rootPath });
+		void createStaffAssistantSession(e, { projectId: picked.id, cwd: defaultCwdForProjectSession(picked) });
 	});
 }
 
@@ -1274,7 +1268,10 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 			<span class="project-reorder-slot">${renderProjectReorderHandle(project)}</span>
 			<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>
-			<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
+			<span class="flex-1 min-w-0 flex flex-col leading-tight">
+				<span class="truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
+				${isHeadquarters ? html`<span class="truncate text-muted-foreground normal-case tracking-normal" style="font-size:0.6875em;">${HEADQUARTERS_HELPER_TEXT}</span>` : nothing}
+			</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
 			<button
 				type="button"
@@ -1670,7 +1667,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0 ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
 						style="line-height:0;"
-						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
+						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, defaultCwdForProjectSession(project), undefined, undefined, project.id); }}
 						title="New session in ${project.name}"
 						?disabled=${state.creatingSession}
 					>
@@ -1684,7 +1681,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 						style="line-height:0;"
-						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
+						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: defaultCwdForProjectSession(project) }); }}
 						title="New session with role"
 					><span class="sidebar-scale-icon">${icon(ChevronDown, "xs")}</span></button>
 					${renderRolePickerDropdown()}

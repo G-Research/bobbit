@@ -1,7 +1,7 @@
 name: propose_tool
 description: "Submit tool proposal with tool name, action, content"
 summary: "Propose a custom tool"
-params: [tool, action, content]
+params: [tool, action, content, projectId?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -10,7 +10,9 @@ docs: >-
   Required parameters: tool (the tool's name — kebab-case identifier; used by
   agents to invoke it and by role tool-allowlists), action (one of "create",
   "update", "delete"), content (the tool's full YAML definition — same shape
-  as defaults/tools/<group>/*.yaml; ignored when action="delete").
+  as defaults/tools/<group>/*.yaml; ignored when action="delete"). Optional:
+  projectId (registered project id; defaults to this session's project and is
+  the authoritative scope).
 
   YAML shape for content: `name`, `description`, `summary`, `group`, `provider`
   (one of: bobbit-extension with extension.ts, MCP server, shell command, etc.),
