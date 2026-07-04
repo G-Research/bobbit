@@ -156,7 +156,7 @@ async function listSessionIds(gw: StartedGateway): Promise<string[]> {
 }
 
 async function createNonGitSession(gw: StartedGateway, label: string): Promise<string> {
-	const cwd = join(tmpdir(), `bobbit-recovery-${gw.port}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+	const cwd = join(gw.defaultProjectRoot, ".e2e-workspaces", `recovery-${gw.port}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 	mkdirSync(cwd, { recursive: true });
 
 	// Resolve default projectId from the live registry (the in-process server

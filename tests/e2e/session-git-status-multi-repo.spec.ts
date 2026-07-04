@@ -20,7 +20,7 @@ import { test, expect } from "./in-process-harness.js";
 // Pool prebuild must run so a multi-repo session can claim per-repo worktrees.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { apiFetch, deleteSession, defaultProjectId, defaultProjectRootPath } from "./e2e-setup.js";
 import { waitForPool, pollSessionUntil } from "./test-utils/pool-polling.mjs";
 import fs from "node:fs";
 import os from "node:os";
@@ -304,9 +304,9 @@ test.describe.serial("session git-status multi-repo envelope", () => {
 	});
 
 	test("single-repo session returns flat shape + repos:{'.':result}", async () => {
-		// A session with no multi-repo worktrees (arbitrary cwd) must keep the
-		// back-compat flat envelope.
-		const cwd = path.join(os.tmpdir(), `bobbit-sess-single-${process.pid}-${Date.now()}`);
+		// A session with no multi-repo worktrees must keep the back-compat flat envelope.
+		const defaultRoot = await defaultProjectRootPath();
+		const cwd = path.join(defaultRoot, ".e2e-workspaces", `sess-single-${process.pid}-${Date.now()}`);
 		fs.mkdirSync(cwd, { recursive: true });
 		const pid = await defaultProjectId();
 		const resp = await apiFetch("/api/sessions", {
