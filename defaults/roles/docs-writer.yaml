@@ -12,6 +12,7 @@ toolPolicies:
   goal_archive_child: never
   goal_decide_mutation: never
   goal_set_policy: never
+thinkingLevel: low
 createdAt: 1773948781652
 updatedAt: 1774972319697
 promptTemplate: |-

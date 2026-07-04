@@ -251,8 +251,10 @@ in the wiring between the shared module and the UI / server boundary.
 ## Related docs
 
 - [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides)
-  — how roles can pin model + level overrides, and how the cascade resolves
-  them.
+  — how roles can pin model + level overrides, how the cascade resolves
+  them, and the built-in role tier defaults (`high` for team-lead/architect
+  and the high-stakes reviewer roles, `low` for docs-writer — the full table
+  lives there).
 - [Spawn-time model pinning](internals.md#spawn-time-model-pinning) — how
   `resolveInitialThinkingLevel` injects the level into the agent CLI args at
   spawn so there's no boot-time race.

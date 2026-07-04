@@ -1504,6 +1504,19 @@ Two optional fields on the `Role` interface in `role-store.ts`:
 
 The generic `resolve<T>()` machinery in `config-cascade.ts` handles these fields automatically - no changes were needed in the cascade itself. Project-level role YAML > server-level > builtin, by whole-record replacement (not field-level merge). This is the same precedence as `toolPolicies` and is the documented contract: a project role with `model` set replaces the entire server role record, including its `thinkingLevel` if any.
 
+### Built-in tier defaults
+
+The built-in roles (`defaults/roles/*.yaml`, the lowest cascade layer) ship with `thinkingLevel` tiers so reasoning budget follows the stakes of the role: deep reasoning where a missed finding is expensive, less where the work is mechanical. `model` is unset on every built-in role (inherit `default.sessionModel`).
+
+| Tier | Roles | Why |
+|---|---|---|
+| `high` | team-lead, architect, security-reviewer, spec-auditor, bug-hunter | Orchestration and high-stakes review - missed vulnerabilities, spec gaps, or cross-system bugs are the costliest failures. |
+| `medium` (explicit) | coder, reviewer, code-reviewer, test-engineer, qa-tester | Matches the implicit global default, but pinned so a future default change can't silently shift these roles. |
+| `low` | docs-writer | Prose/comment-only role - its own prompt forbids touching runtime logic. |
+| *(unset)* | assistant, general, ux-designer | Advisory/creative/catch-all roles - inherit the global default (`default.sessionThinkingLevel`, else `medium`). |
+
+Any project- or server-level role override replaces the whole record (see Cascade above), so overriding a built-in role locally also takes over its tier. The assignments are pinned by `tests/builtin-role-thinking-tiers.test.ts` - edit that test alongside any deliberate tier change.
+
 ### Precedence at session start
 
 When a session starts, the model and thinking level are resolved in this order (highest wins):

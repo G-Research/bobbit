@@ -257,9 +257,10 @@
 	gap: 2px;
 }
 /* The thinking Select is rendered compact-by-construction for list rows
- * (renderModelRow opts: thinkingWidth=clamp(220px, 36%, 360px),
- * fitContent=false), giving it enough room for the inline default label while
- * still avoiding the global Settings min-width:180px overflow behaviour. */
+ * (renderModelRow opts: thinkingWidth=220px, fitContent=false — the width
+ * must stay definite, no percentages; see renderRoleRowModelControl),
+ * giving it enough room for the inline default label while still avoiding
+ * the global Settings min-width:180px overflow behaviour. */
 .role-row-model-control [data-testid="model-row"] [role="combobox"] {
 	min-width: 0;
 	max-width: 360px;

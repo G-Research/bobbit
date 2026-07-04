@@ -16,6 +16,7 @@ toolPolicies:
   goal_decide_mutation: never
   goal_set_policy: never
   verification_result: allow
+thinkingLevel: high
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |
