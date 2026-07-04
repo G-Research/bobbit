@@ -2431,9 +2431,10 @@ export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
 	}
 }
 
-export async function fetchRoles(): Promise<RoleData[]> {
+export async function fetchRoles(projectId?: string): Promise<RoleData[]> {
 	try {
-		const res = await gatewayFetch("/api/roles");
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/roles${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch roles: ${res.status}`);
 		const data = await res.json();
 		const roles: RoleData[] = data.roles || data || [];
@@ -2730,9 +2731,10 @@ export async function updateTool(name: string, updates: { description?: string; 
 // TOOL GROUP POLICY API
 // ============================================================================
 
-export async function fetchGroupPolicies(): Promise<Record<string, string>> {
+export async function fetchGroupPolicies(projectId?: string): Promise<Record<string, string>> {
 	try {
-		const res = await gatewayFetch("/api/tool-group-policies");
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tool-group-policies${qs}`);
 		if (!res.ok) return {};
 		const raw = await res.json();
 		// The cascade endpoint returns { group: { policy, origin } } — normalize to flat { group: policy }
@@ -2750,10 +2752,10 @@ export async function fetchGroupPolicies(): Promise<Record<string, string>> {
 	}
 }
 
-export async function updateGroupPolicy(group: string, policy: string | null): Promise<void> {
+export async function updateGroupPolicy(group: string, policy: string | null, projectId?: string): Promise<void> {
 	await gatewayFetch(`/api/tool-group-policies/${encodeURIComponent(group)}`, {
 		method: "PUT",
-		body: JSON.stringify({ policy }),
+		body: JSON.stringify(projectId ? { policy, projectId } : { policy }),
 	});
 }
 

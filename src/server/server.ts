@@ -8137,7 +8137,17 @@ async function handleApiRoute(
 			json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
 			return;
 		}
-		groupPolicyStore.setGroupPolicy(group, body.policy || null);
+		// Scope the mutation to a project-level store when projectId is given.
+		// Headquarters/system alias to server scope (mirrors resolveRoleMutationTarget).
+		const rawProjectId = body.projectId ?? url.searchParams.get("projectId") ?? undefined;
+		const effectiveProjectId = normalizeConfigProjectId(roleMutationProjectId(rawProjectId));
+		let targetStore: ToolGroupPolicyStore = groupPolicyStore;
+		if (effectiveProjectId) {
+			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.toolGroupPolicyStore;
+		}
+		targetStore.setGroupPolicy(group, body.policy || null);
 		json({ ok: true });
 		return;
 	}

@@ -1990,7 +1990,7 @@ async function toggleRoleDropdown(): Promise<void> {
 		renderApp();
 		return;
 	}
-	if (state.roles.length === 0) await fetchRoles();
+	if (state.roles.length === 0) await fetchRoles(currentGoal?.projectId ?? undefined);
 	roleDropdownOpen = true;
 	renderApp();
 }

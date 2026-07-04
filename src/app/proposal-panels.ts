@@ -410,7 +410,7 @@ async function ensureStaffProposalRolesLoaded(): Promise<void> {
 	if (_staffProposalRolesLoaded) return;
 	_staffProposalRolesLoaded = true;
 	try {
-		_staffProposalRoles = await fetchRoles();
+		_staffProposalRoles = await fetchRoles(staffPreviewProjectId());
 		renderApp();
 	} catch {
 		/* roles are optional; leave list empty */
@@ -1976,7 +1976,7 @@ let _toolsLoaded = false;
 function ensureToolsLoaded(): void {
 	if (_toolsLoaded) return;
 	_toolsLoaded = true;
-	fetchTools().then((tools) => { _availableTools = tools; renderApp(); });
+	fetchTools(state.previewProjectId || undefined).then((tools) => { _availableTools = tools; renderApp(); });
 }
 
 function rolePreviewPanel() {
@@ -3221,7 +3221,7 @@ function ensureProposalRolesLoaded(): void {
 function ensureProposalGroupPoliciesLoaded(): void {
 	if (_proposalGroupPoliciesCache !== null || _proposalGroupPoliciesLoading) return;
 	_proposalGroupPoliciesLoading = true;
-	fetchGroupPolicies().then((gp) => {
+	fetchGroupPolicies(state.previewProjectId || undefined).then((gp) => {
 		_proposalGroupPoliciesCache = gp;
 		_proposalGroupPoliciesLoading = false;
 		renderApp();

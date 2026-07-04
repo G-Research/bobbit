@@ -411,7 +411,8 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(), fetchGroupPolicies(), fetchMcpServers()]);
+	const scopedProjectId = getConfigProjectId();
+	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(scopedProjectId), fetchGroupPolicies(scopedProjectId), fetchMcpServers({ projectId: scopedProjectId })]);
 	tools = t;
 	roles = r;
 	groupPolicies = gp;
@@ -676,8 +677,9 @@ function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
 }
 
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
-	await updateGroupPolicy(key, value || null);
-	groupPolicies = await fetchGroupPolicies();
+	const scopedProjectId = getConfigProjectId();
+	await updateGroupPolicy(key, value || null, scopedProjectId);
+	groupPolicies = await fetchGroupPolicies(scopedProjectId);
 	renderApp();
 }
 
@@ -1094,8 +1096,9 @@ function renderListView(): TemplateResult {
 								@change=${async (e: Event) => {
 									e.stopPropagation();
 									const val = (e.target as HTMLSelectElement).value;
-									await updateGroupPolicy(groupName, val || null);
-									groupPolicies = await fetchGroupPolicies();
+									const scopedProjectId = getConfigProjectId();
+									await updateGroupPolicy(groupName, val || null, scopedProjectId);
+									groupPolicies = await fetchGroupPolicies(scopedProjectId);
 									renderApp();
 								}}>
 								<option value="" ?selected=${!currentGroupPolicy}>Allow (default)</option>
@@ -1177,7 +1180,7 @@ function renderAccessTab(): TemplateResult {
 								const updated = { ...(role.toolPolicies || {}) };
 								if (val) { updated[toolName] = val; } else { delete updated[toolName]; }
 								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-								roles = await fetchRoles();
+								roles = await fetchRoles(getConfigProjectId());
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,

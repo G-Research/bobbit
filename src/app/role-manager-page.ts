@@ -118,7 +118,8 @@ export async function loadRolePageData(): Promise<void> {
 	saving = false;
 	deleting = false;
 	renderApp();
-	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(), fetchGroupPolicies()]);
+	const scopedProjectId = getConfigProjectId();
+	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(scopedProjectId), fetchGroupPolicies(scopedProjectId)]);
 	roles = r;
 	availableTools = t;
 	groupPolicies = gp;

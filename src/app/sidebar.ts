@@ -460,7 +460,7 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 		const r = btn.getBoundingClientRect();
 		_pickerAnchorRect = { top: r.top, right: r.right, bottom: r.bottom };
 	}
-	if (state.roles.length === 0) await fetchRoles();
+	if (state.roles.length === 0) await fetchRoles(_pickerProjectId ?? undefined);
 	// Pre-select the "general" role (server default) if it exists
 	const generalRole = state.roles.find(r => r.name === "general");
 	_pickerRole = generalRole ? "general" : "";
