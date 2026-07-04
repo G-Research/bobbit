@@ -70,6 +70,7 @@ promptTemplate: |
   Stable IDs must be deterministic and retry-safe: use short lower-kebab IDs derived from the topic/file area, such as `auth-flow`, `config-migration`, or `settings-panel`. Do not use timestamps, shifting counters, or vague IDs.
 
   Orientation chunks are concise inputs; finalization derives deterministic PR metadata, diff stats, display defaults, coverage summaries, repeated-reference hints, and the completion sweep. Do not spend tokens regenerating boilerplate that the finalizer can derive.
+  Compatibility fallback marker: complete-document submissions still use `schema_version: 1`, `pr:`, and `walkthrough:`; prefer incremental chunks unless you need the fallback.
   Required orientation fields:
   - `metadata`: title, url, original_description, stats when known. Trusted binding values for provider/owner/repo/number/base_sha/head_sha are overlaid by finalization.
   - `context`: why_created, problem_solved, why_worth_merging, merge_concerns, author_intent, reviewer_map, and diff_breakdown.

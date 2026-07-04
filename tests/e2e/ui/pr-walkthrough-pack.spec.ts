@@ -168,7 +168,7 @@ function submitYaml(): string {
 					alternatives_considered: [{ option: "Fixed delay", pros: ["simple"], cons: ["slow recovery"] }],
 					tradeoffs: ["More latency on persistent failure."],
 					suggested_reviewer_concerns: ["Confirm the cap is sensible."],
-					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, why_relevant: "introduces the retry wrapper" }],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, placement: "secondary", primary_card_id: "significant-sync-worker", why_relevant: "introduces the retry wrapper" }],
 				},
 			],
 			review_chunks: [
@@ -179,7 +179,7 @@ function submitYaml(): string {
 					reviewer_goal: "Verify the retry wrapper is correct.",
 					explanation: "Wrap the fetch in a retry loop with capped exponential delay.",
 					files: [SYNC_FILE],
-					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line_range: "3", why_relevant: "the retry call" }],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line_range: "3", placement: "primary", why_relevant: "the retry call" }],
 					suggested_concerns: [
 						{
 							severity: "non_blocking",

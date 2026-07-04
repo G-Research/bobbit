@@ -19,10 +19,11 @@
 // fixture could only replay PRs known at publish time).
 //
 // ── THE GIT WORKING DIR IS SERVER-DERIVED, NEVER CALLER-SUPPLIED (security) ──
-// The repo root is ALWAYS the worker's own `process.cwd()` — i.e. the bound
-// session's working dir, server-resolved from the persisted session. This module
-// does NOT accept a caller-controlled `repoDir` (from query, body, or store) as the
-// git cwd: a session scoped to this pack must not be able to point the route at
+// The repo root is ALWAYS the server-derived route working dir (`ctx.workingDir`,
+// falling back to the worker's own `process.cwd()`) — i.e. the bound session's
+// working dir, server-resolved from the persisted session. This module does NOT
+// accept a caller-controlled `repoDir` (from query, body, or store) as the git cwd:
+// a session scoped to this pack must not be able to point the route at
 // ANOTHER local repo the gateway can reach (that would disclose diffs/metadata from
 // other projects and bypass session-working-dir confinement). The caller chooses
 // WHICH base/head to diff; the SERVER chooses WHICH repo (the session worktree).
@@ -124,6 +125,10 @@ function strOf(value) {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function routeCwd(ctx) {
+	return strOf(ctx && ctx.workingDir) || workerCwd();
+}
+
 export const routes = {
 	// LIVE changeset recompute + persisted-card read. Two modes:
 	//   • baseSha + headSha present → recompute the REAL changeset LIVE via `git`
@@ -133,9 +138,10 @@ export const routes = {
 	// NEVER a raw fetch — the panel reaches this only via host.callRoute.
 	//
 	// SECURITY (the git working dir is SERVER-DERIVED, never caller-supplied): the
-	// repo root is ALWAYS the worker's own cwd() — i.e. the bound session's working
-	// dir, server-resolved from the persisted session (server.ts routeWorkingDir).
-	// We do NOT accept a caller-controlled `repoDir` from query/body/store as the git
+	// repo root is ALWAYS `ctx.workingDir` (falling back to the worker cwd) — i.e.
+	// the bound session's working dir, server-resolved from the persisted session
+	// (server.ts routeWorkingDir). We do NOT accept a caller-controlled `repoDir`
+	// from query/body/store as the git
 	// cwd: an authenticated session scoped to this pack must not be able to point the
 	// route at ANOTHER local repo the gateway can reach (that would disclose diffs /
 	// metadata from other projects and bypass session-working-dir confinement). Any
@@ -173,10 +179,10 @@ export const routes = {
 			return { found: false, jobId };
 		}
 
-		// ALWAYS the session worktree (the worker's server-resolved cwd) — never a
-		// caller path. A base/head that does not exist in the session worktree fails
-		// `git rev-parse --verify` below (no other-repo data is ever returned).
-		const live = await resolveLocalChangeset(workerCwd(), baseSha, headSha);
+		// ALWAYS the server-derived route/session worktree — never a caller path. A
+		// base/head that does not exist there fails `git rev-parse --verify` below
+		// (no other-repo data is ever returned).
+		const live = await resolveLocalChangeset(routeCwd(ctx), baseSha, headSha);
 
 		// Prefer the synthesized production cards persisted at submit time (keyed by
 		// changeset id); else the deterministic fallback cards computed in-worker above.
@@ -256,15 +262,16 @@ export const routes = {
 		// via gh/git. An explicit target in the body always wins (deep-links / tests);
 		// only resolve-from-branch when absent.
 		let targetInput = body;
+		const cwd = routeCwd(ctx);
 		if (!hasExplicitTarget(body)) {
-			const resolved = await resolveCurrentBranchTarget(workerCwd());
+			const resolved = await resolveCurrentBranchTarget(cwd);
 			if (!resolved.ok) return resolved;
 			targetInput = resolved.target;
 		}
 
 		let target;
 		try {
-			target = await canonicalizeTarget(targetInput, workerCwd());
+			target = await canonicalizeTarget(targetInput, cwd);
 		} catch (e) {
 			return { ok: false, retryable: false, error: messageOf(e), code: "INVALID_TARGET" };
 		}
@@ -1003,7 +1010,7 @@ async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 	let headSha = strOf(binding.headSha) || strOf(body.headSha) || strOf(validation.document?.pr?.head_sha);
 	let live;
 	if (baseSha && headSha) {
-		try { live = await resolveLocalChangeset(workerCwd(), baseSha, headSha); }
+		try { live = await resolveLocalChangeset(routeCwd(ctx), baseSha, headSha); }
 		catch { live = undefined; }
 	}
 	const parsedDiff = live ? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings } : {};
