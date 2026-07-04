@@ -29,6 +29,27 @@
  * computes (anthropic.js:352) — see docs/design/cache-retention-long.md for
  * caveats on what Bobbit currently persists from that field.
  *
+ * Precedence (highest to lowest):
+ *   1. `BOBBIT_CACHE_RETENTION` — Bobbit's own knob. `short`/`none` map to an
+ *      explicit `PI_CACHE_RETENTION=short` (pi-ai's env var only recognizes
+ *      `"long"`, so anything else yields pi's short default — there is no
+ *      env-level "none"; that tier only exists as an explicit per-request
+ *      param, e.g. model-completion.ts). `long` forces long. Unrecognized
+ *      values are ignored and fall through.
+ *   2. An operator-set `PI_CACHE_RETENTION` already present in the gateway's
+ *      environment — propagated through verbatim, never clobbered by the
+ *      Bobbit default. Propagation is EXPLICIT (returned in the map) rather
+ *      than relying on child-process env inheritance, because the docker-exec
+ *      sandbox path does not inherit the gateway's process.env — it only
+ *      forwards allowlisted vars from RpcBridgeOptions.env (rpc-bridge.ts
+ *      spawnDockerExec).
+ *   3. Bobbit's default: `long`.
+ *
+ * Every branch returns an explicit `PI_CACHE_RETENTION` so both spawn paths
+ * (direct node spawn with env inheritance, and docker exec without) behave
+ * identically. Caller-supplied per-session env (`plan.env`) is spread AFTER
+ * this map in session-setup.ts and still overrides all of the above.
+ *
  * Scope: this only sets an env var on the spawned pi-coding-agent subprocess
  * (via RpcBridgeOptions.env, consumed in rpc-bridge.ts); it never touches
  * pi's installed files (contrast pi-ai-bedrock-headers-patch.ts, which is a
@@ -40,6 +61,12 @@
  */
 export function resolveCacheRetentionEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
 	const override = env.BOBBIT_CACHE_RETENTION?.trim().toLowerCase();
-	if (override === "short" || override === "none") return {};
+	// 1. Bobbit's own knob wins over everything (incl. inherited PI_CACHE_RETENTION).
+	if (override === "short" || override === "none") return { PI_CACHE_RETENTION: "short" };
+	if (override === "long") return { PI_CACHE_RETENTION: "long" };
+	// 2. An operator-set PI_CACHE_RETENTION in the gateway env flows through verbatim.
+	const inherited = env.PI_CACHE_RETENTION?.trim();
+	if (inherited) return { PI_CACHE_RETENTION: inherited };
+	// 3. Bobbit's default.
 	return { PI_CACHE_RETENTION: "long" };
 }

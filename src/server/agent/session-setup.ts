@@ -566,10 +566,12 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
 		// unit test in tests/session-setup-env.test.ts.
 		//
-		// resolveCacheRetentionEnv() is spread FIRST (lowest precedence): it only
-		// sets a default (PI_CACHE_RETENTION=long, see cache-retention.ts), so a
-		// caller-supplied toolEnv can still override it per-session (e.g. to force
-		// pi's default short TTL for an A/B run) without touching identity keys.
+		// resolveCacheRetentionEnv() is spread FIRST (lowest precedence within
+		// this map): it resolves the prompt-cache retention env
+		// (BOBBIT_CACHE_RETENTION > operator-set PI_CACHE_RETENTION in the
+		// gateway env > default "long"; see cache-retention.ts), and a
+		// caller-supplied toolEnv can still override the resolved value
+		// per-session (e.g. for an A/B run) without touching identity keys.
 		env: {
 			...resolveCacheRetentionEnv(),
 			...plan.env,

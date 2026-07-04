@@ -30,33 +30,79 @@ import path from "node:path";
 import { resolveCacheRetentionEnv } from "../src/server/agent/cache-retention.ts";
 
 describe("cache-retention env resolution", () => {
-	it("defaults to PI_CACHE_RETENTION=long when no override is set", () => {
+	// Precedence rule (pinned):
+	//   BOBBIT_CACHE_RETENTION > inherited PI_CACHE_RETENTION > Bobbit default "long".
+	// Every branch returns an EXPLICIT PI_CACHE_RETENTION value so the
+	// docker-exec sandbox path (which does not inherit the gateway's
+	// process.env) behaves identically to the direct-spawn path (which does,
+	// with options.env spread after process.env in rpc-bridge.ts).
+
+	it("defaults to PI_CACHE_RETENTION=long when nothing is set", () => {
 		const env = resolveCacheRetentionEnv({});
 		assert.deepEqual(env, { PI_CACHE_RETENTION: "long" });
 	});
 
-	it("opts out on BOBBIT_CACHE_RETENTION=short", () => {
+	it("opts out to explicit short on BOBBIT_CACHE_RETENTION=short", () => {
 		const env = resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "short" });
-		assert.deepEqual(env, {});
+		assert.deepEqual(env, { PI_CACHE_RETENTION: "short" });
 	});
 
-	it("opts out on BOBBIT_CACHE_RETENTION=none", () => {
+	it("opts out to explicit short on BOBBIT_CACHE_RETENTION=none (pi-ai has no env-level 'none' tier)", () => {
 		const env = resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "none" });
-		assert.deepEqual(env, {});
+		assert.deepEqual(env, { PI_CACHE_RETENTION: "short" });
 	});
 
 	it("opts out case-insensitively and trims whitespace", () => {
-		assert.deepEqual(resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: " SHORT " }), {});
-		assert.deepEqual(resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "None" }), {});
+		assert.deepEqual(resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: " SHORT " }), { PI_CACHE_RETENTION: "short" });
+		assert.deepEqual(resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "None" }), { PI_CACHE_RETENTION: "short" });
 	});
 
-	it("ignores unrecognized override values and still defaults to long", () => {
-		const env = resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "bogus" });
-		assert.deepEqual(env, { PI_CACHE_RETENTION: "long" });
+	it("propagates an operator-set PI_CACHE_RETENTION from the gateway env verbatim (never clobbered by the default)", () => {
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ PI_CACHE_RETENTION: "short" }),
+			{ PI_CACHE_RETENTION: "short" },
+			"a gateway launched with PI_CACHE_RETENTION=short must spawn agents with short, not the Bobbit default",
+		);
+		// Verbatim: unknown inherited values flow through untouched (pi-ai treats
+		// anything !== "long" as short; normalizing is not Bobbit's job).
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ PI_CACHE_RETENTION: "custom-future-tier" }),
+			{ PI_CACHE_RETENTION: "custom-future-tier" },
+		);
+	});
+
+	it("BOBBIT_CACHE_RETENTION wins over an inherited PI_CACHE_RETENTION when both are set", () => {
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "short", PI_CACHE_RETENTION: "long" }),
+			{ PI_CACHE_RETENTION: "short" },
+			"BOBBIT_CACHE_RETENTION=short must beat inherited PI_CACHE_RETENTION=long",
+		);
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "long", PI_CACHE_RETENTION: "short" }),
+			{ PI_CACHE_RETENTION: "long" },
+			"BOBBIT_CACHE_RETENTION=long must beat inherited PI_CACHE_RETENTION=short",
+		);
+	});
+
+	it("ignores unrecognized BOBBIT_CACHE_RETENTION values and falls through to inherited, then default", () => {
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "bogus" }),
+			{ PI_CACHE_RETENTION: "long" },
+		);
+		assert.deepEqual(
+			resolveCacheRetentionEnv({ BOBBIT_CACHE_RETENTION: "bogus", PI_CACHE_RETENTION: "short" }),
+			{ PI_CACHE_RETENTION: "short" },
+			"an unrecognized Bobbit knob must not mask an operator-set PI_CACHE_RETENTION",
+		);
+	});
+
+	it("treats empty/whitespace-only inherited PI_CACHE_RETENTION as unset", () => {
+		assert.deepEqual(resolveCacheRetentionEnv({ PI_CACHE_RETENTION: "" }), { PI_CACHE_RETENTION: "long" });
+		assert.deepEqual(resolveCacheRetentionEnv({ PI_CACHE_RETENTION: "   " }), { PI_CACHE_RETENTION: "long" });
 	});
 
 	it("does not mutate the passed-in env object", () => {
-		const input = { BOBBIT_CACHE_RETENTION: "short" as string };
+		const input = { BOBBIT_CACHE_RETENTION: "short" as string, PI_CACHE_RETENTION: "long" as string };
 		const before = { ...input };
 		resolveCacheRetentionEnv(input);
 		assert.deepEqual(input, before);

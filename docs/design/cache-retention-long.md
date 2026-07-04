@@ -81,10 +81,28 @@ through untouched from env var to the Anthropic request.
 Config-only, no monkeypatch (this is squarely case 1 from the audit's "seam
 preference order" — a native pi setting exists):
 
-- `src/server/agent/cache-retention.ts` — `resolveCacheRetentionEnv(env)`:
-  defaults to `{ PI_CACHE_RETENTION: "long" }`; returns `{}` (no override,
-  i.e. pi's own "short" default applies) when `BOBBIT_CACHE_RETENTION` is set
-  to `"short"` or `"none"` (case-insensitive, trimmed).
+- `src/server/agent/cache-retention.ts` — `resolveCacheRetentionEnv(env)`
+  resolves the `PI_CACHE_RETENTION` value for the spawned process with this
+  precedence (highest first):
+  1. `BOBBIT_CACHE_RETENTION` (Bobbit's knob, case-insensitive, trimmed):
+     `short`/`none` → explicit `PI_CACHE_RETENTION=short` (pi-ai's env var
+     only recognizes `"long"`, so any other value yields pi's short default;
+     there is no env-level "none" tier — that only exists as an explicit
+     per-request param, e.g. model-completion.ts). `long` → forces `long`.
+     Unrecognized values are ignored and fall through.
+  2. An operator-set `PI_CACHE_RETENTION` already present in the gateway's
+     environment — propagated verbatim, never clobbered by the Bobbit
+     default. (A gateway launched with `PI_CACHE_RETENTION=short` spawns
+     agents with `short`.)
+  3. Bobbit's default: `long`.
+
+  Every branch returns an **explicit** value (never `{}`), for two reasons:
+  the direct-spawn path in `rpc-bridge.ts` merges `process.env` first and
+  `options.env` second, so an unconditional entry here would otherwise
+  clobber the operator's inherited value; and the docker-exec sandbox path
+  does *not* inherit the gateway's `process.env` at all — it only forwards
+  allowlisted vars from `RpcBridgeOptions.env`, so inherited-value
+  propagation must be explicit for both paths to behave identically.
 - `src/server/agent/session-setup.ts` (`_resolveBridgeOptions`) spreads
   `resolveCacheRetentionEnv()` as the **lowest-precedence** entry in the
   bridge env, before caller `plan.env` and the gateway identity keys — so a
@@ -95,7 +113,9 @@ preference order" — a native pi setting exists):
   `BOBBIT_GOAL_ID` forwarding, so sandboxed sessions get the same default as
   host sessions.
 
-Default is **ON** (opt-out via `BOBBIT_CACHE_RETENTION=short`). Justification:
+Default is **ON** (opt-out via `BOBBIT_CACHE_RETENTION=short`, or by
+launching the gateway with `PI_CACHE_RETENTION=short` — the operator-set
+value flows through per the precedence rule above). Justification:
 the mechanism is a pi-native, officially-documented-in-source env var (not a
 patch), the blast radius is a pricing tradeoff rather than a correctness
 change, and it is already scoped so it can never silently override an
@@ -158,8 +178,10 @@ filling it — out of scope for this PR.
 - `rg cacheRetention src/` (outside `node_modules`) — only hit is
   `model-completion.ts:177`'s `cacheRetention: "none"`, confirmed unaffected.
 - `rg cacheWrite1h src/ tests/` — no hits, confirming the A/B gap noted above.
-- Added `tests/cache-retention-env.test.ts`: config-plumbing tests for
-  `resolveCacheRetentionEnv`, source-anchored wiring checks for
+- Added `tests/cache-retention-env.test.ts`: config-plumbing tests pinning
+  the full precedence rule (BOBBIT_CACHE_RETENTION > inherited
+  PI_CACHE_RETENTION > default "long", all three cases plus both-set
+  conflicts), source-anchored wiring checks for
   `session-setup.ts` / `rpc-bridge.ts` / `model-completion.ts`, and a
   patch-application-style guard that re-reads the installed pi-ai source and
   fails loudly if a future pi-ai bump changes the `PI_CACHE_RETENTION`
