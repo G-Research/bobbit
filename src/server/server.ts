@@ -8166,6 +8166,51 @@ async function handleApiRoute(
 		};
 	}
 
+	// POST /api/auth/operator-elevate — upgrade the caller's bobbit_session cookie to an
+	// operator-capable one. This is the ONLY operator-elevation path in --auth mode.
+	//
+	// Why it exists: operator-capable cookies are otherwise minted solely by the
+	// credential-free localhost /api/health bootstrap. In --auth mode that branch never
+	// runs and bearer/query-token traffic deliberately receives operator:false cookies,
+	// so a human browser on an authed deployment had NO path to operator confirmations
+	// (inherited from the original 58071877/01489efb design, whose tests only exercised
+	// the happy path with forceAuth:false).
+	//
+	// Security invariants preserved (mirror isHumanOperatorRequest and the pinned
+	// negative tests in tests/e2e/claude-code-status-api.spec.ts):
+	// - Session-bound traffic (X-Bobbit-Session-*/X-Bobbit-Spawning-Session) can never
+	//   elevate — hard 403 regardless of credentials.
+	// - Sandbox-scoped tokens can never elevate — the sandbox route guard default-denies
+	//   this path before dispatch, and we re-check here for defense in depth.
+	// - Generic bearer/API traffic still receives operator:false cookies everywhere else;
+	//   elevation only happens on this explicit, deliberate POST which additionally
+	//   requires the ADMIN token itself in --auth mode (an operator:false cookie alone —
+	//   e.g. one replayed from a preview iframe context — is NOT sufficient).
+	// The operator:true cookie replaces a non-operator cookie via issueIfMissing's
+	// re-issue semantics (pinned by tests/preview-cookie.test.ts).
+	if (url.pathname === "/api/auth/operator-elevate" && req.method === "POST") {
+		if (sandboxScope) {
+			json({ error: "Sandbox-scoped tokens cannot elevate to operator" }, 403);
+			return;
+		}
+		if (hasSessionBoundHeaders()) {
+			json({ error: "Session-bound callers cannot elevate to operator" }, 403);
+			return;
+		}
+		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+		if (!isLocalhostMode) {
+			const authHeader = firstHeader("authorization");
+			const presentedToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : url.searchParams.get("token");
+			if (!presentedToken || !validateToken(presentedToken, config.authToken)) {
+				json({ error: "Operator elevation requires the admin token" }, 403);
+				return;
+			}
+		}
+		issueCookieIfMissing(req, res, cookieStore!, { localhost: isLocalhostMode, operator: true });
+		json({ ok: true, operator: true });
+		return;
+	}
+
 	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
 	// for host-local Claude Code preferences that affect process execution or permission bypass.
 	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {

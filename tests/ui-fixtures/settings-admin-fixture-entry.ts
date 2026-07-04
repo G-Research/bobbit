@@ -32,6 +32,25 @@ const DEFAULT_MODELS = [
 	{ id: "gpt-4o", provider: "openai", reasoning: false },
 ];
 
+const DEFAULT_CLAUDE_CODE_STATUS = {
+	available: true,
+	authenticated: false,
+	ready: false,
+	checking: false,
+	commandPath: "claude",
+	version: "1.2.3",
+	modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
+	permissionMode: "default",
+	reason: "auth_required",
+	message: "Claude Code is installed but not authenticated.",
+};
+
+let claudeCodeStatus = { ...DEFAULT_CLAUDE_CODE_STATUS };
+// When set to a non-2xx status (e.g. 403), the confirmation endpoint refuses to
+// mint — lets specs pin that a refused confirmation surfaces a visible error
+// instead of a silent success-shaped closure (QA-LOG 2026-07-04 Finding 1).
+let claudeCodeConfirmationStatus = 200;
+
 function defaultRoles(): RoleData[] {
 	return [
 		{
@@ -236,6 +255,16 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const body = parseBody(init);
 	fetchLog.push({ url, method, body });
 
+	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
+		if (claudeCodeConfirmationStatus !== 200) {
+			return response({ error: "Operator confirmation refused (fixture)", confirmationRequired: true }, claudeCodeConfirmationStatus);
+		}
+		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });
+	}
+	if (pathname === "/api/auth/operator-elevate" && method === "POST") {
+		return response({ ok: true, operator: true });
+	}
+
 	if (pathname === "/api/preferences") {
 		if (method === "GET") {
 			updatePlayFinishDataset();
@@ -249,6 +278,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 
 	if (pathname === "/api/aigw/status") return response({ configured: false, url: "", models: [] });
+	if (pathname === "/api/claude-code/status") return response(claudeCodeStatus);
+	if (pathname === "/api/claude-code/status/refresh" && method === "POST") {
+		claudeCodeStatus = { ...claudeCodeStatus, checking: false };
+		return response(claudeCodeStatus);
+	}
 	if (pathname === "/api/models") return response(DEFAULT_MODELS);
 	if (pathname === "/api/image-models") return response(DEFAULT_IMAGE_MODELS);
 	if (pathname === "/api/models/test") return response({ ok: true, latencyMs: 1 });
@@ -346,6 +380,8 @@ updatePlayFinishDataset();
 	workflows?: Workflow[];
 	structuredProjects?: Record<string, StructuredProject>;
 	oauthStatus?: OAuthStatus;
+	claudeCodeStatus?: typeof claudeCodeStatus;
+	claudeCodeConfirmationStatus?: number;
 } = {}) => {
 	localStorage.removeItem(PREFS_KEY);
 	localStorage.removeItem(ROLES_KEY);
@@ -361,6 +397,8 @@ updatePlayFinishDataset();
 		"openai-codex": { authenticated: false },
 		...(opts.oauthStatus || {}),
 	};
+	claudeCodeStatus = opts.claudeCodeStatus || { ...DEFAULT_CLAUDE_CODE_STATUS };
+	claudeCodeConfirmationStatus = opts.claudeCodeConfirmationStatus ?? 200;
 	worktreeInventory = defaultWorktreeInventory();
 	worktreeCleanup = defaultWorktreeCleanup();
 	worktreeNextInventory = null;

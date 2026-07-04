@@ -50,7 +50,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
-import { GW_URL_KEY } from "./gateway-fetch.js";
+import { GW_URL_KEY, GW_TOKEN_KEY } from "./gateway-fetch.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
@@ -1506,6 +1506,10 @@ type ClaudeCodeStatus = {
 let claudeCodeStatus: ClaudeCodeStatus | null = null;
 let claudeCodeStatusLoading = false;
 let claudeCodeStatusError = "";
+// Inline error for the operator-confirmation flow (mint refused / gated PUT
+// rejected). Rendered inside the Claude Code section — a failed confirmation
+// must never look like a successful save (QA-LOG 2026-07-04 Finding 1).
+let claudeCodeConfirmationError = "";
 let prefClaudeCodeExecutable = "claude";
 let prefClaudeCodeDefaultModel = "local-claude-opus-4-8";
 let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "acceptEdits";
@@ -1689,22 +1693,47 @@ async function operatorPreferenceFetch(path: string, init: RequestInit): Promise
 	});
 	let res = await doFetch();
 	if (res.status === 403 || res.status === 401) {
+		// Localhost mode: a same-origin, no-Authorization request mints the
+		// operator-capable cookie. Auth mode: the explicit elevate endpoint
+		// upgrades our preview/API cookie to operator-capable using the stored
+		// admin token (see POST /api/auth/operator-elevate in server.ts).
 		await fetch(`${url}/api/health`, { credentials: "include" }).catch(() => undefined);
+		const token = localStorage.getItem(GW_TOKEN_KEY) || "";
+		await fetch(`${url}/api/auth/operator-elevate`, {
+			method: "POST",
+			credentials: "include",
+			headers: token ? { Authorization: `Bearer ${token}` } : {},
+		}).catch(() => undefined);
 		res = await doFetch();
 	}
 	return res;
 }
 
-async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
+/**
+ * Save a confirmation-gated Claude Code preference. Returns true on success;
+ * on failure records claudeCodeConfirmationError so the Settings UI surfaces
+ * the problem instead of silently closing the dialog (QA-LOG 2026-07-04 F1).
+ */
+async function saveConfirmedPref(key: string, value: string | boolean | null, operatorConfirmationToken: string): Promise<boolean> {
 	try {
-		if (operatorConfirmationToken) {
-			await operatorPreferenceFetch("/api/preferences", {
-				method: "PUT",
-				headers: { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken },
-				body: JSON.stringify({ [key]: value }),
-			});
-			return;
+		const res = await operatorPreferenceFetch("/api/preferences", {
+			method: "PUT",
+			headers: { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken },
+			body: JSON.stringify({ [key]: value }),
+		});
+		if (!res.ok) {
+			claudeCodeConfirmationError = `Saving ${key} was rejected by the server (HTTP ${res.status}). Reload the Bobbit tab and try again.`;
+			return false;
 		}
+		return true;
+	} catch (err: any) {
+		claudeCodeConfirmationError = `Saving ${key} failed: ${err?.message || "network error"}`;
+		return false;
+	}
+}
+
+async function savePref(key: string, value: string | boolean | null): Promise<void> {
+	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ [key]: value }),
@@ -1713,13 +1742,27 @@ async function savePref(key: string, value: string | boolean | null, operatorCon
 }
 
 async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
-	const res = await operatorPreferenceFetch("/api/preferences/claude-code/confirmation", {
-		method: "POST",
-		body: JSON.stringify(patch),
-	});
-	if (!res.ok) return undefined;
+	claudeCodeConfirmationError = "";
+	let res: Response;
+	try {
+		res = await operatorPreferenceFetch("/api/preferences/claude-code/confirmation", {
+			method: "POST",
+			body: JSON.stringify(patch),
+		});
+	} catch (err: any) {
+		claudeCodeConfirmationError = `Operator confirmation request failed: ${err?.message || "network error"}`;
+		return undefined;
+	}
+	if (!res.ok) {
+		claudeCodeConfirmationError = `Operator confirmation was refused by the server (HTTP ${res.status}). The change was NOT saved. Reload the Bobbit tab and try again.`;
+		return undefined;
+	}
 	const data = await res.json().catch(() => ({}));
-	return typeof data.confirmationToken === "string" ? data.confirmationToken : undefined;
+	if (typeof data.confirmationToken !== "string") {
+		claudeCodeConfirmationError = "Operator confirmation response was malformed. The change was NOT saved.";
+		return undefined;
+	}
+	return data.confirmationToken;
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
@@ -1772,9 +1815,13 @@ async function setClaudeCodeExecutable(value: string): Promise<void> {
 	);
 	if (!confirmed) return;
 	const confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
-	if (!confirmationToken) return;
-	prefClaudeCodeExecutable = next || "claude";
-	await savePref("claudeCode.executablePath", next, confirmationToken);
+	if (!confirmationToken) {
+		claudeCodeConfirmationError = `Executable path was NOT changed to "${next || "claude"}": ${claudeCodeConfirmationError}`;
+		renderApp();
+		return;
+	}
+	const saved = await saveConfirmedPref("claudeCode.executablePath", next, confirmationToken);
+	if (saved) prefClaudeCodeExecutable = next || "claude";
 	renderApp();
 }
 
@@ -1797,10 +1844,19 @@ async function setClaudeCodePermissionMode(value: string): Promise<void> {
 		);
 		if (!confirmed) return;
 		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.permissionMode": next });
-		if (!confirmationToken) return;
+		if (!confirmationToken) {
+			claudeCodeConfirmationError = `Permission mode was NOT changed to bypassPermissions: ${claudeCodeConfirmationError}`;
+			renderApp();
+			return;
+		}
 	}
-	prefClaudeCodePermissionMode = next;
-	await savePref("claudeCode.permissionMode", next === "default" ? null : next, confirmationToken);
+	if (confirmationToken) {
+		const saved = await saveConfirmedPref("claudeCode.permissionMode", next, confirmationToken);
+		if (saved) prefClaudeCodePermissionMode = next;
+	} else {
+		prefClaudeCodePermissionMode = next;
+		await savePref("claudeCode.permissionMode", next === "default" ? null : next);
+	}
 	renderApp();
 }
 
@@ -1817,14 +1873,23 @@ async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
 	let confirmationToken: string | undefined;
 	if (value) {
 		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.allowBypassPermissions": true });
-		if (!confirmationToken) return;
+		if (!confirmationToken) {
+			claudeCodeConfirmationError = `Bypass permissions were NOT enabled: ${claudeCodeConfirmationError}`;
+			renderApp();
+			return;
+		}
 	}
-	prefClaudeCodeAllowBypass = value;
 	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
 		prefClaudeCodePermissionMode = "acceptEdits";
 		await savePref("claudeCode.permissionMode", null);
 	}
-	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
+	if (confirmationToken) {
+		const saved = await saveConfirmedPref("claudeCode.allowBypassPermissions", true, confirmationToken);
+		if (saved) prefClaudeCodeAllowBypass = true;
+	} else {
+		prefClaudeCodeAllowBypass = value;
+		await savePref("claudeCode.allowBypassPermissions", value ? true : null);
+	}
 	renderApp();
 }
 
@@ -2234,6 +2299,11 @@ function renderClaudeCodeSection() {
 					data-testid="claude-code-executable"
 					@blur=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
 				/>
+				${claudeCodeConfirmationError ? html`
+					<div class="text-xs text-destructive px-3 py-2 rounded-md border border-destructive/20 bg-destructive/10" data-testid="claude-code-confirmation-error">
+						${claudeCodeConfirmationError}
+					</div>
+				` : ""}
 			</div>
 
 			<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">

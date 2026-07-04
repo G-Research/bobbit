@@ -477,6 +477,37 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect(title).not.toHaveText("Claude Code login required");
 	});
 
+	test("Claude Code refused operator confirmation surfaces an inline error, never silent success", async ({ page }) => {
+		// QA-LOG 2026-07-04 Finding 1: a 403 from the confirmation endpoint used
+		// to be swallowed — the dialog closed as if saved and no error surfaced.
+		await resetFixture(page, { claudeCodeConfirmationStatus: 403 });
+		await renderSettings(page, "#/settings/system/models");
+		const section = page.locator("[data-testid='claude-code-section']");
+		await expect(section).toBeVisible();
+
+		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
+		await section.locator("[data-testid='claude-code-executable']").blur();
+		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
+		await page.keyboard.press("Enter");
+
+		const error = section.locator("[data-testid='claude-code-confirmation-error']");
+		await expect(error).toBeVisible();
+		await expect(error).toContainText("NOT changed");
+		await expect(error).toContainText("/opt/bin/claude");
+		// The pref must not have been written.
+		expect((await prefs(page))["claudeCode.executablePath"]).toBeUndefined();
+
+		// A subsequent successful flow clears the error and saves.
+		await resetFixture(page, { claudeCodeConfirmationStatus: 200 });
+		await renderSettings(page, "#/settings/system/models");
+		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
+		await section.locator("[data-testid='claude-code-executable']").blur();
+		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
+		await expect(section.locator("[data-testid='claude-code-confirmation-error']")).not.toBeVisible();
+	});
+
 	test("Claude Code status refresh posts and updates ready card", async ({ page }) => {
 		await resetFixture(page, {
 			claudeCodeStatus: {
