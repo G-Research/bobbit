@@ -181,6 +181,20 @@ test("clampThinkingLevel: medium on gpt-5.2 stays medium", () => {
 	assert.equal(clampThinkingLevel("medium", gpt52), "medium");
 });
 
+test("clampThinkingLevel: gpt-5.5 dropped middle level clamps UP (pi-ai direction), never to off", () => {
+	// gpt-5.5's map drops "minimal" (minimal:null) while keeping low+; a request
+	// for the unsupported "minimal" must clamp UP to "low" (matching pi-ai), not
+	// DOWN to "off" — otherwise valid reasoning intent is silently disabled.
+	const gpt55: ModelLike = {
+		id: "gpt-5.5", provider: "openai", reasoning: true,
+		thinkingLevelMap: { off: "none", xhigh: "xhigh", minimal: null },
+	};
+	assert.deepEqual(getSupportedThinkingLevels(gpt55), ["off", "low", "medium", "high", "xhigh"]);
+	assert.equal(clampThinkingLevel("minimal", gpt55), "low");
+	assert.equal(clampThinkingLevel("off", gpt55), "off");
+	assert.equal(clampThinkingLevel("xhigh", gpt55), "xhigh");
+});
+
 test("clampThinkingLevel: high on OpenRouter/AIGW GLM 5.2 stays high but xhigh clamps to high", () => {
 	for (const provider of ["openrouter", "aigw"]) {
 		const glm52: ModelLike = { id: "z-ai/glm-5.2", provider, reasoning: true };

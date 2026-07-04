@@ -176,11 +176,15 @@ export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
  * Clamp a user-supplied level to one supported by the model.
  *
  *  - If `level` is supported by the model, returns it unchanged.
- *  - Else steps DOWN by rank (xhigh→high→medium→low→minimal→off) until a
- *    supported level is found.
- *  - If nothing below is supported (a map dropped "off" itself, e.g. Fable's
- *    `off: null`), steps UP by rank to the lowest supported level so we never
- *    return an unsupported "off". Matches pi-ai's clamp direction.
+ *  - Else steps UP by rank to the nearest supported level, then DOWN — exactly
+ *    mirroring pi-ai's `clampThinkingLevel` direction (the runtime source of
+ *    truth). Upward-first matters when a map drops a *middle* level while
+ *    keeping lower ones (e.g. gpt-5.5's `minimal: null` → supported
+ *    off/low/medium/high/xhigh): requesting `minimal` clamps UP to `low`, not
+ *    down to `off`, so valid reasoning intent is never silently disabled. It
+ *    also covers a map that drops `off` itself (Fable's `off: null`): `off`
+ *    clamps up to the lowest supported level rather than returning an
+ *    unsupported `off`.
  *  - Unknown strings become "off" first, then are clamped.
  *  - If `level` is undefined/empty AND `opts.allowEmpty` is true, returns
  *    `undefined` (used by role overrides / prefs that mean "inherit").
@@ -200,17 +204,17 @@ export function clampThinkingLevel(
 	// Unknown token → off.
 	const token: ThinkingLevel = isThinkingLevel(trimmed) ? (trimmed as ThinkingLevel) : "off";
 	if (supportedSet.has(token)) return token;
-	// Walk DOWN by rank to the nearest supported level (documented down-clamp).
-	for (let i = RANK[token] - 1; i >= 0; i--) {
-		const candidate = ORDERED[i];
-		if (supportedSet.has(candidate)) return candidate;
-	}
-	// Nothing below is supported — the map dropped "off" itself (e.g. Fable's
-	// `off: null`). Step UP to the lowest supported level rather than returning
-	// an unsupported "off".
+	// Walk UP by rank to the nearest supported level, then DOWN — matching
+	// pi-ai's clampThinkingLevel direction exactly. Upward-first keeps an
+	// unsupported middle level (e.g. gpt-5.5 drops "minimal") clamping to the
+	// next *higher* supported effort rather than collapsing to "off".
 	for (let i = RANK[token] + 1; i < ORDERED.length; i++) {
 		const candidate = ORDERED[i];
 		if (supportedSet.has(candidate)) return candidate;
 	}
-	return "off";
+	for (let i = RANK[token] - 1; i >= 0; i--) {
+		const candidate = ORDERED[i];
+		if (supportedSet.has(candidate)) return candidate;
+	}
+	return supported[0] ?? "off";
 }
