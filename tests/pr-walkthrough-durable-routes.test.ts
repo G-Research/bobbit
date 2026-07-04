@@ -59,6 +59,53 @@ function seedCtx(overrides: Record<string, any> = {}) {
 	return { ctx: { sessionId, host: { store } }, store };
 }
 
+function bundleDiffEvidenceKey(id = jobId): string {
+	return `reviews/${id}/draft/analysis-bundle-diff`;
+}
+
+function seedBundleDiffEvidence(store: MemoryStore, hunkId: string): void {
+	store.data.set(bundleDiffEvidenceKey(), {
+		schemaVersion: 1,
+		kind: "pr_walkthrough_finalization_diff",
+		jobId,
+		source: "analysis-bundle",
+		generatedAt: "2026-06-01T00:00:00.000Z",
+		parsedDiff: {
+			changeset: {
+				baseSha,
+				headSha,
+				provider: "github",
+				prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+				prNumber: 42,
+				prTitle: "Bundle fallback",
+				filesChanged: 1,
+				additions: 1,
+				deletions: 1,
+			},
+			files: [{
+				filePath: "src/bundle-fallback.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 1,
+				diffBlocks: [{
+					id: "bundle-src-bundle-fallback",
+					filePath: "src/bundle-fallback.ts",
+					status: "modified",
+					hunks: [{
+						id: hunkId,
+						header: "@@ -1,1 +1,1 @@",
+						lines: [
+							{ id: `${hunkId}:l1`, side: "old", oldLine: 1, kind: "del", text: "old value" },
+							{ id: `${hunkId}:l2`, side: "new", newLine: 1, kind: "add", text: "new value" },
+						],
+					}],
+				}],
+			}],
+			warnings: [],
+		},
+	});
+}
+
 async function seedQuotaCtx(rootDir: string) {
 	const packId = "pr-walkthrough-quota-regression";
 	const packStore = createPackStore({
@@ -266,6 +313,39 @@ test("PR walkthrough chunks are idempotent and finalized into review-scoped payl
 	assert.equal(bundle.cardsSource, "stored-final");
 	assert.equal(bundle.cardCount, 3);
 	assert.equal(bundle.cards.length, 3);
+});
+
+test("PR walkthrough durable finalization resolves hunk ids from stored bundle evidence when local SHAs are unavailable", async () => {
+	const hunkId = "bundle-hunk-src-fallback-h0";
+	const { ctx, store } = seedCtx();
+	seedBundleDiffEvidence(store, hunkId);
+	await saveRequiredChunks(ctx);
+	await saveChunk(ctx, "chunk:bundle-fallback", `phase: significant
+title: Bundle fallback
+reviewer_goal: Review bundle fallback
+explanation: Uses persisted bundle evidence when local git cannot resolve the PR SHAs.
+files:
+  - src/bundle-fallback.ts
+relevant_hunks:
+  - hunk_id: ${hunkId}
+    placement: primary
+    why_relevant: The finalizer must map this hunk from the stored analysis bundle.
+suggested_concerns: []
+positive_notes: []`);
+
+	const status = await routes.publish(ctx, { body: { op: "submissionStatus" } });
+	assert.equal(status.draftCoverage.totalHunks, 1);
+	assert.equal(status.draftCoverage.unread, 1);
+
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	assert.equal(finalized.coverage.totalHunks, 1);
+	assert.equal(finalized.coverage.unread, 1);
+	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
+	const card = finalPayload.cards.find((item: any) => item.title === "Bundle fallback");
+	assert.ok(card, JSON.stringify(finalPayload.cards.map((item: any) => item.title)));
+	assert.deepEqual(card.diffBlocks.flatMap((block: any) => block.hunks.map((hunk: any) => hunk.id)), [hunkId]);
+	assert.equal(finalPayload.changeset.prUrl, "https://github.com/SuuBro/bobbit/pull/42");
 });
 
 test("PR walkthrough durable finalization rejects duplicate primary hunk ownership without writing final payload", async (t) => {

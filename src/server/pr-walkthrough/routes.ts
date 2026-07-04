@@ -14,7 +14,7 @@ import { safeExternalUrl, normalizeTrustedHosts, isTrustedExternalHost } from ".
 import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
-import { WalkthroughAnalysisBundleStore, createAnalysisBundleFromParsedDiff, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
+import { WalkthroughAnalysisBundleStore, analysisBundleToParsedDiff, createAnalysisBundleFromParsedDiff, type PrWalkthroughAnalysisBundle, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
 import { resolveGithubPr } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import { validatePrWalkthroughYaml, type WalkthroughParsedDiffForYamlMapping } from "./walkthrough-yaml-schema.js";
@@ -38,6 +38,7 @@ const prwReviewerIndexKey = (sessionId: string): string => `reviewers/${sessionI
 const prwReviewPrefix = (jobId: string): string => `reviews/${jobId}/`;
 const prwReviewBindingKey = (jobId: string, childSessionId: string): string => `${prwReviewPrefix(jobId)}binding/${childSessionId}`;
 const prwFinalPayloadKey = (jobId: string): string => `${prwReviewPrefix(jobId)}final/payload`;
+const prwBundleDiffEvidenceKey = (jobId: string): string => `${prwReviewPrefix(jobId)}draft/analysis-bundle-diff`;
 const prwReadReceiptPrefix = (jobId: string): string => `${prwReviewPrefix(jobId)}draft/read-receipts/`;
 const prwReadReceiptKey = (jobId: string, receiptId: string): string => `${prwReadReceiptPrefix(jobId)}${receiptId}`;
 const prwReviewBindingQuota = (jobId: string) => ({ quotaScope: { prefix: prwReviewPrefix(jobId), profile: "default" as const } });
@@ -1286,7 +1287,24 @@ async function resolveAndReadBindingBundle(
 		const bundle = createAnalysisBundleFromParsedDiff(jobLike, parsedDiff);
 		bundleStore.save(binding.jobId, bundle);
 	}
+	const bundle = bundleStore.load(binding.jobId);
+	if (bundle) await persistPrwFinalizationBundleEvidence(deps.packStore ?? getPackStore(), binding.jobId, bundle);
 	return bundleStore.read(jobLike, readReq);
+}
+
+async function persistPrwFinalizationBundleEvidence(store: PackStore, jobId: string, bundle: PrWalkthroughAnalysisBundle): Promise<void> {
+	try {
+		await store.put(PRW_PACK_ID, prwBundleDiffEvidenceKey(jobId), {
+			schemaVersion: 1,
+			kind: "pr_walkthrough_finalization_diff",
+			jobId,
+			source: "analysis-bundle",
+			generatedAt: bundle.generated_at,
+			parsedDiff: analysisBundleToParsedDiff(bundle),
+		}, prwReviewDraftQuota(jobId));
+	} catch (err) {
+		console.warn(`[pr-walkthrough] failed to persist finalization bundle evidence for ${jobId}:`, err);
+	}
 }
 
 async function resolveBindingCwd(deps: PrWalkthroughRouteDeps, sessionId: string): Promise<string> {

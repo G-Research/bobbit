@@ -311,6 +311,10 @@ describe("WalkthroughAnalysisBundleStore file read windowing", () => {
 			assert.equal(compact.json.read_receipts.total, 1);
 			assert.equal(compact.json.read_receipts.truncatedReads, 1);
 			assert.equal([...data.keys()].filter((key) => key.startsWith(`reviews/${job.jobId}/draft/read-receipts/`)).length, 1);
+			const evidence = data.get(`reviews/${job.jobId}/draft/analysis-bundle-diff`) as any;
+			assert.equal(evidence.kind, "pr_walkthrough_finalization_diff");
+			assert.equal(evidence.source, "analysis-bundle");
+			assert.deepEqual(evidence.parsedDiff.files[0].diffBlocks[0].hunks.map((hunk: any) => hunk.id), ["hunk-0", "hunk-1", "hunk-2"]);
 
 			const legacy = await postInternalBundleRead(dir, packStore, { mode: "manifest" });
 			assert.equal(legacy.status, 200);

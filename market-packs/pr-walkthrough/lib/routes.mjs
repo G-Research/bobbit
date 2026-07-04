@@ -90,6 +90,7 @@ const stagingPrefix = (jobId) => `${reviewPrefix(jobId)}staging/`;
 const chunkPrefix = (jobId) => `${draftPrefix(jobId)}chunks/`;
 const chunkKey = (jobId, chunkId) => `${chunkPrefix(jobId)}${chunkId}`;
 const readReceiptPrefix = (jobId) => `${draftPrefix(jobId)}read-receipts/`;
+const bundleDiffEvidenceKey = (jobId) => `${draftPrefix(jobId)}analysis-bundle-diff`;
 const draftStatusKey = (jobId) => `${draftPrefix(jobId)}status`;
 const draftCheckpointKey = (jobId) => `${draftPrefix(jobId)}checkpoint`;
 const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
@@ -1013,7 +1014,10 @@ async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 		try { live = await resolveLocalChangeset(routeCwd(ctx), baseSha, headSha); }
 		catch { live = undefined; }
 	}
-	const parsedDiff = live ? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings } : {};
+	const bundleParsedDiff = live ? undefined : await readBundleDiffEvidence(ctx.host.store, binding.jobId);
+	if (!baseSha) baseSha = strOf(bundleParsedDiff?.changeset?.baseSha);
+	if (!headSha) headSha = strOf(bundleParsedDiff?.changeset?.headSha);
+	const parsedDiff = live ? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings } : (bundleParsedDiff ?? {});
 	const readReceipts = Array.isArray(body.readReceipts) ? body.readReceipts : await readReadReceipts(ctx.host.store, binding.jobId);
 	const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff, { readReceipts });
 	const cards = Array.isArray(result.cards) ? result.cards : [];
@@ -1023,6 +1027,32 @@ async function buildFinalPayload(ctx, binding, yamlText, body = {}) {
 	const persistedAt = existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now();
 	const finalizedAt = Date.now();
 	return { schemaVersion: STORE_SCHEMA_VERSION, jobId: binding.jobId, changesetId, baseSha, headSha, yaml: yamlText, changeset: result.changeset, cards, warnings, coverage: result.coverage, limits: result.limits, export: result.export, persistedAt, finalizedAt, cardCount: cards.length };
+}
+
+async function readBundleDiffEvidence(store, jobId) {
+	try {
+		const evidence = await store.get(bundleDiffEvidenceKey(jobId));
+		return normalizeBundleDiffEvidence(evidence, jobId);
+	} catch {
+		return undefined;
+	}
+}
+
+function normalizeBundleDiffEvidence(evidence, jobId) {
+	if (!isObject(evidence)) return undefined;
+	if (strOf(evidence.jobId) && strOf(evidence.jobId) !== jobId) return undefined;
+	const parsed = isObject(evidence.parsedDiff) ? evidence.parsedDiff : evidence;
+	const diffBlocks = Array.isArray(parsed.diffBlocks) ? parsed.diffBlocks.filter(isObject) : undefined;
+	const files = Array.isArray(parsed.files) ? parsed.files.filter(isObject) : undefined;
+	if ((!diffBlocks || diffBlocks.length === 0) && (!files || files.length === 0)) return undefined;
+	return {
+		...(isObject(parsed.changeset) ? { changeset: parsed.changeset } : {}),
+		...(diffBlocks ? { diffBlocks } : {}),
+		...(files ? { files } : {}),
+		...(Array.isArray(parsed.warnings) ? { warnings: parsed.warnings.filter(isObject) } : {}),
+		...(isObject(parsed.limits) ? { limits: parsed.limits } : {}),
+		...(isObject(parsed.export) ? { export: parsed.export } : {}),
+	};
 }
 
 function changesetIdFromDocument(document, baseSha, headSha) {
