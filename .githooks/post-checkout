@@ -1,0 +1,25 @@
+#!/bin/sh
+# graphify graph refresh — runs after `git checkout`/`git switch`.
+#
+# Only fires on an actual branch switch (git passes flag=1 for that; flag=0 is
+# a plain file checkout, which we ignore). Keeps src/graphify-out/graph.json
+# (gitignored) roughly in sync when hopping branches/worktrees.
+# Opt in via `scripts/setup-githooks.sh` (sets core.hooksPath=.githooks).
+#
+# Defensive by design:
+#   - no-ops silently if `graphify` isn't on PATH (other machines/CI stay unaffected)
+#   - runs detached in the background so the checkout never blocks
+#   - logs to .git/graphify-update.log instead of the terminal
+
+BRANCH_SWITCH="$3"
+[ "$BRANCH_SWITCH" = "1" ] || exit 0
+
+command -v graphify >/dev/null 2>&1 || exit 0
+
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+LOG="$GIT_DIR/graphify-update.log"
+
+nohup graphify update src --force >>"$LOG" 2>&1 &
+disown >/dev/null 2>&1 || true
+
+exit 0

@@ -393,6 +393,38 @@ To get a fork change accepted into the upstream project:
 
 ---
 
+## Code graph (graphify)
+
+graphify (installed as a CLI + optional MCP server) extracts an AST/import graph of `src/` into `src/graphify-out/graph.json` — a ~10k-node, ~26k-edge structural map of the codebase. It answers questions that `rg`/LSP can't cheaply: "what's coupled to X", "what would break if I change Y" (`graphify affected`), god-object decomposition planning, and PR blast-radius. See [`.claude/skills/orient/SKILL.md`](../.claude/skills/orient/SKILL.md) for how it fits into the broader "where is X" lookup order (LSP first, then graphify, then the codemap/audit docs).
+
+**When it's valuable**: structural/cross-file questions (coupling, fan-in/out, call chains spanning many files), planning a refactor of a god-object (`server.ts` is 16k lines), estimating the blast radius of a change before touching it. It is not a substitute for LSP `goToDefinition`/`findReferences` on a known symbol — those are cheaper and exact.
+
+**It is not installed on PATH by default.** Install the CLI yourself (`pipx install graphify` or `uv tool install graphify`, see graphify's own docs) — this repo only wires the *result* of having it installed.
+
+### The graph is a snapshot, not live
+
+`src/graphify-out/` is gitignored (an 11MB+ generated artifact) and does **not** auto-update as code changes. Three ways it gets refreshed, in increasing order of automation:
+
+1. **Manual**: `npm run graph:refresh` (= `graphify update src --force`) from the repo root. No LLM call — pure AST re-extraction. `--force` is required whenever files were deleted (otherwise graphify refuses to shrink the graph).
+2. **Committed git hooks** (`.githooks/post-merge`, `.githooks/post-checkout`): refresh the graph in the background after a merge/pull or a branch switch. **Not active by default** — opt in once per clone/worktree with `./scripts/setup-githooks.sh` (sets `core.hooksPath=.githooks` for that checkout only; nothing is enabled automatically on `npm install`). The hooks no-op silently if `graphify` isn't on PATH, so machines/CI without it are unaffected, and they run detached (logging to `.git/graphify-update.log`) so `git merge`/`git pull`/`git checkout` never block on a rebuild.
+3. **`graphify` also ships its own native hook installer** (`graphify hook install`), which writes post-commit/post-checkout hooks straight into `.git/hooks/` (uncommitted, machine-local, not shared via this repo). We deliberately did **not** use that path here — `.git/hooks/` isn't checked in, so it wouldn't propagate to other clones/worktrees the way `.githooks/` + `core.hooksPath` does. If you prefer per-commit (not just per-merge) refreshes on your own machine, `graphify hook install` is a reasonable personal addition on top of (or instead of) the committed hooks.
+
+**Worktree caveat**: a fresh worktree/clone has no `src/graphify-out/` until someone runs the refresh once. `/orient` degrades gracefully in that case — LSP + `rg` still work (steps 1/3/4 in that skill), just without the structural graph step.
+
+### MCP wiring
+
+`.mcp.json` (committed) wires graphify as an MCP server so its `query_graph`/`get_neighbors`/`shortest_path`/`get_pr_impact` tools are available directly, instead of shelling out to the `graphify` CLI. Its `command` field is a machine-specific absolute path to the `uv`-managed graphify Python interpreter (e.g. `/Users/<you>/.local/share/uv/tools/graphifyy/bin/python`) — adjust it per machine if graphify was installed differently (pipx, system Python, a different `uv` tool name). Without a working `.mcp.json` entry, fall back to the `graphify query "<question>"` / `graphify path` / `graphify explain` CLI subcommands from the repo root.
+
+### `graph.json` and merge conflicts
+
+`graph.json` is gitignored, so it never enters a commit and can never produce a git merge conflict — graphify's `merge-driver` subcommand (a union-merge for two `graph.json` files, meant to be wired via `.gitattributes` + `git config merge.<name>.driver`) is **not applicable** to this repo as currently configured. It would only become relevant if a future decision started tracking `graph.json` in git.
+
+### Keeping the skill current
+
+The `/orient` and `graphify` skills bundle a version-pinned copy of graphify's own `SKILL.md`. When the CLI prints `skill is from graphify X, package is Y` on startup, run `graphify install` (or `graphify install --platform claude`) to refresh it — by default this writes to your **home** skill dir (e.g. `~/.claude/skills/graphify/SKILL.md`), not into the repo; pass `--project` if you specifically want a repo-local copy instead.
+
+---
+
 ## Related docs
 
 - **[README.md](../README.md)** — Architecture overview, quick start, CLI flags

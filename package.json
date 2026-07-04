@@ -48,6 +48,7 @@
     "metrics:baseline": "node scripts/metrics/baseline.mjs",
     "metrics:check": "node scripts/metrics/check.mjs",
     "test": "npm run build && npm run test:unit && npm run test:e2e:run --",
+    "graph:refresh": "graphify update src --force",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",
     "build:binaries": "node scripts/build-binaries.mjs"

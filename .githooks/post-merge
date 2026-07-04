@@ -1,0 +1,21 @@
+#!/bin/sh
+# graphify graph refresh — runs after `git merge` / `git pull` completes.
+#
+# Keeps src/graphify-out/graph.json (gitignored) roughly in sync with the code
+# so /orient and the graphify MCP don't drift too far from a merge window.
+# Opt in via `scripts/setup-githooks.sh` (sets core.hooksPath=.githooks).
+#
+# Defensive by design:
+#   - no-ops silently if `graphify` isn't on PATH (other machines/CI stay unaffected)
+#   - runs detached in the background so `git merge`/`git pull` never blocks
+#   - logs to .git/graphify-update.log instead of the terminal
+
+command -v graphify >/dev/null 2>&1 || exit 0
+
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+LOG="$GIT_DIR/graphify-update.log"
+
+nohup graphify update src --force >>"$LOG" 2>&1 &
+disown >/dev/null 2>&1 || true
+
+exit 0
