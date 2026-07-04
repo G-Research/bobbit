@@ -365,7 +365,8 @@ test.describe("Headquarters same-root split API", () => {
 			expectSamePath(join(gw.serverRoot, ".bobbit", "headquarters"), gw.headquartersDir, "default Headquarters directory");
 
 			const storedProjects = readJsonFile(join(gw.headquartersDir, "state", "projects.json"));
-			expect(storedProjects.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expect(storedProjects.map((p: any) => p.id).sort()).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID, SYSTEM_PROJECT_ID].sort());
+			expect(storedProjects.find((p: any) => p.id === SYSTEM_PROJECT_ID)).toMatchObject({ id: SYSTEM_PROJECT_ID, hidden: true, kind: "system" });
 			expectSameRootNormalProject(storedProjects.find((p: any) => p.id === SAME_ROOT_PROJECT_ID), gw.serverRoot);
 
 			const normalConfig = await gw.json(`/api/projects/${SAME_ROOT_PROJECT_ID}/config`);
