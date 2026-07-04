@@ -37,6 +37,7 @@ import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
 import { validateRuntimeManifest } from "../runtime/manifest.js";
+import { ALL_PROVIDER_HOOKS } from "./lifecycle-hooks.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -45,22 +46,13 @@ const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
-const PROVIDER_HOOKS = new Set([
-	"sessionSetup",
-	"beforePrompt",
-	"afterTurn",
-	"beforeCompact",
-	"sessionShutdown",
-	// Goal-lifecycle hook (hierarchical goal metadata): fired once per worktree
-	// provisioning in a goal's subtree with the resolved goal metadata. Lets a
-	// provider apply per-goal filesystem treatments (content-addressed marker/
-	// cache) without per-turn cost. See docs/design/goal-metadata.md.
-	"goalProvisioned",
-	// Goal-lifecycle hook fired once a goal is marked complete (see
-	// lifecycle-hub.ts dispatchGoalCompleted). Lets a provider persist/finalize
-	// per-goal state (e.g. Hindsight memory pack) at goal completion.
-	"goalCompleted",
-]);
+// Acceptance list for `providers/<id>.yaml` `hooks:` entries — derived from the
+// single source of truth in lifecycle-hooks.ts (finding EXT-02) so this can
+// never drift from what LifecycleHub actually dispatches/accepts. Includes
+// both the generic-dispatch hooks (LIFECYCLE_HOOKS) and the goal-only,
+// dedicated-dispatch hooks (GOAL_ONLY_HOOKS, e.g. `goalProvisioned` — see
+// lifecycle-hooks.ts for why it's split out).
+const PROVIDER_HOOKS = new Set<string>(ALL_PROVIDER_HOOKS);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an

@@ -27,14 +27,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ProviderContribution } from "./pack-contributions.js";
-import type { LifecycleHub, LifecycleHook } from "./lifecycle-hub.js";
+import type { LifecycleHub } from "./lifecycle-hub.js";
+import { LIFECYCLE_HOOKS, type LifecycleHook } from "./lifecycle-hooks.js";
 
 /** Delimiters wrapping the per-turn dynamic-context region in the system prompt. */
 export const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
 export const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
 
-/** The per-turn hooks that require the in-process bridge extension. */
-export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "beforeCompact"];
+/**
+ * The per-turn hooks that require the in-process bridge extension — the
+ * subset of `LIFECYCLE_HOOKS` (lifecycle-hooks.ts, single source of truth,
+ * finding EXT-02) that must run INSIDE the agent process to observe/amend
+ * the outgoing turn. Not every lifecycle hook is per-turn: `sessionSetup` /
+ * `afterTurn` / `sessionShutdown` / `goalCompleted` are dispatched
+ * gateway-side and never need the bridge. Filtering the master list (rather
+ * than hand-copying a literal) guarantees this can never silently diverge
+ * from what LifecycleHub actually dispatches.
+ */
+const PER_TURN_HOOK_NAMES = new Set<LifecycleHook>(["beforePrompt", "beforeCompact"]);
+export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = LIFECYCLE_HOOKS.filter((h) => PER_TURN_HOOK_NAMES.has(h));
 
 /** Timeout (ms) for the before-prompt callback — blocking-with-timeout. */
 export const BEFORE_PROMPT_TIMEOUT_MS = 5000;
