@@ -974,6 +974,31 @@ function goalGitUnavailablePayload(goal: Pick<PersistedGoal, "id" | "projectId" 
 	};
 }
 
+// ── Headquarters session git isolation ──
+// Headquarters sessions default their cwd to the Headquarters directory
+// (`<serverRunDir>/.bobbit/headquarters`), which is physically INSIDE the
+// server run directory's git checkout. Running git/gh from there would leak
+// the parent repo's state. Headquarters never uses worktrees or git lifecycle,
+// so every session git/PR endpoint must short-circuit with an unavailable
+// response instead of shelling out from cwd. See design "Headquarters
+// git/worktree behavior".
+const HEADQUARTERS_NO_WORKTREE_SESSION_GIT_MESSAGE = "This Headquarters session runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+function isHeadquartersSession(session: { projectId?: string }): boolean {
+	return session.projectId === HEADQUARTERS_PROJECT_ID;
+}
+
+function sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown> {
+	return {
+		error: `${action} is unavailable. ${HEADQUARTERS_NO_WORKTREE_SESSION_GIT_MESSAGE}`,
+		code: "GOAL_GIT_UNAVAILABLE",
+		sessionId: session.id,
+		projectId: session.projectId ?? HEADQUARTERS_PROJECT_ID,
+		branch: null,
+		worktreePath: null,
+	};
+}
+
 /** Cached Docker availability result to avoid running `docker info` per session creation */
 let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
 
@@ -4286,10 +4311,29 @@ async function handleApiRoute(
 		const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
 		const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
 		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
-		const preserveHeadquartersDir = fs.existsSync(path.join(body.rootPath, ".bobbit", "headquarters"));
+		// Preserve the Headquarters/server workspace directory when it lives
+		// inside this project's `.bobbit/`. The default is `.bobbit/headquarters`,
+		// but a `BOBBIT_DIR`/`BOBBIT_PI_DIR` override (e.g. `.bobbit/custom-hq`)
+		// moves it — archiving a normal same-root project's `.bobbit` must never
+		// move or delete server/HQ state, so preserve the ACTUAL directory by its
+		// real relative segment, not just the literal `headquarters/` name.
+		const rootBobbitDir = path.join(body.rootPath, ".bobbit");
+		const preserveEntries: string[] = [];
+		if (fs.existsSync(path.join(rootBobbitDir, "headquarters"))) preserveEntries.push("headquarters/");
+		try {
+			const realRootBobbit = fs.realpathSync(rootBobbitDir);
+			const actualHqDir = bobbitDir();
+			if (fs.existsSync(actualHqDir)) {
+				const rel = path.relative(realRootBobbit, fs.realpathSync(actualHqDir));
+				if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+					const entry = rel.replace(/\\/g, "/") + "/";
+					if (!preserveEntries.includes(entry)) preserveEntries.push(entry);
+				}
+			}
+		} catch { /* .bobbit or HQ dir missing — fall back to default headquarters/ preservation */ }
 		const allowlistEntries = [
 			...(gatewayOwned ? GATEWAY_OWNED_FILES : []),
-			...(preserveHeadquartersDir ? ["headquarters/"] : []),
+			...preserveEntries,
 		];
 		const allowlist = allowlistEntries.length > 0 ? allowlistEntries : undefined;
 		try {
@@ -5955,16 +5999,16 @@ async function handleApiRoute(
 			: undefined;
 
 		// If creating under a goal, use the goal's cwd/project as the default.
+		// NOTE: the goal's auto-transition to in-progress is deferred until AFTER
+		// the sandbox ownership check below — a sandbox-scoped token must not be
+		// able to mutate another project's goal state before we've verified the
+		// goal is inside its scope.
 		let cwd = explicitCwd || config.defaultCwd;
 		let goalForSession: PersistedGoal | undefined;
 		if (goalId) {
 			goalForSession = getGoalAcrossProjects(goalId);
 			if (goalForSession) {
 				cwd = explicitCwd || goalForSession.cwd;
-				// Auto-transition goal to in-progress when first session starts
-				if (goalForSession.state === "todo") {
-					await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
-				}
 			}
 		}
 
@@ -5998,6 +6042,39 @@ async function handleApiRoute(
 		// no projectId is supplied. All normal user/work sessions need an explicit
 		// projectId or a persisted goal/reattempt source project.
 		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool";
+
+		// ── Sandbox scope ownership enforcement ──
+		// Authorized delegate creation (body.delegateOf + instructions) is handled
+		// and returned earlier. Any OTHER session creation reaching here under a
+		// sandbox-scoped token must stay strictly inside that token's project/goal
+		// scope. Enforce this BEFORE resolving the project or mutating any goal so a
+		// compromised container cannot escape its scope, promote assistant/server
+		// scope, or flip another project's goal to in-progress. Violations are 403.
+		if (sandboxScope) {
+			if (assistantType) {
+				json({ error: "Forbidden: sandbox tokens cannot create assistant or server-scope sessions", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+			if (!explicitProjectId || explicitProjectId !== sandboxScope.projectId) {
+				json({ error: "Forbidden: sandbox session projectId must match the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+			if (goalId && !sandboxScope.goalIds.has(goalId)) {
+				json({ error: "Forbidden: goal is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+			if (reattemptGoalId && !sandboxScope.goalIds.has(reattemptGoalId)) {
+				json({ error: "Forbidden: reattempt goal is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+		}
+
+		// Auto-transition the goal to in-progress when its first session starts.
+		// Deferred to here so the sandbox ownership check above runs first.
+		if (goalId && goalForSession && goalForSession.state === "todo") {
+			await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
+		}
+
 		let resolvedProjectId = explicitProjectId;
 		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
@@ -13085,6 +13162,7 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git status"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 
@@ -13389,6 +13467,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git diff"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13418,6 +13497,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: 'Session not found' }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Commit history"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
@@ -13466,6 +13546,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13499,6 +13580,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git pull"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13515,10 +13597,11 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-push — push local commits to remote
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git push"), 409); return; }
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13537,10 +13620,11 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to project primary
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Squash push"), 409); return; }
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13630,6 +13714,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Rebase on primary"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13697,6 +13782,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR merge"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }

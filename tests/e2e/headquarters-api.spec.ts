@@ -678,3 +678,93 @@ test.describe("Headquarters no-git goals", () => {
 		}
 	});
 });
+
+test.describe("Headquarters session git isolation", () => {
+	test("Headquarters session git/PR endpoints return an unavailable state and never run git from cwd", async () => {
+		const gw = await startWithNormalSameRoot();
+		try {
+			// The server run directory is a real git checkout. A Headquarters
+			// session defaults its cwd to <serverRoot>/.bobbit/headquarters, which
+			// is physically INSIDE that checkout — so a naive git/gh call would leak
+			// the parent repo's state. Every session git/PR endpoint must refuse.
+			execFileSync("git", ["init"], { cwd: gw.serverRoot, stdio: "ignore" });
+
+			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
+			expect(hqSession.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(hqSession.cwd, gw.headquartersDir, "Headquarters session cwd");
+			expect(isSameOrUnder(gw.headquartersDir, gw.serverRoot), "default Headquarters dir must be inside the server run dir git checkout").toBe(true);
+
+			const getEndpoints: Array<[string, string]> = [
+				["git-status", "Git status"],
+				["git-diff", "Git diff"],
+				["commits", "Commit history"],
+				["pr-status", "PR status"],
+			];
+			for (const [endpoint, action] of getEndpoints) {
+				const resp = await gw.json(`/api/sessions/${hqSession.id}/${endpoint}`);
+				expect(resp.status, `${endpoint}: ${resp.text}`).toBe(409);
+				expect(resp.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+				expect(resp.body.sessionId).toBe(hqSession.id);
+				expect(resp.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+				expect(String(resp.body.error)).toMatch(/Headquarters/i);
+				expect(String(resp.body.error)).toMatch(new RegExp(action, "i"));
+			}
+
+			const postEndpoints = ["git-pull", "git-push", "git-squash-push"];
+			for (const endpoint of postEndpoints) {
+				const resp = await gw.json(`/api/sessions/${hqSession.id}/${endpoint}`, {
+					method: "POST",
+					body: JSON.stringify({}),
+				});
+				expect(resp.status, `${endpoint}: ${resp.text}`).toBe(409);
+				expect(resp.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+				expect(resp.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			}
+
+			// Contrast: a normal same-root session (cwd = serverRoot git checkout) is
+			// NOT subject to Headquarters isolation — it reaches the real git handler.
+			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
+			const normalStatus = await gw.json(`/api/sessions/${normalSession.id}/git-status`);
+			expect(normalStatus.status, `normal git-status: ${normalStatus.text}`).not.toBe(409);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+});
+
+test.describe("Headquarters archive preservation", () => {
+	test("archive-bobbit preserves a custom BOBBIT_DIR Headquarters directory inside <rootPath>/.bobbit", async () => {
+		const serverRoot = uniqueDir("archive-custom-hq-server");
+		const customHqDir = join(serverRoot, ".bobbit", "custom-hq");
+		seedNormalSameRootLayout(serverRoot);
+		const gw = await startHeadquartersGateway({
+			serverRoot,
+			headquartersDir: customHqDir,
+			clean: false,
+			projects: [sameRootProjectRecord(serverRoot)],
+		});
+		try {
+			expectSamePath(gw.headquartersDir, customHqDir, "custom Headquarters dir");
+			expect(isSameOrUnder(customHqDir, join(serverRoot, ".bobbit")), "custom Headquarters dir must live inside <rootPath>/.bobbit").toBe(true);
+			// Sentinels: HQ/server state must survive; normal project config is archived.
+			writeFileSync(join(customHqDir, "state", "hq-sentinel.txt"), "keep custom headquarters state");
+			mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
+			writeFileSync(join(serverRoot, ".bobbit", "config", "normal-sentinel.txt"), "normal project config");
+
+			const archive = await gw.json("/api/projects/archive-bobbit", {
+				method: "POST",
+				body: JSON.stringify({ rootPath: serverRoot }),
+			});
+			expect(archive.status, archive.text).toBe(200);
+			expect(existsSync(customHqDir), "custom Headquarters directory must survive archive").toBe(true);
+			expect(existsSync(join(customHqDir, "state", "hq-sentinel.txt")), "archive must not move a custom BOBBIT_DIR Headquarters directory").toBe(true);
+			// The preserved set includes the custom HQ segment, not just "headquarters/".
+			const preserved: string[] = (archive.body.preservedPaths ?? []).map((p: string) => p.replace(/\\/g, "/"));
+			expect(preserved.some((p) => p === "custom-hq" || p.startsWith("custom-hq/"))).toBe(true);
+			// The normal project config was actually archived (start-fresh worked).
+			expect(existsSync(join(serverRoot, ".bobbit", "config", "normal-sentinel.txt")), "normal project config should have been archived").toBe(false);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+});

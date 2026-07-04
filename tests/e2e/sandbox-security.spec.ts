@@ -10,7 +10,7 @@
  * are tracked under the project scope via addSession().
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, nonGitCwd, injectDefaultProjectId, createGoal, deleteGoal } from "./e2e-setup.js";
 
 // Helper to make requests with admin token
 async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
@@ -170,6 +170,56 @@ test.describe("Sandbox Security Boundaries", () => {
 			body: JSON.stringify({ cwd: "/tmp" }),
 		});
 		expect([400, 403]).toContain(res.status);
+	});
+
+	// ── Session-creation scope ownership (before goal mutation/resolution) ──
+
+	test("cannot create a session in a project outside its sandbox scope", async ({ gateway }) => {
+		const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+			method: "POST",
+			body: JSON.stringify({ projectId: "some-other-project", cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(403);
+		const body = await res.json();
+		expect(body.code).toBe("SANDBOX_SCOPE_VIOLATION");
+	});
+
+	test("cannot create an assistant/server-scope session under a sandbox token", async ({ gateway }) => {
+		for (const assistantType of ["project", "role", "tool"]) {
+			const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+				method: "POST",
+				body: JSON.stringify({ assistantType, projectId, cwd: nonGitCwd() }),
+			});
+			expect(res.status, `assistantType=${assistantType}`).toBe(403);
+			expect((await res.json()).code).toBe("SANDBOX_SCOPE_VIOLATION");
+		}
+	});
+
+	test("cannot attach to an out-of-scope goal, and does not transition it to in-progress", async ({ gateway }) => {
+		// Create a real todo goal in the harness default project (a different
+		// project + goal than the sandbox scope). The sandbox token must be
+		// rejected BEFORE the goal auto-transition mutates its state.
+		const goal = await createGoal({ title: `Sandbox scope guard ${Date.now()}`, worktree: false });
+		const outOfScopeGoalId = goal.id as string;
+		try {
+			const before = await adminFetch(gateway.baseURL, `/api/goals/${outOfScopeGoalId}`);
+			expect((await before.json()).state).toBe("todo");
+
+			const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+				method: "POST",
+				body: JSON.stringify({ projectId, goalId: outOfScopeGoalId }),
+			});
+			expect(res.status).toBe(403);
+			expect((await res.json()).code).toBe("SANDBOX_SCOPE_VIOLATION");
+
+			// The critical invariant: the out-of-scope goal was NOT flipped to
+			// in-progress. This pins the "goal auto-transition runs after the
+			// sandbox ownership check" fix.
+			const after = await adminFetch(gateway.baseURL, `/api/goals/${outOfScopeGoalId}`);
+			expect((await after.json()).state).toBe("todo");
+		} finally {
+			await deleteGoal(outOfScopeGoalId).catch(() => {});
+		}
 	});
 
 	// ── Token persistence check ────────────────────────────────────────
