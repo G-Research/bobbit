@@ -1,5 +1,7 @@
 # Restart-Safe Gate Commands — Issue Analysis
 
+> Historical issue-analysis document. It describes the pre-fix failure mode and design targets for restart-safe command verification. The current shipped behavior is documented in [Restart-safe command gate verification](../verification-restart.md).
+
 ## 1. Observed failure and impact
 
 Observed incident:
