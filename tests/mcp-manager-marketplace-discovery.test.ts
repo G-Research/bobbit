@@ -820,20 +820,24 @@ describe("SessionManager scoped MCP manager creation", () => {
     }
   });
 
-  it("routes no-project sessions to their cwd-scoped MCP manager when no scopeKey is supplied", async () => {
+  it("routes no-project sessions to the default MCP manager without cwd fallback", async () => {
     const { cwd } = tmpDirs();
     const sessionManager = new SessionManager() as any;
     const defaultMgr = { marker: "default" };
-    const cwdMgr = { marker: "cwd", connectAll: async () => {} };
+    const createMcpManagerCalls: unknown[] = [];
     const sessionId = "cwd-session";
     sessionManager.mcpManager = defaultMgr;
-    sessionManager.createMcpManager = () => cwdMgr;
+    sessionManager.createMcpManager = (...args: unknown[]) => {
+      createMcpManagerCalls.push(args);
+      throw new Error("projectless sessions must not create cwd-scoped MCP managers");
+    };
     sessionManager.sessions.set(sessionId, { id: sessionId, cwd });
 
-    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), cwdMgr);
-    assert.equal(sessionManager.getMcpManagerForSession(sessionId), cwdMgr);
-    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), cwdMgr);
-    assert.notEqual(await sessionManager.resolveMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(sessionManager.getMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId, `cwd:${path.resolve(cwd)}`), null);
+    assert.deepEqual(createMcpManagerCalls, []);
   });
 
   it("refreshes external MCP tool registrations after pending marketplace reloads complete", async () => {
