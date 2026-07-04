@@ -1,8 +1,8 @@
-import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
+import { atomicWriteJsonSync, loadJsonWithBackupFallback } from "./atomic-json.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -75,43 +75,38 @@ function compositeKey(goalId: string, gateId: string): string {
 }
 
 export class GateStore {
-	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private gates: Map<string, GateState> = new Map();
+	/** Number of .bak generations to keep alongside gates.json. */
+	private static readonly BACKUP_COUNT = 3;
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
 	constructor(stateDir: string) {
-		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "gates.json");
 		this.load();
 	}
 
 	private load(): void {
-		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
-				if (Array.isArray(data)) {
-					for (const g of data) {
-						if (g.gateId && g.goalId) {
-							this.gates.set(compositeKey(g.goalId, g.gateId), g);
-						}
-					}
+		const data = loadJsonWithBackupFallback<GateState[]>(this.storeFile, {
+			backups: GateStore.BACKUP_COUNT,
+			onBackupUsed: (usedFile) =>
+				console.warn(`[gate-store] Loaded from backup ${path.basename(usedFile)} — primary missing/corrupt`),
+		});
+		if (Array.isArray(data)) {
+			for (const g of data) {
+				if (g.gateId && g.goalId) {
+					this.gates.set(compositeKey(g.goalId, g.gateId), g);
 				}
 			}
-		} catch (err) {
-			console.error("[gate-store] Failed to load persisted gates:", err);
 		}
 	}
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
 			const data = Array.from(this.gates.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			atomicWriteJsonSync(this.storeFile, data, { backups: GateStore.BACKUP_COUNT });
 		} catch (err) {
 			console.error("[gate-store] Failed to save gates:", err);
 		}
