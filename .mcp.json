@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "/Users/aj/.local/share/uv/tools/graphifyy/bin/python",
+      "args": ["-m", "graphify.serve", "/Users/aj/Documents/dev/bobbit-aj/src/graphify-out/graph.json"]
+    }
+  }
+}
