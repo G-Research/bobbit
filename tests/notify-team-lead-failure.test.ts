@@ -71,6 +71,48 @@ describe("buildVerificationFailureMessage", () => {
 		assert.doesNotMatch(message, /step="QA"/);
 	});
 
+	it("keeps real command failures whose output mentions restart while omitting no-verdict restart rows", () => {
+		const steps: any[] = [
+			{
+				name: "Real command failure",
+				type: "command",
+				passed: false,
+				status: "failed",
+				output: "Assertion failed while testing text: Step was interrupted by server restart",
+			},
+			{
+				name: "Restart interrupted command",
+				type: "command",
+				passed: false,
+				status: "waiting",
+				output: "Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained.",
+			},
+		];
+
+		const message = buildVerificationFailureMessage("implementation", steps);
+
+		assert.match(
+			message,
+			/step="Real command failure"/,
+			"RESTART_SAFE_COMMAND_NOTIFICATION_FILTER: real command failures must not be filtered only because output contains restart text.",
+		);
+		assert.match(
+			message,
+			/\*\*Failed step:\*\* `Real command failure` \(`command`\)/,
+			"RESTART_SAFE_COMMAND_NOTIFICATION_FILTER: notification should include the real failed command step.",
+		);
+		assert.doesNotMatch(
+			message,
+			/step="Restart interrupted command"/,
+			"RESTART_SAFE_COMMAND_NOTIFICATION_FILTER: no-verdict restart-interrupted rows must stay omitted.",
+		);
+		assert.doesNotMatch(
+			message,
+			/\*\*Failed step:\*\* `Restart interrupted command`/,
+			"RESTART_SAFE_COMMAND_NOTIFICATION_FILTER: no-verdict restart-interrupted rows must not be listed as failed steps.",
+		);
+	});
+
 	it("omits long failed-step output entirely instead of truncating it", () => {
 		const output = `START\n${"x".repeat(610)}\nTAIL`;
 		const message = buildVerificationFailureMessage("execution", [

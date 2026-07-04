@@ -9,8 +9,9 @@ import type {
  * AnnotationStore — Pure data module for managing review annotations.
  * No Lit dependency. Uses in-memory cache with server-side persistence.
  *
- * Cache-first pattern: all reads are synchronous from cache, all writes
- * update cache immediately and fire-and-forget to server API.
+ * Cache-first pattern: all reads are synchronous from cache. Writes update
+ * cache immediately and return the server persistence promise so callers can
+ * await durability before navigation/reload-sensitive UI state changes.
  * On session connect, `initAnnotationStore()` hydrates cache from server.
  */
 
@@ -19,8 +20,8 @@ import type {
 export type AnnotationKey = { sessionId: string; bucket: string };
 
 export interface AnnotationBackend {
-  add(key: AnnotationKey, ann: ReviewAnnotation): void;
-  remove(key: AnnotationKey, id: string): void;
+  add(key: AnnotationKey, ann: ReviewAnnotation): void | Promise<void>;
+  remove(key: AnnotationKey, id: string): void | Promise<void>;
   get(key: AnnotationKey): ReviewAnnotation[];
 }
 
@@ -80,18 +81,28 @@ function _authHeaders(): Record<string, string> {
   };
 }
 
-function _serverFetch(url: string, options?: RequestInit): void {
+function _isKeepaliveSafe(options?: RequestInit): boolean {
+  const body = options?.body;
+  if (body == null) return true;
+  if (typeof body !== "string") return false;
+  return new TextEncoder().encode(body).byteLength <= 60 * 1024;
+}
+
+function _serverFetch(url: string, options?: RequestInit): Promise<void> {
   const p = fetch(url, {
     ...options,
+    keepalive: options?.keepalive ?? _isKeepaliveSafe(options),
     headers: { ..._authHeaders(), ...options?.headers },
   }).then(() => {}).catch(() => {
-    // Fire-and-forget — server down is non-fatal
+    // Persistence is best-effort when the server is unavailable. Callers that
+    // await this promise still wait for the request to settle when it can run.
   });
   _pendingWrites.push(p);
   p.finally(() => {
     const idx = _pendingWrites.indexOf(p);
     if (idx >= 0) _pendingWrites.splice(idx, 1);
   });
+  return p;
 }
 
 function _ensureSessionCache(sessionId: string): Map<string, ReviewAnnotation[]> {
@@ -147,27 +158,27 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
 
 // ── Annotation CRUD ──────────────────────────────────────────────────
 
-export function addAnnotation(sessionId: string, docTitle: string, annotation: ReviewAnnotation): void {
+export function addAnnotation(sessionId: string, docTitle: string, annotation: ReviewAnnotation): Promise<void> {
   const sessionCache = _ensureSessionCache(sessionId);
   const docAnnotations = [...(sessionCache.get(docTitle) || [])];
   docAnnotations.push(annotation);
   sessionCache.set(docTitle, docAnnotations);
 
-  _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
+  return _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ docTitle, annotation }),
   });
 }
 
-export function removeAnnotation(sessionId: string, docTitle: string, annotationId: string): void {
+export function removeAnnotation(sessionId: string, docTitle: string, annotationId: string): Promise<void> {
   const sessionCache = _annotationCache.get(sessionId);
   if (sessionCache) {
     const filtered = (sessionCache.get(docTitle) || []).filter(a => a.id !== annotationId);
     sessionCache.set(docTitle, filtered);
   }
 
-  _serverFetch(
+  return _serverFetch(
     `/api/sessions/${sessionId}/review/annotations/${encodeURIComponent(annotationId)}?docTitle=${encodeURIComponent(docTitle)}`,
     { method: "DELETE" },
   );
@@ -177,20 +188,20 @@ export function getAnnotations(sessionId: string, docTitle: string): ReviewAnnot
   return _annotationCache.get(sessionId)?.get(docTitle) || [];
 }
 
-export function clearAnnotations(sessionId: string, docTitle: string): void {
+export function clearAnnotations(sessionId: string, docTitle: string): Promise<void> {
   _annotationCache.get(sessionId)?.delete(docTitle);
 
-  _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
+  return _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ docTitle }),
   });
 }
 
-export function clearAllAnnotations(sessionId: string): void {
+export function clearAllAnnotations(sessionId: string): Promise<void> {
   _annotationCache.delete(sessionId);
 
-  _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
+  return _serverFetch(`/api/sessions/${sessionId}/review/annotations`, {
     method: "DELETE",
   });
 }
@@ -201,10 +212,10 @@ export function clearAllAnnotations(sessionId: string): void {
  * Mark that the review has been submitted for a session.
  * Prevents review pane from reopening on reconnect/replay.
  */
-export function markReviewSubmitted(sessionId: string): void {
+export function markReviewSubmitted(sessionId: string): Promise<void> {
   _submittedCache.set(sessionId, true);
 
-  _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
+  return _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ submitted: true }),
@@ -227,12 +238,12 @@ export function isReviewSubmitted(sessionId: string): boolean {
  * them on reload. Keeping the PUT conditional eliminates the race without
  * losing the across-reconnect persistence the call site relies on. RP-09.
  */
-export function clearReviewSubmitted(sessionId: string): void {
+export function clearReviewSubmitted(sessionId: string): Promise<void> | void {
   const wasSubmitted = _submittedCache.get(sessionId) === true;
   _submittedCache.set(sessionId, false);
   if (!wasSubmitted) return;
 
-  _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
+  return _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ submitted: false }),
@@ -241,16 +252,102 @@ export function clearReviewSubmitted(sessionId: string): void {
 
 // ── Aggregate helpers ────────────────────────────────────────────────
 
-type ReviewDocumentCollection = ReadonlyMap<string, Pick<ReviewDocumentModel, "title" | "markdown">>;
+type ReviewDocumentLike = Pick<ReviewDocumentModel, "title" | "markdown" | "documentId">;
+type ReviewDocumentCollection = ReadonlyMap<string, ReviewDocumentLike>;
 
-function _displayTitle(key: string, doc: Pick<ReviewDocumentModel, "title" | "markdown">): string {
+function _displayTitle(key: string, doc: ReviewDocumentLike): string {
   return doc.title || key;
+}
+
+function _uniquePush(values: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (!trimmed || values.includes(trimmed)) return;
+  values.push(trimmed);
+}
+
+function _isUniqueDocumentTitle(
+  doc: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): boolean {
+  const title = doc.title?.trim();
+  if (!title) return false;
+  if (!documents) return true;
+
+  let matches = 0;
+  for (const [candidateKey, candidate] of documents) {
+    const candidateTitle = candidate.title?.trim() || candidateKey;
+    if (candidateTitle === title) matches += 1;
+    if (matches > 1) return false;
+  }
+  return true;
+}
+
+function _annotationBucketCandidates(
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): string[] {
+  const candidates: string[] = [];
+  _uniquePush(candidates, documentKey);
+  _uniquePush(candidates, document.documentId);
+  if (_isUniqueDocumentTitle(document, documents)) {
+    _uniquePush(candidates, document.title);
+  }
+  return candidates;
+}
+
+export function getAnnotationBucketForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): string {
+  const candidates = _annotationBucketCandidates(documentKey, document, documents);
+  const sessionCache = _annotationCache.get(sessionId);
+  if (sessionCache) {
+    for (const bucket of candidates) {
+      if ((sessionCache.get(bucket) || []).length > 0) return bucket;
+    }
+  }
+  return candidates[0] || documentKey || document.title;
+}
+
+export function getAnnotationsForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): ReviewAnnotation[] {
+  const sessionCache = _annotationCache.get(sessionId);
+  if (!sessionCache) return [];
+
+  const seen = new Set<string>();
+  const annotations: ReviewAnnotation[] = [];
+  for (const bucket of _annotationBucketCandidates(documentKey, document, documents)) {
+    for (const ann of sessionCache.get(bucket) || []) {
+      const identity = ann.id || `${ann.start ?? ""}:${ann.end ?? ""}:${ann.quote}:${ann.comment}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      annotations.push(ann);
+    }
+  }
+  return annotations;
+}
+
+export function getDocumentAnnotationCountForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): number {
+  return getAnnotationsForDocument(sessionId, documentKey, document, documents).length;
 }
 
 function _documentForComment(
   comment: ReviewInlineCommentPayload,
   documents: ReviewDocumentCollection,
-): Pick<ReviewDocumentModel, "title" | "markdown"> | undefined {
+): ReviewDocumentLike | undefined {
   const directMatch = documents.get(comment.documentTitle);
   if (directMatch) return directMatch;
   for (const [key, doc] of documents) {
@@ -303,10 +400,8 @@ export function getTotalAnnotationCount(
   documents: ReviewDocumentCollection,
 ): number {
   let total = 0;
-  const sessionCache = _annotationCache.get(sessionId);
-  if (!sessionCache) return 0;
-  for (const [title] of documents) {
-    total += (sessionCache.get(title) || []).length;
+  for (const [title, doc] of documents) {
+    total += getDocumentAnnotationCountForDocument(sessionId, title, doc, documents);
   }
   return total;
 }
@@ -317,12 +412,13 @@ export function getDocumentAnnotationCount(sessionId: string, documentTitle: str
 
 function _inlineCommentPayloadsForEntries(
   sessionId: string,
-  entries: Iterable<readonly [string, Pick<ReviewDocumentModel, "title" | "markdown">]>,
+  entries: Iterable<readonly [string, ReviewDocumentLike]>,
+  documents?: ReviewDocumentCollection,
 ): ReviewInlineCommentPayload[] {
   const inlineComments: ReviewInlineCommentPayload[] = [];
 
   for (const [title, doc] of entries) {
-    for (const ann of getAnnotations(sessionId, title)) {
+    for (const ann of getAnnotationsForDocument(sessionId, title, doc, documents)) {
       inlineComments.push({
         documentTitle: _displayTitle(title, doc),
         quote: ann.quote,
@@ -346,15 +442,15 @@ export function getInlineCommentPayloads(
   sessionId: string,
   documents: ReviewDocumentCollection,
 ): ReviewInlineCommentPayload[] {
-  return _inlineCommentPayloadsForEntries(sessionId, documents);
+  return _inlineCommentPayloadsForEntries(sessionId, documents, documents);
 }
 
 export function getInlineCommentPayloadsForDocument(
   sessionId: string,
   documentTitle: string,
-  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+  document: ReviewDocumentLike,
 ): ReviewInlineCommentPayload[] {
-  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]]);
+  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]], new Map([[documentTitle, document]]));
 }
 
 /**

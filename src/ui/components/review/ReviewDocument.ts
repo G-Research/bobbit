@@ -593,7 +593,7 @@ export class ReviewDocument extends LitElement {
     const id = this._hoverChipId;
     if (!id) return;
     this._hideHoverChipNow();
-    this._removeAnnotation(id);
+    void this._removeAnnotation(id);
   }
 
   // --- Mobile selection flow ---
@@ -746,13 +746,13 @@ export class ReviewDocument extends LitElement {
 
   // --- End mobile selection flow ---
 
-  private _onAnnotationSubmit(e: CustomEvent): void {
+  private async _onAnnotationSubmit(e: CustomEvent): Promise<void> {
     const { comment } = e.detail;
     if (!comment || !this._pendingSelection) return;
 
-    // If editing an existing annotation, remove the old one first
+    // If editing an existing annotation, remove the old one first.
     if (this._editingAnnotationId) {
-      this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, this._editingAnnotationId);
+      await this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, this._editingAnnotationId);
       try { this._annotator?.removeAnnotation(this._editingAnnotationId); } catch { /* ignore */ }
     }
 
@@ -768,7 +768,7 @@ export class ReviewDocument extends LitElement {
       isCode: sel.isCode,
     };
 
-    this.backend.add({ sessionId: this.sessionId, bucket: this.docTitle }, ann);
+    await this.backend.add({ sessionId: this.sessionId, bucket: this.docTitle }, ann);
     this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._pendingSelection = null;
     this._popoverOpen = false;
@@ -804,7 +804,8 @@ export class ReviewDocument extends LitElement {
       }
     }
 
-    // Notify parent of annotation count change
+    // Notify parent only after persistence has settled so immediate reloads
+    // can't observe the badge before the server-side annotation is durable.
     this.dispatchEvent(new CustomEvent("annotation-change", { bubbles: true, composed: true }));
   }
 
@@ -828,8 +829,8 @@ export class ReviewDocument extends LitElement {
     });
   }
 
-  private _removeAnnotation(annotationId: string): void {
-    this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, annotationId);
+  private async _removeAnnotation(annotationId: string): Promise<void> {
+    await this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, annotationId);
     this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._detachedAnnotations = this._detachedAnnotations.filter(a => a.id !== annotationId);
 
@@ -928,7 +929,7 @@ export class ReviewDocument extends LitElement {
       onCancel: () => this._onAnnotationCancel(),
       onDelete: editingId
         ? () => {
-            this._removeAnnotation(editingId);
+            void this._removeAnnotation(editingId);
             this._onAnnotationCancel();
           }
         : undefined,
@@ -968,7 +969,7 @@ export class ReviewDocument extends LitElement {
                     <div class="review-detached-comment">${ann.comment}</div>
                     <button
                       class="review-detached-remove"
-                      @click=${() => this._removeAnnotation(ann.id)}
+                      @click=${() => { void this._removeAnnotation(ann.id); }}
                       title="Remove comment"
                     >×</button>
                   </div>

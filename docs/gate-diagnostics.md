@@ -6,7 +6,7 @@ Retained gate diagnostics preserve the evidence from automated gate verification
 
 Gate verification stores a compact step result in the gate history so `gate_status`, notifications, and default `gate_inspect` calls stay small enough for agent context. Command steps can also emit much larger stdout/stderr streams and Playwright artifacts. Those diagnostics are retained in Bobbit state, outside the goal worktree. Verification inspection reads logs with bounded selection and exposes artifacts as a compact index; artifact file content is fetched only when a caller explicitly targets one artifact.
 
-This split keeps routine status checks cheap while making failed E2E and browser-test gates diagnosable after worktree cleanup or a gateway restart.
+This split keeps routine status checks cheap while making failed E2E and browser-test gates diagnosable after worktree cleanup or a gateway restart. During restart recovery, the same files let `gate_status` and `gate_inspect` show bounded output from before and after the gateway restart.
 
 ## What is retained
 
@@ -21,10 +21,12 @@ For command verification steps, Bobbit writes retained diagnostics under the gat
     playwright-report/...
 ```
 
-The gate store persists references to these files on the verification step. Completed gate inspection can therefore read the state copy even if:
+While a restart-recoverable command is running, the verification harness also persists process recovery files under the verification state tree: a pid/nonce identity file, heartbeat file, and atomic exit-code file. Those files are operational state, not user artifacts, but they point at the same retained stdout/stderr logs used for inspection.
+
+The gate store persists references to the retained diagnostics on the verification step. Completed gate inspection can therefore read the state copy even if:
 
 - the original goal worktree was cleaned up;
-- the gateway restarted after the command finished;
+- the gateway restarted while or after the command ran;
 - the compact `GateSignalStep.output` only contains a short failure tail.
 
 The compact step output is still the source for default status views. The retained files are the source for explicit diagnostic inspection.
@@ -126,5 +128,6 @@ Gate reset does not delete historical diagnostics; reset changes approval state 
 ## Related references
 
 - [Goals, workflows, and tasks — Verification](goals-workflows-tasks.md#verification)
+- [Restart-safe command gate verification](verification-restart.md)
 - [REST API — Gate inspect endpoint](rest-api.md#gate-inspect-endpoint)
 - [Debugging — Failed gate has missing or compact logs](debugging.md#failed-gate-has-missing-or-compact-logs)

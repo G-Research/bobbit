@@ -454,6 +454,14 @@ Running command steps can include live stdout/stderr tails. The server reads tho
 
 Completed command steps also retain stdout/stderr under Bobbit state. Default status surfaces and implicit inspection stay compact, but any explicit `gate_inspect(section="verification", mode=...)` request can query the retained logs and returns diagnostics metadata when available. Playwright-style `test-results` and `playwright-report` artifacts are copied into the same retained diagnostics tree, including `error-context.md`, traces, screenshots, and reports. Retained log streams are capped at 20 MiB each, artifact copying is symlink-hardened, and diagnostics are cleaned up when the owning goal is archived or deleted. Team leads should inspect these persisted diagnostics before rerunning expensive suites. See [Retained gate diagnostics](gate-diagnostics.md) for the full storage, inspection, and cleanup model.
 
+#### Command step restart recovery
+
+Command verification steps persist enough state to survive a gateway restart: process metadata, stdout/stderr log paths, durable exit-file paths, identity files, heartbeat files, original deadlines, and cancellation/timeout kill intent. If a restarted gateway finds an exit file, it finalizes from that real command verdict and retained logs. If the command is still running, Bobbit reattaches only after identity checks prove the PID belongs to the recorded command.
+
+A restart that leaves no durable exit status is not treated as a command failure. Bobbit records an explicit restart-interrupted step row, leaves the gate `pending`, and asks the team lead to re-signal. Timeout and cancellation cleanup also persists intent until Bobbit verifies the command tree is gone; if identity cannot be proven, Bobbit refuses unsafe PID kills and keeps retryable cleanup state instead of killing an unrelated process.
+
+See [Restart-safe command gate verification](verification-restart.md) for the full recovery, identity, and cleanup model.
+
 ##### Targeting a single verification step
 
 A gate often runs several verify steps (e.g. type-check + lint + unit + e2e, or multiple review steps). By default `gate_inspect section=verification` returns *every* step, so a team lead chasing one failing step still receives all the others' output and cannot scope a `grep`/`slice` to the step they care about. The optional `step` parameter fixes that: pass the step **name** and the snapshot is scoped to just that one step.

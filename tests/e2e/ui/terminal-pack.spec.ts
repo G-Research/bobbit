@@ -259,6 +259,7 @@ test.describe("terminal pack panel", () => {
 		await openTerminalFromSessionMenu(page);
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalMountedForFrameInjection(page);
+		await muteRealTerminalFrames(page);
 
 		const run = `bobbit_windows_conpty_${Date.now()}`;
 		const burstDone = `${run}_BURST_DONE`;
@@ -297,6 +298,7 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel()), "terminal panel should restore for Windows ConPTY replay reproduction").toBeVisible({ timeout: 20_000 });
 		await waitForTerminalMountedForFrameInjection(page);
 		await expect.poll(() => channelSendCount(page, "ext_channel_attach"), { timeout: 20_000 }).toBeGreaterThan(0);
+		await muteRealTerminalFrames(page);
 		await injectTerminalTextFrame(page, WINDOWS_CMD_CONPTY_STARTUP_STREAM + burst + followUpPrompt);
 		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
 		await expect(page.locator(terminalHost())).toContainText(followUp, { timeout: 10_000 });
@@ -392,10 +394,32 @@ async function listContributions(): Promise<Array<{ packId: string; panels: Arra
 async function installChannelFrameSpy(page: import("@playwright/test").Page): Promise<void> {
 	await page.addInitScript(() => {
 		const win = window as any;
-		win.__terminalE2E = { sent: [] as any[], received: [] as any[], sockets: [] as WebSocket[] };
+		win.__terminalE2E = {
+			sent: [] as any[],
+			received: [] as any[],
+			sockets: [] as WebSocket[],
+			mutedRealFrameChannels: new Set<string>(),
+		};
+		const isMutedRealFrame = (data: unknown): boolean => {
+			if (typeof data !== "string") return false;
+			try {
+				const msg = JSON.parse(data);
+				return msg?.type === "ext_channel_frame"
+					&& msg.__terminalE2EInjected !== true
+					&& typeof msg.channelId === "string"
+					&& win.__terminalE2E.mutedRealFrameChannels.has(msg.channelId);
+			} catch {
+				return false;
+			}
+		};
+		win.__terminalE2E.muteRealFrames = (channelId: string) => win.__terminalE2E.mutedRealFrameChannels.add(channelId);
+		win.__terminalE2E.unmuteRealFrames = (channelId: string) => win.__terminalE2E.mutedRealFrameChannels.delete(channelId);
 		win.__terminalE2E.injectServerMessage = (msg: any) => {
-			const data = JSON.stringify(msg);
-			win.__terminalE2E.received.push(msg);
+			const tagged = msg && typeof msg === "object" && !Array.isArray(msg)
+				? { ...msg, __terminalE2EInjected: true }
+				: msg;
+			const data = JSON.stringify(tagged);
+			win.__terminalE2E.received.push(tagged);
 			const sockets = [...win.__terminalE2E.sockets].filter((socket: WebSocket) => socket.readyState === WebSocket.OPEN);
 			for (const socket of sockets) {
 				const event = new MessageEvent("message", { data });
@@ -410,6 +434,10 @@ async function installChannelFrameSpy(page: import("@playwright/test").Page): Pr
 				super(url, protocols as any);
 				win.__terminalE2E.sockets.push(this);
 				this.addEventListener("message", (event: MessageEvent) => {
+					if (isMutedRealFrame(event.data)) {
+						event.stopImmediatePropagation();
+						return;
+					}
 					if (typeof event.data !== "string") return;
 					try {
 						const msg = JSON.parse(event.data);
@@ -464,6 +492,15 @@ async function injectTerminalFrame(page: import("@playwright/test").Page, frame:
 		(window as any).__terminalE2E?.injectServerMessage?.({ type: "ext_channel_frame", channelId: id, frame: injectedFrame });
 	}, { channelId, frame });
 	await waitForTerminalAnimationFrames(page);
+}
+
+async function muteRealTerminalFrames(page: import("@playwright/test").Page): Promise<string> {
+	// The ConPTY reproducer injects deterministic bridge frames; live PTY repaint
+	// frames can race with those fixtures on startup/resize and invalidate the fixture.
+	const channelId = await latestTerminalChannelId(page);
+	expect(channelId, "terminal reproducer needs an attached terminal channel before muting live PTY frames").toBeTruthy();
+	await page.evaluate((id) => (window as any).__terminalE2E?.muteRealFrames?.(id), channelId);
+	return channelId;
 }
 
 async function waitForTerminalAnimationFrames(page: import("@playwright/test").Page): Promise<void> {
@@ -772,12 +809,13 @@ function terminalContentProblems(snapshot: TerminalDebugSnapshot, expectedNearBo
 		}
 	}
 	if (expectedNearBottom) {
-		const bottomText = snapshot.rows.bottom.join("");
+		const bottomRows = nearBottomRows(snapshot.rows.all);
+		const bottomText = bottomRows.join("");
 		if (!snapshot.scroll.atBottom) {
 			problems.push(`${snapshot.phase}: expected viewport at bottom after follow-up prompt; scrollTop=${snapshot.scroll.scrollTop} max=${snapshot.scroll.maxScrollTop}`);
 		}
 		if (!bottomText.includes(expectedNearBottom) && !bottomText.includes(expectedNearBottom.slice(-32))) {
-			problems.push(`${snapshot.phase}: expected ${expectedNearBottom} near bottom rows; bottom=${JSON.stringify(snapshot.rows.bottom)}`);
+			problems.push(`${snapshot.phase}: expected ${expectedNearBottom} near bottom rows; nearBottom=${JSON.stringify(bottomRows)} rawBottom=${JSON.stringify(snapshot.rows.bottom)}`);
 		}
 	}
 	return problems;
