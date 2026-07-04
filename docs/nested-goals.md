@@ -210,6 +210,19 @@ three distinct codes (`403` on the spawn routes, `422` on `POST /api/goals`):
 
 UI controls are UX only; the server is the authority.
 
+### SWARM-W0 — the structural recursion cap on swarm-tagged workers
+
+A goal created with `swarmGroup` set (a dynamic-swarms fan-out sibling — see
+[docs/design/swarm-orchestration-w0.md](design/swarm-orchestration-w0.md)) is a
+**lowered worker node**: `GoalManager.createGoal` unconditionally forces
+**both** `subgoalsAllowed: false` **and** `maxNestingDepth: 0` on it, no matter
+what the caller passed for those two fields — belt-and-braces, since either
+field alone is independently sufficient to make `checkCanSpawnChild` reject a
+spawn attempt from that worker (`PARENT_SUBGOALS_DISABLED` /
+`NESTING_DEPTH_EXCEEDED`). A goal without `swarmGroup` is completely
+unaffected. Nothing stamps `swarmGroup` in production yet — it is a seam
+exercised by tests, consumed by the swarm feature's later waves.
+
 ### Max-depth semantics
 
 "Max nesting depth" (both the proposal control and the existing-goal settings

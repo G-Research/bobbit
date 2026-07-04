@@ -310,8 +310,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup } = opts ?? {};
 		const team = true;
 		const worktree = opts?.worktree !== false;
 		const now = Date.now();
@@ -388,6 +388,25 @@ export class GoalManager {
 		if (subgoalsAllowed !== undefined) goal.subgoalsAllowed = subgoalsAllowed;
 		if (maxNestingDepth !== undefined && Number.isFinite(maxNestingDepth)) {
 			goal.maxNestingDepth = maxNestingDepth;
+		}
+
+		// SWARM-W0 structural recursion cap (docs/design/swarm-orchestration-w0.md,
+		// design/swarm-orchestration.md §9 "Structural recursion cap"). A
+		// swarm-tagged worker is a LOWERED node — belt-and-braces, it ALWAYS gets
+		// BOTH subgoalsAllowed=false AND maxNestingDepth=0, unconditionally
+		// overriding any subgoalsAllowed/maxNestingDepth the caller passed above.
+		// One missed field is the blast radius, so both are forced here, in the
+		// ONE place every goal (root or child) is constructed — see
+		// `checkCanSpawnChild` (subgoal-nesting-limit.ts) for the enforcement
+		// this feeds: PARENT_SUBGOALS_DISABLED and NESTING_DEPTH_EXCEEDED are two
+		// independent rejections, either of which alone blocks a spawn attempt
+		// from this goal. Nothing stamps `swarmGroup` in production yet (seam
+		// exercised by tests only, consumed by SWARM-W1+); when absent this
+		// block is a no-op — zero behavior change for non-swarm goals.
+		if (swarmGroup) {
+			goal.swarmGroup = swarmGroup;
+			goal.subgoalsAllowed = false;
+			goal.maxNestingDepth = 0;
 		}
 
 		// Per-goal metadata (arbitrary, namespaced keys). Persist only a non-empty

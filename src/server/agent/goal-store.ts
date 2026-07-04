@@ -148,6 +148,22 @@ export interface PersistedGoal {
 	subgoalsAllowed?: boolean;
 	/** Per-goal max nesting depth override (root=1, +1 per hop). Cannot exceed system pref. */
 	maxNestingDepth?: number;
+
+	// ── SWARM-W0 (docs/design/swarm-orchestration-w0.md) ─────────────────
+	// Seam-only: nothing creates a swarmGroup-tagged goal in production yet
+	// (exercised by tests only, consumed by SWARM-W1+).
+
+	/**
+	 * Group id (rootGoalId-scoped) tagging this goal as one sibling of a
+	 * dynamic-swarm fan-out. Stamped at creation by `GoalManager.createGoal`
+	 * and never mutated afterward. Presence of this field is also what
+	 * forces the structural recursion cap (`subgoalsAllowed=false` +
+	 * `maxNestingDepth=0`, see `createGoal`) and suppresses the auto
+	 * git-merge on completion (see `mergeChild`) — every other code path is
+	 * gated on this field being undefined, so a non-swarm goal is completely
+	 * unaffected. See docs/design/swarm-orchestration-w0.md.
+	 */
+	swarmGroup?: string;
 }
 
 /**
