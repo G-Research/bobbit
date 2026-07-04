@@ -36,6 +36,7 @@ import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type 
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
+import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -1895,7 +1896,12 @@ export class SessionManager {
 				}
 				bridgeOptions.gatewayToken = scopedToken;
 			} else {
-				const adminToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				// readToken() is relocation-aware (serverSecretsDir() + legacy fallback),
+				// so a fresh install with no legacy <hqDir>/state/token still resolves.
+				const adminToken = readToken();
+				if (adminToken === null) {
+					throw new Error("Cannot read gateway credentials for sandbox");
+				}
 				bridgeOptions.gatewayToken = adminToken;
 			}
 		} catch (err) {

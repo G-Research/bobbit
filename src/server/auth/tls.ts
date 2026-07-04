@@ -7,11 +7,11 @@ import { serverSecretsDir } from "../bobbit-dir.js";
 // (outside any project root). Resolved lazily at call time because the secrets
 // dir depends on env (BOBBIT_SECRETS_DIR) that must be readable when used, not
 // at module load.
-function tlsDir(): string { return path.join(serverSecretsDir(), "tls"); }
+export function tlsDir(): string { return path.join(serverSecretsDir(), "tls"); }
 function certPath(): string { return path.join(tlsDir(), "cert.pem"); }
 function keyPath(): string { return path.join(tlsDir(), "key.pem"); }
 // mkcert CA files
-function caCertPath(): string { return path.join(tlsDir(), "ca.crt"); }
+export function caCertPath(): string { return path.join(tlsDir(), "ca.crt"); }
 function caKeyPath(): string { return path.join(tlsDir(), "ca.key"); }
 
 /** Resolve the openssl binary, checking Git-bundled locations on Windows. */

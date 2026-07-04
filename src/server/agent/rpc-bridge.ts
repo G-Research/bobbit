@@ -5,6 +5,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
+import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -435,10 +436,12 @@ export class RpcBridge {
 		if (this.options.containerId) {
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
 		} else {
-			// Trust our self-signed CA cert if available; fall back to disabling TLS verification
-			const caCertPath = path.join(bobbitStateDir(), "tls", "ca.crt");
-			const tlsEnv = fs.existsSync(caCertPath)
-				? { NODE_EXTRA_CA_CERTS: caCertPath }
+			// Trust our self-signed CA cert if available; fall back to disabling TLS
+			// verification. TLS material moved to serverSecretsDir() after the S1
+			// relocation, so resolve via the tls helper rather than bobbitStateDir().
+			const caCert = caCertPath();
+			const tlsEnv = fs.existsSync(caCert)
+				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
 			this.process = spawn(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],

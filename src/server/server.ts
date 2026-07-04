@@ -35,7 +35,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
-import { validateToken } from "./auth/token.js";
+import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -2263,7 +2263,10 @@ export function createGateway(config: GatewayConfig) {
 		gatewayInfo: () => {
 			try {
 				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				// Secrets moved to serverSecretsDir() after the S1 relocation; readToken()
+				// is relocation-aware (new location + legacy fallback), so a fresh install
+				// with no legacy token still resolves instead of ENOENT-ing.
+				const token = readToken() ?? "";
 				return { baseUrl, token };
 			} catch {
 				return { baseUrl: "", token: "" };
