@@ -72,6 +72,7 @@ import { PackContributionRegistry } from "./extension-host/pack-contribution-reg
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -2428,7 +2429,7 @@ export function createGateway(config: GatewayConfig) {
 			await sessionManager.lifecycleHub?.dispatchGoalCompleted(ctx);
 		},
 		hasGoalCompletedProviders: (goalId, projectId) =>
-			!!sessionManager.lifecycleHub?.hasProvidersForHooks(projectId, ["goalCompleted"], goalId),
+			!!sessionManager.lifecycleHub?.hasProvidersForHooks(projectId, GOAL_COMPLETED_PRESENCE_HOOKS, goalId),
 		resolveGoalPullRequest: (goalId) => {
 			const pr = prStatusStore.get(goalId);
 			if (!pr) return undefined;

@@ -8,8 +8,11 @@ import { packIdFromRoot } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
-
-export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalCompleted";
+// `LifecycleHook` is defined in lifecycle-hooks.js (single source of truth,
+// finding EXT-02) and re-exported here so existing `from "./lifecycle-hub.js"`
+// imports keep working unchanged.
+import type { LifecycleHook } from "./lifecycle-hooks.js";
+export type { LifecycleHook } from "./lifecycle-hooks.js";
 
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
