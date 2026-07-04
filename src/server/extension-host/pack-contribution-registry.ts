@@ -85,12 +85,17 @@ export class PackContributionRegistry implements PackContributionResolver {
 	 *                   scope, low→high precedence, already deduped-on-path
 	 *                   (mirrors `marketToolRoots`).
 	 * @param disabledEntrypoints  Activation override lookup (§7). Absent ⇒ all enabled.
+	 * @param disabledRuntimes  Disabled-runtime activation override lookup (DisabledRefs.runtimes).
+	 *                          A disabled runtime is dropped from `getPack().runtimes` /
+	 *                          `getRuntime`, so the supervisor's registry lookup 404s and
+	 *                          runtime listings omit it. Absent ⇒ all enabled.
 	 */
 	constructor(
 		private readonly enumerate: (projectId: string | undefined) => PackEntry[],
 		private readonly disabledEntrypoints?: DisabledEntrypointsLookup,
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
+		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -104,6 +109,44 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	getPack(projectId: string | undefined, packId: string): PackContributions | undefined {
 		return this.index(projectId).byId.get(packId);
+	}
+
+	/**
+	 * A single pack's RAW (activation-UNFILTERED) contributions, or undefined when
+	 * the pack is not installed. Unlike {@link getPack}, this does NOT drop dormant
+	 * providers (those whose `activation` gate is unsatisfied), disabled entrypoints,
+	 * or disabled runtimes — it returns exactly what `loadPackContributions` parses
+	 * from disk for the WINNING pack entry (highest precedence per packId).
+	 *
+	 * Used by the managed-runtime REST surface (`/api/pack-runtimes/:id/{capabilities,
+	 * start,restart}`) to CLASSIFY the deployment mode/config from a pack whose
+	 * provider is still dormant — e.g. Hindsight's external-mode `memory` provider,
+	 * which only activates once `externalUrl` is configured. Reading the
+	 * activation-filtered `getPack` there would misclassify fresh/default Hindsight as
+	 * provider-less and disclose / start the Docker default mode instead of the
+	 * external (no-Docker) setup path. Actual runtime availability (disabled-runtime
+	 * filtering) stays enforced by the supervisor's activation-filtered registry
+	 * lookups, NOT by this method. Providers carry their SCHEMA-DEFAULT flat config
+	 * (`config`); callers overlay persisted store config themselves.
+	 */
+	getRawPack(projectId: string | undefined, packId: string): PackContributions | undefined {
+		const entries = this.enumerate(projectId);
+		let winning: PackEntry | undefined;
+		for (const e of entries) {
+			if (!e.manifest) continue;
+			if (packIdFromRoot(e.path) !== packId) continue;
+			winning = e; // last wins (highest precedence)
+		}
+		if (!winning?.manifest) return undefined;
+		try {
+			return loadPackContributions(winning.path, winning.manifest);
+		} catch (err) {
+			if (err instanceof PackContributionError) {
+				console.error(`[pack-contributions] rejecting pack at ${winning.path}: ${err.message}`);
+				return undefined;
+			}
+			throw err;
+		}
 	}
 
 	getPanel(projectId: string | undefined, packId: string, panelId: string): PanelContribution | undefined {
@@ -198,6 +241,18 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };
+			// Runtimes: drop entries disabled via pack_activation (DisabledRefs.runtimes
+			// kill-switch), keyed by listName — mirrors the entrypoint/provider toggles.
+			// A disabled managed runtime is absent from `getPack().runtimes` /
+			// `getRuntime`, so the PackRuntimeSupervisor's registry lookup 404s
+			// (start/stop/capabilities reject) and runtime listings omit it; managed
+			// runtime dormancy is a deliberate activation decision.
+			const disabledRuntimes = this.disabledRuntimes
+				? new Set(this.disabledRuntimes(e.scope, projectId, contrib.packName))
+				: undefined;
+			if (disabledRuntimes && disabledRuntimes.size > 0) {
+				contrib = { ...contrib, runtimes: contrib.runtimes.filter((r) => !disabledRuntimes.has(r.listName)) };
+			}
 			loaded.push(contrib);
 		}
 
