@@ -7,14 +7,13 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { createSession, deleteSession, apiFetch } from "./e2e-setup.js";
+import { createSession, deleteSession, apiFetch, nonGitCwd } from "./e2e-setup.js";
 
 function freshDir(label: string): string {
 	const dir = path.join(
-		os.tmpdir(),
-		`bobbit-file-mentions-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		nonGitCwd(),
+		`file-mentions-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 	);
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;

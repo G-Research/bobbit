@@ -36,12 +36,11 @@
  */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
+import { apiFetch, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -62,7 +61,7 @@ function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 function makeGitFixture(): GitFixture {
-	const cwd = mkdtempSync(join(tmpdir(), "bobbit-prw-ha-"));
+	const cwd = mkdtempSync(join(nonGitCwd(), "bobbit-prw-ha-"));
 	git(cwd, ["init"]);
 	git(cwd, ["config", "user.name", "Bobbit E2E"]);
 	git(cwd, ["config", "user.email", "bobbit-e2e@example.test"]);

@@ -1,9 +1,8 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "./e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, nonGitCwd } from "./e2e-setup.js";
 import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 function git(cwd: string, args: string[]): string {
@@ -11,7 +10,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 function initRepo(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-quiet-pr-status-"));
+	const root = fs.mkdtempSync(path.join(nonGitCwd(), "bobbit-quiet-pr-status-"));
 	git(root, ["init"]);
 	git(root, ["checkout", "-B", "master"]);
 	git(root, ["config", "user.email", "test@bobbit.local"]);

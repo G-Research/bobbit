@@ -1,9 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal } from "./e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal, nonGitCwd } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'ERROR failed sentinel line '+i:'noise line '+i))"`;
@@ -358,7 +357,7 @@ test.describe("gate inspect slicing", () => {
 
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {
 		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifacts-${Date.now()}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `playwright-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Playwright Artifacts ${Date.now()}`, workflowId, cwd });
 		try {
@@ -456,7 +455,7 @@ test.describe("gate inspect slicing", () => {
 
 	test("bounds artifact grep tail slice full modes and rejects invalid artifact requests", async () => {
 		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifact-selection-${Date.now()}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `playwright-artifact-selection-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Artifact Selection ${Date.now()}`, workflowId, cwd });
 		try {
@@ -542,7 +541,7 @@ test.describe("gate inspect slicing", () => {
 
 	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async () => {
 		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-compact-artifacts-${Date.now()}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `compact-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Status Compact Diagnostics ${Date.now()}`, workflowId, cwd });
 		try {

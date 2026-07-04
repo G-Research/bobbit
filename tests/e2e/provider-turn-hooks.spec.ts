@@ -28,9 +28,9 @@ import {
 	messageEndPredicate,
 	waitForCondition,
 	assertStaysFalse,
+	nonGitCwd,
 } from "./e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -155,7 +155,7 @@ test.describe("provider per-turn hooks", () => {
 	let packDir: string;
 
 	function freshCwd(label: string): string {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `provider-turn-${label}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `provider-turn-${label}-`));
 		cwds.push(cwd);
 		return cwd;
 	}

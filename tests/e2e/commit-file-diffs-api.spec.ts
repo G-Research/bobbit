@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./e2e-setup.js";
 import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -85,7 +85,8 @@ async function expectTargetCommit(endpoint: string, targetSha: string): Promise<
 test.describe("commit file diff API", () => {
 	test("session commits include changed files and commit-scoped git-diff", async () => {
 		const { root, targetSha } = initRepo();
-		const sessionId = await createSession({ cwd: root, projectId: await defaultProjectId() });
+		const project = await registerProject({ name: `commit-diff-session-${Date.now()}`, rootPath: root });
+		const sessionId = await createSession({ cwd: root, projectId: project.id });
 		try {
 			await expectTargetCommit(`/api/sessions/${sessionId}`, targetSha);
 
@@ -98,12 +99,14 @@ test.describe("commit file diff API", () => {
 			expect((await worktreeResp.json()).diff).toContain("+worktree marker");
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await safeRm(root);
 		}
 	});
 
 	test("goal commits include changed files and commit-scoped git-diff", async () => {
 		const { root } = initRepo();
+		const project = await registerProject({ name: `commit-diff-goal-${Date.now()}`, rootPath: root });
 		let goalId: string | undefined;
 		try {
 			const goal = await createGoal({
@@ -111,7 +114,7 @@ test.describe("commit file diff API", () => {
 				cwd: root,
 				worktree: true,
 				autoStartTeam: false,
-				projectId: await defaultProjectId(),
+				projectId: project.id,
 			});
 			goalId = String(goal.id);
 			const readyGoal = await pollUntil(async () => {
@@ -140,6 +143,7 @@ test.describe("commit file diff API", () => {
 			await expectTargetCommit(`/api/goals/${goalId}`, goalTargetSha);
 		} finally {
 			if (goalId) await deleteGoal(goalId).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await safeRm(root);
 		}
 	});

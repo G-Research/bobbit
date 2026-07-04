@@ -12,7 +12,6 @@
 import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
@@ -104,17 +103,21 @@ export function nonGitCwd(): string {
  * A cwd that IS a git repository (minimal, no package-lock.json).
  * Used by tests that need worktree creation (e.g. staff agents).
  */
-let _gitCwd: string | undefined;
+const _gitCwdByHarnessRoot: Record<string, string> = {};
 export function gitCwd(): string {
-	if (!_gitCwd) {
-		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${port()}-${Date.now()}`);
-		mkdirSync(_gitCwd, { recursive: true });
-		writeFileSync(join(_gitCwd, "README.md"), "# E2E test repo\n");
-		execFileSync("git", ["init"], { cwd: _gitCwd, stdio: "pipe" });
-		execFileSync("git", ["add", "."], { cwd: _gitCwd, stdio: "pipe" });
-		execFileSync("git", ["commit", "-m", "init"], { cwd: _gitCwd, stdio: "pipe" });
+	const defaultRoot = harnessDefaultProjectRoot();
+	const key = `${port()}|${defaultRoot}`;
+	let cwd = _gitCwdByHarnessRoot[key];
+	if (!cwd) {
+		cwd = join(defaultRoot, ".e2e-workspaces", `git-${port()}-${Date.now()}`);
+		_gitCwdByHarnessRoot[key] = cwd;
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(cwd, "README.md"), "# E2E test repo\n");
+		execFileSync("git", ["init"], { cwd, stdio: "pipe" });
+		execFileSync("git", ["add", "."], { cwd, stdio: "pipe" });
+		execFileSync("git", ["commit", "-m", "init"], { cwd, stdio: "pipe" });
 	}
-	return _gitCwd;
+	try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 /**
