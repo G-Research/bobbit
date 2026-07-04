@@ -62,12 +62,12 @@ Thinking-level capability is centralized in `src/shared/thinking-levels.ts`; see
 
 For Opus 4.8, `xhigh` is accepted through two paths:
 
-1. **Pi metadata first.** If the discovered model carries `thinkingLevelMap.xhigh`, Bobbit trusts it.
+1. **Pi metadata first.** If the discovered model carries a `thinkingLevelMap`, Bobbit trusts the whole map (Opus 4.8's `{xhigh:"xhigh"}` yields the full `off→xhigh` ladder). Bobbit now mirrors pi-ai's map semantics fully, not just `xhigh` detection — see [Per-model thinking-level capabilities](thinking-levels.md#mirroring-pi-ai-when-a-thinkinglevelmap-is-present).
 2. **Fallback family rule.** Sparse payloads, including some AI Gateway and persisted-state paths, match Claude Opus 4.6+ ids with either hyphen or dotted spelling.
 
 Provider guarding still applies. The fallback accepts Anthropic, AI Gateway (`aigw`), and legacy empty-provider state. It rejects mismatched provider/id collisions, such as an OpenAI-provider model with a Claude-shaped id.
 
-Clamping is unchanged: if `xhigh` is stored but the resolved model does not support it, Bobbit degrades to the highest supported lower level. Stored preferences preserve the user's intent; spawn-time and set-time paths clamp against the resolved model before talking to Pi.
+Clamping for Opus 4.8 is unchanged: if `xhigh` is stored but the resolved model does not support it, Bobbit degrades to the highest supported lower level. Stored preferences preserve the user's intent; spawn-time and set-time paths clamp against the resolved model before talking to Pi. (The clamp is now up-then-down to match pi-ai exactly — relevant only for maps that drop `off` or a middle level, e.g. Fable; Opus 4.8 supports `off` so its clamp result is identical.)
 
 ## Spawn pinning and no-flash guarantees
 

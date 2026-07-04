@@ -29,6 +29,18 @@
     <option value="anthropic|claude-opus-4-5-20250920|1">Anthropic Claude Opus 4-5 (reasoning)</option>
     <option value="anthropic|claude-sonnet-4-6-20251101|1">Anthropic Claude Sonnet 4-6 (reasoning)</option>
     <option value="anthropic|claude-haiku-4-5|0">Anthropic Claude Haiku 4-5 (non-reasoning)</option>
+    <!--
+      Claude Fable 5 carries an upstream thinkingLevelMap {off:null, xhigh:"xhigh"}.
+      off:null = forced adaptive thinking, so "off" is dropped and the selector
+      must offer minimal/low/medium/high/xhigh only. The 4th `|`-segment encodes
+      the map as `key=value;key=value` (value "null" → null). A full tests/e2e/ui
+      browser picker test can't surface a selectable anthropic Fable model in the
+      e2e harness (model auth-surfacing isn't wired there), so this file:// fixture
+      is the reliable vehicle for the map-present UI-rendering contract; the
+      WS-level e2e (tests/e2e/fable-model-state-frame.spec.ts) covers the server
+      frame + persistence.
+    -->
+    <option value="anthropic|claude-fable-5|1|off=null;xhigh=xhigh">Anthropic Claude Fable 5 (reasoning, off:null map)</option>
     <option value="openai|gpt-5.2-codex|1">OpenAI gpt-5.2-codex (reasoning)</option>
     <option value="openai|gpt-5.2|1">OpenAI gpt-5.2 (reasoning)</option>
     <option value="openai|gpt-5.4|1">OpenAI gpt-5.4 (reasoning)</option>
@@ -56,6 +68,10 @@ const THINKING_LEVELS = ["off","minimal","low","medium","high","xhigh"];
 const RANK = { off:0, minimal:1, low:2, medium:3, high:4, xhigh:5 };
 
 function supportsXHigh(m) {
+  // Map-present: mirror pi-ai — xhigh needs an explicit non-null entry.
+  if (m.thinkingLevelMap !== undefined) {
+    return m.thinkingLevelMap.xhigh !== undefined && m.thinkingLevelMap.xhigh !== null;
+  }
   const id = m.id || "";
   const provider = (m.provider || "").toLowerCase();
   // Provider guard must fail closed on cross-provider id collisions —
@@ -69,6 +85,18 @@ function supportsXHigh(m) {
 
 function getSupportedThinkingLevels(m) {
   if (m.reasoning === false) return ["off"];
+  // Map-present: mirror pi-ai's getSupportedThinkingLevels exactly — drop levels
+  // mapped to null (e.g. off:null on Fable), keep absent levels, and keep xhigh
+  // only when present with a non-null value.
+  if (m.thinkingLevelMap !== undefined) {
+    const map = m.thinkingLevelMap;
+    return THINKING_LEVELS.filter((level) => {
+      const mapped = map[level];
+      if (mapped === null) return false;
+      if (level === "xhigh") return mapped !== undefined;
+      return true;
+    });
+  }
   const base = ["off","minimal","low","medium","high"];
   return supportsXHigh(m) ? base.concat("xhigh") : base;
 }
@@ -76,9 +104,15 @@ function getSupportedThinkingLevels(m) {
 function clampThinkingLevel(level, m) {
   if (level == null || level === "") return "off";
   const supported = new Set(getSupportedThinkingLevels(m));
-  let token = THINKING_LEVELS.includes(level) ? level : "off";
+  const token = THINKING_LEVELS.includes(level) ? level : "off";
   if (supported.has(token)) return token;
+  // Walk DOWN by rank to the nearest supported level.
   for (let i = RANK[token] - 1; i >= 0; i--) {
+    const c = THINKING_LEVELS[i];
+    if (supported.has(c)) return c;
+  }
+  // Nothing below — map dropped "off" itself (Fable). Step UP to the lowest supported.
+  for (let i = RANK[token] + 1; i < THINKING_LEVELS.length; i++) {
     const c = THINKING_LEVELS[i];
     if (supported.has(c)) return c;
   }
@@ -97,8 +131,22 @@ const currentSpan = document.getElementById("thinking-current");
 const supportedSpan = document.getElementById("supported-list");
 
 function parseModel(value) {
-  const [provider, id, reasoning] = value.split("|");
-  return { provider, id, reasoning: reasoning === "1" };
+  const [provider, id, reasoning, mapStr] = value.split("|");
+  const m = { provider, id, reasoning: reasoning === "1" };
+  // Optional 4th segment encodes an upstream thinkingLevelMap as
+  // `key=value;key=value` where the literal "null" decodes to null.
+  if (mapStr) {
+    const map = {};
+    for (const pair of mapStr.split(";")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      const key = pair.slice(0, eq);
+      const val = pair.slice(eq + 1);
+      map[key] = val === "null" ? null : val;
+    }
+    m.thinkingLevelMap = map;
+  }
+  return m;
 }
 
 function rerender() {

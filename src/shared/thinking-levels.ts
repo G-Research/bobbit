@@ -4,23 +4,34 @@
  *
  * Resolution order:
  *   1. If the model carries upstream per-model metadata (`thinkingLevelMap`),
- *      trust it for xhigh support.
+ *      trust it fully — this mirrors pi-ai's own `getSupportedThinkingLevels`
+ *      (`@earendil-works/pi-ai`), the source of truth the agent runtime uses.
  *   2. Otherwise fall back to Bobbit's family heuristics for sparse model
- *      payloads (notably AI Gateway / fallback persisted state).
+ *      payloads (notably AI Gateway / fallback persisted state) that carry no
+ *      `thinkingLevelMap`.
  *
- * Base rules:
- *   - "off" is always supported.
- *   - "minimal"/"low"/"medium"/"high" are supported iff the model has
- *     `reasoning === true`.
- *   - Fallback heuristic: "xhigh" is supported by:
+ * Map-present rules (mirror pi-ai exactly):
+ *   - `reasoning === false` → only "off".
+ *   - A level whose map value is exactly `null` is DROPPED (explicitly
+ *     unsupported). Notably `off: null` = forced adaptive thinking, so "off"
+ *     is NOT selectable (e.g. Claude Fable 5 → minimal/low/medium/high/xhigh).
+ *   - A level ABSENT from the map is KEPT (uses provider default), except
+ *     "xhigh" which is kept only when present with a non-null value.
+ *
+ * Map-absent (heuristic) rules:
+ *   - "off" is supported.
+ *   - "minimal"/"low"/"medium"/"high" are supported iff `reasoning === true`.
+ *   - "xhigh" is supported by:
  *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, claude-opus-4.8, …)
  *       • OpenAI gpt-5.1-codex-max
  *       • OpenAI gpt-5.2* / gpt-5.4* / gpt-5.5*
  *
- * Clamping (`clampThinkingLevel`) steps **down** by rank to the next-lower
- * supported level when the requested level is unsupported. Unknown tokens
- * are treated as "off" before clamping, so on a non-reasoning model any
- * unknown input ends up as "off".
+ * Clamping (`clampThinkingLevel`) resolves the requested token (unknown →
+ * "off"), returns it if supported, else steps **down** by rank to the
+ * next-lower supported level; if none exists below it steps **up** to the
+ * lowest supported level (needed when a map drops "off" itself, e.g. Fable).
+ * This preserves the documented down-clamp for every current family while
+ * fixing the off-unsupported case, matching pi-ai's clamp direction.
  */
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
@@ -132,15 +143,31 @@ export function supportsXHigh(m: ModelLike): boolean {
 
 /**
  * Levels supported by the given model.
- *  - reasoning === false → only "off".
- *  - else → off, minimal, low, medium, high (+ xhigh iff `supportsXHigh`).
  *
- * If `reasoning` is undefined (legacy client state), default to true so
- * existing reasoning-capable selectors keep working; the server filters
+ * When `thinkingLevelMap` is present, mirror pi-ai's `getSupportedThinkingLevels`
+ * exactly: filter the canonical ladder, dropping any level mapped to `null`
+ * (e.g. `off: null` = forced adaptive thinking → "off" unsupported) and keeping
+ * absent levels (except "xhigh", which needs an explicit non-null entry).
+ *
+ * When the map is absent (sparse AIGW / persisted-fallback payloads), fall back
+ * to Bobbit's family heuristic: off, minimal, low, medium, high (+ xhigh iff
+ * `supportsXHigh`), or only "off" for non-reasoning models.
+ *
+ * If `reasoning` is undefined (legacy client state), default to reasoning-capable
+ * so existing reasoning-capable selectors keep working; the server filters
  * non-reasoning models at the boundary via the registry-derived metadata.
  */
 export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
 	if (m.reasoning === false) return ["off"];
+	if (m.thinkingLevelMap !== undefined) {
+		const map = m.thinkingLevelMap;
+		return THINKING_LEVELS.filter((level) => {
+			const mapped = map[level];
+			if (mapped === null) return false;          // explicit null → dropped (unsupported)
+			if (level === "xhigh") return mapped !== undefined; // xhigh needs an explicit non-null entry
+			return true;                                 // absent (undefined) → kept (provider default)
+		});
+	}
 	const base: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 	return supportsXHigh(m) ? [...base, "xhigh"] : base;
 }
@@ -149,11 +176,16 @@ export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
  * Clamp a user-supplied level to one supported by the model.
  *
  *  - If `level` is supported by the model, returns it unchanged.
- *  - Else steps DOWN by rank (xhigh→high→medium→low→minimal→off) until
- *    a supported level is found. "off" is always supported so the walk
- *    always terminates.
- *  - Unknown strings become "off" first, then are clamped (which yields
- *    "off" on any model).
+ *  - Else steps UP by rank to the nearest supported level, then DOWN — exactly
+ *    mirroring pi-ai's `clampThinkingLevel` direction (the runtime source of
+ *    truth). Upward-first matters when a map drops a *middle* level while
+ *    keeping lower ones (e.g. gpt-5.5's `minimal: null` → supported
+ *    off/low/medium/high/xhigh): requesting `minimal` clamps UP to `low`, not
+ *    down to `off`, so valid reasoning intent is never silently disabled. It
+ *    also covers a map that drops `off` itself (Fable's `off: null`): `off`
+ *    clamps up to the lowest supported level rather than returning an
+ *    unsupported `off`.
+ *  - Unknown strings become "off" first, then are clamped.
  *  - If `level` is undefined/empty AND `opts.allowEmpty` is true, returns
  *    `undefined` (used by role overrides / prefs that mean "inherit").
  */
@@ -169,13 +201,20 @@ export function clampThinkingLevel(
 	const trimmed = typeof level === "string" ? level.trim() : "";
 	const supported = getSupportedThinkingLevels(m);
 	const supportedSet = new Set(supported);
-	// Unknown token → off (also guarantees presence in `supported`).
-	let token: ThinkingLevel = isThinkingLevel(trimmed) ? (trimmed as ThinkingLevel) : "off";
+	// Unknown token → off.
+	const token: ThinkingLevel = isThinkingLevel(trimmed) ? (trimmed as ThinkingLevel) : "off";
 	if (supportedSet.has(token)) return token;
-	// Walk down by rank until we hit a supported level.
+	// Walk UP by rank to the nearest supported level, then DOWN — matching
+	// pi-ai's clampThinkingLevel direction exactly. Upward-first keeps an
+	// unsupported middle level (e.g. gpt-5.5 drops "minimal") clamping to the
+	// next *higher* supported effort rather than collapsing to "off".
+	for (let i = RANK[token] + 1; i < ORDERED.length; i++) {
+		const candidate = ORDERED[i];
+		if (supportedSet.has(candidate)) return candidate;
+	}
 	for (let i = RANK[token] - 1; i >= 0; i--) {
 		const candidate = ORDERED[i];
 		if (supportedSet.has(candidate)) return candidate;
 	}
-	return "off";
+	return supported[0] ?? "off";
 }
