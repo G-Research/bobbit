@@ -256,7 +256,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	const allowedDefault = defaultAgentDir(normalizedProjectRoot);
 	const allowedDefaultCandidates = [allowedDefault, realpathForExistingPrefix(allowedDefault) ?? allowedDefault];
 	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, resolvedPath)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, resolvedPath);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, resolvedPath);
 	}
 
 	// Before creating a missing directory, resolve the deepest existing parent.
@@ -264,7 +264,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	// the git worktree, without leaving behind a rejected directory in the repo.
 	const preCreateRealTarget = realpathForExistingPrefix(resolvedPath);
 	if (preCreateRealTarget && isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, preCreateRealTarget)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, preCreateRealTarget);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, preCreateRealTarget);
 	}
 
 	try {
@@ -292,7 +292,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	}
 
 	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, realResolvedPath)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, realResolvedPath);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, realResolvedPath);
 	}
 
 	try {

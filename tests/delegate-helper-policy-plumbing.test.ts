@@ -21,7 +21,8 @@ describe("delegated helper worktree push policy plumbing", () => {
 	it("threads createSession opts into SessionSetupPlan", () => {
 		const manager = src("session-manager.ts");
 		assert.match(manager, /worktreePushPolicy\?: WorktreePushPolicy/);
-		assert.match(manager, /worktreePushPolicy: opts\?\.worktreePushPolicy/);
+		assert.match(manager, /const worktreePushPolicy = headquartersScope \? undefined : opts\?\.worktreePushPolicy;/);
+		assert.match(manager, /worktreePushPolicy,/);
 	});
 
 	it("passes SessionSetupPlan policy through to worktree creation and persistence", () => {
