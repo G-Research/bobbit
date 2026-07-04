@@ -232,8 +232,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url.startsWith("/api/projects/" + PROJECT_ID + "/qa-testing-config")) return response({ configured: false });
 	if (url.startsWith("/api/projects")) return response({ projects: [PROJECT] });
 	if (url.startsWith("/api/workflows")) return response({ workflows: [{ id: "general", name: "General", description: "General workflow", gates: [] }] });
-	if (url === "/api/tools") return response({ tools: [] });
-	if (url === "/api/roles") return response({ roles: [
+	// Match by prefix so project-scoped calls (e.g. `/api/roles?projectId=…`) from
+	// the staff-proposal / role-preview panels still resolve to the fixture data.
+	if (url.startsWith("/api/tools")) return response({ tools: [] });
+	if (url.startsWith("/api/roles")) return response({ roles: [
 		{ name: "coder", label: "Coder", promptTemplate: "Coder role", accessory: "none", createdAt: 1, updatedAt: 1 },
 		{ name: "architect", label: "Architect", promptTemplate: "Architect role", accessory: "none", createdAt: 1, updatedAt: 1 },
 	] });
