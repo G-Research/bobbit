@@ -148,6 +148,7 @@ describe("Headquarters directory migration", () => {
 		fs.mkdirSync(overrideConfig, { recursive: true });
 		seedProject(overrideState, hqProject(override));
 		fs.writeFileSync(path.join(overrideConfig, "project.yaml"), "name: Override HQ\n", "utf-8");
+		writeJson(path.join(root, ".bobbit", "state", "projects.json"), [normalProject("normal-default-root", root)]);
 		fs.mkdirSync(path.join(root, ".bobbit", "config"), { recursive: true });
 		fs.writeFileSync(path.join(root, ".bobbit", "config", "project.yaml"), "name: Normal Same Root\n", "utf-8");
 
@@ -161,6 +162,7 @@ describe("Headquarters directory migration", () => {
 
 		assert.equal(fs.readFileSync(path.join(overrideConfig, "project.yaml"), "utf-8"), "name: Override HQ\n");
 		assert.equal(fs.existsSync(path.join(override, "headquarters", "state")), false);
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(overrideState, "projects.json")).some(project => project.id === "normal-default-root"), false, "BOBBIT_DIR must not import default .bobbit project registry");
 		assert.ok(diagnostics.skipped.some(entry => entry.includes("override config is used in place")));
 	});
 });
