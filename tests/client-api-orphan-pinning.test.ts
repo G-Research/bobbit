@@ -258,12 +258,12 @@ const ALLOWLIST = new Set<string>(["/api/0/0/customize", "/api/0/0/override"]);
  * as designed, forcing their removal here.
  *
  * `/api/pack-runtimes` and its `/:id/start|stop|restart|logs|capabilities|down`
- * family (restoration W2.E, not yet started) are NOT listed here: as of this
- * writing no client code under src/app/ or src/ui/ references them at all —
- * only tests/e2e/pack-runtimes-api.spec.ts does, which is out of this test's
- * client-only scope (see module header). Once client UI wiring for pack
- * runtimes lands, add its call sites' paths here (or, if the route is
- * restored first, they'll simply pass with no burn-down entry needed).
+ * family (restoration W2.E) needed NO burn-down entry: the server route family
+ * and the client call sites (src/app/api.ts's `listPackRuntimes`,
+ * `startPackRuntime`, `stopPackRuntime`, `getPackRuntimeLogs`,
+ * `getPackRuntimeCapabilities`, `downPackRuntime`, `purgePackRuntime`) were
+ * restored together in the same PR, so this test never observed an orphaned
+ * state for them.
  */
 const KNOWN_ORPHANS = [
 	// Newly discovered by this test (not yet linked to a restoring PR as of

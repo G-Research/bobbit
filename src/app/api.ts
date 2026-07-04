@@ -3396,7 +3396,9 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 // /api/ext/contributions — so a disabled entity stays visible + re-enableable.
 // ============================================================================
 
-/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`. */
+/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`.
+ *  The schema-v2 arrays (`providers`/`hooks`/`runtimes`/`workflows`) are present
+ *  only for schema≥2 packs; absent = all enabled. */
 export interface DisabledRefs {
 	roles?: string[];
 	tools?: string[];
@@ -3406,6 +3408,12 @@ export interface DisabledRefs {
 	piExtensions?: string[];
 	/** contributionId -> disabled operation names. */
 	mcpOperations?: Record<string, string[]>;
+	/** Schema-v2 contribution basenames. */
+	providers?: string[];
+	hooks?: string[];
+	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
+	runtimes?: string[];
+	workflows?: string[];
 }
 
 /** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
@@ -3426,6 +3434,12 @@ export interface PackActivationCatalogue {
 	/** Pi extension activation refs. Rich entries are preferred, but older backends may
 	 *  return string refs; the UI normalizes both. */
 	piExtensions?: Array<string | PackActivationPiExtensionEntry>;
+	/** Schema-v2 contribution basenames (loader-resolved listNames). */
+	providers?: string[];
+	hooks?: string[];
+	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
+	runtimes?: string[];
+	workflows?: string[];
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }
@@ -3458,4 +3472,165 @@ export function setMcpOperationActivation(opts: {
 	expectedRevision?: string;
 }): Promise<MarketResult<PackActivationResponse>> {
 	return marketFetch("/api/marketplace/pack-activation/mcp-operation", jsonInit("PATCH", opts));
+}
+
+// ============================================================================
+// PACK MANAGED RUNTIMES (P3 — modes/consent design §8)
+//
+// Docker-backed runtimes a pack ships are consent-gated: the enable card must
+// disclose images/services, host ports, the data/volume path and the
+// memory/trust copy BEFORE the runtime starts. `startPolicy: on-enable` runtimes
+// start ONLY from the explicit pack-activation enable action — never on
+// boot/install/update. The capability summary is derived from the validated
+// manifest + selected mode (no Docker required), so the disclosure renders even
+// when Docker is unavailable or the runtime is stopped. External mode is a
+// non-Docker setup path and reports `dockerRequired: false`.
+// ============================================================================
+
+/** One exposed host port for the enable-card disclosure. Mirrors the server's
+ *  `PackRuntimeCapabilityPort` shape (pack-runtime-supervisor.ts) — there is no
+ *  human `label`; the env var name / manifest key serve as the label. */
+export interface PackRuntimePortInfo {
+	/** Manifest persistence/env key (e.g. `HINDSIGHT_API_PORT`). */
+	key: string;
+	/** Env var name the chosen host port is exposed under, when declared. */
+	env?: string;
+	/** Informational container-side port the service listens on. */
+	container?: number;
+	/** Allocated/persisted host port when one is already known (loopback-bound). */
+	host?: number;
+}
+
+/** Capability disclosure for a managed runtime, derived from the manifest +
+ *  selected mode (design §8). Used to render the consent enable-card. */
+export interface PackRuntimeCapabilitySummary {
+	packId: string;
+	runtimeId: string;
+	/** Resolved deployment mode the summary describes (e.g. `managed-postgres`). */
+	mode?: string;
+	/** Service/image names that will run for the selected mode (post-omit). */
+	services: string[];
+	/** Exposed host ports (loopback) the runtime will bind. */
+	ports: PackRuntimePortInfo[];
+	/** Effective host data/volume path for managed modes (e.g. `~/.hindsight`). */
+	volumePath?: string;
+	/** True for Docker-managed modes; false for the external (no-Docker) path. */
+	dockerRequired?: boolean;
+	/** First-party memory/trust disclosure copy. */
+	trust?: string;
+}
+
+/** Build the URL-safe runtime API id (`<packId>:<runtimeId>`) the
+ *  `/api/pack-runtimes/:id/*` routes expect (mirrors the server's
+ *  encodePackRuntimeId). `packId` is the pack's structural id (== packName for
+ *  first-party built-ins). */
+export function encodeRuntimeApiId(packId: string, runtimeId: string): string {
+	return `${encodeURIComponent(packId)}:${encodeURIComponent(runtimeId)}`;
+}
+
+/** GET capability disclosure for the consent enable-card. Best-effort: returns a
+ *  MarketResult so the UI degrades gracefully (static copy) when the route is
+ *  unavailable. `mode` selects the deployment mode to summarise. */
+export function getPackRuntimeCapabilities(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeCapabilitySummary>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	if (opts.mode) params.set("mode", opts.mode);
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/capabilities${qs ? `?${qs}` : ""}`);
+}
+
+/** POST `docker compose down` for a managed runtime. `volumes`+`removeState`
+ *  effect an explicit PURGE (down -v + runtime-state removal); without them this
+ *  is the uninstall-grade down that preserves bind-mounted data. */
+export function downPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<MarketResult<{ status: string }>> {
+	// `projectId` goes on the query string (the server's down route reads it from
+	// the query, not the JSON body); only `volumes`/`removeState` ride the body.
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	const body: Record<string, unknown> = {};
+	if (opts.volumes) body.volumes = true;
+	if (opts.removeState) body.removeState = true;
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/down${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
+}
+
+/** POST explicit purge for a pack runtime: `down -v` + runtime-state removal
+ *  (removes Docker volumes and supervisor-owned state). Destructive. */
+export function purgePackRuntime(opts: { scope: MarketScope; packName: string; runtimeId: string; projectId?: string }): Promise<MarketResult<{ status?: string }>> {
+	return marketFetch("/api/marketplace/purge-runtime", jsonInit("POST", opts));
+}
+
+// ── Live runtime status + explicit start/stop (Hindsight UX polish, design §5.1) ──
+// These mirror the server `PackRuntimeStatus` shape served by `GET /api/pack-runtimes`
+// (runtimes/pack-runtime-supervisor.ts) — do NOT invent fields. Reading status is a
+// PURE read (the supervisor `list`/`status` never starts Docker); the ONLY Docker
+// start path is the explicit {@link startPackRuntime} call wired to a user click.
+
+/** One compose service's reported state in a {@link PackRuntimeStatus}. Mirrors the
+ *  server `PackRuntimeServiceStatus`. */
+export interface PackRuntimeServiceStatus {
+	name: string;
+	state?: string;
+	health?: string;
+}
+
+/** Live status of a managed pack runtime, mirroring the server `PackRuntimeStatus`
+ *  (runtimes/pack-runtime-supervisor.ts). `status` is the supervisor's literal state;
+ *  `docker-unavailable` means Docker is not installed/running (the runtime is
+ *  effectively stopped). `id` is the URL-safe `encodePackRuntimeId(packId,runtimeId)`. */
+export interface PackRuntimeStatus {
+	id: string;
+	packId: string;
+	packName?: string;
+	runtimeId: string;
+	title?: string;
+	description?: string;
+	status: "docker-unavailable" | "stopped" | "starting" | "running" | "unhealthy";
+	mode?: string;
+	composeProject?: string;
+	services?: PackRuntimeServiceStatus[];
+	message?: string;
+}
+
+/** GET the live status of every managed pack runtime. PURE read — never starts
+ *  Docker (the supervisor `list` only inspects). Best-effort MarketResult so the
+ *  marketplace degrades gracefully (no status strip) when the supervisor is
+ *  unavailable (503) or Docker is absent. */
+export function listPackRuntimes(projectId?: string): Promise<MarketResult<{ runtimes: PackRuntimeStatus[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/pack-runtimes${qs}`);
+}
+
+/** POST an EXPLICIT start for a managed pack runtime (`/api/pack-runtimes/:id/start`).
+ *  This is the ONLY Docker-starting path from the marketplace — it must be wired to a
+ *  user click behind the consent disclosure, never to a status/capability read or page
+ *  load. An external (non-managed) deployment answers 409 (no Docker to start) →
+ *  surfaced as `ok:false`. `mode` overrides the deployment-derived runtime mode. */
+export function startPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	const body: Record<string, unknown> = {};
+	if (opts.mode) body.mode = opts.mode;
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/start${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
+}
+
+/** POST stop for a managed pack runtime (`/api/pack-runtimes/:id/stop`). Brings the
+ *  Docker containers down (preserving data); never destructive. */
+export function stopPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string }): Promise<MarketResult<PackRuntimeStatus>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/stop${qs ? `?${qs}` : ""}`, jsonInit("POST", {}));
+}
+
+/** GET recent logs for a managed pack runtime (`/api/pack-runtimes/:id/logs`). PURE
+ *  read — never starts Docker. `tail` bounds the line count. A missing-Docker install
+ *  answers 200 with `{ logs:"", status:"docker-unavailable" }`. */
+export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; projectId?: string; tail?: number }): Promise<MarketResult<{ logs: string; status?: string; message?: string }>> {
+	const params = new URLSearchParams();
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	if (typeof opts.tail === "number") params.set("tail", String(opts.tail));
+	const qs = params.toString();
+	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
 }

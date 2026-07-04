@@ -368,4 +368,96 @@ describe("Source pin — merge-loss invariants", () => {
 			"pin — restore the dropped filtering logic instead.",
 		);
 	});
+
+	it("server.ts exposes registerPackRuntimeSupervisorFactory (restored by the w2-pack-runtimes-restore fix)", () => {
+		const text = read("src/server/server.ts");
+		assert.ok(
+			text.includes("export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {"),
+			"src/server/server.ts must export registerPackRuntimeSupervisorFactory() — the\n" +
+			"test-only seam that injects a fully-mocked PackRuntimeSupervisor (no Docker\n" +
+			"daemon) so the /api/pack-runtimes/* routes and the marketplace managed-runtime\n" +
+			"activation/uninstall paths can be exercised end-to-end in E2E. Without it every\n" +
+			"caller of `mod.registerPackRuntimeSupervisorFactory(...)` in\n" +
+			"tests/e2e/marketplace-runtime-activation.spec.ts throws \"is not a function\" and\n" +
+			"the whole P2/P3 managed-runtime surface is untestable. The underlying\n" +
+			"PackRuntimeSupervisor class (src/server/runtimes/pack-runtime-supervisor.ts) was\n" +
+			"NEVER dropped — only this server.ts wiring (interfaces, factory seam, REST\n" +
+			"routes, activation/uninstall threading) vanished. Originally added by 4a48eb9b;\n" +
+			"silently dropped by merge commit b687d93d (first parent 06498f81 had it, merge\n" +
+			"result did not); restored by the w2-pack-runtimes-restore fix. DO NOT delete this\n" +
+			"pin — restore the dropped wiring instead. Independently pinned end-to-end by\n" +
+			"tests/e2e/pack-runtimes-api.spec.ts, tests/e2e/marketplace-runtime-activation.spec.ts,\n" +
+			"tests/e2e/pack-runtimes-start-config.spec.ts, and tests/e2e/hindsight-config-write.spec.ts.",
+		);
+	});
+
+	it("server.ts exposes the sessionless /api/ext/pack-route/:packId/:routeName seam (restored by the w2-pack-runtimes-restore fix)", () => {
+		const text = read("src/server/server.ts");
+		assert.ok(
+			text.includes("url.pathname.match(/^\\/api\\/ext\\/pack-route\\/([^/]+)\\/([^/]+)$/)"),
+			"src/server/server.ts must handle GET/POST /api/ext/pack-route/:packId/:routeName —\n" +
+			"the sessionless, admin-bearer, BUILT-IN-pack-only seam the Marketplace uses to\n" +
+			"read/write a built-in pack's route (e.g. Hindsight config) when `#/market` has no\n" +
+			"active chat session to mint a surface token. Without it\n" +
+			"tests/e2e/hindsight-config-write.spec.ts's POST returns 404 and the inline\n" +
+			"Marketplace Configure form cannot persist. Originally added by e3f31960; silently\n" +
+			"dropped by merge commit b687d93d; restored by the w2-pack-runtimes-restore fix.\n" +
+			"DO NOT delete this pin — restore the dropped route instead. Independently pinned\n" +
+			"end-to-end by tests/e2e/hindsight-config-write.spec.ts.",
+		);
+	});
+
+	it("api.ts exposes the pack-runtimes client fetch wrappers (restored by the w2-pack-runtimes-restore fix)", () => {
+		const text = read("src/app/api.ts");
+		assertTextInOrder(
+			text,
+			[
+				"export function getPackRuntimeCapabilities(",
+				"export function downPackRuntime(",
+				"export function purgePackRuntime(",
+				"export function listPackRuntimes(",
+				"export function startPackRuntime(",
+				"export function stopPackRuntime(",
+				"export function getPackRuntimeLogs(",
+			],
+			"src/app/api.ts must expose the pack-runtimes client fetch wrappers\n" +
+			"(getPackRuntimeCapabilities/downPackRuntime/purgePackRuntime/listPackRuntimes/\n" +
+			"startPackRuntime/stopPackRuntime/getPackRuntimeLogs). Without them\n" +
+			"marketplace-page.ts has no client to the restored /api/pack-runtimes/* REST\n" +
+			"surface and the managed-runtime consent card + start/stop controls cannot\n" +
+			"function even though the server routes exist. Originally added alongside the\n" +
+			"server REST routes; silently dropped by merge commit b687d93d; restored by the\n" +
+			"w2-pack-runtimes-restore fix. DO NOT delete this pin — restore the dropped\n" +
+			"wrappers instead. Independently pinned by tests/marketplace-runtime-consent.spec.ts.",
+		);
+	});
+
+	it("marketplace-page.ts exposes the managed-runtime consent-card exports (restored by the w2-pack-runtimes-restore fix)", () => {
+		const text = read("src/app/marketplace-page.ts");
+		assertTextInOrder(
+			text,
+			[
+				"export function runtimeRestPackId(",
+				"export function runtimeCapabilityCacheKey(",
+				"export function invalidateRuntimeCapabilities(",
+				"export function ensureRuntimeCapabilities(",
+				"export function renderRuntimeConsentCard(",
+				"export function renderRuntimeConsentCardView(",
+				"export function activationEntityTotal(",
+				"export function activationEntityEnabledCount(",
+			],
+			"src/app/marketplace-page.ts must export the managed-runtime consent-card\n" +
+			"pipeline (runtimeRestPackId/runtimeCapabilityCacheKey/ensureRuntimeCapabilities/\n" +
+			"invalidateRuntimeCapabilities/renderRuntimeConsentCard/renderRuntimeConsentCardView)\n" +
+			"and the schema-v2-aware activation counting helpers\n" +
+			"(activationEntityTotal/activationEntityEnabledCount). Without them\n" +
+			"tests/marketplace-runtime-consent.spec.ts's fixture bundle fails to build\n" +
+			"(\"No matching export\") and the pre-start consent disclosure (design §8) cannot\n" +
+			"render, and the master-toggle counts silently omit managed runtimes from\n" +
+			"enabled/total. Originally added alongside the P3 consent design; silently\n" +
+			"dropped by merge commit b687d93d; restored by the w2-pack-runtimes-restore fix.\n" +
+			"DO NOT delete this pin — restore the dropped exports instead. Independently\n" +
+			"pinned by tests/marketplace-runtime-consent.spec.ts.",
+		);
+	});
 });
