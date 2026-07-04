@@ -5986,30 +5986,12 @@ async function handleApiRoute(
 		// ── Re-attempt support ──
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
 
-		// ── Sandbox validation ──
-		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape
+		// ── Sandbox request flag ──
+		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape.
+		// Config/Docker preflight is deferred until after projectId resolution so it
+		// uses the selected ProjectContext, not server/Headquarters config.
 		let sandboxed = body?.sandboxed === true;
 		if (sandboxScope) sandboxed = true;
-		if (sandboxed) {
-			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-			if (sandboxConfig !== "docker") {
-				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
-				return;
-			}
-			// Skip Docker check if sandbox manager has ready containers.
-			// Otherwise use a cached result to avoid running `docker info` on every session creation.
-			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
-			if (!hasReadyContainer) {
-				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
-					const dockerStatus = await checkDockerAvailability();
-					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
-				}
-				if (!_dockerAvailCache.available) {
-					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
-					return;
-				}
-			}
-		}
 
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
 		// Role/Tool assistants can deliberately use the hidden system project when
@@ -6029,7 +6011,7 @@ async function handleApiRoute(
 				return;
 			}
 			resolvedProjectId = goalProjectId;
-			cwdSource = { kind: "goal", goalId };
+			if (!explicitCwd) cwdSource = { kind: "goal", goalId };
 		}
 
 		// If re-attempting a goal, inherit cwd and projectId from the original goal.
@@ -6044,7 +6026,7 @@ async function handleApiRoute(
 						return;
 					}
 					resolvedProjectId = origProjectId;
-					cwdSource = { kind: "goal", goalId: reattemptGoalId };
+					if (!explicitCwd) cwdSource = { kind: "goal", goalId: reattemptGoalId };
 				}
 			}
 		}
@@ -6084,29 +6066,63 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		resolvedProjectId = resolved.projectId;
 		resolvedProject = resolved.project;
+		const resolvedProjectContext = projectContextManager.getOrCreate(resolvedProjectId);
 
 		if (!explicitCwd && !goalForSession && !reattemptGoalId && !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
 			cwd = resolvedProject.rootPath;
 		}
 
+		const shouldValidateCwd = !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID);
+		if (shouldValidateCwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+		}
+
 		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted).
+		// Only server-selected/persisted cwd values may fall back; explicit user cwd
+		// must fail rather than being silently replaced with the project root.
 		if (cwd && !fs.existsSync(cwd)) {
 			const staleCwd = cwd;
+			if (explicitCwd) {
+				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+				return;
+			}
 			let fallback: string | undefined;
 			if (fs.existsSync(resolvedProject.rootPath)) fallback = resolvedProject.rootPath;
 			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
 			if (fallback) {
 				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
 				cwd = fallback;
+				if (shouldValidateCwd) {
+					const fallbackValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+					if (!fallbackValidation.ok) { writeCwdValidationError(fallbackValidation); return; }
+				}
 			} else {
 				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
 				return;
 			}
 		}
 
-		if (!(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+		// ── Sandbox validation ──
+		if (sandboxed) {
+			const sandboxConfig = resolvedProjectContext?.projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig !== "docker") {
+				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+				return;
+			}
+			// Skip Docker check if sandbox manager has ready containers.
+			// Otherwise use a cached result to avoid running `docker info` on every session creation.
+			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
+			if (!hasReadyContainer) {
+				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
+					const dockerStatus = await checkDockerAvailability();
+					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
+				}
+				if (!_dockerAvailCache.available) {
+					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
+					return;
+				}
+			}
 		}
 
 		if (roleId && typeof roleId === "string") {
