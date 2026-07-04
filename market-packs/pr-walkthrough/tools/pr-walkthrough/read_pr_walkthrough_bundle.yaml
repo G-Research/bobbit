@@ -1,6 +1,6 @@
 name: read_pr_walkthrough_bundle
 group: PR Walkthrough
-description: Read the scoped persisted launch-time PR metadata and diff bundle for this walkthrough job. Output is bounded; start with manifest/summary, then request files by path or index. Use format=compact for review work; omitted format preserves legacy JSON output.
+description: Read the scoped persisted launch-time PR metadata and diff bundle for this walkthrough job. Output is bounded; start with manifest/summary hunk IDs, then request files by path or index. Use format=compact for review work; omitted format preserves legacy JSON output.
 summary: "Read PR walkthrough bundle"
 params: [mode, file, path, index, offset, limit, hunkOffset, hunkLimit, format]
 provider:
@@ -13,7 +13,9 @@ examples:
 notes:
   - The gateway validates the caller session secret and resolves the bound walkthrough job.
   - The persisted bundle is authoritative for the launched PR metadata and diff content.
-  - format=compact returns a unified-diff-like tool result for lower token use; compact manifest is the authoritative envelope read, while compact summary/files/file reads suppress repeated target/changeset/limits blocks.
+  - format=compact returns a unified-diff-like tool result for lower token use; compact manifest is the authoritative envelope read and includes bounded hunk IDs, hunk indexes, coordinates, changed-line counts, categories, and flags.
+  - Compact summary/files/file reads suppress repeated target/changeset/limits blocks; compact file reads print hunk IDs and hunkOffset values before each hunk body.
+  - Successful reads record bounded read receipts in the review draft state so resume/status flows can distinguish manifest planning reads from file body hunk reads.
   - Compact file output is hard-capped at 64KiB and may window long lines or large hunks; truncation markers explain omitted bytes/lines.
   - For generated/minified or very large files, request narrow reads with mode=file format=compact hunkOffset=<n> hunkLimit=1; use format=legacy only when exact line ids, old_line, or new_line metadata is required.
   - format is optional. When omitted, legacy output is preserved for compatibility; use format=legacy when exact line ids, old_line, or new_line metadata is required.
