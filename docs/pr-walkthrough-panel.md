@@ -307,6 +307,19 @@ the child pane only polls its own job's `status` route and renders — it never
 spawns or mutates anything. It is safe precisely because it is the child's own
 pane reading the child's own job; nothing about it can affect another session.
 
+**The panel Host API binds to the tab's session, not the selected session.** The
+reviewer-child pane routinely renders while a *different* session (the parent) is
+selected in the sidebar. So the panel builds its Host API and `params.__sessionId`
+from the **session the tab is bound to** (`source.sessionId`), not the
+currently-selected session, falling back to the active session only for legacy
+tabs with no bound source. This matters because `host.callRoute` carries the bound
+session id, and the server resolves the route's working directory from that
+session's worktree: binding to the selected session instead would send the wrong
+`x-bobbit-session-id`, make `bundle`/`status`/`recover` resolve against the wrong
+worktree (surfacing as `Invalid baseSha`), and leave the pane stuck on the pending
+title. Binding to the tab's own session is what lets the child pane recover and
+render correctly regardless of which session is focused.
+
 **Pending state.** Until a final payload exists, the pane shows exactly
 `PR Walkthrough: In Progress` with a spinner (`data-testid="prw-pending"`, no
 progress %). The child pane self-drives the poll keyed off its own review binding:

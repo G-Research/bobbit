@@ -120,6 +120,8 @@ narrative:
 
 Supported narrative entry types are `text`, `diff`, `note`, `suggested_comment`, and `checklist`. Entries must have stable ids unique within the chunk. Narrative entries never embed raw diff bodies; they reference hunk ids/headers and concise commentary, and the finalizer pulls code from the bundle.
 
+A chunk's top-level `relevant_hunks` and its `narrative[].diff` entries share the same hunk universe. If a non-`skip` top-level hunk reference is never placed in a `narrative[].diff` entry, the finalizer appends a deterministic `additional-referenced-hunks` diff entry so narrative-first rendering cannot silently hide a hunk the reviewer explicitly cited. This keeps referenced code visible and counted in coverage even when the author forgets to interleave it.
+
 ### Hunk placement and coverage
 
 Every hunk reference can declare `placement`:
@@ -130,7 +132,20 @@ Every hunk reference can declare `placement`:
 
 Prefer manifest `hunk_id` values. Legacy `file` + `hunk_header` references remain compatibility fallbacks only when they resolve to exactly one hunk after any supplied index or coordinates are considered. Ambiguous references fail closed so reviewers do not accidentally assign ownership to the wrong hunk.
 
+A `placement: skip` reference may name just a `file` with no `hunk_header`, index, or coordinates. This is the only way to reference a hunkless changed block (see below) that exposes no header to anchor on. The resolver stays strict for that shortcut: a file-only reference that matches more than one hunk still fails closed with `PRW_HUNK_REF_UNRESOLVED`, so it can only skip a file whose change is a single (or synthetic block-level) hunk.
+
 Finalization derives coverage from the manifest, read receipts, and normalized hunk placements. Each changed hunk is classified as primary-reviewed, secondary-referenced, skipped with reason, unread, or completion-sweep remaining. Repeated secondary references are tracked separately from primary coverage so the same hunk can be reviewed once and cited later without duplicating full diffs.
+
+### Hunkless and binary blocks
+
+Some changed files produce no textual hunks: binary files, pure mode or rename changes, and empty diffs. These still represent a change the reviewer is accountable for, so finalization indexes a **synthetic block-level hunk** for every hunkless changed block. Without it, the diff-reference mapper — which builds its hunk index from a block's textual hunks — would drop these files from the coverage universe entirely, so a binary change could vanish from finalization coverage and the completion-sweep audit card.
+
+The synthetic hunk carries the block's own flags (binary, generated, truncated) and a descriptive header (`Binary file (no textual diff)` or `File change (no textual hunks)`) with zero changed lines. Because it has `changed_lines: 0` and inherits the binary/generated flags, it is never a completion-sweep `major_remaining` candidate. It is therefore classified as:
+
+- `completion-sweep-remaining` by default — it appears on the derived audit/completion card as a low-signal remaining item; or
+- `skipped` with a reason when a reviewer names it with a file-only `placement: skip` — it then shows in the audit skip list (for example `assets/logo.png (binary)`) with its `skip_reason`.
+
+Either way the changed file stays visible in coverage and audit metadata rather than disappearing.
 
 Read receipts are written for successful bundle reads. Manifest receipts prove planning context was read; file/hunk receipts prove code bodies were returned to the reviewer. Windowed or truncated receipts remain visible in status so reviewers can decide whether a narrower read is needed.
 
