@@ -262,6 +262,75 @@ describe("Headquarters directory migration", () => {
 		assert.equal(reread.sessions.length, 1);
 	});
 
+	// Security regression: SERVER_STATE_ENTRIES includes `token`. In the default
+	// no-override same-root case the legacy `<serverRunDir>/.bobbit/state/token` is a
+	// live admin bearer token readable by a normal same-root project agent (whose cwd
+	// defaults to `<serverRunDir>` and reads `<serverRunDir>/.bobbit/state`). The
+	// migration must strip it from that path while preserving it in Headquarters.
+	it("neutralizes legacy server secrets at the normal-project state path (default same-root)", () => {
+		const root = tmpRoot();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		fs.mkdirSync(legacyStateDir, { recursive: true });
+		// A normal project registered at the server run dir → same-root split.
+		seedProject(legacyStateDir, normalProject("same-root", root));
+		const adminToken = "admin-bearer-secret-value";
+		fs.writeFileSync(path.join(legacyStateDir, "token"), adminToken, "utf-8");
+		fs.writeFileSync(path.join(legacyStateDir, "sandbox-agent-auth"), "sandbox-secret", "utf-8");
+
+		const dirs = migrateDirs(root);
+		const diagnostics = migrateLegacyHeadquartersDirectory(dirs);
+
+		const legacyToken = path.join(legacyStateDir, "token");
+		const hqToken = path.join(dirs.headquartersStateDir, "token");
+		// Legacy admin token must no longer be readable by a same-root project agent.
+		assert.equal(fs.existsSync(legacyToken), false, "legacy admin token must be removed from the normal-project state path");
+		// Headquarters retains the authoritative token.
+		assert.equal(fs.readFileSync(hqToken, "utf-8"), adminToken, "Headquarters state must retain the admin token");
+		// Restricted quarantine backup preserves the value under HQ state.
+		assert.equal(
+			fs.readFileSync(path.join(dirs.headquartersStateDir, "migration-quarantine", "secrets", "token"), "utf-8"),
+			adminToken,
+		);
+		// A NON-secret marker is left behind; diagnostics record the move without secrets.
+		assert.equal(fs.existsSync(path.join(legacyStateDir, ".token-moved-to-headquarters")), true);
+		assert.ok(diagnostics.copied.some(entry => entry.includes("neutralized legacy server secret") && entry.includes("token")));
+		assert.ok(diagnostics.copied.every(entry => !entry.includes(adminToken)), "diagnostics must not contain secret contents");
+		// sandbox-agent-auth is likewise neutralized.
+		assert.equal(fs.existsSync(path.join(legacyStateDir, "sandbox-agent-auth")), false);
+
+		// Idempotent: re-running does not resurrect the legacy token or change the HQ copy.
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(fs.existsSync(legacyToken), false, "re-running migration must not resurrect the legacy token");
+		assert.equal(fs.readFileSync(hqToken, "utf-8"), adminToken);
+		assert.equal(second.failures.length, 0);
+	});
+
+	it("leaves BOBBIT_DIR-override server secrets in place and never neutralizes them", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const adminToken = "override-admin-token";
+		fs.writeFileSync(path.join(overrideState, "token"), adminToken, "utf-8");
+		// A legacy default .bobbit/state token also exists but is NOT the HQ source.
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		fs.mkdirSync(legacyStateDir, { recursive: true });
+		fs.writeFileSync(path.join(legacyStateDir, "token"), "legacy-default-token", "utf-8");
+
+		migrateLegacyHeadquartersDirectory({
+			serverRunDir: root,
+			headquartersDir: override,
+			headquartersStateDir: overrideState,
+			headquartersConfigDir: path.join(override, "config"),
+			legacyServerBobbitDir: path.join(root, ".bobbit"),
+		});
+
+		// Override HQ token untouched; legacy default token untouched (override path skips the copy/neutralize loop).
+		assert.equal(fs.readFileSync(path.join(overrideState, "token"), "utf-8"), adminToken);
+		assert.equal(fs.existsSync(path.join(legacyStateDir, "token")), true, "override case must not touch the legacy default .bobbit/state");
+		assert.equal(fs.existsSync(path.join(overrideState, "migration-quarantine", "secrets", "token")), false);
+	});
+
 	it("does not promote same-root normal projects and quarantines ambiguous config", () => {
 		const root = tmpRoot();
 		const oldId = "server-root-project";
@@ -357,5 +426,48 @@ describe("Headquarters per-project migration repair", () => {
 		assert.ok(projects.some(project => project.id === oldId));
 		assert.ok(projects.some(project => project.id === HEADQUARTERS_PROJECT_ID));
 		assert.equal(readJson(path.join(root, ".bobbit", "state", "goals.json"))[0].projectId, oldId);
+	});
+
+	// Regression: sessions.json is a v2 envelope `{ version, epoch, sessions: [...] }`,
+	// not a bare array. Reading it with readJsonArray returned [] → the central bucket
+	// looked empty → clearCentralBucketIfDefaultMissing overwrote it with `[]`, silently
+	// losing every session. Distribution must be envelope-aware: the central HQ bucket
+	// keeps its envelope, and per-project sessions are written as v2 envelopes too.
+	it("preserves and distributes a v2-envelope sessions.json through per-project migration", () => {
+		const root = tmpRoot();
+		const stateDir = path.join(root, ".bobbit", "headquarters", "state");
+		const hqDir = path.dirname(stateDir);
+		fs.mkdirSync(stateDir, { recursive: true });
+		const oldId = "normal-proj";
+		seedProject(stateDir, hqProject(hqDir), [normalProject(oldId, root)]);
+		// Central sessions.json is a versioned envelope, not a bare array.
+		writeJson(path.join(stateDir, "sessions.json"), {
+			version: 2,
+			epoch: 5,
+			sessions: [
+				{ id: "hq-s1", title: "HQ", cwd: hqDir, agentSessionFile: "a.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1 },
+				{ id: "np-s1", title: "Normal", cwd: root, agentSessionFile: "b.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1 },
+			],
+		});
+
+		migrateToPerProjectState(stateDir, new ProjectRegistry(stateDir), root, { centralConfigDir: path.join(hqDir, "config") });
+
+		// The central HQ sessions.json keeps its envelope and its HQ session (never reduced to []).
+		const hqEnvelope = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(path.join(stateDir, "sessions.json"));
+		assert.equal(Array.isArray(hqEnvelope), false, "central sessions.json must remain a v2 envelope, not be reduced to []");
+		assert.equal(hqEnvelope.version, 2);
+		assert.equal(hqEnvelope.epoch, 5);
+		assert.equal(hqEnvelope.sessions.length, 1, "the HQ session must be preserved, not lost");
+		assert.equal(hqEnvelope.sessions[0].id, "hq-s1");
+		assert.equal(hqEnvelope.sessions[0].projectId, HEADQUARTERS_PROJECT_ID);
+
+		// The normal project's session is distributed as a v2 envelope to its own state dir.
+		const normalEnvelope = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(path.join(root, ".bobbit", "state", "sessions.json"));
+		assert.equal(Array.isArray(normalEnvelope), false, "per-project sessions.json must be written as a v2 envelope");
+		assert.equal(normalEnvelope.version, 2);
+		assert.equal(normalEnvelope.epoch, 5);
+		assert.equal(normalEnvelope.sessions.length, 1);
+		assert.equal(normalEnvelope.sessions[0].id, "np-s1");
+		assert.equal(normalEnvelope.sessions[0].projectId, oldId);
 	});
 });

@@ -8,7 +8,6 @@ import {
 	type RegisteredProject,
 } from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
-import type { PersistedSession } from "./session-store.js";
 import type { PersistedStaff } from "./staff-store.js";
 import type { PersistedTask } from "./task-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -168,6 +167,13 @@ const SERVER_STATE_ENTRIES = new Set([
 	"tls",
 	"sandbox-agent-auth",
 ]);
+
+// Server-scope secrets that must never remain readable at the normal-project-owned
+// `<serverRunDir>/.bobbit/state` path after the Headquarters split. A same-root
+// normal project defaults cwd to `<serverRunDir>` and reads
+// `<serverRunDir>/.bobbit/{state,config}`, so leaving a live admin bearer `token`
+// (or TLS material / sandbox auth) there is a gateway-wide privilege escalation.
+const SERVER_SECRET_ENTRIES = ["token", "tls", "sandbox-agent-auth"] as const;
 
 const PROJECT_STORE_FILES = new Set([
 	"goals.json",
@@ -721,6 +727,56 @@ function quarantineLegacyConfig(
 	collect(quarantineDir);
 }
 
+/**
+ * Security: after server secrets are preserved in Headquarters state, remove the
+ * legacy copies from the normal-project-owned `<serverRunDir>/.bobbit/state`.
+ *
+ * A same-root normal project defaults its cwd to `<serverRunDir>` and uses
+ * `<serverRunDir>/.bobbit/{state,config}`, so a project agent could otherwise read
+ * the still-valid admin bearer `token` (plus TLS material / sandbox auth) and
+ * escalate to gateway-wide privileges. The value is preserved in Headquarters
+ * state PLUS a restricted quarantine backup, so this is a justified exception to
+ * the preserve-first policy. Idempotent: a no-op once the legacy copy is gone.
+ * Only call in the default no-override, non-source-is-target case.
+ */
+function neutralizeLegacyServerSecrets(
+	legacyStateDir: string,
+	headquartersStateDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const quarantineDir = path.join(headquartersStateDir, "migration-quarantine", "secrets");
+	for (const entry of SERVER_SECRET_ENTRIES) {
+		const legacyPath = path.join(legacyStateDir, entry);
+		if (!fs.existsSync(legacyPath)) continue; // already neutralized / never present
+		try {
+			// 1. Guarantee the secret survives in Headquarters state before removal.
+			const hqPath = path.join(headquartersStateDir, entry);
+			if (!fs.existsSync(hqPath)) {
+				copyTreePreserveFirst(legacyPath, hqPath, entry, diagnostics);
+			}
+			// 2. Keep a restricted backup under HQ state (never loaded by any store).
+			const backupPath = path.join(quarantineDir, entry);
+			if (!fs.existsSync(backupPath)) {
+				fs.mkdirSync(quarantineDir, { recursive: true });
+				copyTreePreserveFirst(legacyPath, backupPath, path.join("migration-quarantine", "secrets", entry), diagnostics);
+			}
+			// 3. Remove the legacy copy from the normal-project-owned state dir.
+			fs.rmSync(legacyPath, { recursive: true, force: true });
+			// 4. Leave a NON-secret marker so operators can trace the move.
+			try {
+				fs.writeFileSync(
+					path.join(legacyStateDir, `.${entry}-moved-to-headquarters`),
+					`Moved to Headquarters state on ${new Date().toISOString()}. Restricted backup: migration-quarantine/secrets/${entry} under the Headquarters state directory.\n`,
+					"utf-8",
+				);
+			} catch { /* marker is best-effort and contains no secret */ }
+			diagnostics.copied.push(`security: neutralized legacy server secret "${entry}" at normal-project state (preserved in Headquarters + restricted backup)`);
+		} catch (err) {
+			diagnostics.failures.push(`security: could not neutralize legacy server secret "${entry}": ${(err as Error).message}`);
+		}
+	}
+}
+
 export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
 	const serverRunDir = path.resolve(input.serverRunDir);
 	const headquartersDirPath = path.resolve(input.headquartersDir);
@@ -754,6 +810,9 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 				copyTreePreserveFirst(src, dest, entry.name, diagnostics);
 			}
 		}
+		// Server secrets have now been preserved in Headquarters state; strip the
+		// live copies from the normal-project-owned `<serverRunDir>/.bobbit/state`.
+		neutralizeLegacyServerSecrets(legacyStateDir, headquartersStateDir, diagnostics);
 	} else if (usingOverride) {
 		diagnostics.skipped.push("legacy default .bobbit/state: BOBBIT_DIR/BOBBIT_PI_DIR-style Headquarters override is used in place");
 	}
@@ -1028,6 +1087,56 @@ export function migrateToPerProjectState(
 		writeJsonArray(centralFile, [], { backup: true });
 	}
 
+	// Envelope-aware variants of writeBucket / clearCentralBucketIfDefaultMissing for
+	// sessions.json. Unlike goals/tasks/staff (true arrays), sessions.json is a
+	// versioned envelope `{ version: 2, epoch, sessions: [...] }` written by
+	// SessionStore. Reading it with readJsonArray returns [] (dropping every session)
+	// and writing it as a bare array (or clearing with `[]`) corrupts the store so
+	// SessionStore loads nothing after restart. These preserve the discovered shape.
+	function writeSessionBucket(
+		centralFile: string,
+		project: RegisteredProject,
+		sessions: Record<string, unknown>[],
+		sourceShape: StoreFileShape,
+	): void {
+		const targetFile = path.join(ensureProjectStateDir(project), "sessions.json");
+		if (samePath(targetFile, centralFile)) {
+			backupForHeadquartersMigration(targetFile);
+			writeStoreRecords(targetFile, sessions, sourceShape);
+			return;
+		}
+		if (sessions.length === 0) return;
+		fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+		const targetExists = fs.existsSync(targetFile);
+		const { records: existing, shape: existingShape } = readStoreRecordsWithShape(targetFile, "sessions.json");
+		const existingIds = new Set(existing.map(item => String(item.id)));
+		let added = 0;
+		for (const session of sessions) {
+			if (!existingIds.has(String(session.id))) {
+				existing.push(session);
+				added++;
+			}
+		}
+		// Preserve the target's own envelope when it already exists; otherwise adopt
+		// the source envelope shape so a brand-new per-project file stays v2.
+		writeStoreRecords(targetFile, existing, targetExists ? existingShape : sourceShape);
+		if (added > 0) console.log(`[migration] Wrote ${added} new items to ${targetFile}`);
+	}
+
+	function clearCentralSessionsBucketIfDefaultMissing(
+		centralFile: string,
+		groups: Map<string, Record<string, unknown>[]>,
+		shape: StoreFileShape,
+	): void {
+		const defaultTarget = path.join(ensureProjectStateDir(defaultProject), "sessions.json");
+		if (!samePath(defaultTarget, centralFile)) return;
+		if (groups.has(defaultProject.id)) return;
+		if (!fs.existsSync(centralFile)) return;
+		// Write an EMPTY v2 envelope, never a bare `[]`, so SessionStore can load it.
+		backupForHeadquartersMigration(centralFile);
+		writeStoreRecords(centralFile, [], shape);
+	}
+
 	// Helper: safely rename a file with .pre-migration suffix.
 	function renameForBackup(filePath: string): void {
 		try {
@@ -1071,12 +1180,14 @@ export function migrateToPerProjectState(
 	console.log(`[migration] Distributed ${centralGoals.length} goals across ${goalsByProject.size} project(s)`);
 
 	// ── 3. Sessions ──
+	// sessions.json is a versioned envelope (see writeSessionBucket) — read and write
+	// it envelope-aware so distribution never flattens/clears it to a bare array.
 	const centralSessionsFile = path.join(centralStateDir, "sessions.json");
-	const centralSessions = readJsonArray<PersistedSession>(centralSessionsFile);
-	const sessionsByProject = new Map<string, PersistedSession[]>();
+	const { records: centralSessions, shape: sessionsShape } = readStoreRecordsWithShape(centralSessionsFile, "sessions.json");
+	const sessionsByProject = new Map<string, Record<string, unknown>[]>();
 
 	for (const session of centralSessions) {
-		const project = resolveProject(session.projectId);
+		const project = resolveProject(typeof session.projectId === "string" ? session.projectId : undefined);
 		session.projectId = project.id;
 		let bucket = sessionsByProject.get(project.id);
 		if (!bucket) {
@@ -1088,9 +1199,9 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, sessions] of sessionsByProject) {
 		const project = projectRegistry.get(projectId)!;
-		writeBucket(centralSessionsFile, "sessions.json", project, sessions, "id");
+		writeSessionBucket(centralSessionsFile, project, sessions, sessionsShape);
 	}
-	clearCentralBucketIfDefaultMissing(centralSessionsFile, "sessions.json", sessionsByProject);
+	clearCentralSessionsBucketIfDefaultMissing(centralSessionsFile, sessionsByProject, sessionsShape);
 	console.log(`[migration] Distributed ${centralSessions.length} sessions across ${sessionsByProject.size} project(s)`);
 
 	// ── 4. Tasks — resolve project via goalId → goal's project ──
