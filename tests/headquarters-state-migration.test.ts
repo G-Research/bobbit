@@ -528,6 +528,74 @@ describe("Headquarters directory migration", () => {
 		const normalGoalsAfter = readJson<Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "goals.json"));
 		assert.equal(normalGoalsAfter.filter(record => record.id === "g1").length, 1, "re-running must not duplicate the re-attributed record");
 	});
+
+	// Finding C: the in-place / backup-driven re-attribution must PREFER the current
+	// (post-promotion) record and use the stale `.pre-headquarters-id-migration`
+	// backup only to recover the normal projectId (and fields the promotion stripped).
+	// Overwriting the live record with the backup would silently revert progress made
+	// after the promotion (updated state, new fields, newer titles).
+	it("prefers the current post-promotion record over the stale id-migration backup (finding C)", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const oldId = "original-project";
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		fs.mkdirSync(legacyStateDir, { recursive: true });
+		writeJson(path.join(legacyStateDir, "projects.json"), [hqProject(root)]);
+		writeJson(path.join(legacyStateDir, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Original" })]);
+		// CURRENT (post-promotion) goal has progressed AFTER promotion: newer state,
+		// updated title/spec, and a field that did not exist in the backup snapshot.
+		writeJson(path.join(legacyStateDir, "goals.json"), [
+			{ id: "g1", title: "Updated after promotion", cwd: root, state: "complete", spec: "new spec", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, updatedAt: 99, addedAfterPromotion: true },
+		]);
+		writeJson(path.join(legacyStateDir, "goals.json.pre-headquarters-id-migration"), [
+			{ id: "g1", title: "Before promotion", cwd: root, state: "todo", spec: "old spec", projectId: oldId, createdAt: 1, updatedAt: 1 },
+		]);
+
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+
+		const normalGoals = readJson<Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "goals.json"));
+		const g = normalGoals.find(record => record.id === "g1")!;
+		assert.equal(g.projectId, oldId, "record must be re-attributed to the normal project");
+		assert.equal(g.title, "Updated after promotion", "current post-promotion title must win over the stale backup");
+		assert.equal(g.state, "complete", "current post-promotion state must not be reverted to the backup snapshot");
+		assert.equal(g.spec, "new spec");
+		assert.equal(g.updatedAt, 99);
+		assert.equal(g.addedAfterPromotion, true, "fields present only in the current record must be preserved");
+	});
+
+	// Finding B: relocating a live server secret is FATAL if it cannot be provably
+	// removed from a project-reachable path. If the copy into serverSecretsDir()
+	// succeeds but the reachable source cannot be deleted, leaving it behind would
+	// keep the admin bearer token readable under a same-root project's cwd (S1).
+	// Simulate a delete failure and assert the migration throws and audits it.
+	it("aborts fatally when a live server secret cannot be removed from a project-reachable path (finding B)", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const dirs = migrateDirs(root);
+		fs.mkdirSync(dirs.headquartersStateDir, { recursive: true });
+		fs.writeFileSync(path.join(dirs.headquartersStateDir, "token"), "leaked-admin-token", "utf-8");
+
+		const realRmSync = fs.rmSync;
+		(fs as unknown as { rmSync: unknown }).rmSync = () => { throw new Error("simulated: source could not be removed"); };
+		try {
+			assert.throws(
+				() => migrateLegacyHeadquartersDirectory(dirs),
+				/could not provably relocate live server secret "token"/,
+				"migration must abort when a live secret cannot be removed from a project-reachable path",
+			);
+		} finally {
+			(fs as unknown as { rmSync: unknown }).rmSync = realRmSync;
+		}
+
+		// Diagnostics are persisted before the throw, without ever leaking the secret value.
+		const diag = readJson<{ failures: string[] }>(path.join(dirs.headquartersStateDir, "headquarters-migration-diagnostics.json"));
+		assert.ok(
+			diag.failures.some(entry => entry.includes("could not provably relocate live server secret")),
+			"the fatal relocation failure must be recorded in diagnostics for auditability",
+		);
+		assert.ok(diag.failures.every(entry => !entry.includes("leaked-admin-token")), "diagnostics must not contain the secret value");
+	});
 });
 
 describe("serverSecretsDir resolution", () => {
