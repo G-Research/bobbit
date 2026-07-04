@@ -12,6 +12,7 @@ const HEADQUARTERS_PROJECT_NAME = "Headquarters";
 const SYSTEM_PROJECT_ID = "system";
 const SAME_ROOT_PROJECT_ID = "same-root-normal-project";
 const SAME_ROOT_PROJECT_NAME = "Original Same Root Project";
+const SAME_ROOT_WORKFLOW_ID = "same-root-normal-workflow";
 
 const test = base;
 test.describe.configure({ mode: "serial" });
@@ -123,8 +124,8 @@ function seedNormalSameRootLayout(serverRoot: string, opts: { sessions?: unknown
 		"name: Original Same Root Project",
 		"same_root_normal_marker: normal-project-config",
 		"workflows:",
-		"  same-root-normal-workflow:",
-		"    id: same-root-normal-workflow",
+		`  ${SAME_ROOT_WORKFLOW_ID}:`,
+		`    id: ${SAME_ROOT_WORKFLOW_ID}`,
 		"    name: Same Root Normal Workflow",
 		"    gates:",
 		"      - id: plan",
@@ -312,7 +313,7 @@ async function createSession(gw: StartedGateway, projectId: string): Promise<any
 	return created.body;
 }
 
-async function createGoal(gw: StartedGateway, projectId: string): Promise<any> {
+async function createGoal(gw: StartedGateway, projectId: string, workflowId?: string): Promise<any> {
 	const created = await gw.json("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
@@ -321,6 +322,7 @@ async function createGoal(gw: StartedGateway, projectId: string): Promise<any> {
 			projectId,
 			worktree: false,
 			autoStartTeam: false,
+			...(workflowId ? { workflowId } : {}),
 		}),
 	});
 	expect(created.status, `POST /api/goals projectId=${projectId}: ${created.text}`).toBe(201);
@@ -554,7 +556,7 @@ test.describe("Headquarters same-root split API", () => {
 			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
 			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
 			const hqGoal = await createGoal(gw, HEADQUARTERS_PROJECT_ID);
-			const normalGoal = await createGoal(gw, SAME_ROOT_PROJECT_ID);
+			const normalGoal = await createGoal(gw, SAME_ROOT_PROJECT_ID, SAME_ROOT_WORKFLOW_ID);
 			const hqStaff = await createStaff(gw, HEADQUARTERS_PROJECT_ID);
 			const normalStaff = await createStaff(gw, SAME_ROOT_PROJECT_ID);
 
