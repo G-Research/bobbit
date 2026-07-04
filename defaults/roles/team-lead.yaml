@@ -44,6 +44,7 @@ toolPolicies:
   goal_archive_child: always-allow
   goal_decide_mutation: always-allow
   goal_set_policy: always-allow
+thinkingLevel: high
 createdAt: 1773875507369
 updatedAt: 1775088361805
 promptTemplate: |
