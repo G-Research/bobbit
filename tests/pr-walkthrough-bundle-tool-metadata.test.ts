@@ -77,11 +77,11 @@ describe("PR walkthrough bundle access tool metadata", () => {
 
 			await bundleTool.execute("call-1", { mode: "file", path: "src/demo.ts", index: 3, offset: 4, limit: 5, hunkOffset: 6, hunkLimit: 7, format: "compact", sessionId: "attacker-session", jobId: "attacker-job", extra: "ignored" });
 
-			// No sessionId/jobId/format in the body — caller-supplied identity fields are dropped,
-			// and compact/legacy is a local model-facing render choice, not a gateway route arg.
-			// The authentic session is proven by the X-Bobbit-Session-Secret header.
+			// No sessionId/jobId in the body — caller-supplied identity fields are dropped.
+			// format is forwarded only as a receipt hint; the authentic session is proven by the X-Bobbit-Session-Secret header.
 			assert.deepEqual(postedBody, {
 				mode: "file",
+				format: "compact",
 				path: "src/demo.ts",
 				index: 3,
 				offset: 4,

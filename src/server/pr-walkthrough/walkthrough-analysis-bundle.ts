@@ -21,6 +21,7 @@ export const PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW = {
 } as const;
 const READ_WINDOW_MARKER_RESERVE_BYTES = 1024;
 const READ_WINDOW_GUIDANCE = "Bundle store windowed this file read before returning it. Request narrower slices with mode=file hunkOffset=<n> hunkLimit=1 when more hunk context is needed.";
+const MANIFEST_HUNK_SUMMARY_LIMIT = 20;
 
 export type PrWalkthroughAnalysisBundleTarget = {
 	provider: "github" | string;
@@ -57,6 +58,28 @@ export type PrWalkthroughAnalysisBundleHunk = {
 	new_start?: number;
 	new_lines?: number;
 	lines: PrWalkthroughAnalysisBundleLine[];
+};
+
+export type PrWalkthroughHunkManifest = {
+	hunk_id: string;
+	file: string;
+	old_path?: string | null;
+	file_id?: string;
+	hunk_index: number;
+	header: string;
+	old_start?: number;
+	old_lines?: number;
+	new_start?: number;
+	new_lines?: number;
+	changed_lines: number;
+	additions: number;
+	deletions: number;
+	category: string;
+	is_binary: boolean;
+	is_generated: boolean;
+	is_truncated: boolean;
+	source_is_truncated?: boolean;
+	read_window?: Record<string, unknown>;
 };
 
 export type PrWalkthroughAnalysisBundleFile = {
@@ -123,6 +146,7 @@ export type ReadPrWalkthroughBundleRequest = {
 	sessionId: string;
 	jobId: string;
 	mode?: "summary" | "manifest" | "files" | "file";
+	format?: "compact" | "legacy" | "json";
 	path?: string;
 	index?: number;
 	offset?: number;
@@ -172,6 +196,7 @@ export class WalkthroughAnalysisBundleStore {
 			const windowed = windowFileRead(file, hunks, hunkOffset);
 			const hunkWindowTruncated = hunkOffset > 0 || hunkOffset + hunkLimit < file.hunks.length;
 			return {
+				mode: "file",
 				bundle: bundleHeader(bundle),
 				file: windowed.file,
 				hunkOffset,
@@ -341,8 +366,9 @@ function bundleHunkFromDiffHunk(hunk: PrWalkthroughHunk): PrWalkthroughAnalysisB
 }
 
 function diffBlockFromBundleFile(file: PrWalkthroughAnalysisBundleFile): PrWalkthroughDiffBlock {
+	const fileId = fileIdFor(file);
 	return {
-		id: file.id ?? `bundle-${hashText(file.path).slice(0, 12)}`,
+		id: fileId,
 		filePath: file.path,
 		oldPath: file.old_path ?? undefined,
 		status: file.status as PrWalkthroughDiffBlock["status"],
@@ -353,19 +379,21 @@ function diffBlockFromBundleFile(file: PrWalkthroughAnalysisBundleFile): PrWalkt
 		blobUrl: file.blob_url,
 		rawUrl: file.raw_url,
 		contentsUrl: file.contents_url,
-		hunks: file.hunks.map(hunk => {
-			const header = typeof hunk.header === "string" ? hunk.header : "";
+		hunks: file.hunks.map((hunk, hunkIndex) => {
+			const normalized = normalizeHunkForFile(file, hunk, hunkIndex);
+			const header = typeof normalized.header === "string" ? normalized.header : "";
+			const hunkId = hunkIdFor(file, normalized, hunkIndex);
 			return {
-			id: hunk.id ?? `hunk-${hashText(`${file.path}\0${header}`).slice(0, 12)}`,
-			header,
-			lines: hunk.lines.map((line, index): PrWalkthroughDiffLine => ({
-				id: line.id ?? `line-${hashText(`${file.path}\0${header}\0${index}`).slice(0, 12)}`,
-				side: line.side ?? (line.kind === "add" ? "new" : line.kind === "del" ? "old" : "context"),
-				oldLine: line.old_line,
-				newLine: line.new_line,
-				text: line.text,
-				kind: line.kind,
-			})),
+				id: hunkId,
+				header,
+				lines: normalized.lines.map((line, index): PrWalkthroughDiffLine => ({
+					id: line.id ?? `line-${hashText(`${file.path}\0${hunkId}\0${index}\0${line.old_line ?? ""}:${line.new_line ?? ""}`).slice(0, 12)}`,
+					side: line.side ?? (line.kind === "add" ? "new" : line.kind === "del" ? "old" : "context"),
+					oldLine: line.old_line,
+					newLine: line.new_line,
+					text: line.text,
+					kind: line.kind,
+				})),
 			};
 		}),
 	};
@@ -379,7 +407,95 @@ function parseBundle(value: unknown, expectedJobId: string): PrWalkthroughAnalys
 }
 
 function sanitizeBundle(bundle: PrWalkthroughAnalysisBundle): PrWalkthroughAnalysisBundle {
-	return sanitizeValue(bundle) as PrWalkthroughAnalysisBundle;
+	return normalizeBundle(sanitizeValue(bundle) as PrWalkthroughAnalysisBundle);
+}
+
+function normalizeBundle(bundle: PrWalkthroughAnalysisBundle): PrWalkthroughAnalysisBundle {
+	const files = Array.isArray(bundle.files) ? bundle.files.map(normalizeFileForBundle).filter((file): file is PrWalkthroughAnalysisBundleFile => Boolean(file)) : [];
+	return {
+		...bundle,
+		warnings: Array.isArray(bundle.warnings) ? bundle.warnings : [],
+		files,
+	};
+}
+
+function normalizeFileForBundle(file: PrWalkthroughAnalysisBundleFile, fileIndex: number): PrWalkthroughAnalysisBundleFile | null {
+	const filePath = typeof file.path === "string" && file.path.trim() ? file.path.trim() : `file-${fileIndex}`;
+	const normalizedFile = {
+		...file,
+		id: typeof file.id === "string" && file.id.trim() ? file.id.trim() : `bundle-${hashText(filePath).slice(0, 12)}`,
+		path: filePath,
+		old_path: typeof file.old_path === "string" && file.old_path.trim() ? file.old_path.trim() : file.old_path === null ? null : undefined,
+		is_binary: Boolean(file.is_binary),
+		is_generated: Boolean(file.is_generated),
+		is_truncated: Boolean(file.is_truncated),
+		hunks: [],
+	} as PrWalkthroughAnalysisBundleFile;
+	normalizedFile.hunks = (Array.isArray(file.hunks) ? file.hunks : []).map((hunk, hunkIndex) => normalizeHunkForFile(normalizedFile, hunk, hunkIndex));
+	return normalizedFile;
+}
+
+function normalizeHunkForFile(file: PrWalkthroughAnalysisBundleFile, hunk: PrWalkthroughAnalysisBundleHunk, hunkIndex: number): PrWalkthroughAnalysisBundleHunk {
+	const header = typeof hunk.header === "string" ? hunk.header : "";
+	const parsed = parseHunkHeader(header);
+	const oldStart = numberValue(hunk.old_start) ?? parsed.old_start;
+	const oldLines = numberValue(hunk.old_lines) ?? parsed.old_lines;
+	const newStart = numberValue(hunk.new_start) ?? parsed.new_start;
+	const newLines = numberValue(hunk.new_lines) ?? parsed.new_lines;
+	const normalized = {
+		...hunk,
+		header,
+		old_start: oldStart,
+		old_lines: oldLines,
+		new_start: newStart,
+		new_lines: newLines,
+		lines: Array.isArray(hunk.lines) ? hunk.lines.map((line, lineIndex) => normalizeLineForHunk(file, hunk, hunkIndex, line, lineIndex)) : [],
+	} as PrWalkthroughAnalysisBundleHunk;
+	normalized.id = typeof hunk.id === "string" && hunk.id.trim() ? hunk.id.trim() : fallbackHunkId(file, normalized, hunkIndex);
+	return normalized;
+}
+
+function normalizeLineForHunk(
+	file: PrWalkthroughAnalysisBundleFile,
+	hunk: PrWalkthroughAnalysisBundleHunk,
+	hunkIndex: number,
+	line: unknown,
+	lineIndex: number,
+): PrWalkthroughAnalysisBundleLine {
+	const record = isRecord(line) ? line as Record<string, unknown> : {};
+	const kind = record.kind === "add" || record.kind === "del" || record.kind === "context" ? record.kind : "context";
+	const side = record.side === "old" || record.side === "new" || record.side === "context" ? record.side : kind === "add" ? "new" : kind === "del" ? "old" : "context";
+	const oldLine = numberValue(record.old_line);
+	const newLine = numberValue(record.new_line);
+	const hunkSeed = typeof hunk.id === "string" && hunk.id.trim() ? hunk.id.trim() : fallbackHunkId(file, { ...hunk, header: typeof hunk.header === "string" ? hunk.header : "" }, hunkIndex);
+	return {
+		id: typeof record.id === "string" && record.id.trim() ? record.id.trim() : `line-${hashText(`${file.path}\0${hunkSeed}\0${lineIndex}\0${oldLine ?? ""}:${newLine ?? ""}`).slice(0, 12)}`,
+		kind,
+		side,
+		old_line: oldLine,
+		new_line: newLine,
+		text: typeof record.text === "string" ? record.text : "",
+	};
+}
+
+function fileIdFor(file: PrWalkthroughAnalysisBundleFile): string {
+	return typeof file.id === "string" && file.id.trim() ? file.id.trim() : `bundle-${hashText(file.path).slice(0, 12)}`;
+}
+
+function hunkIdFor(file: PrWalkthroughAnalysisBundleFile, hunk: PrWalkthroughAnalysisBundleHunk, hunkIndex: number): string {
+	return typeof hunk.id === "string" && hunk.id.trim() ? hunk.id.trim() : fallbackHunkId(file, hunk, hunkIndex);
+}
+
+function fallbackHunkId(file: PrWalkthroughAnalysisBundleFile, hunk: Pick<PrWalkthroughAnalysisBundleHunk, "header" | "old_start" | "old_lines" | "new_start" | "new_lines">, hunkIndex: number): string {
+	const seed = [
+		file.path,
+		fileIdFor(file),
+		String(hunkIndex),
+		typeof hunk.header === "string" ? hunk.header : "",
+		`${hunk.old_start ?? ""}:${hunk.old_lines ?? ""}`,
+		`${hunk.new_start ?? ""}:${hunk.new_lines ?? ""}`,
+	].join("\0");
+	return `hunk-${hashText(seed).slice(0, 16)}`;
 }
 
 function sanitizeValue(value: unknown): unknown {
@@ -431,7 +547,9 @@ function manifestForBundle(bundle: PrWalkthroughAnalysisBundle, mode: string, of
 		export: bundle.export,
 		fileOffset: offset,
 		fileLimit: limit,
+		hunkManifestLimit: MANIFEST_HUNK_SUMMARY_LIMIT,
 		totalFiles: bundle.files.length,
+		totalHunks: bundle.files.reduce((total, file) => total + file.hunks.length, 0),
 		files: bundle.files.slice(offset, offset + limit).map(fileManifest),
 		truncated: offset > 0 || offset + limit < bundle.files.length,
 	};
@@ -450,10 +568,13 @@ function bundleHeader(bundle: PrWalkthroughAnalysisBundle): Record<string, unkno
 function fileManifest(file: PrWalkthroughAnalysisBundleFile): Record<string, unknown> {
 	const readWindow = summarizeFileReadWindow(file);
 	const readWindowed = Boolean(readWindow.applied);
+	const hunkManifest = file.hunks.slice(0, MANIFEST_HUNK_SUMMARY_LIMIT).map((hunk, index) => hunkManifestFor(file, hunk, index, readWindowed));
 	return {
+		file_id: fileIdFor(file),
 		path: file.path,
 		old_path: file.old_path,
 		status: file.status,
+		category: fileCategory(file),
 		additions: file.additions,
 		deletions: file.deletions,
 		is_binary: file.is_binary,
@@ -462,7 +583,62 @@ function fileManifest(file: PrWalkthroughAnalysisBundleFile): Record<string, unk
 		source_is_truncated: file.is_truncated,
 		read_window: readWindow,
 		hunks: file.hunks.length,
+		hunk_manifest: hunkManifest,
+		hunk_manifest_truncated: file.hunks.length > hunkManifest.length,
+		hunk_manifest_offset: 0,
+		hunk_manifest_limit: MANIFEST_HUNK_SUMMARY_LIMIT,
 	};
+}
+
+function hunkManifestFor(file: PrWalkthroughAnalysisBundleFile, hunk: PrWalkthroughAnalysisBundleHunk, hunkIndex: number, fileReadWindowed: boolean): PrWalkthroughHunkManifest {
+	const normalized = normalizeHunkForFile(file, hunk, hunkIndex);
+	const stats = hunkLineStats(normalized);
+	const readWindow = isRecord(normalized) && isRecord((normalized as Record<string, unknown>).read_window) ? (normalized as Record<string, unknown>).read_window as Record<string, unknown> : undefined;
+	const hunkTruncated = Boolean((normalized as Record<string, unknown>).is_truncated ?? (normalized as Record<string, unknown>).truncated ?? file.is_truncated ?? fileReadWindowed);
+	return {
+		hunk_id: hunkIdFor(file, normalized, hunkIndex),
+		file: file.path,
+		old_path: file.old_path,
+		file_id: fileIdFor(file),
+		hunk_index: hunkIndex,
+		header: normalized.header,
+		old_start: normalized.old_start,
+		old_lines: normalized.old_lines,
+		new_start: normalized.new_start,
+		new_lines: normalized.new_lines,
+		changed_lines: stats.additions + stats.deletions,
+		additions: stats.additions,
+		deletions: stats.deletions,
+		category: fileCategory(file),
+		is_binary: file.is_binary,
+		is_generated: file.is_generated,
+		is_truncated: hunkTruncated,
+		source_is_truncated: file.is_truncated,
+		read_window: readWindow,
+	};
+}
+
+function hunkLineStats(hunk: PrWalkthroughAnalysisBundleHunk): { additions: number; deletions: number } {
+	let additions = 0;
+	let deletions = 0;
+	for (const line of hunk.lines) {
+		if (line.kind === "add") additions++;
+		else if (line.kind === "del") deletions++;
+	}
+	return { additions, deletions };
+}
+
+function fileCategory(file: PrWalkthroughAnalysisBundleFile): string {
+	if (file.is_generated) return "generated";
+	if (file.is_binary) return "binary";
+	const normalized = file.path.replace(/\\/g, "/").toLowerCase();
+	const name = normalized.split("/").pop() ?? normalized;
+	if (/^(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|composer\.lock|poetry\.lock|cargo\.lock|gemfile\.lock|go\.sum)$/.test(name)) return "lockfile";
+	if (/(^|\/)(docs?|documentation|\.github)(\/|$)/.test(normalized) || /\.(md|mdx|rst|adoc|txt)$/i.test(normalized)) return "docs";
+	if (/(^|\/)(test|tests|__tests__|spec|fixtures?)(\/|$)/.test(normalized) || /(?:\.|-)(test|spec)\.[cm]?[jt]sx?$/.test(normalized)) return "test";
+	if (/(^|\/)(vendor|third[_-]?party|node_modules)(\/|$)/.test(normalized)) return "vendor";
+	if (/\.(png|jpe?g|gif|webp|svg|ico|pdf|zip|gz|br|woff2?|ttf|otf|mp4|mov|mp3|wav)$/i.test(normalized)) return "asset";
+	return "source";
 }
 
 function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: PrWalkthroughAnalysisBundleHunk[], hunkOffset: number): { file: PrWalkthroughAnalysisBundleFile; window: BundleFileReadWindowMetadata } {
@@ -473,6 +649,7 @@ function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: Pr
 
 	const hunks = selectedHunks.map((hunk, selectedIndex) => {
 		const absoluteHunkIndex = hunkOffset + selectedIndex;
+		const normalizedHunk = normalizeHunkForFile(file, hunk, absoluteHunkIndex);
 		const hunkWindow = {
 			applied: false,
 			omittedLines: 0,
@@ -481,7 +658,7 @@ function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: Pr
 		};
 		const lines: PrWalkthroughAnalysisBundleLine[] = [];
 		const header = windowTextToBudget(
-			typeof hunk.header === "string" ? hunk.header : "",
+			typeof normalizedHunk.header === "string" ? normalizedHunk.header : "",
 			Math.min(PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxHeaderBytes, Math.max(0, remainingBytes - READ_WINDOW_MARKER_RESERVE_BYTES)),
 			` … [hunk header truncated by bundle-store read window; request hunkOffset=${absoluteHunkIndex} hunkLimit=1 if needed]`,
 		);
@@ -494,10 +671,10 @@ function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: Pr
 		}
 
 		let hunkReturnedSourceLines = 0;
-		for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex++) {
-			const line = hunk.lines[lineIndex];
+		for (let lineIndex = 0; lineIndex < normalizedHunk.lines.length; lineIndex++) {
+			const line = normalizedHunk.lines[lineIndex];
 			if (hunkReturnedSourceLines >= PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW.maxLinesPerHunk || remainingLines <= 0 || remainingBytes <= READ_WINDOW_MARKER_RESERVE_BYTES) {
-				const omitted = summarizeOmittedLines(hunk.lines, lineIndex);
+				const omitted = summarizeOmittedLines(normalizedHunk.lines, lineIndex);
 				hunkWindow.applied = true;
 				hunkWindow.omittedLines += omitted.lines;
 				hunkWindow.omittedBytes += omitted.bytes;
@@ -548,7 +725,7 @@ function windowFileRead(file: PrWalkthroughAnalysisBundleFile, selectedHunks: Pr
 		window.omittedLines += hunkWindow.omittedLines;
 		window.truncatedLines += hunkWindow.truncatedLines;
 		window.omittedBytes += hunkWindow.omittedBytes;
-		const windowedHunk = { ...hunk, header: header.text, lines } as PrWalkthroughAnalysisBundleHunk & Record<string, unknown>;
+		const windowedHunk = { ...normalizedHunk, id: hunkIdFor(file, normalizedHunk, absoluteHunkIndex), header: header.text, lines } as PrWalkthroughAnalysisBundleHunk & Record<string, unknown>;
 		if (hunkWindow.applied) {
 			windowedHunk.is_truncated = true;
 			windowedHunk.truncated = true;

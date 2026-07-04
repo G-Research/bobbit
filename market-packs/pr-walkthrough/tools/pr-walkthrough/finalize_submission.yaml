@@ -7,4 +7,10 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Call once all required chunks are saved. The finalizer assembles chunks into the canonical PR walkthrough YAML, validates it, synthesizes cards, and commits the final payload. If validation fails, overwrite the relevant chunks and call this tool again.
+  Call once all required chunks are saved. The finalizer assembles chunks into the canonical PR walkthrough YAML, validates it, synthesizes cards, derives deterministic boilerplate/coverage/completion-sweep data, and commits the final payload atomically. If validation fails, overwrite the relevant chunks and call this tool again.
+
+  Finalization validates the V2 logical-card contract: explicit hunk ids or unambiguous fallback anchors, one primary placement per hunk, secondary references pointing to an existing primary, skip_reason for skipped hunks, and no raw diff bodies in YAML. `review_chunks[].files` remains navigation metadata; it does not expand whole files into cards.
+
+  Retryable validation errors include PRW_DUPLICATE_PRIMARY_HUNK, PRW_HUNK_REF_UNRESOLVED, PRW_SECONDARY_WITHOUT_PRIMARY, PRW_SKIP_REASON_REQUIRED, PRW_MAJOR_REMAINING_HUNKS, PRW_FINALIZE_INCOMPLETE, PRW_CHUNK_CONFLICT, and PRW_SCHEMA_INVALID. Fix the named chunks/hunks and finalize again.
+
+  Large PR safety bounds individual reads and stored values, not the number of logical cards. More than 12 required cards should still be finalized when coverage and validation pass.

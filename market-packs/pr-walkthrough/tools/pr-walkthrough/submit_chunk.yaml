@@ -7,6 +7,14 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Save each completed section immediately so progress survives compaction, retries, reloads, and reviewer restarts. Valid section_id values are metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, and chunk:<id>. Re-sending the same section_id overwrites the saved chunk rather than appending a duplicate.
+  Save each completed section immediately so progress survives compaction, retries, reloads, and reviewer restarts. Re-sending the same section_id overwrites that chunk rather than appending a duplicate.
 
-  Successful saves return compact model-facing status such as saved, section_id, nextRequired, and missing instead of the full growing chunk summary. Use read_pr_walkthrough_submission_status whenever you need the complete saved-chunk and finalization status.
+  Valid section_id values are metadata, context, merge_assessment, omissions_and_followups, audit, display, document, decision:<id>, and chunk:<id>. Use stable deterministic ids; do not use timestamps or shifting counters.
+
+  `chunk:<id>` values should be one logical review card, not one file. Use the V2 `review_chunks[]` contract: `files` is navigation metadata only, while rendered code comes from explicit `narrative[].diff.hunks[]` or legacy `relevant_hunks[]` references. Reference manifest `hunk_id`s; do not paste raw diff bodies into YAML.
+
+  Hunk placement is explicit: `primary` for the one expanded owner, `secondary` for later collapsed references to an already-primary hunk, and `skip` for generated/binary/mechanical/low-signal hunks. `skip` requires `skip_reason`; secondary references should include `primary_card_id` when known.
+
+  `narrative` entries are ordered and support `text`, `diff`, `note`, `suggested_comment`, and `checklist`. Keep setup and notes brief, and place suggested comments close to the relevant diff anchor.
+
+  Successful saves return compact model-facing status such as saved, section_id, nextRequired, and missing instead of the full growing chunk summary. Use read_pr_walkthrough_submission_status whenever you need saved chunks, read receipts, coverage counts, repeated references, skipped/remaining hunks, or finalization state.
