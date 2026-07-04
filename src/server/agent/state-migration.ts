@@ -665,7 +665,14 @@ function routeLegacyProjectStoreFile(
 		const projectId = typeof record.projectId === "string" ? record.projectId : undefined;
 
 		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
-			routeNormal(backupProjectId, { ...backup, projectId: backupProjectId }, key);
+			// Finding C: the CURRENT (post-promotion) record is authoritative. The
+			// stale `.pre-headquarters-id-migration` backup is a pre-promotion
+			// snapshot — overwriting the live record with it would silently DROP any
+			// updates made after promotion (progressed goals, updated sessions, …).
+			// Prefer the current record's fields; use the backup only to (a) recover
+			// the correct normal projectId and (b) fill in fields the promotion may
+			// have stripped (e.g. worktree/git metadata). Current wins on conflict.
+			routeNormal(backupProjectId, { ...backup, ...record, projectId: backupProjectId }, key);
 			continue;
 		}
 		if (projectId && projectId !== HEADQUARTERS_PROJECT_ID && projectsById.has(projectId)) {
@@ -750,6 +757,49 @@ function quarantineLegacyConfig(
 }
 
 /**
+ * Recursively compare two filesystem trees for byte-equivalence, mirroring what
+ * {@link copyTreePreserveFirst} actually copies: symlinks and special entries are
+ * skipped (so their presence is not required for equivalence), files must have
+ * identical bytes, and directories must have byte-equivalent children. Used to
+ * PROVE a relocated server secret landed intact before we delete the reachable
+ * source. Returns false on any read/stat error so callers fail closed.
+ */
+function treesEqual(a: string, b: string): boolean {
+	let sa: fs.Stats;
+	let sb: fs.Stats;
+	try {
+		sa = fs.lstatSync(a);
+		sb = fs.lstatSync(b);
+	} catch {
+		return false;
+	}
+	if (sa.isSymbolicLink()) return true; // copy skips symlinks; not required at dest
+	if (sa.isFile()) {
+		if (!sb.isFile()) return false;
+		try {
+			return fs.readFileSync(a).equals(fs.readFileSync(b));
+		} catch {
+			return false;
+		}
+	}
+	if (sa.isDirectory()) {
+		if (!sb.isDirectory()) return false;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(a, { withFileTypes: true });
+		} catch {
+			return false;
+		}
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue; // copy skips symlinks
+			if (!treesEqual(path.join(a, entry.name), path.join(b, entry.name))) return false;
+		}
+		return true;
+	}
+	return true; // special entries are skipped by the copy
+}
+
+/**
  * Security: relocate LIVE server secrets (`token`, `tls`, `sandbox-agent-auth`)
  * out of `sourceStateDir` and into the OS-level `serverSecretsDir()`, which lives
  * OUTSIDE any project root.
@@ -766,6 +816,13 @@ function quarantineLegacyConfig(
  * When the target already exists we simply drop the reachable duplicate. A
  * NON-secret marker is left behind so the move is traceable. Idempotent: a no-op
  * once no reachable copy remains.
+ *
+ * FATAL by design (finding B): if a live secret cannot be provably removed from
+ * the project-reachable path — the copy into serverSecretsDir() failed / is not
+ * byte-equivalent, or the reachable source survives deletion — this THROWS rather
+ * than merely logging. Continuing would leave the admin bearer token readable
+ * under a same-root normal project's cwd, re-opening the S1 privilege escalation.
+ * Diagnostics are persisted before the throw so the failure is auditable.
  */
 function relocateServerSecretsToSecretsDir(
 	sourceStateDir: string,
@@ -779,10 +836,17 @@ function relocateServerSecretsToSecretsDir(
 		if (!fs.existsSync(src)) continue; // already relocated / never present
 		const dest = path.join(secretsDir, entry);
 		try {
-			if (!fs.existsSync(dest)) {
+			const destPreexisted = fs.existsSync(dest);
+			if (!destPreexisted) {
 				// 1. Preserve the secret in the secrets dir before removal.
 				fs.mkdirSync(secretsDir, { recursive: true });
 				copyTreePreserveFirst(src, dest, path.join("server-secrets", entry), diagnostics);
+				// FATAL: prove the copy produced a byte-equivalent secret BEFORE we
+				// delete the reachable source. Deleting after a bad copy would lose the
+				// secret; keeping the source leaves the admin token readable.
+				if (!fs.existsSync(dest) || !treesEqual(src, dest)) {
+					throw new Error("copied secret into serverSecretsDir is missing or not byte-equivalent to the source");
+				}
 				diagnostics.copied.push(`security: relocated live server secret "${entry}" into serverSecretsDir (outside any project root)`);
 			} else {
 				// secretsDir already holds the authoritative live copy — just drop the
@@ -791,6 +855,12 @@ function relocateServerSecretsToSecretsDir(
 			}
 			// 2. Remove the reachable copy from the project-reachable state dir.
 			fs.rmSync(src, { recursive: true, force: true });
+			// FATAL: prove the reachable source is actually gone. If it survives, the
+			// live admin bearer token / TLS / sandbox auth stays readable under a
+			// project-reachable path (S1 escalation) — refuse to continue.
+			if (fs.existsSync(src)) {
+				throw new Error("reachable server secret survived removal from the project-reachable state dir");
+			}
 			// 3. Leave a NON-secret marker so operators can trace the move.
 			try {
 				fs.writeFileSync(
@@ -800,7 +870,15 @@ function relocateServerSecretsToSecretsDir(
 				);
 			} catch { /* marker is best-effort and contains no secret */ }
 		} catch (err) {
-			diagnostics.failures.push(`security: could not relocate live server secret "${entry}": ${(err as Error).message}`);
+			// FATAL: leaving a live server secret readable under a project-reachable
+			// path re-opens the same-root admin-token escalation. Persist diagnostics
+			// (never containing the secret), then abort — fail closed.
+			const message = `security: refusing to continue — could not provably relocate live server secret "${entry}" out of a project-reachable path (${src}): ${(err as Error).message}`;
+			diagnostics.failures.push(message);
+			try {
+				writeHeadquartersDiagnostics(diagnostics.paths.headquartersStateDir, diagnostics);
+			} catch { /* best-effort audit; the throw below is the real signal */ }
+			throw new Error(message);
 		}
 	}
 }
