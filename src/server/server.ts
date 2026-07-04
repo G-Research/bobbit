@@ -509,6 +509,7 @@ import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
+import { consumeOperatorConfirmation, mintOperatorConfirmation, stableConfirmationBinding } from "./auth/operator-confirmation.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
@@ -517,6 +518,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
@@ -2445,7 +2447,7 @@ export function createGateway(config: GatewayConfig) {
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
+			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session, X-Bobbit-Operator-Confirmation");
 
 			if (req.method === "OPTIONS") {
 				res.writeHead(204);
@@ -2470,6 +2472,18 @@ export function createGateway(config: GatewayConfig) {
 
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
+			const hasAuthorizationHeader = typeof req.headers.authorization === "string" && req.headers.authorization.length > 0;
+			const requestHeader = (value: string | string[] | undefined): string => Array.isArray(value) ? (value[0] || "") : (value || "");
+			const hasSessionBoundAuthHeaders = (): boolean => Boolean(
+				requestHeader(req.headers["x-bobbit-session-id"])
+				|| requestHeader(req.headers["x-bobbit-session-secret"])
+				|| requestHeader(req.headers["x-bobbit-spawning-session"]),
+			);
+			const canMintOperatorCookie = (): boolean => {
+				if (url.pathname !== "/api/health" || req.method !== "GET") return false;
+				if (hasAuthorizationHeader || url.searchParams.has("token") || hasSessionBoundAuthHeaders()) return false;
+				return true;
+			};
 
 			// Cookie auth short-circuit — if the browser presents a known
 			// bobbit_session cookie, treat the request as admin-authenticated
@@ -2507,16 +2521,21 @@ export function createGateway(config: GatewayConfig) {
 					}
 					sandboxScope = scope;
 				} else {
-					// Successful admin Bearer auth — mint session cookie if absent
-					// so subsequent requests (including iframe content origin) can
-					// authenticate without the Bearer token leaking into URLs.
-					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
+					// Successful admin Bearer/query-token auth mints only a preview/API
+					// cookie so iframe content origin can authenticate without the token
+					// leaking into URLs. Operator-confirmation-capable cookies must never
+					// be issued to token-authenticated REST traffic.
+					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode, operator: false });
 				}
 			} else if (!isPublicEndpoint && isLocalhostMode) {
 				// Localhost mode: skip auth check, still mint the cookie so the
 				// browser can use the same cookie auth path on non-localhost
 				// deployments later (and the SSE endpoint below remains uniform).
-				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
+				// Requests that carry Authorization or ?token are API/script traffic
+				// and only receive preview/API-capable cookies. Local no-auth browser
+				// bootstrap on /api/health receives the operator-capable cookie used
+				// by human confirmation flows.
+				issueCookieIfMissing(req, res, cookieStore, { localhost: true, operator: canMintOperatorCookie() });
 			}
 
 			// Enforce sandbox route guard
@@ -2952,6 +2971,8 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for in-process E2E tests to seed/read preferences directly (see tests/e2e/in-process-harness.ts GatewayInfo.preferencesStore). */
+		preferencesStore,
 		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
@@ -8025,6 +8046,64 @@ async function handleApiRoute(
 		return;
 	}
 
+	function firstHeader(name: string): string | undefined {
+		const value = req.headers[name.toLowerCase()];
+		const str = Array.isArray(value) ? value[0] : value;
+		return typeof str === "string" && str.length > 0 ? str : undefined;
+	}
+
+	function hasSessionBoundHeaders(): boolean {
+		return Boolean(
+			firstHeader("x-bobbit-session-id")
+			|| firstHeader("x-bobbit-session-secret")
+			|| firstHeader("x-bobbit-spawning-session"),
+		);
+	}
+
+	function isHumanOperatorRequest(): boolean {
+		return Boolean(
+			cookieStore
+			&& cookieTryAuth(req, cookieStore, { operator: true })
+			&& !sandboxScope
+			&& !hasSessionBoundHeaders()
+			&& !firstHeader("authorization"),
+		);
+	}
+
+	function claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string } {
+		const sensitive = sensitiveClaudeCodePreferenceMutation(patch);
+		return {
+			requiresConfirmation: sensitive.requiresConfirmation,
+			keys: sensitive.keys,
+			binding: stableConfirmationBinding({ values: sensitive.values }),
+		};
+	}
+
+	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
+	// for host-local Claude Code preferences that affect process execution or permission bypass.
+	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {
+		if (!isHumanOperatorRequest()) {
+			json({ error: "Claude Code preference confirmation requires an operator browser session" }, 403);
+			return;
+		}
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
+		try {
+			confirmation = claudeCodeConfirmationBinding(body as Record<string, unknown>);
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 400);
+			return;
+		}
+		if (!confirmation.requiresConfirmation) {
+			json({ confirmationRequired: false, sensitiveKeys: [] });
+			return;
+		}
+		const minted = mintOperatorConfirmation({ purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
+		json({ confirmationRequired: true, confirmationToken: minted.token, expiresAt: minted.expiresAt, sensitiveKeys: confirmation.keys });
+		return;
+	}
+
 	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
 		json(getSafePreferences());
@@ -8046,8 +8125,35 @@ async function handleApiRoute(
 			}, 400);
 			return;
 		}
+		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
+		let preferencePatch = body as Record<string, unknown>;
+		if (claudeCodePrefsChanged) {
+			let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
+			try {
+				confirmation = claudeCodeConfirmationBinding(preferencePatch);
+			} catch (err: any) {
+				json({ error: err?.message || String(err) }, 400);
+				return;
+			}
+			if (confirmation.requiresConfirmation) {
+				const token = firstHeader("x-bobbit-operator-confirmation");
+				const confirmed = isHumanOperatorRequest()
+					&& consumeOperatorConfirmation(token, { purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
+				if (!confirmed) {
+					json({
+						error: "Claude Code host-runtime preference changes require operator confirmation",
+						confirmationRequired: true,
+						sensitiveKeys: confirmation.keys,
+					}, 403);
+					return;
+				}
+			}
+			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
+			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
+			preferencePatch = { ...preferencePatch, ...normalized.values };
+		}
 		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
-		for (const [key, value] of Object.entries(body)) {
+		for (const [key, value] of Object.entries(preferencePatch)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
 				// authoritative. An empty/invalid list removes the key entirely.
