@@ -108,6 +108,17 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
 
 This means removing a normal project cleanly removes its state from Bobbit's UI, while Headquarters preserves the server/default workspace and server config state.
 
+### Durable-store write discipline (atomic writes + .bak recovery)
+
+All recovery-critical JSON stores write crash-safely — never a plain truncating `writeFileSync` to the target path (a kill mid-write would leave a torn file, and the next save from a fresh empty load would make the loss permanent).
+
+Two implementations of the same discipline:
+
+- **`sessions.json` / `bg-processes.json`** (`session-store.ts`, `bg-process-store.ts`): tmp-write → fsync → rename, 5-deep `.bak.N` rotation, plus a version-2 epoch envelope with a stale-snapshot guard (their multi-writer concern).
+- **`gates.json` / `tasks.json` / `team-state.json` / `inbox/<staffId>.json`** (`gate-store.ts`, `task-store.ts`, `team-store.ts`, `inbox-store.ts`): the shared helper `src/server/agent/atomic-json.ts` — `atomicWriteJsonSync()` (tmp-write → fsync → rename → best-effort directory fsync) with 3-deep `.bak.N` rotation. On-disk JSON shape is unchanged; only the write/recovery mechanics are hardened.
+
+Load-fallback order for the shared-helper stores (`loadJsonWithBackupFallback()`): primary file → newest parseable `.bak.N` (logs a `Loaded from backup` warn) → start empty. Deliberate deletion (e.g. staff removal wiping `inbox/<staffId>.json`) must go through `removeJsonWithBackups()`, which purges the `.bak.N` files with the primary — otherwise the deleted state would resurrect from backup on the next load. Pinned by `tests/atomic-json.test.ts` and `tests/durable-store-atomic-write.test.ts` (session/bg stores: `tests/session-store-atomic-write.test.ts`). Symptom→fix lookup: [debugging.md — Corrupt or truncated durable store on restart](debugging.md#corrupt-or-truncated-durable-store-on-restart-gatesjson--tasksjson--team-statejson--inbox).
+
 ### ProjectContext (scoped stores)
 
 `ProjectContext` (`project-context.ts`) holds a complete set of stores scoped to one project. Every store constructor accepts a directory parameter (`stateDir` or `configDir`) instead of using module-level globals:
