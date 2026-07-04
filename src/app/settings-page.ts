@@ -48,7 +48,7 @@ import {
 import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
-import { setConfigScope, getConfigScope } from "./config-scope.js";
+import { setConfigScope, getConfigScope, getConfigApiProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
@@ -2839,11 +2839,8 @@ function loadConfigDirs(): void {
 	(async () => {
 		try {
 			const dirParams = new URLSearchParams();
-			const scope = getActiveScope();
-			if (scope && scope !== "system") {
-				dirParams.set("projectId", scope);
-			}
-			const res = await gatewayFetch(`/api/config-directories${dirParams.toString() ? '?' + dirParams.toString() : ''}`);
+			dirParams.set("projectId", getConfigApiProjectId(getActiveScope()));
+			const res = await gatewayFetch(`/api/config-directories?${dirParams.toString()}`);
 			if (res.ok) {
 				configDirs = await res.json();
 				configDirsLoaded = true;
