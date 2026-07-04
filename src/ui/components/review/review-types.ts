@@ -47,6 +47,7 @@ export interface ReviewDocumentModel {
   title: string;
   markdown: string;
   source?: ReviewSource;
+  documentId?: string;
 }
 
 export interface ReviewDecisionEventDetail {

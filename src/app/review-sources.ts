@@ -16,7 +16,8 @@ import {
 import {
 	clearAnnotations,
 	flushPendingWrites,
-	getAnnotations,
+	getAnnotationBucketForDocument,
+	getInlineCommentPayloadsForDocument,
 	markReviewSubmitted,
 } from "../ui/components/review/AnnotationStore.js";
 
@@ -338,17 +339,9 @@ async function deleteReviewWorkspaceTabsFromServer(sessionId: string, doc: Revie
 	}
 }
 
-function inlineCommentsFromAnnotations(sessionId: string, documentTitle: string): ReviewInlineCommentPayload[] {
-	return getAnnotations(sessionId, documentTitle).map((ann) => ({
-		documentTitle,
-		quote: ann.quote,
-		comment: ann.comment,
-		prefix: ann.prefix,
-		suffix: ann.suffix,
-		start: ann.start,
-		end: ann.end,
-		isCode: ann.isCode,
-	}));
+function inlineCommentsFromAnnotations(sessionId: string, doc: ReviewDocumentModel): ReviewInlineCommentPayload[] {
+	const documentKey = reviewDocumentMapKey(doc);
+	return getInlineCommentPayloadsForDocument(sessionId, documentKey, doc);
 }
 
 function inlineCommentBelongsToDocument(comment: ReviewInlineCommentPayload, doc: ReviewDocumentModel): boolean {
@@ -360,7 +353,7 @@ function normalizeDecisionPayload(input: ReviewDecisionPayload, sessionId: strin
 	const inputInlineComments = providedInlineComments.filter((comment) => inlineCommentBelongsToDocument(comment, doc));
 	const inlineComments = inputInlineComments.length > 0
 		? inputInlineComments.map((comment) => ({ ...comment, documentTitle: comment.documentTitle || doc.title }))
-		: inlineCommentsFromAnnotations(sessionId, doc.title);
+		: inlineCommentsFromAnnotations(sessionId, doc);
 	return {
 		decision: input.decision,
 		finalComment: typeof input.finalComment === "string" ? input.finalComment : "",
@@ -494,13 +487,16 @@ export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayloa
 			}).catch(() => undefined);
 		}
 	}
+	const docKey = reviewDocumentMapKey(doc);
 	if (sessionId) {
-		clearAnnotations(sessionId, doc.title);
+		const annotationBuckets = new Set<string>([doc.title, docKey]);
+		if (doc.documentId) annotationBuckets.add(doc.documentId);
+		annotationBuckets.add(getAnnotationBucketForDocument(sessionId, docKey, doc, state.reviewDocuments));
+		for (const bucket of annotationBuckets) clearAnnotations(sessionId, bucket);
 		removePersistedReviewDocument(sessionId, doc.title);
 	}
 	await flushPendingWrites();
 	state.reviewDocuments = new Map(state.reviewDocuments);
-	const docKey = reviewDocumentMapKey(doc);
 	state.reviewDocuments.delete(docKey);
 	if (state.reviewActiveTab === docKey) {
 		state.reviewActiveTab = [...state.reviewDocuments.keys()][0] || "";
