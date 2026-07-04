@@ -65,7 +65,9 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files
 	"state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
-	"state/sandbox-agent-auth/",  // scoped sandbox auth mounts (host-tokens.ts)
+	// NOTE: sandbox-agent-auth is a live server secret and now lives under
+	// serverSecretsDir() (outside any project root), not under state/, so it is
+	// intentionally NOT listed here — secrets must never be archived.
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
 	"state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
 ];

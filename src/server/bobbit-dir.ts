@@ -1,3 +1,6 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   defaultAgentDir as resolveDefaultAgentDir,
@@ -79,6 +82,48 @@ export function bobbitConfigDir(projectRoot = getProjectRoot()): string {
 /** Returns <headquartersDir>/state. */
 export function bobbitStateDir(projectRoot = getProjectRoot()): string {
   return path.join(headquartersDir(projectRoot), "state");
+}
+
+/**
+ * Absolute directory for LIVE server secrets — the admin bearer `token`, TLS
+ * material (`tls/`), and sandbox-agent auth (`sandbox-agent-auth/`).
+ *
+ * These MUST live OUTSIDE any project root. The default Headquarters dir is
+ * `<serverRunDir>/.bobbit/headquarters`, and a normal project registered at the
+ * server run directory defaults its session cwd to `<serverRunDir>`. That makes
+ * `<serverRunDir>/.bobbit/headquarters/state/token` a descendant of a normal
+ * project's cwd — a project agent could read the live admin token and escalate
+ * to gateway-wide API access. Relocating the secrets to an OS user-level
+ * directory removes them from any project-reachable path.
+ *
+ * Resolution priority (computed fresh each call — no cache — so env overrides
+ * used for test isolation take effect):
+ *   1. `BOBBIT_SECRETS_DIR` (explicit override; REQUIRED for test isolation).
+ *   2. OS user dir + `bobbit/secrets/<hash>` where `<hash>` = first 16 hex of
+ *      `sha256(headquartersDir())` (stable per Headquarters dir, so multiple
+ *      servers on one machine don't collide).
+ */
+export function serverSecretsDir(): string {
+  let dir: string;
+  if (process.env.BOBBIT_SECRETS_DIR) {
+    dir = path.resolve(process.env.BOBBIT_SECRETS_DIR);
+  } else {
+    const hash = crypto.createHash("sha256").update(headquartersDir()).digest("hex").slice(0, 16);
+    if (process.platform === "win32") {
+      const base = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+      dir = path.join(base, "bobbit", "secrets", hash);
+    } else if (process.platform === "darwin") {
+      dir = path.join(os.homedir(), "Library", "Application Support", "bobbit", "secrets", hash);
+    } else {
+      const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+      dir = path.join(base, "bobbit", "secrets", hash);
+    }
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.platform !== "win32") {
+    try { fs.chmodSync(dir, 0o700); } catch { /* best-effort perms */ }
+  }
+  return dir;
 }
 
 /** Returns the server/Headquarters default agent directory. */

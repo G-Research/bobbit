@@ -42,15 +42,18 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 
 		// Run the seed script BEFORE starting the gateway. Seed expects workDir
 		// (the project root); it creates split Headquarters and normal project state.
+		const secretsDir = join(workDir, ".bobbit", "secrets");
 		execFileSync("node", [SEED_SCRIPT, workDir], {
 			stdio: "pipe",
-			env: { ...process.env, BOBBIT_DIR: headquartersDir, BOBBIT_PI_DIR: "" },
+			env: { ...process.env, BOBBIT_DIR: headquartersDir, BOBBIT_PI_DIR: "", BOBBIT_SECRETS_DIR: secretsDir },
 		});
 		mkdirSync(join(headquartersDir, "state"), { recursive: true });
 		writeFileSync(join(headquartersDir, "state", "setup-complete"), "e2e\n");
 
 		// Set env BEFORE importing server modules
 		process.env.BOBBIT_DIR = headquartersDir;
+		// Isolate live server secrets so they never land in the real OS home dir.
+		process.env.BOBBIT_SECRETS_DIR = secretsDir;
 		delete process.env.BOBBIT_PI_DIR;
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_MCP = "1";

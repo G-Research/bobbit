@@ -60,7 +60,12 @@ export interface GatewayInfo {
 }
 
 function readHarnessToken(info: GatewayInfo): string {
-	try { return readFileSync(join(info.bobbitDir, "state", "token"), "utf-8").trim(); } catch {}
+	// Live token lives under serverSecretsDir() (BOBBIT_SECRETS_DIR); fall back to
+	// the legacy Headquarters-state location for older fixtures.
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR || join(info.bobbitDir, ".secrets");
+	for (const p of [join(secretsDir, "token"), join(info.bobbitDir, "state", "token")]) {
+		try { return readFileSync(p, "utf-8").trim(); } catch {}
+	}
 	const token = process.env.BOBBIT_TOKEN?.trim();
 	if (token && token.length >= 64) return token;
 	throw new Error(`missing token for ${info.bobbitDir}`);
@@ -186,6 +191,9 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+		// land in the developer's real OS home dir (serverSecretsDir() default).
+		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
 		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
 		process.env.BOBBIT_AGENT_DIR = agentDir;

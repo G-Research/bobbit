@@ -81,11 +81,20 @@ if (!existsSync(join(projectRoot, "dist", "server"))) {
 
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
+// Live server secrets (token / TLS / sandbox-agent auth) resolve to an OS
+// user-level directory via serverSecretsDir(). Pin BOBBIT_SECRETS_DIR to an
+// isolated temp dir for the whole unit phase so no test can ever write real
+// admin secrets into the developer's home dir. Individual tests that need a
+// pristine secrets dir override this per-test.
+const unitSecretsDir = process.env.BOBBIT_SECRETS_DIR
+	|| join(realpathSync(tmpdir()), `bobbit-unit-secrets-${process.pid}`);
+mkdirSync(unitSecretsDir, { recursive: true });
 const testEnv = {
 	...process.env,
 	NODE_ENV: "test",
 	BOBBIT_TEST_NO_EXTERNAL: process.env.BOBBIT_TEST_NO_EXTERNAL || "1",
 	BOBBIT_TEST_NO_REMOTE: process.env.BOBBIT_TEST_NO_REMOTE || "1",
+	BOBBIT_SECRETS_DIR: unitSecretsDir,
 };
 
 // The two runners are BOTH CPU-bound and each parallelises internally. Running

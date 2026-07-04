@@ -85,6 +85,9 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	}
 
 	process.env.BOBBIT_DIR = bobbitDir;
+	// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+	// land in the developer's real OS home dir (serverSecretsDir() default).
+	process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 	// Isolate the agent dir so each test has its own ~/.bobbit/agent equivalent.
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.NODE_ENV = "test";

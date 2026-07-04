@@ -97,6 +97,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+		// land in the developer's real OS home dir (serverSecretsDir() default).
+		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";

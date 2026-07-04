@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { serverSecretsDir } from "../bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -641,11 +642,18 @@ function routeLegacyProjectStoreFile(
 	const hqRecords: Record<string, unknown>[] = [];
 	const normalRecordsByProject = new Map<string, Record<string, unknown>[]>();
 	const seenLegacyKeys = new Set<string>();
+	// When the source and target are the same file (BOBBIT_DIR-override same-root
+	// repair), records re-attributed to a normal project must be REMOVED from the
+	// Headquarters store — merging them into the normal store alone would leave a
+	// duplicate under `headquarters`.
+	const inPlace = samePath(legacyFile, targetFile);
+	const routedNormalKeys = new Set<string>();
 
 	const routeNormal = (projectId: string, record: Record<string, unknown>, key: string): void => {
 		const bucket = normalRecordsByProject.get(projectId) ?? [];
 		bucket.push(record);
 		normalRecordsByProject.set(projectId, bucket);
+		if (key) routedNormalKeys.add(key);
 		diagnostics.restoredNormalRecords.push({ file: fileName, key, projectId });
 	};
 
@@ -706,6 +714,20 @@ function routeLegacyProjectStoreFile(
 		const normalFile = path.join(project.rootPath, ".bobbit", "state", fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
 		mergeRecordsByKey(normalFile, fileName, records, diagnostics, `normal:${projectId}`);
 	}
+	// In-place (override) repair: drop records now attributed to a normal project
+	// from the Headquarters store so they no longer double up under `headquarters`.
+	// Records that were left ambiguous / genuinely headquarters are preserved.
+	if (inPlace && routedNormalKeys.size > 0) {
+		const { records: existing, shape } = readStoreRecordsWithShape(targetFile, fileName);
+		const kept = existing.filter(record => {
+			const key = recordKeyForFile(fileName, record);
+			return !key || !routedNormalKeys.has(key);
+		});
+		if (kept.length !== existing.length) {
+			writeStoreRecords(targetFile, kept, shape);
+			diagnostics.copied.push(`headquarters: removed ${existing.length - kept.length} re-attributed normal record${existing.length - kept.length === 1 ? "" : "s"} from ${fileName}`);
+		}
+	}
 }
 
 function quarantineLegacyConfig(
@@ -728,53 +750,74 @@ function quarantineLegacyConfig(
 }
 
 /**
- * Security: after server secrets are preserved in Headquarters state, remove the
- * legacy copies from the normal-project-owned `<serverRunDir>/.bobbit/state`.
+ * Security: relocate LIVE server secrets (`token`, `tls`, `sandbox-agent-auth`)
+ * out of `sourceStateDir` and into the OS-level `serverSecretsDir()`, which lives
+ * OUTSIDE any project root.
  *
- * A same-root normal project defaults its cwd to `<serverRunDir>` and uses
- * `<serverRunDir>/.bobbit/{state,config}`, so a project agent could otherwise read
- * the still-valid admin bearer `token` (plus TLS material / sandbox auth) and
- * escalate to gateway-wide privileges. The value is preserved in Headquarters
- * state PLUS a restricted quarantine backup, so this is a justified exception to
- * the preserve-first policy. Idempotent: a no-op once the legacy copy is gone.
- * Only call in the default no-override, non-source-is-target case.
+ * Both the Headquarters state dir (`<serverRunDir>/.bobbit/headquarters/state` by
+ * default) and the legacy `<serverRunDir>/.bobbit/state` are DESCENDANTS of a
+ * same-root normal project's default cwd (`<serverRunDir>`), so leaving a live
+ * admin bearer `token` (or TLS material / sandbox auth) there is a gateway-wide
+ * privilege escalation. This moves each entry so exactly ONE live copy remains,
+ * in `serverSecretsDir()`.
+ *
+ * Preserve-first: never overwrite a secret already present in `serverSecretsDir()`
+ * — that copy is authoritative (preserves an existing token VALUE / continuity).
+ * When the target already exists we simply drop the reachable duplicate. A
+ * NON-secret marker is left behind so the move is traceable. Idempotent: a no-op
+ * once no reachable copy remains.
  */
-function neutralizeLegacyServerSecrets(
-	legacyStateDir: string,
-	headquartersStateDir: string,
+function relocateServerSecretsToSecretsDir(
+	sourceStateDir: string,
+	secretsDir: string,
 	diagnostics: HeadquartersMigrationDiagnostics,
 ): void {
-	const quarantineDir = path.join(headquartersStateDir, "migration-quarantine", "secrets");
+	// Never relocate onto itself (e.g. BOBBIT_SECRETS_DIR pointed at the state dir).
+	if (samePath(sourceStateDir, secretsDir)) return;
 	for (const entry of SERVER_SECRET_ENTRIES) {
-		const legacyPath = path.join(legacyStateDir, entry);
-		if (!fs.existsSync(legacyPath)) continue; // already neutralized / never present
+		const src = path.join(sourceStateDir, entry);
+		if (!fs.existsSync(src)) continue; // already relocated / never present
+		const dest = path.join(secretsDir, entry);
 		try {
-			// 1. Guarantee the secret survives in Headquarters state before removal.
-			const hqPath = path.join(headquartersStateDir, entry);
-			if (!fs.existsSync(hqPath)) {
-				copyTreePreserveFirst(legacyPath, hqPath, entry, diagnostics);
+			if (!fs.existsSync(dest)) {
+				// 1. Preserve the secret in the secrets dir before removal.
+				fs.mkdirSync(secretsDir, { recursive: true });
+				copyTreePreserveFirst(src, dest, path.join("server-secrets", entry), diagnostics);
+				diagnostics.copied.push(`security: relocated live server secret "${entry}" into serverSecretsDir (outside any project root)`);
+			} else {
+				// secretsDir already holds the authoritative live copy — just drop the
+				// project-reachable duplicate. Preserves token continuity.
+				diagnostics.skipped.push(`security: server secret "${entry}" already present in serverSecretsDir; removed project-reachable duplicate`);
 			}
-			// 2. Keep a restricted backup under HQ state (never loaded by any store).
-			const backupPath = path.join(quarantineDir, entry);
-			if (!fs.existsSync(backupPath)) {
-				fs.mkdirSync(quarantineDir, { recursive: true });
-				copyTreePreserveFirst(legacyPath, backupPath, path.join("migration-quarantine", "secrets", entry), diagnostics);
-			}
-			// 3. Remove the legacy copy from the normal-project-owned state dir.
-			fs.rmSync(legacyPath, { recursive: true, force: true });
-			// 4. Leave a NON-secret marker so operators can trace the move.
+			// 2. Remove the reachable copy from the project-reachable state dir.
+			fs.rmSync(src, { recursive: true, force: true });
+			// 3. Leave a NON-secret marker so operators can trace the move.
 			try {
 				fs.writeFileSync(
-					path.join(legacyStateDir, `.${entry}-moved-to-headquarters`),
-					`Moved to Headquarters state on ${new Date().toISOString()}. Restricted backup: migration-quarantine/secrets/${entry} under the Headquarters state directory.\n`,
+					path.join(sourceStateDir, `.${entry}-moved-to-server-secrets`),
+					`Moved to the OS-level Bobbit server secrets directory on ${new Date().toISOString()}. Live secrets no longer live under any project-reachable path.\n`,
 					"utf-8",
 				);
 			} catch { /* marker is best-effort and contains no secret */ }
-			diagnostics.copied.push(`security: neutralized legacy server secret "${entry}" at normal-project state (preserved in Headquarters + restricted backup)`);
 		} catch (err) {
-			diagnostics.failures.push(`security: could not neutralize legacy server secret "${entry}": ${(err as Error).message}`);
+			diagnostics.failures.push(`security: could not relocate live server secret "${entry}": ${(err as Error).message}`);
 		}
 	}
+}
+
+/**
+ * Security: relocate legacy `<serverRunDir>/.bobbit/state` server secrets into
+ * `serverSecretsDir()` (preserve-first) and strip the legacy copies. Thin wrapper
+ * over {@link relocateServerSecretsToSecretsDir} kept for call-site clarity — the
+ * legacy state dir is normal-project-owned after the split, so the same reachable
+ * escalation applies. Only call in the default no-override, non-source-is-target
+ * case (the override legacy dir is handled by relocating the HQ state dir).
+ */
+function neutralizeLegacyServerSecrets(
+	legacyStateDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	relocateServerSecretsToSecretsDir(legacyStateDir, serverSecretsDir(), diagnostics);
 }
 
 export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
@@ -810,12 +853,21 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 				copyTreePreserveFirst(src, dest, entry.name, diagnostics);
 			}
 		}
-		// Server secrets have now been preserved in Headquarters state; strip the
-		// live copies from the normal-project-owned `<serverRunDir>/.bobbit/state`.
-		neutralizeLegacyServerSecrets(legacyStateDir, headquartersStateDir, diagnostics);
+		// Relocate the legacy `<serverRunDir>/.bobbit/state` server secrets out to
+		// the OS-level serverSecretsDir(); leaving them at a normal-project-reachable
+		// path is a gateway-wide privilege escalation.
+		neutralizeLegacyServerSecrets(legacyStateDir, diagnostics);
 	} else if (usingOverride) {
 		diagnostics.skipped.push("legacy default .bobbit/state: BOBBIT_DIR/BOBBIT_PI_DIR-style Headquarters override is used in place");
 	}
+
+	// Always relocate any live server secrets that were copied into (or already
+	// live at) the Headquarters state dir out to serverSecretsDir(). The default
+	// Headquarters dir is `<serverRunDir>/.bobbit/headquarters`, a descendant of a
+	// same-root normal project's cwd, so the admin token / TLS / sandbox auth must
+	// not remain there. Preserve-first: an existing secretsDir copy wins (token
+	// continuity). Runs for both default and BOBBIT_DIR-override installs.
+	relocateServerSecretsToSecretsDir(headquartersStateDir, serverSecretsDir(), diagnostics);
 
 	const projectsFile = path.join(headquartersStateDir, "projects.json");
 	const legacyProjectsFile = path.join(legacyStateDir, "projects.json");
@@ -846,6 +898,31 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 				continue;
 			}
 			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
+		}
+	} else if (usingOverride && !sourceIsTarget && sameRootEvidence) {
+		// B1: BOBBIT_DIR/BOBBIT_PI_DIR-override installs promoted per-store records
+		// (sessions/goals/staff/…) under `headquarters` and left their
+		// `.pre-headquarters-id-migration` per-store backups in the SAME override
+		// state dir. `repairProjectsFileForHeadquartersSplit` restored the normal
+		// project's registry record above, but without this the promoted records
+		// stay attributed to headquarters. Re-run the per-store repair reading the
+		// per-store files and backups from the override state dir (which is both the
+		// source and the Headquarters target — routeLegacyProjectStoreFile detects
+		// the in-place case and strips re-attributed normal records from the HQ
+		// store). Reuses the same routing/evidence helpers as the non-override path.
+		for (const fileName of PROJECT_STORE_FILES) {
+			const overrideFile = path.join(headquartersStateDir, fileName);
+			const hasBackup = fs.existsSync(overrideFile + HEADQUARTERS_BACKUP_SUFFIX);
+			if (!fs.existsSync(overrideFile) && !hasBackup) continue;
+			const targetFile = path.join(headquartersStateDir, fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+			if (PROJECT_OBJECT_STORE_FILES.has(fileName)) {
+				// Object-shaped stores can't be safely re-attributed key-by-key when
+				// same-root evidence exists — flag for manual attribution, matching
+				// the non-override branch.
+				diagnostics.ambiguousRecords.push({ file: fileName, key: "*", reason: "object-shaped project store requires manual attribution when same-root normal project evidence exists (override install)" });
+				continue;
+			}
+			routeLegacyProjectStoreFile(fileName, overrideFile, targetFile, headquartersDirPath, evidence, diagnostics);
 		}
 	}
 

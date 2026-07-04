@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
+import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 /** Provider keys from auth.json / host env → sandbox env var name + description */
@@ -174,8 +174,8 @@ function sanitizeAuthScope(scope?: string): string | undefined {
 export function sandboxAgentAuthPath(scope?: string): string {
 	const safeScope = sanitizeAuthScope(scope);
 	return safeScope
-		? path.join(bobbitStateDir(), "sandbox-agent-auth", `${safeScope}.auth.json`)
-		: path.join(bobbitStateDir(), SANDBOX_AGENT_AUTH_RELATIVE_PATH);
+		? path.join(serverSecretsDir(), "sandbox-agent-auth", `${safeScope}.auth.json`)
+		: path.join(serverSecretsDir(), SANDBOX_AGENT_AUTH_RELATIVE_PATH);
 }
 
 export interface SandboxAgentAuthOptions {
