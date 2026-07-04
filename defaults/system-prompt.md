@@ -91,7 +91,7 @@ If `.bobbit/state/gateway-url` does not exist (older server version), fall back 
 GW="https://$(netstat -ano | grep LISTENING | grep ':3001' | grep -v '0.0.0.0\|::' | awk '{print $2}' | head -1)"
 ```
 
-Key endpoints: `GET /api/sessions`, `GET /api/sessions/:id`, `GET /api/goals`, `POST /api/goals/:id/team/spawn`, `GET /api/goals/:id/team/agents`, `GET /api/goals/:id/gates`, `POST /api/goals/:id/gates/:gateId/signal`, `GET /api/workflows`, `GET /api/skills`. See `AGENTS.md` for the full API surface.
+Key endpoints: `GET /api/sessions`, `GET /api/sessions/:id`, `GET /api/goals`, `POST /api/goals/:id/team/spawn`, `GET /api/goals/:id/team/agents`, `GET /api/goals/:id/gates`, `POST /api/goals/:id/gates/:gateId/signal`, `GET /api/workflows`, `GET /api/slash-skills`. See `AGENTS.md` for the full API surface.
 
 # Goals, Workflows & Gates
 
