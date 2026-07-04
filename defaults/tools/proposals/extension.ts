@@ -14,6 +14,27 @@ import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
 type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
+// Stable project ids (mirrors ./agent/project-registry). The hidden internal
+// `system` project is compatibility-only and never a user-facing config scope;
+// `headquarters` is the user-facing server/global scope.
+const SYSTEM_PROJECT_ID = "system";
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+
+/**
+ * Map a session's projectId to the scope a proposal draft should carry.
+ *
+ * Server-scope role/tool assistant sessions resolve to the hidden internal
+ * `system` project, which is never a user-facing config scope. Stamp the
+ * user-facing Headquarters (server/global) scope instead so accepted role/tool
+ * config lands in the visible Headquarters store rather than the hidden system
+ * store. Safe for all non-project proposal types (`system` is never a valid
+ * user-facing scope). Any other projectId passes through unchanged.
+ */
+export function scopeProposalProjectId(sessionProjectId: string | undefined): string | undefined {
+	if (!sessionProjectId) return undefined;
+	return sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
+}
+
 /**
  * Module-private gateway helper. Returns parsed JSON or text on success;
  * throws on network error or non-2xx HTTP. For edit_proposal we want the
@@ -70,8 +91,8 @@ async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unk
 	if (type === "project" || !args || typeof args !== "object" || Array.isArray(args)) return args;
 	const record = args as Record<string, unknown>;
 	if (typeof record.projectId === "string" && record.projectId.trim()) return args;
-	const projectId = await currentSessionProjectId();
-	return projectId ? { ...record, projectId } : args;
+	const scoped = scopeProposalProjectId(await currentSessionProjectId());
+	return scoped ? { ...record, projectId: scoped } : args;
 }
 
 /**

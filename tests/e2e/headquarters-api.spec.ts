@@ -640,6 +640,75 @@ test.describe("Headquarters same-root split API", () => {
 	});
 });
 
+test.describe("Headquarters server-scope config from hidden `system` proposals", () => {
+	// Code-quality finding: server-scope role/tool assistant sessions resolve to
+	// the hidden internal `system` project. Their proposal drafts carry
+	// projectId="system", so on acceptance the config must NOT land in the hidden
+	// system store — it must resolve to the user-facing Headquarters/server scope
+	// (Layer 2 defense-in-depth: role + tool mutation scope resolution).
+	test("POST /api/roles with projectId=system writes to Headquarters/server scope, not the hidden system store", async () => {
+		const gw = await startHeadquartersGateway({ projects: [] });
+		try {
+			const roleName = "sys-scope-role";
+			const created = await gw.json("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({
+					projectId: SYSTEM_PROJECT_ID,
+					name: roleName,
+					label: "Sys Scope Role",
+					promptTemplate: "created from a server-scope assistant proposal",
+				}),
+			});
+			expect(created.status, created.text).toBe(201);
+
+			// Landed in the Headquarters/server role store...
+			const serverRoleFile = join(gw.headquartersDir, "config", "roles", `${roleName}.yaml`);
+			expect(existsSync(serverRoleFile), `role must be written to Headquarters/server store at ${serverRoleFile}`).toBe(true);
+
+			// ...and NOT in the hidden system project's config store.
+			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
+			expect(system.status, system.text).toBe(200);
+			const systemRoleFile = join(system.body.rootPath, ".bobbit", "config", "roles", `${roleName}.yaml`);
+			expect(existsSync(systemRoleFile), "role must NOT be written to the hidden system project store").toBe(false);
+
+			// Visible in the Headquarters cascade with server origin.
+			const hqRoles = await gw.json(`/api/roles?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			expect(hqRoles.status, hqRoles.text).toBe(200);
+			const found = (hqRoles.body.roles as any[]).find((r) => r.name === roleName);
+			expect(found, "role must be visible in the Headquarters/server roles cascade").toBeTruthy();
+			expect(found.origin).toBe("server");
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
+	test("POST /api/tools/:name/customize with projectId=system writes to Headquarters/server scope, not the hidden system store", async () => {
+		const gw = await startHeadquartersGateway({ projects: [] });
+		try {
+			// `read` is a builtin File System tool (defaults/tools/filesystem/read.yaml).
+			const customize = await gw.json(
+				`/api/tools/read/customize?scope=project&projectId=${SYSTEM_PROJECT_ID}`,
+				{ method: "POST" },
+			);
+			expect(customize.status, customize.text).toBe(201);
+			const groupDir = customize.body.groupDir as string;
+			expect(groupDir, "customize must resolve the builtin tool's group dir").toBeTruthy();
+
+			// Copied into the Headquarters/server tools dir...
+			const serverToolFile = join(gw.headquartersDir, "config", "tools", groupDir, "read.yaml");
+			expect(existsSync(serverToolFile), `tool must be written to Headquarters/server store at ${serverToolFile}`).toBe(true);
+
+			// ...and NOT into the hidden system project's config store.
+			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
+			expect(system.status, system.text).toBe(200);
+			const systemToolDir = join(system.body.rootPath, ".bobbit", "config", "tools", groupDir);
+			expect(existsSync(systemToolDir), "tool must NOT be written to the hidden system project store").toBe(false);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+});
+
 test.describe("Headquarters no-git goals", () => {
 	test("Headquarters goals default to the Headquarters directory and do not allocate git/worktree state", async () => {
 		const gw = await startHeadquartersGateway({ projects: [] });

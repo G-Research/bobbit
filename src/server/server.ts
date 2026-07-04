@@ -3864,10 +3864,23 @@ async function handleApiRoute(
 		| { scope: "server"; store: RoleStore; manager: RoleManager }
 		| { scope: "project"; store: RoleStore; projectId: string };
 
+	/**
+	 * The hidden internal `system` project is compatibility-only and never a
+	 * user-facing config scope. Role/tool config mutations that arrive scoped to
+	 * `system` — e.g. from server-scope role/tool assistant proposals whose
+	 * session resolves to the hidden system project — must instead resolve to
+	 * Headquarters (server/global) scope so the config lands in the visible
+	 * Headquarters store, not the hidden system role/tool store.
+	 */
+	function aliasSystemToHeadquartersScope(projectId: string | undefined): string | undefined {
+		return projectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : projectId;
+	}
+
 	function roleMutationProjectId(value: unknown): string | undefined {
 		if (typeof value !== "string") return undefined;
 		const trimmed = value.trim();
-		return trimmed ? trimmed : undefined;
+		if (!trimmed) return undefined;
+		return aliasSystemToHeadquartersScope(trimmed);
 	}
 
 	/**
@@ -7974,7 +7987,9 @@ async function handleApiRoute(
 	if (toolCustomizeMatch && req.method === "POST") {
 		const name = decodeURIComponent(toolCustomizeMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		// Defense-in-depth: `system` is the hidden internal project, never a
+		// user-facing tool config scope — alias it to Headquarters/server scope.
+		const projectId = aliasSystemToHeadquartersScope(url.searchParams.get("projectId") || undefined);
 
 		// Find the tool in the cascade to get its origin
 		const resolved = configCascade.resolveTools(projectId);
@@ -8038,7 +8053,9 @@ async function handleApiRoute(
 	if (toolOverrideMatch && req.method === "DELETE") {
 		const name = decodeURIComponent(toolOverrideMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		// Defense-in-depth: `system` is the hidden internal project, never a
+		// user-facing tool config scope — alias it to Headquarters/server scope.
+		const projectId = aliasSystemToHeadquartersScope(url.searchParams.get("projectId") || undefined);
 
 		// Determine the tools directory for the target scope
 		let targetToolsDir: string;
