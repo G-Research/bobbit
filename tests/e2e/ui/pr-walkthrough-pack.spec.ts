@@ -723,11 +723,11 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
 
-		// Pending: exact copy "PR Walkthrough: In Progress" + the spinner.
+		// Pending: exact copy "PR Walkthrough: In Progress" + the centred progress bar.
 		const pending = page.locator('[data-testid="prw-pending"]').first();
 		await expect(pending).toBeVisible({ timeout: 15_000 });
 		await expect(pending).toContainText("PR Walkthrough: In Progress");
-		await expect(page.locator('[data-testid="prw-spinner"]').first()).toBeVisible();
+		await expect(pending.locator('[data-testid="prw-pending-overlay"] .progress-track').first()).toBeVisible();
 		// The manual Run/Load buttons are GONE.
 		await expect(page.locator('[data-testid="prw-run"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);

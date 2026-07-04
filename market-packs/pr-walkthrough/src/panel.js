@@ -1667,7 +1667,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const isPending = status === "running" || status === "publishing"
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
-			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
 			const progressLabel = (kind) => kind === "pending" ? "Generating review cards" : kind === "draft" ? "Saved draft" : "Walkthrough unavailable";
 			const stateLabel = (kind) => kind === "error" ? "Error" : kind === "neutral" ? "No walkthrough" : kind === "draft" ? "Draft saved" : kind === "missing" ? "Missing" : "Pending";
 			const renderChunkSummary = (summary) => {
@@ -1714,7 +1713,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							<div class="phase-label">${phase}</div>
 							<h2>${title}</h2>
 							<p>${body}</p>
-							<div class="pending-progress-row"><span class="pr-pill">${spinner}</span><div class="progress-wrap"><span>${label}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${String(value)}><div class=${`progress-fill ${indeterminate ? "prw-progress-indeterminate" : ""}`} style=${`width:${width}%`}></div></div></div></div>
+							<div class="pending-progress-row"><div class="progress-wrap"><span>${label}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${String(value)}><div class=${`progress-fill ${indeterminate ? "prw-progress-indeterminate" : ""}`} style=${`width:${width}%`}></div></div></div></div>
 							${detail}
 							<div class="state-skeleton"><span></span><span></span><span></span></div>
 						</article>
@@ -1726,7 +1725,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 			return html`
 				<style>
-					@keyframes prw-spin { to { transform: rotate(360deg); } }
 					.prw-root { color: var(--foreground); background: var(--background); padding: 0; min-height: 100%; height: 100%; box-sizing: border-box; }
 					.prw-root .prw-shell { border: 0; border-radius: 0; background: var(--card); overflow: hidden; box-shadow: none; }
 					.prw-root .prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
@@ -1825,7 +1823,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .prw-dislike-button { color: var(--foreground); }
 					.prw-root .prw-dislike-button:hover:not(:disabled), .prw-root .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }
 					.prw-root button:disabled { opacity: .48; cursor: not-allowed; }
-					.prw-root .prw-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: prw-spin .8s linear infinite; }
 					.prw-root .prw-pending, .prw-root .prw-empty, .prw-root .prw-neutral, .prw-root .prw-error { display: flex; align-items: center; gap: 8px; padding: 18px; color: var(--muted-foreground); }
 					.prw-root .prw-error { color: var(--negative); }
 					@media (max-width: 760px) {
@@ -2171,9 +2168,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .pending-modal { width: min(360px, calc(100% - 20px)); padding: 18px; border-radius: 18px; background: color-mix(in oklch, var(--card) 94%, var(--background)); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); }
 					.prw-root .pending-modal h2 { margin: 8px 0 0; font-size: clamp(20px, 4vw, 28px); line-height: 1.15; letter-spacing: -.02em; }
 					.prw-root .pending-modal p { margin: 12px 0 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.55; }
-					.prw-root .pending-progress-row { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 16px; }
-					.prw-root .pending-progress-row .pr-pill { width: 34px; height: 34px; padding: 0; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 74%, var(--card)); }
-					.prw-root .pending-progress-row .progress-wrap { display: grid; gap: 4px; color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .pending-progress-row { display: flex; justify-content: center; margin-top: 16px; }
+					.prw-root .pending-progress-row .progress-wrap { width: min(280px, 100%); gap: 4px; text-align: center; color: var(--muted-foreground); font-size: 12px; }
 					.prw-root .state-shell { grid-template-rows: auto minmax(0, 1fr); }
 					.prw-root .state-shell .state-header { height: auto; min-height: 68px; grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); gap: 12px; padding: 10px 14px; align-items: center; }
 					.prw-root .state-shell .title-group { min-width: 0; }
