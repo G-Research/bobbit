@@ -437,10 +437,13 @@ describe("Source pin — merge-loss invariants", () => {
 		assertTextInOrder(
 			text,
 			[
+				'runtime: "runtimes",',
+				"export function masterToggleDisabledRefs(",
 				"export function runtimeRestPackId(",
 				"export function runtimeCapabilityCacheKey(",
 				"export function invalidateRuntimeCapabilities(",
 				"export function ensureRuntimeCapabilities(",
+				"export function renderRuntimeRow(",
 				"export function renderRuntimeConsentCard(",
 				"export function renderRuntimeConsentCardView(",
 				"export function activationEntityTotal(",
@@ -448,16 +451,21 @@ describe("Source pin — merge-loss invariants", () => {
 			],
 			"src/app/marketplace-page.ts must export the managed-runtime consent-card\n" +
 			"pipeline (runtimeRestPackId/runtimeCapabilityCacheKey/ensureRuntimeCapabilities/\n" +
-			"invalidateRuntimeCapabilities/renderRuntimeConsentCard/renderRuntimeConsentCardView)\n" +
-			"and the schema-v2-aware activation counting helpers\n" +
-			"(activationEntityTotal/activationEntityEnabledCount). Without them\n" +
+			"invalidateRuntimeCapabilities/renderRuntimeRow/renderRuntimeConsentCard/\n" +
+			"renderRuntimeConsentCardView), the schema-v2-aware activation helpers\n" +
+			"(masterToggleDisabledRefs/activationEntityTotal/activationEntityEnabledCount),\n" +
+			"and map `runtime: \"runtimes\"` in ACTIVATION_KIND_KEY. Without them\n" +
 			"tests/marketplace-runtime-consent.spec.ts's fixture bundle fails to build\n" +
-			"(\"No matching export\") and the pre-start consent disclosure (design §8) cannot\n" +
-			"render, and the master-toggle counts silently omit managed runtimes from\n" +
-			"enabled/total. Originally added alongside the P3 consent design; silently\n" +
-			"dropped by merge commit b687d93d; restored by the w2-pack-runtimes-restore fix.\n" +
-			"DO NOT delete this pin — restore the dropped exports instead. Independently\n" +
-			"pinned by tests/marketplace-runtime-consent.spec.ts.",
+			"(\"No matching export\"), the pre-start consent disclosure (design §8) cannot\n" +
+			"render, individual runtime toggles cannot address DisabledRefs.runtimes, and\n" +
+			"the master OFF toggle silently leaves a managed runtime enabled (Docker keeps\n" +
+			"running while the pack reads Disabled). Originally added alongside the P3\n" +
+			"consent design (26b87339); silently dropped by merge commit b687d93d; restored\n" +
+			"by the w2-pack-runtimes-restore fix (the row/kind-key/master-payload half was\n" +
+			"initially missed and caught by adversarial review of PR #25 — the consent card\n" +
+			"alone renders nothing without renderRuntimeRow mounting it). DO NOT delete this\n" +
+			"pin — restore the dropped exports instead. Independently pinned by\n" +
+			"tests/marketplace-runtime-consent.spec.ts.",
 		);
 	});
 });

@@ -275,4 +275,56 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		// The runtime is disabled → only the tool + provider remain enabled.
 		expect(counts.enabled).toBe(2);
 	});
+
+	test("runtime activation ROW renders the on-enable toggle + consent card together", async ({ page }) => {
+		await gotoAndWait(page);
+		const rowHtml = await page.evaluate(() => (window as any).__renderRuntimeRow("hindsight", true) as string);
+		// The row wrapper, the explicit on-enable toggle, and the consent card must
+		// all render from the ONE production path (renderRuntimeRow) — this is the
+		// activation UI the Marketplace actually mounts, not just the card in
+		// isolation.
+		expect(rowHtml).toContain('data-testid="market-runtime-hindsight"');
+		expect(rowHtml).toContain('data-testid="market-toggle-runtime-hindsight"');
+		expect(rowHtml).toContain('data-testid="market-runtime-card-hindsight"');
+		// Disabled state renders the off styling on the toggle label.
+		const offHtml = await page.evaluate(() => (window as any).__renderRuntimeRow("hindsight", false) as string);
+		expect(offHtml).toContain("market-activation-toggle--off");
+	});
+
+	test("master enable/disable-all payload covers the schema-v2 arrays (runtimes)", async ({ page }) => {
+		await gotoAndWait(page);
+		const payloads = await page.evaluate(() => {
+			const activation = {
+				scope: "server",
+				packName: "hindsight",
+				catalogue: {
+					roles: [],
+					tools: ["recall"],
+					skills: [],
+					entrypoints: [],
+					providers: ["memory"],
+					hooks: ["retain"],
+					runtimes: ["hindsight"],
+					workflows: ["wf"],
+				},
+				disabled: {},
+			};
+			return {
+				off: (window as any).__masterToggle(activation, false) as Record<string, unknown>,
+				on: (window as any).__masterToggle(activation, true) as Record<string, unknown>,
+			};
+		});
+		// Master OFF must disable the managed runtime (and the other schema-v2
+		// kinds) — otherwise the pack reads "Disabled" while Docker keeps running.
+		expect(payloads.off.runtimes).toEqual(["hindsight"]);
+		expect(payloads.off.providers).toEqual(["memory"]);
+		expect(payloads.off.hooks).toEqual(["retain"]);
+		expect(payloads.off.workflows).toEqual(["wf"]);
+		expect(payloads.off.tools).toEqual(["recall"]);
+		// Master ON clears every kind back to default-enabled.
+		expect(payloads.on.runtimes).toEqual([]);
+		expect(payloads.on.providers).toEqual([]);
+		expect(payloads.on.hooks).toEqual([]);
+		expect(payloads.on.workflows).toEqual([]);
+	});
 });
