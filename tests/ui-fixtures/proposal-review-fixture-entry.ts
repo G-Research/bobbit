@@ -94,8 +94,8 @@ export const PROPOSAL_FIXTURES: ProposalFixture[] = [
 	},
 	{
 		type: "staff",
-		initial: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder" },
-		partial: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "", role: "coder" },
+		initial: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder", projectId: PROJECT_ID },
+		partial: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "", role: "coder", projectId: PROJECT_ID },
 	},
 ];
 
