@@ -8,28 +8,31 @@ A single Bobbit server manages N registered projects, each with its own `.bobbit
 
 ### Why multi-project?
 
-Without multi-project support, running multiple Bobbit instances (one per project) means separate browser tabs, separate auth tokens, and no cross-project search. Multi-project lets a single server manage everything - sessions and goals are scoped per project, config cascades from global to project, and search works across all projects by default.
+Without multi-project support, running multiple Bobbit instances (one per project) means separate browser tabs, separate auth tokens, and no cross-project search. Multi-project lets a single server manage everything: Headquarters provides the server/default workspace, sessions and goals are scoped per project, config cascades from Headquarters/server to normal projects, and search works across projects by default.
 
 ### Project Registry
 
-`ProjectRegistry` (`project-registry.ts`) persists registered projects to `<server-cwd>/.bobbit/state/projects.json`. Each project is a `RegisteredProject`:
+`ProjectRegistry` (`project-registry.ts`) persists registered projects to `<bobbitStateDir>/projects.json`. Each project is a `RegisteredProject`:
 
 ```typescript
 interface RegisteredProject {
-  id: string;        // UUID
+  id: string;        // UUID, or stable built-in id such as "headquarters"
   name: string;      // Display name (e.g. "my-api")
   rootPath: string;  // Absolute path to project directory
   createdAt: number; // Epoch ms
-  color?: string;    // Optional accent color for sidebar grouping
+  kind?: "normal" | "headquarters" | "system";
+  position?: number; // User order for normal visible projects only
+  hidden?: boolean;  // Internal projects are resolvable by id but omitted from lists
 }
 ```
 
 Key behaviors:
-- **No default project.** Bobbit has no "default" project concept. On startup, the registry loads `projects.json` as-is - whatever is on disk, including zero projects. A fresh install is a valid state: the sidebar shows an Add Project CTA, and the toolbar **+ New Goal** button is disabled with tooltip "Add a project first" until at least one project is registered. Bobbit never implicitly registers a project based on the server CWD. `ProjectRegistry.ensureDefaultProject()` has been removed.
-- `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed. `POST /api/projects` supports `upsert: true` - if a project already exists at the same `rootPath`, the existing project is returned (200) instead of a 400 error. This makes project registration idempotent.
-- `remove()` only unregisters - it does not delete files.
-- **Removal:** `DELETE /api/projects/:id` always succeeds for non-hidden projects — there is no last-project guard, and there is no carve-out for a "first" or "CWD" project. When the last visible project is removed, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow.
-- The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section for every registered project. On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
+- **Headquarters is auto-ensured.** Startup creates or repairs the built-in `headquarters` project before state migration and context initialization. Its root is `getProjectRoot()` and it represents the server/default workspace. See [Headquarters project](headquarters.md).
+- **No implicit user project.** Bobbit still does not silently treat an arbitrary user repo as a default project. Normal projects are added through `register()` / `POST /api/projects`; Headquarters is the only built-in visible workspace.
+- `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed. `POST /api/projects` supports `upsert: true` - if a normal project already exists at the same `rootPath`, the existing project is returned (200) instead of a 400 error. An upsert for the server workspace returns Headquarters.
+- `remove()` only unregisters - it does not delete files. `assertNormalMutableProject()` blocks destructive or identity-changing lifecycle mutations for Headquarters, the hidden `system` project, and other hidden projects.
+- **Removal:** `DELETE /api/projects/:id` succeeds for normal non-hidden projects, including the last normal project. Headquarters remains as the built-in workspace unless the user hides it from project lists. The hidden `system` project is unaffected by this flow.
+- The per-project settings page General tab exposes a "Remove Project" button only for normal projects. Headquarters can be hidden from project lists in Settings but cannot be removed, archived, renamed, or re-rooted.
 - Persistence is atomic (write to `.tmp` then rename).
 
 ### Symlinked project rootPath handling
@@ -48,27 +51,39 @@ When a user registers a project whose `rootPath` is a Linux/macOS symlink (or a 
 
 **Migration policy.** Existing projects registered with a symlinked `rootPath` before this guard landed are **not migrated** — there is no startup sweep. They continue to work because `findByCwd` canonicalisation handles the runtime mismatch. Only new registrations are guarded. Migrating in place would require regenerating worktrees and state-dir paths, which is risky against running sessions and would surprise users; the runtime fix is sufficient.
 
+### Headquarters project
+
+Headquarters is the visible server workspace with stable id `headquarters`, name `Headquarters`, `kind: "headquarters"`, and root `getProjectRoot()`. It is auto-ensured on startup and repaired if an older record drifts. It exists so a fresh server can create sessions/staff/goals immediately and so server-level config has a user-facing home.
+
+Headquarters aliases `bobbitDir()`, `bobbitStateDir()`, and `bobbitConfigDir()` instead of deriving paths from `<rootPath>/.bobbit`. This is required because `BOBBIT_DIR` can redirect server state/config outside the server run directory.
+
+For non-workflow config, `projectId: "headquarters"` normalizes to server scope: roles, tools, tool policies, skills, marketplace/MCP contributions, and config-directory lookups use the same stores as `/api/project-config` and report server origins. Workflows remain project-scoped; `resolveWorkflows("headquarters")` reads the Headquarters project config store, while `resolveWorkflows(undefined)` returns `[]`.
+
+`GET /api/projects` returns Headquarters first by default. The `showHeadquartersInProjectLists` preference hides it only from normal project lists/sidebar/pickers; explicit lookup and internal routing by id still work and all sessions/goals/staff/config remain intact. Destructive project lifecycle routes reject Headquarters through `HEADQUARTERS_IMMUTABLE` or `HEADQUARTERS_ALREADY_EXISTS` responses.
+
+See [Headquarters project](headquarters.md) for the full behavior contract.
+
 ### Synthetic system project
 
 A hidden, synthetic project with id `system` is registered at server startup by `projectRegistry.registerSystemProject(<bobbitStateDir>/system-project)` (see `src/server/server.ts` startup hook calling `registerSystemProject()` in `src/server/agent/project-registry.ts`). Idempotent — safe to call repeatedly.
 
-**Purpose.** System-scope tool authoring (editing `defaults/tools/` style configuration that isn't tied to any user project) needs a persistence anchor for its sessions. Without one, the tool-assistant flow would either force the user to register a real project before authoring system-wide tools, or hit `POST /api/sessions` with no resolvable project and 400. The synthetic system project gives those sessions a valid `projectId` (`"system"`) and a real `.bobbit/state/` directory to land in.
+**Purpose.** Some server-scope assistant flows still need a compatibility persistence anchor that is not shown as user work. The synthetic system project gives those sessions a valid `projectId` (`"system"`) and a real `.bobbit/state/` directory without creating a second visible global scope. User-facing server/default work belongs to Headquarters.
 
-**Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, the splash-screen new-session gating) therefore behave as if it doesn't exist. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
+**Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, settings scope rows) therefore behave as if it doesn't exist and show Headquarters as the server scope instead. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
 
 **StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.json` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
 
 **Iteration contract: `visible()` vs `all()`.** `ProjectContextManager` exposes two iterators. `all()` returns **every** context including the hidden system project — use this for callers that legitimately need it (`getContextForSession`, `findStoreForStaff`, MCP discovery, system-scope tool authoring resolution). `visible()` skips `hidden: true` contexts — use this for worktree sweepers, worktree-pool init, goal-manager pool-resolver wiring, unified worktree maintenance, and the `/api/sessions` + `/api/goals` listing aggregations that back the UI. The cross-project aggregation methods on the manager (`getAllLiveGoals`, `getAllLiveSessions`, `getAllGoals`, `getAllSessions`, `searchAll`) filter hidden internally for the same reason. Iterating hidden via `all()` for worktree/pool flows was the root cause of `pool/_pool-*` branches being allocated in unrelated host repos when the bobbit state dir was nested inside one (pinned by `tests/system-project-pool-leak.test.ts`).
 
-**Which UI surfaces produce sessions here.** Any server-scope config-editing assistant lands here when no project is selected: the Tools page "New Tool" with scope = System (passes `projectId: "system"` explicitly), and the Roles / Tools pages' "+ New …" buttons when their scope picker is at the server level (post the bare `{ assistantType: "role" | "tool" }` and let the server anchor them). The server side of this is the `isServerScopeAssistant` branch in `POST /api/sessions` (see [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs)): when `assistantType ∈ {role, tool}` and no `projectId` is supplied, the handler sets `resolvedProjectId = SYSTEM_PROJECT_ID` and skips `resolveProjectForRequest`. Explicit `projectId` from a project-scoped Roles/Tools page is still honoured. **Staff assistants are not included in this carve-out** — they are project-scoped permanent sessions (see [Staff agents in the sidebar](#staff-agents-in-the-sidebar)) and must resolve a real project the same way `goal` assistants do. Splash-screen "New Session" / "Quick Session" never lands here — those flows are gated on `state.projects.length` and either prompt for project creation, bind to the sole project, or open the splash project picker (`state.splashProjectPickerOpen` in `src/app/render.ts`). The 400 "projectId required" failure mode for those buttons is closed by gating, not by the system project.
+**Which UI surfaces produce sessions here.** Compatibility server-scope config-editing assistants can still land here when no user-facing project is selected. The server side is the `isServerScopeAssistant` branch in `POST /api/sessions` (see [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs)): when `assistantType ∈ {role, tool}` and no `projectId` is supplied, the handler sets `resolvedProjectId = SYSTEM_PROJECT_ID` and skips `resolveProjectForRequest`. Explicit `projectId` is still honoured. **Staff assistants are not included in this carve-out** — they are project-scoped permanent sessions (see [Staff agents in the sidebar](#staff-agents-in-the-sidebar)) and can use Headquarters when it is the selected project. Splash-screen **Quick Session** creates a Headquarters session on a fresh server, never a `system` session.
 
 ### Per-project state isolation
 
-Each registered project is a self-contained unit on disk. State (goals, sessions, tasks, teams, gates, search, costs) lives in `<project-root>/.bobbit/state/`, not in a central directory. The server aggregates across all projects.
+Normal projects are self-contained units on disk. Their state (goals, sessions, tasks, teams, gates, search, costs) lives in `<project-root>/.bobbit/state/`, not in a central directory. Headquarters is the exception: it is a registered project, but its stores alias the server `bobbitStateDir()` / `bobbitConfigDir()` so server-level state has one owner. The server aggregates across all visible project contexts.
 
 ```
-<project-root>/.bobbit/
-  config/          # Project config (roles, tools, etc.)
+<normal-project-root>/.bobbit/
+  config/          # Normal project config
   state/
     goals.json     # Goals for THIS project
     sessions.json  # Sessions for THIS project
@@ -79,16 +94,19 @@ Each registered project is a self-contained unit on disk. State (goals, sessions
     search.flex/       # Lexical search index for THIS project (FlexSearch JSON)
     session-costs.json # Cost tracking (see session-cost.md)
 
-<server-cwd>/.bobbit/
-  state/
-    projects.json     # Global project registry (only truly global state)
-    preferences.json  # Global UI preferences
-    token             # Auth token
-    gateway-url       # Gateway address
-    colors.json       # Session colors
+<bobbitStateDir>/
+  projects.json     # Global project registry
+  preferences.json  # Global UI preferences
+  token             # Auth token
+  gateway-url       # Gateway address
+  colors.json       # Session colors
+  goals.json        # Headquarters goals
+  sessions.json     # Headquarters sessions
+  staff.json        # Headquarters staff
+  system-project/   # Hidden internal system-project anchor
 ```
 
-This means removing a project cleanly removes its state, and pointing a different Bobbit instance at a project directory gives access to its history.
+This means removing a normal project cleanly removes its state from Bobbit's UI, while Headquarters preserves the server/default workspace and server config state.
 
 ### ProjectContext (scoped stores)
 
@@ -98,9 +116,11 @@ This means removing a project cleanly removes its state, and pointing a differen
 - **Config stores** (configDir): RoleStore, WorkflowStore, ToolManager, ProjectConfigStore, ToolGroupPolicyStore
 - **Managers**: GoalManager (wraps GoalStore)
 
-Directories derive from the project's `rootPath`:
+Directories usually derive from the project's `rootPath`:
 - `stateDir` = `<rootPath>/.bobbit/state/`
 - `configDir` = `<rootPath>/.bobbit/config/`
+
+For Headquarters, `ProjectContext` uses `bobbitStateDir()` and `bobbitConfigDir()` instead. The context also reuses the standalone server `ProjectConfigStore`, so `/api/project-config` and `/api/projects/headquarters/config` cannot stale-read or clobber each other.
 
 `ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` flushes the session store and closes the search index.
 
@@ -302,9 +322,11 @@ Without it, every project got a full independent copy of all config YAML via sca
 #### Architecture
 
 ```
-builtin (dist/server/defaults/)  →  server (<server-cwd>/.bobbit/config/)  →  project (<project>/.bobbit/config/)
-       lowest priority                                                              highest priority
+builtin (dist/server/defaults/)  →  server / Headquarters (bobbitConfigDir())  →  normal project (<project>/.bobbit/config/)
+       lowest priority                                                                              highest priority
 ```
+
+`projectId=headquarters` is normalized to the server/Headquarters layer for non-workflow config, so it does not add a second project override layer.
 
 Two modules implement this:
 
@@ -314,16 +336,18 @@ Two modules implement this:
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` - the config object
-- `origin: "builtin" | "server" | "project"` - which layer provided this item
+- `origin: "builtin" | "server" | "user" | "project"` - which layer provided this item
 - `overrides?: ConfigOrigin` - which lower layer this item shadows, if any
+
+The UI labels `origin: "server"` as **Headquarters**.
 
 #### Resolution rules
 
-For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely - no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top.
+For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely - no field-level merge. Without `projectId`, returns server/Headquarters scope (builtins + server stores at `bobbitConfigDir()`). With a normal `projectId`, the project layer is added on top. With `projectId=headquarters`, the project id is normalized away and only the server/Headquarters layer is used.
 
-Workflows are not cascaded - `resolveWorkflows(projectId)` reads only the project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`.
+Workflows are not cascaded - `resolveWorkflows(projectId)` reads only the selected project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`; with `projectId=headquarters`, it reads the Headquarters `project.yaml::workflows` block through the aliased server config store.
 
-**System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path - they always require a `projectId`.
+**Headquarters/server-scope writes** (role customize + override endpoints with `scope=server`, no scope, or `projectId=headquarters`) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `bobbitConfigDir()`. They are **never** duplicated into a normal project's store. Fresh installs can customize Headquarters roles immediately because the server stores are independent of normal project registration. Workflow mutations have no server-scope path - they always require a `projectId`, and `projectId=headquarters` targets the Headquarters workflow list.
 
 #### Workflows are project-scoped only
 
@@ -332,8 +356,8 @@ Workflows are inlined per-project (in `project.yaml::workflows`) rather than cas
 Consequences:
 
 - `BuiltinConfigProvider.getWorkflows()` returns `[]` (kept only for `ServerStores` shape compat).
-- No system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. `<server-cwd>/.bobbit/config/project.yaml::workflows` is **not** read at runtime.
-- All `/api/workflows*` mutations require a `projectId` (400 otherwise - no `?scope=server` parameter).
+- No standalone system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. The Headquarters `ProjectContext` owns the server-workspace workflow store and reads `bobbitConfigDir()/project.yaml::workflows` only when callers use `projectId=headquarters`.
+- All `/api/workflows*` mutations require a `projectId` (400 otherwise - no `?scope=server` parameter). Use `projectId=headquarters` for Headquarters workflows.
 - `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
 - New projects do **not** receive any default seed at `POST /api/projects` time - a `propose_project` call that omits `workflows` results in a project with zero workflows. The project assistant is solely responsible for designing the workflow set from the discovered components and commands. See [No default workflow scaffold](#no-default-workflow-scaffold). Legacy `<project>/.bobbit/config/workflows/*.yaml` files are still folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
 
@@ -355,7 +379,7 @@ Workflows must be a deliberate, project-specific design done by the project assi
 
 #### Server stores decoupling
 
-`ConfigCascade` accepts explicit `ServerStores` accessors rather than reading from any project's stores. The standalone stores in `server.ts` are backed by `<server-cwd>/.bobbit/config/` (or `$BOBBIT_DIR/.bobbit/config/` in E2E tests). Using explicit accessors ensures PUT and GET use the same underlying stores and decouples the server layer from whether any project is registered.
+`ConfigCascade` accepts explicit `ServerStores` accessors rather than reading from any normal project's stores. The standalone stores in `server.ts` are backed by `bobbitConfigDir()`. Headquarters shares that config ownership, and `normalizeConfigProjectId("headquarters")` prevents the cascade from reading the same files once as server and again as a project. Using explicit accessors ensures PUT and GET use the same underlying stores and decouples the server layer from normal project registration.
 
 #### Builtin seeding
 
@@ -385,9 +409,9 @@ The customize/override endpoints follow the same pattern for roles. Workflow CRU
 
 #### UI
 
-The Roles, Tools, and Skills config pages display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`; the row accepts an optional `excludeSystem` flag.
+The Roles, Tools, and Skills config pages display a project scope row with **Headquarters** plus normal project tabs. They do not expose a separate System tab. Items show origin badges (grey=builtin, blue=Headquarters/server, green=project). In normal project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`; the row accepts an optional `excludeSystem` flag for surfaces that should show only projects.
 
-The Workflows page is a special case - it has **no System tab** because workflows are project-scoped only. The page passes `excludeSystem: true` to the scope row, and visiting `/workflows` while the global scope is `system` auto-switches to the first registered project (or shows an empty state if none).
+The Workflows page is a special case - it has **no System tab** because workflows are project-scoped only. The page passes `excludeSystem: true` to the scope row, and visiting `/workflows` while the global scope is `system` auto-switches to the first visible project, normally Headquarters. It shows an empty state only if no project scope is visible.
 
 ### Project assistant
 
@@ -928,15 +952,15 @@ The sidebar always groups sessions and goals under collapsible project folder ro
 ├── [+ Add Project]
 ```
 
-When only one project is registered, its folder row defaults to expanded so there is no extra click required. Each project row shows a folder icon, project name, settings gear, and new-goal button. When no projects are registered (fresh install), the sidebar shows a "No projects configured" empty state with an "Add Project" button.
+When only one project is visible, its folder row defaults to expanded so there is no extra click required. A fresh server normally has one visible project: Headquarters. Headquarters uses the Lucide `TowerControl` icon, is anchored first, and has no destructive project actions. If the user hides Headquarters and no normal projects remain, the sidebar shows a fallback with **Quick Session in Headquarters**, **Show Headquarters**, and **Add Project** instead of a dead-end "No projects configured" state.
 
-**Toolbar "+ New Goal" behavior** depends on how many projects are registered:
+**Toolbar "+ New Goal" behavior** depends on how many projects are visible:
 
-| # projects | Click behavior |
+| # visible projects | Click behavior |
 |---|---|
-| 0 | Button disabled with tooltip "Add a project first". Empty-state Add Project CTA is the primary action. |
-| 1 | Skips the picker entirely and opens the goal creation dialog directly, scoped to the one project. |
-| 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing every registered project with its color dot. Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
+| 0 | Only possible when Headquarters is hidden. The UI offers the hidden-Headquarters fallback actions. |
+| 1 | Skips the picker entirely and opens the goal creation dialog directly, scoped to the one visible project. |
+| 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing Headquarters first when visible and normal projects after it. Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
 
 The per-project "+ goal" button on each project row bypasses the popover - the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
 
@@ -946,7 +970,7 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 
 Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and runs either in the project root/subdirectory or in a project-derived `staff-<name>-<id>` worktree. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
 
-The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows get the same active / unread / last-activity treatment as ordinary sessions, plus a hover-action pencil that opens `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
+The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. This includes Headquarters on a fresh server, so New Staff does not require adding a normal project first. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows get the same active / unread / last-activity treatment as ordinary sessions, plus a hover-action pencil that opens `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
 
 **Staff are not merged into Sessions.** Created staff agents live exclusively in the Staff sub-section. The staff-creation **assistant session** (`assistantType: "staff"`) is a transient normal session and shows up in the project's Sessions list while open — only the persisted staff record that results from accepting `propose_staff` moves into Staff. This split was the point of restoring the sub-section: a previous experiment that synthesised staff rows into Sessions made staff feel like ordinary disposable sessions and hid the fact that they are long-lived, profile-backed agents.
 
@@ -973,11 +997,11 @@ The collapsed (icon-only) sidebar buckets staff under their owning project group
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List all registered projects |
-| `POST` | `/api/projects` | Register a project (body: `name`, `rootPath`, optional `color`) |
-| `GET` | `/api/projects/:id` | Get a single project |
-| `PUT` | `/api/projects/:id` | Update name/color |
-| `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk); any project may be removed, including the last visible one |
+| `GET` | `/api/projects` | List visible projects. Headquarters appears first by default; hidden `system` is never listed. |
+| `POST` | `/api/projects` | Register a normal project (body: `name`, `rootPath`, optional `color`). The server workspace is already represented by Headquarters. |
+| `GET` | `/api/projects/:id` | Get a single project, including `headquarters` even when hidden from lists. |
+| `PUT` | `/api/projects/:id` | Update normal-project name/color/root. Headquarters is immutable. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk); the last normal project may be removed while Headquarters remains. |
 | `GET` | `/api/projects/:id/config` | Raw project-level config overrides |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults |
 | `PUT` | `/api/projects/:id/config` | Set/clear project config fields |

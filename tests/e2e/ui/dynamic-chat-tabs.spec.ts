@@ -4,7 +4,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
@@ -16,17 +16,7 @@ async function sessionIdFromHash(page: Page): Promise<string> {
 
 async function openGoalAssistantProposal(page: Page): Promise<string> {
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page);
 
 	const sessionId = await sessionIdFromHash(page);
 	expect(sessionId).toMatch(/^[a-f0-9-]{36}$/);

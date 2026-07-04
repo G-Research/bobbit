@@ -77,18 +77,27 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false });
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
-	goalStore.update(parent.id, { maxConcurrentChildren: cap } as any);
+	goalStore.update(parent.id, {
+		maxConcurrentChildren: cap,
+		branch: `goal/${parent.id}`,
+		worktreePath: tmpRoot,
+	} as any);
 
 	// By default createGoal stamps setupStatus='preparing' for children so the
 	// route's "would start a team" branch fires under the OLD guard. Tests for
 	// the data-only / non-git fix pass `stampChildPreparing:false` so the child
-	// keeps the natural `setupStatus='ready'` (non-git tmp cwd → no worktree) —
-	// the NEW guard must still route those through the scheduler.
+	// keeps the natural `setupStatus='ready'`. Fake git metadata is still stamped
+	// so integrate-child reaches the stubbed merge path instead of the no-worktree
+	// guard; these tests exercise scheduling, not git availability.
 	const realCreate = goalManager.createGoal.bind(goalManager);
 	(goalManager as any).createGoal = async (title: string, cwd: string, opts?: any) => {
 		const g = await realCreate(title, cwd, opts);
-		if (opts?.parentGoalId && stampChildPreparing) {
-			goalStore.update(g.id, { setupStatus: "preparing" } as any);
+		if (opts?.parentGoalId) {
+			goalStore.update(g.id, {
+				branch: `goal/${g.id}`,
+				worktreePath: path.join(tmpRoot, "children", g.id),
+				...(stampChildPreparing ? { setupStatus: "preparing" } : {}),
+			} as any);
 			return goalStore.get(g.id)!;
 		}
 		return g;

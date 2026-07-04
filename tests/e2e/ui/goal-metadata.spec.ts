@@ -24,7 +24,7 @@
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createSessionViaUI, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const GOAL_TAB_TESTID = "[data-testid='goal-proposal-tab-goal']";
 const GOAL_PANEL_TESTID = "[data-testid='goal-proposal-panel-goal']";
@@ -63,16 +63,7 @@ async function setSubgoalsEnabled(value: boolean): Promise<void> {
 async function openGoalAssistant(page: Page, trigger: string) {
 	test.setTimeout(90_000);
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 10_000 });
 	await sendMessage(page, trigger);

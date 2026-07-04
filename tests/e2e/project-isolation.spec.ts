@@ -8,7 +8,7 @@
  * 4. Multi-project session lifecycle keeps data isolated per project.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
+import { apiFetch, defaultProject, nonGitCwd } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -65,13 +65,9 @@ async function listSessions(projectId?: string): Promise<any[]> {
 	return body.sessions ?? body;
 }
 
-/** Get the default project (server CWD project). */
-async function getDefaultProject(): Promise<{ id: string; name: string }> {
-	const resp = await apiFetch("/api/projects");
-	expect(resp.status).toBe(200);
-	const data = await resp.json();
-	expect(data.length).toBeGreaterThan(0);
-	return data[0];
+/** Get the normal harness default project, not the visible Headquarters entry. */
+async function getDefaultProject(): Promise<{ id: string; name?: string }> {
+	return defaultProject();
 }
 
 test.describe("Project isolation — no default fallback", () => {

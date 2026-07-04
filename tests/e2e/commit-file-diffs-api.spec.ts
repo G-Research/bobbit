@@ -109,7 +109,8 @@ test.describe("commit file diff API", () => {
 			const goal = await createGoal({
 				title: "Commit file diff API goal",
 				cwd: root,
-				worktree: false,
+				worktree: true,
+				autoStartTeam: false,
 				projectId: await defaultProjectId(),
 			});
 			goalId = String(goal.id);
@@ -117,7 +118,13 @@ test.describe("commit file diff API", () => {
 				const resp = await apiFetch(`/api/goals/${goalId}`);
 				if (resp.status !== 200) return null;
 				const body = await resp.json();
-				return body.setupStatus === "ready" && typeof body.cwd === "string" && fs.existsSync(body.cwd) ? body : null;
+				return body.setupStatus === "ready"
+					&& typeof body.cwd === "string"
+					&& typeof body.branch === "string"
+					&& typeof body.worktreePath === "string"
+					&& fs.existsSync(body.cwd)
+					? body
+					: null;
 			}, { timeoutMs: 15_000, label: "goal worktree ready" });
 			const goalCwd = readyGoal.cwd;
 

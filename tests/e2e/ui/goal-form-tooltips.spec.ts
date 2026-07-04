@@ -5,8 +5,8 @@
  * this browser spec keeps the real assistant/form render path only once.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
-import { apiFetch } from "../e2e-setup.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -16,10 +16,8 @@ test.describe.configure({ timeout: 90_000 });
  * the "Configure qa_start_command in project settings..." fallback.
  */
 test.beforeAll(async () => {
-	const projectsResp = await apiFetch("/api/projects");
-	const projects = await projectsResp.json();
-	if (projects.length === 0) return;
-	const projectId = projects[0].id;
+	const projectId = await defaultProjectId();
+	if (!projectId) return;
 	const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
 	if (!structuredResp || !structuredResp.ok) return;
 	const data = await structuredResp.json();
@@ -35,10 +33,7 @@ test.beforeAll(async () => {
 async function openGoalForm(page: import("@playwright/test").Page) {
 	await openApp(page);
 
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	await newGoalBtn.click();
+	await createGoalAssistantViaUI(page);
 
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 45_000 });

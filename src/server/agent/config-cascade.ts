@@ -18,6 +18,7 @@ import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./builtin-packs.js";
+import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 
 /**
  * `user` corresponds to the global-user scope. It is additive: global-user is
@@ -76,6 +77,14 @@ export interface ResolvedPolicy {
 	policy: GrantPolicy;
 	origin: ConfigOrigin;
 	overrides?: ConfigOrigin;
+}
+
+/**
+ * Headquarters is the user-facing alias for server/global config. Non-workflow
+ * config must therefore omit the project layer when callers pass its project id.
+ */
+export function normalizeConfigProjectId(projectId?: string): string | undefined {
+	return projectId === HEADQUARTERS_PROJECT_ID ? undefined : projectId;
 }
 
 /**
@@ -190,12 +199,15 @@ export class ConfigCascade {
 		field: "model" | "thinkingLevel" | "promptTemplate",
 		projectId?: string,
 	): string | undefined {
-		if (projectId) {
-			const v = this.localRoleField(projectId, roleName, field);
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
+		if (normalizedProjectId) {
+			const v = this.localRoleField(normalizedProjectId, roleName, field);
 			if (v !== undefined) return v;
 			if (this.projectRegistry) {
-				for (const anc of this.projectRegistry.getAncestors(projectId)) {
-					const av = this.localRoleField(anc.id, roleName, field);
+				for (const anc of this.projectRegistry.getAncestors(normalizedProjectId)) {
+					const normalizedAncestorId = normalizeConfigProjectId(anc.id);
+					if (!normalizedAncestorId) continue;
+					const av = this.localRoleField(normalizedAncestorId, roleName, field);
 					if (av !== undefined) return av;
 				}
 			}
@@ -227,12 +239,13 @@ export class ConfigCascade {
 
 	/** Raw resolved role entries (with origin pack + shadows) — for conflicts. */
 	resolveRolesEntries(projectId?: string): ResolvedEntity<Role>[] {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		return this.resolveEntities<Role>(
 			"roles",
 			[new RoleLoader()],
 			this.builtins.getRoles(),
 			r => r.name,
-			projectId,
+			normalizedProjectId,
 			this.serverStores.getRoles(),
 			ctx => ctx.roleStore.getAllLocal(),
 		);
@@ -262,12 +275,13 @@ export class ConfigCascade {
 
 	/** Raw resolved tool entries (with origin pack + shadows) — for conflicts. */
 	resolveToolsEntries(projectId?: string): ResolvedEntity<ToolInfo>[] {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		return this.resolveEntities<ToolInfo>(
 			"tools",
 			[new ToolLoader()],
 			this.builtins.getTools(),
 			t => t.name,
-			projectId,
+			normalizedProjectId,
 			this.serverStores.getTools(),
 			ctx => ctx.toolManager.getLocalTools(),
 		);
@@ -276,6 +290,7 @@ export class ConfigCascade {
 	// ── Tool Group Policies ──────────────────────────────────────
 
 	resolveToolGroupPolicies(projectId?: string): Record<string, ResolvedPolicy> {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		const merged = new Map<string, ResolvedPolicy>();
 
 		// Layer 1: builtins
@@ -294,9 +309,10 @@ export class ConfigCascade {
 		}
 
 		// Layer 3: project-level (when a projectId is specified).
+		// Headquarters normalizes to server scope for non-workflow config.
 		// Without projectId, only builtins + server stores are used (system scope).
-		if (projectId) {
-			const projectCtx = this.projectContextManager.getOrCreate(projectId);
+		if (normalizedProjectId) {
+			const projectCtx = this.projectContextManager.getOrCreate(normalizedProjectId);
 			if (projectCtx) {
 				for (const [group, policy] of Object.entries(projectCtx.toolGroupPolicyStore.getAll())) {
 					const existing = merged.get(group);

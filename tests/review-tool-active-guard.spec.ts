@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 /**
  * Regression test for: an agent calling `review_open` from a background
@@ -26,29 +25,18 @@ const PREVIEW_PANEL_SRC = path.resolve("src/app/preview-panel.ts");
 const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(REMOTE_AGENT_SRC).mtimeMs,
-		fs.statSync(REVIEW_SOURCES_SRC).mtimeMs,
-		fs.statSync(REVIEW_SOURCES_LAZY_SRC).mtimeMs,
-		fs.statSync(PREVIEW_PANEL_SRC).mtimeMs,
-		fs.statSync(PANEL_WORKSPACE_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [
+			ENTRY,
+			REMOTE_AGENT_SRC,
+			REVIEW_SOURCES_SRC,
+			REVIEW_SOURCES_LAZY_SRC,
+			PREVIEW_PANEL_SRC,
+			PANEL_WORKSPACE_SRC,
+		],
+	});
 });
 
 const PAGE = `file://${FIXTURE}`;

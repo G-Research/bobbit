@@ -8,7 +8,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp, createGoalAssistantViaUI } from "./ui-helpers.js";
 import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 test.describe("Sidebar goal actions & staff", () => {
@@ -23,14 +23,11 @@ test.describe("Sidebar goal actions & staff", () => {
 	test("SB-16: New Goal button visible and opens goal assistant", async ({ page }) => {
 		await openApp(page);
 
-		// The "New Goal" button appears in the project header area or the bottom action bar.
-		// In single-project mode, the button is in the nav bar with title "New goal (Alt+G)".
-		// In multi-project mode, it's on the project header with title "New goal in <project>".
-		const newGoalBtn = page.locator("button").filter({ hasText: "New Goal" }).first();
-		await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-
-		// Click it — should open a goal assistant session with a textarea
-		await newGoalBtn.click();
+		// The toolbar New Goal entry opens a project picker when both Headquarters
+		// and the harness default project are visible. Use the shared helper so
+		// this test follows the current multi-project UX before asserting the
+		// assistant textarea.
+		await createGoalAssistantViaUI(page);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 
 		// Verify the URL changed to a session route (goal assistant session)

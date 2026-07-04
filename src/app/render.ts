@@ -8,10 +8,11 @@ import { html, render, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderOpen, FolderPlus, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderPlus, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
+	setProjects,
 	isDesktop,
 	hasActiveSession,
 	activeSessionId,
@@ -20,7 +21,7 @@ import {
 	type GatewaySession,
 	type Project,
 } from "./state.js";
-import { gatewayFetch, retryLoadSessions } from "./api.js";
+import { fetchProjects, gatewayFetch, retryLoadSessions } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
@@ -42,6 +43,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
@@ -120,12 +122,39 @@ const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:
 // ──────────────────────────────────────────────────────────────────────
 let _splashPickerAnchorRect: DOMRect | null = null;
 
+function _headquartersHiddenWithNoVisibleProjects(): boolean {
+	return state.projects.length === 0 && state.showHeadquartersInProjectLists === false;
+}
+
 function _splashSessionLabel(): string {
-	return state.projects.length === 0 ? "New Project" : "New Session";
+	if (_headquartersHiddenWithNoVisibleProjects()) return "Quick Session";
+	return state.projects.length === 0 ? "New Project" : "Quick Session";
 }
 
 function _splashSessionIcon() {
-	return state.projects.length === 0 ? icon(FolderPlus, "sm") : icon(Plus, "sm");
+	return state.projects.length === 0 && !_headquartersHiddenWithNoVisibleProjects() ? icon(FolderPlus, "sm") : icon(Plus, "sm");
+}
+
+async function _showHeadquartersInProjectLists(): Promise<void> {
+	state.showHeadquartersInProjectLists = true;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
+		});
+		setProjects(await fetchProjects());
+		showHeaderToast("Headquarters shown in project lists.");
+	} catch {
+		state.showHeadquartersInProjectLists = false;
+		showHeaderToast("Failed to show Headquarters.");
+	} finally {
+		renderApp();
+	}
+}
+
+function _quickSessionInHeadquarters(): void {
+	createAndConnectSession(undefined, undefined, undefined, undefined, undefined, HEADQUARTERS_PROJECT_ID);
 }
 
 function _onSplashSessionClick(e: Event): void {
@@ -134,7 +163,8 @@ function _onSplashSessionClick(e: Event): void {
 	e.stopPropagation();
 	const projects = state.projects;
 	if (projects.length === 0) {
-		showProjectDialog();
+		if (_headquartersHiddenWithNoVisibleProjects()) _quickSessionInHeadquarters();
+		else showProjectDialog();
 		return;
 	}
 	if (projects.length === 1) {
@@ -147,6 +177,40 @@ function _onSplashSessionClick(e: Event): void {
 	_splashPickerAnchorRect = btn ? btn.getBoundingClientRect() : null;
 	state.splashProjectPickerOpen = true;
 	renderApp();
+}
+
+function _hiddenHeadquartersFallback() {
+	if (!_headquartersHiddenWithNoVisibleProjects()) return "";
+	return html`
+		<div class="flex flex-col items-center justify-center gap-3 text-center" data-testid="headquarters-hidden-fallback">
+			<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
+			<div class="flex flex-col gap-1">
+				<p class="text-sm font-medium text-foreground">Headquarters is hidden from project lists.</p>
+				<p class="text-xs text-muted-foreground max-w-md">Hiding only removes the shortcut. Headquarters sessions, staff, goals, and server configuration are kept.</p>
+			</div>
+			<div class="flex flex-wrap items-center justify-center gap-2">
+				${Button({
+					variant: "default",
+					size: "sm",
+					disabled: state.creatingSession,
+					onClick: () => _quickSessionInHeadquarters(),
+					children: state.creatingSession ? "Creating…" : "Quick Session in Headquarters",
+				})}
+				${Button({
+					variant: "ghost",
+					size: "sm",
+					onClick: () => { void _showHeadquartersInProjectLists(); },
+					children: "Show Headquarters",
+				})}
+				${Button({
+					variant: "ghost",
+					size: "sm",
+					onClick: () => showProjectDialog(),
+					children: "Add Project",
+				})}
+			</div>
+		</div>
+	`;
 }
 
 function _splashProjectPicker() {
@@ -170,9 +234,11 @@ function _splashProjectPicker() {
 			<div class="px-3 pt-2 pb-1.5 text-xs font-semibold text-foreground">New session in…</div>
 			${projects.map(p => {
 				const isDark = document.documentElement.classList.contains("dark");
-				const color = isDark
-					? (p.colorDark || p.color || "var(--muted-foreground)")
-					: (p.colorLight || p.color || "var(--muted-foreground)");
+				const color = isHeadquartersProject(p)
+					? "var(--primary)"
+					: isDark
+						? (p.colorDark || p.color || "var(--muted-foreground)")
+						: (p.colorLight || p.color || "var(--muted-foreground)");
 				return html`
 					<button
 						class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-2"
@@ -182,8 +248,11 @@ function _splashProjectPicker() {
 							createAndConnectSession(undefined, undefined, p.rootPath, undefined, undefined, p.id);
 						}}
 					>
-						<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
-						<span class="flex-1 truncate">${p.name}</span>
+						<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(p)} data-project-icon=${projectIconKind(p)} style="color:${color};">${icon(projectIconComponent(p), "sm")}</span>
+						<span class="flex-1 min-w-0 flex flex-col">
+							<span class="truncate">${p.name}</span>
+							${isHeadquartersProject(p) ? html`<span class="text-xs text-muted-foreground leading-tight">${HEADQUARTERS_HELPER_TEXT}</span>` : nothing}
+						</span>
 					</button>
 				`;
 			})}
@@ -536,23 +605,25 @@ function renderMobileLanding() {
 								<button class="text-muted-foreground underline" title="Retry" @click=${retryLoadSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
-							? html`<div class="text-center py-12">
-									<div class="text-muted-foreground mb-3 empty-state-icon flex justify-center">${icon(Server, "lg")}</div>
-									<p class="text-muted-foreground mb-4" style="font-size: 1.3333em;">No goals or sessions yet</p>
-									<div class="flex items-center justify-center gap-2">
-										${Button({
-											variant: "default",
-											onClick: (e?: Event) => startNewGoalFlow((e?.currentTarget as HTMLElement | null) ?? null),
-											children: html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create a Goal</span>`,
-										})}
-										${Button({
-											variant: "ghost",
-											disabled: state.creatingSession,
-											onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
-											children: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-quick-session-label">${_splashSessionIcon()} ${state.projects.length === 0 ? "New Project" : "Quick Session"}</span>`,
-										})}
-										${_splashProjectPicker()}
-									</div>
+							? html`<div class="text-center py-12 px-4">
+									${_headquartersHiddenWithNoVisibleProjects() ? _hiddenHeadquartersFallback() : html`
+										<div class="text-muted-foreground mb-3 empty-state-icon flex justify-center">${icon(Server, "lg")}</div>
+										<p class="text-muted-foreground mb-4" style="font-size: 1.3333em;">No goals or sessions yet</p>
+										<div class="flex items-center justify-center gap-2">
+											${Button({
+												variant: "default",
+												onClick: (e?: Event) => startNewGoalFlow((e?.currentTarget as HTMLElement | null) ?? null),
+												children: html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create a Goal</span>`,
+											})}
+											${Button({
+												variant: "ghost",
+												disabled: state.creatingSession,
+												onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
+												children: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-quick-session-label">${_splashSessionIcon()} ${state.projects.length === 0 ? _splashSessionLabel() : "Quick Session"}</span>`,
+											})}
+											${_splashProjectPicker()}
+										</div>
+									`}
 								</div>`
 							: html`
 								${(() => {
@@ -608,9 +679,10 @@ function renderMobileLanding() {
 											const expanded = projectTree.projectNode.expanded;
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
+											const projectSettingsTarget = isHeadquartersProject(project) ? "system/general" : `${project.id}/general`;
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
-												<div data-project-reorder-id=${project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
+												<div data-project-reorder-id=${isHeadquartersProject(project) ? nothing : project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
 													<div
 														data-testid="project-header"
 														data-project-id=${project.id}
@@ -619,13 +691,13 @@ function renderMobileLanding() {
 														@click=${() => { if (isProjectReordering()) return; toggleProjectExpanded(project.id); renderApp(); }}>
 														<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${effectiveExpanded ? "▾" : "▸"}</span></span>
 														${renderProjectReorderHandle(project)}
-														<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
+														<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} style="color:${color};">${icon(projectIconComponent(project), "sm")}</span>
 													<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
-															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
-															title="Project settings"
+															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", projectSettingsTarget); }}
+															title=${isHeadquartersProject(project) ? "Headquarters settings" : "Project settings"}
 														>${icon(Settings, "sm")}</button>
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
@@ -2949,18 +3021,22 @@ export function doRenderApp(): void {
 			return html`
 				${orphanTranscriptsBanner()}
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
-					<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
-					<p class="text-sm text-muted-foreground">Select a session from the sidebar or create a new one</p>
-					${Button({
-						variant: "default",
-						size: "sm",
-						disabled: state.creatingSession,
-						onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
-						children: state.creatingSession
-							? html`<span class="inline-flex items-center gap-1.5"><svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg> Creating…</span>`
-							: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-new-session-label">${_splashSessionIcon()} ${_splashSessionLabel()}</span>`,
-					})}
-					${_splashProjectPicker()}
+					${_headquartersHiddenWithNoVisibleProjects() ? _hiddenHeadquartersFallback() : html`
+						<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
+						<p class="text-sm text-muted-foreground">${state.projects.length === 1 && isHeadquartersProject(state.projects[0])
+							? "Start in Headquarters to configure Bobbit, coordinate work, or explore the server workspace."
+							: "Select a session from the sidebar or create a new one"}</p>
+						${Button({
+							variant: "default",
+							size: "sm",
+							disabled: state.creatingSession,
+							onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
+							children: state.creatingSession
+								? html`<span class="inline-flex items-center gap-1.5"><svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg> Creating…</span>`
+								: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-new-session-label">${_splashSessionIcon()} ${_splashSessionLabel()}</span>`,
+						})}
+						${_splashProjectPicker()}
+					`}
 				</div>
 			`;
 		}

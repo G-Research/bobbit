@@ -9,6 +9,8 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "./e2e-setup.js";
 
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+
 test.describe.configure({ mode: "serial" });
 
 async function listVisibleProjects(): Promise<Array<{ id: string; name?: string; hidden?: boolean }>> {
@@ -22,11 +24,11 @@ async function listVisibleProjects(): Promise<Array<{ id: string; name?: string;
 }
 
 async function drainVisibleProjects(): Promise<void> {
-	for (const project of await listVisibleProjects()) {
+	for (const project of (await listVisibleProjects()).filter(p => p.id !== HEADQUARTERS_PROJECT_ID)) {
 		const resp = await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" });
 		expect(resp.status, `delete project ${project.id}`).toBe(200);
 	}
-	expect(await listVisibleProjects(), "visible projects after drain").toEqual([]);
+	expect((await listVisibleProjects()).filter(p => p.id !== HEADQUARTERS_PROJECT_ID), "normal visible projects after drain").toEqual([]);
 }
 
 test("createSession without explicit projectId survives default project deletion", async () => {

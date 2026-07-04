@@ -2,6 +2,14 @@
 
 Detailed reference for all Bobbit features. For a quick overview, see the [README](../README.md).
 
+## Headquarters workspace
+
+Every Bobbit server has a built-in project named **Headquarters** with stable id `headquarters`. It represents the server run directory and the server/global config scope, so a fresh install can create a Quick Session or staff agent immediately without Add Project setup.
+
+Headquarters appears first in project lists by default and uses the Lucide `TowerControl` icon instead of the normal folder identity. The Settings preference `showHeadquartersInProjectLists` hides or shows it in normal lists only; hidden Headquarters remains resolvable internally and preserves its sessions, goals, staff, and config.
+
+Non-workflow config with `projectId=headquarters` aliases server config. Workflows remain project-scoped under Headquarters. See [headquarters.md](headquarters.md) for the storage, API, UI, and no-worktree goal behavior.
+
 ## Sessions
 
 Each session is a running `pi-coding-agent` child process with its own conversation history.
@@ -23,7 +31,7 @@ Goals are a task-tracking layer on top of sessions. A goal has a title, spec (ma
 
 - **Goal assistant**: Sessions created with `assistantType: "goal"` get a special prompt that helps users define clear goals. The assistant calls `propose_goal` (and other `propose_*` tools) to emit structured proposals as tool calls, which persist in message history and can be reopened via an "Open proposal" button. A deprecated XML fallback (`proposal-parsers.ts`) still parses legacy `<goal_proposal>` blocks for backward compatibility.
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
-- **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
+- **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager. Headquarters also supports explicit data-only goals with `worktree: false`; git/branch/PR endpoints are guarded with `GOAL_GIT_UNAVAILABLE` when no worktree exists.
 - **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. Human sign-off steps use the review pane for submitted content, inline/final comments, and approve/reject decisions. See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [review-pane-signoff.md](review-pane-signoff.md) for the full architecture.
 
 ## Teams
@@ -105,7 +113,7 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 
 ## Workflows
 
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
+Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Headquarters can own workflows through its aliased server `project.yaml`, but they are still addressed with `projectId=headquarters`. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md), [headquarters.md](headquarters.md), and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
 
 ## Git status rich diff viewer
 

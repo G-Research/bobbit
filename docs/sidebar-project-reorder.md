@@ -1,11 +1,11 @@
 # Sidebar project drag reorder
 
-Project drag reorder lets users choose the order of project sections in the sidebar. The order is server-side project registry state, not per-browser UI state, so the same order appears after reloads and in other connected browser sessions.
+Project drag reorder lets users choose the order of normal project sections in the sidebar. Headquarters is anchored first when visible and is not reorderable. The normal-project order is server-side project registry state, not per-browser UI state, so the same order appears after reloads and in other connected browser sessions.
 
 This feature sits between the project registry/API and the sidebar render paths:
 
-- The server stores visible-project order as contiguous project positions.
-- `GET /api/projects` returns visible projects in that persisted order.
+- The server stores normal visible-project order as contiguous project positions.
+- `GET /api/projects` returns Headquarters first when visible, followed by normal projects in persisted order.
 - The desktop sidebar and mobile landing page render projects in `state.projects` order.
 - `PUT /api/projects/order` saves a complete visible-project order and broadcasts `projects_changed` so other clients can update without a reload.
 
@@ -15,13 +15,15 @@ See [REST API — Projects](rest-api.md#projects) for the wire contract.
 
 ### Where the handle appears
 
-Project headers are ordered as:
+Normal project headers are ordered as:
 
 1. expand/collapse chevron;
 2. reorder grab handle;
 3. folder icon;
 4. project name/status;
 5. project actions such as settings and new goal.
+
+The Headquarters header omits the reorder handle and uses the `TowerControl` icon instead of the folder icon.
 
 Desktop keeps the normal sidebar density by reserving the handle slot but hiding the icon until the project header is hovered, the header has focus within it, the handle itself is focused, or a reorder is active.
 
@@ -68,15 +70,15 @@ When a reorder completes:
 
 The regular session refresh path also fetches projects, so tabs without an active session WebSocket still converge on the saved order.
 
-New visible projects append to the end of the current custom order. Removing a visible project compacts the remaining positions without changing their relative order.
+New normal projects append to the end of the current custom order after Headquarters. Removing a normal project compacts the remaining positions without changing their relative order.
 
 ## Validation and edge cases
 
-Only visible, non-system projects participate in user ordering. Hidden projects, including the synthetic `system` project, remain hidden from `GET /api/projects` and must not be sent to the reorder endpoint.
+Only visible normal projects participate in user ordering. Headquarters is visible by default but anchored outside the user order. Hidden projects, including the synthetic `system` project, remain hidden from `GET /api/projects` and must not be sent to the reorder endpoint.
 
-`PUT /api/projects/order` requires a complete, duplicate-free list of the current visible project IDs:
+`PUT /api/projects/order` requires a complete, duplicate-free list of the current visible normal project IDs:
 
-- malformed bodies, non-string IDs, duplicate IDs, unknown IDs, and hidden/system IDs return `400` with `code: "invalid_project_order"`;
+- malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, and hidden/system IDs return `400` with `code: "invalid_project_order"`;
 - otherwise valid lists that do not exactly match the current visible project set return `409` with `code: "stale_project_order"` plus the expected and received IDs;
 - failed saves do not mutate the registry.
 

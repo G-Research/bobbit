@@ -2,8 +2,9 @@
 
 The Add Project dialog runs a structured pre-flight pass against the candidate
 `rootPath` before it lets the user click Submit, and offers a safe "start
-fresh" path that archives any existing project-scoped `.bobbit/` content
-without ever touching gateway-owned state.
+fresh" path that archives existing project-scoped `.bobbit/` content. The
+server workspace is represented by Headquarters, so Add Project never offers
+archive remediation for the Headquarters/server-owned `.bobbit` state.
 
 This page is the user/developer-facing reference. The design rationale,
 alternatives considered, and open questions live in
@@ -57,8 +58,8 @@ reports `pass` when it succeeds.
 | `path.nested-in-project` | fail | Path is inside another registered project's `rootPath`, or inside its worktree root. Downgraded to `warn` when the only container is the gateway's own project — that case is unavoidable in dev. |
 | `path.contains-project` | warn | Path is an ancestor of an existing registered project. Registering the parent would shadow it. |
 | `path.is-worktree` | fail | `<rootPath>/.git` is a file pointing into another repo's `worktrees/` directory — register the primary checkout instead. |
-| `bobbit.existing` | warn | `.bobbit/` already has content. Detail summarises sessions / goals / config files. Carries an inline **Archive existing .bobbit/** action. This check asks "is there content to archive?" — a distinct question from "is this a configured Bobbit project?", which is keyed to `.bobbit/config/project.yaml` and answered by [`POST /api/projects/detect`](internals.md#project-assistant). After a successful archive, `bobbit.existing` becomes `pass` (the empty re-scaffolded `config/`+`state/` shape doesn't trip it) and detection routes Continue to the project assistant, not auto-import. |
-| `bobbit.gateway-owned` | warn | This path is the running gateway's own working directory (matches `getProjectRoot()`, contains `state/gateway-url`, or `state/watchdog.json`). Archive operations will preserve gateway-owned files when this is set. |
+| `bobbit.existing` | warn | `.bobbit/` already has content. Detail summarises sessions / goals / config files. Carries an inline **Archive existing .bobbit/** action only for project-scoped `.bobbit/` data. This check asks "is there content to archive?" — a distinct question from "is this a configured Bobbit project?", which is keyed to `.bobbit/config/project.yaml` and answered by [`POST /api/projects/detect`](internals.md#project-assistant). After a successful archive, `bobbit.existing` becomes `pass` (the empty re-scaffolded `config/`+`state/` shape doesn't trip it) and detection routes Continue to the project assistant, not auto-import. |
+| `bobbit.gateway-owned` | warn | This path is the running gateway's own working directory (matches `getProjectRoot()`, contains `state/gateway-url`, or `state/watchdog.json`). When the path is Headquarters-owned, archive remediation is removed and the row explains that Headquarters already represents the server workspace. |
 | `git.repo` | pass-only | Informational — whether `.git` is a directory or a file. Never blocking. |
 | `disk.space` | warn | Free space on the volume is below 500 MB. |
 
@@ -69,10 +70,15 @@ for the catalogue.
 
 ### Start fresh — archive existing `.bobbit/`
 
-When `bobbit.existing` reports content at the path, the row carries an
-**Archive existing .bobbit/** button. Clicking it opens a confirmation modal
-showing the target archive directory and (when `bobbit.gateway-owned` is set)
-the list of files that will be preserved in place.
+When `bobbit.existing` reports project-scoped content at a normal project path,
+the row carries an **Archive existing .bobbit/** button. Clicking it opens a
+confirmation modal showing the target archive directory and (when
+`bobbit.gateway-owned` is set outside the Headquarters-owned path) the list of
+files that will be preserved in place.
+
+The button is not shown for the server workspace because Headquarters owns that
+`.bobbit` state. Use the Headquarters visibility setting instead of trying to
+archive the server workspace.
 
 The archive operation moves everything under `<rootPath>/.bobbit/` into a new
 `<rootPath>/.bobbit-archive-NNN/` directory where `NNN` is a zero-padded
@@ -97,12 +103,15 @@ archive directory back into `.bobbit/`, and delete the archive directory.
 
 ### What gets preserved when the gateway owns the path
 
-When you're running the Bobbit gateway from inside a project directory and
-that same directory is being registered (so `bobbit.gateway-owned` is `warn`),
-the archive must not touch the files the running server depends on —
+When you're running the Bobbit gateway from inside a non-Headquarters project
+directory and that same directory is being registered (so `bobbit.gateway-owned`
+is `warn`), the archive must not touch the files the running server depends on —
 otherwise it would kill the gateway mid-operation. The preserved set is the
 `GATEWAY_OWNED_FILES` allowlist exported from
 [`src/server/agent/bobbit-archive.ts`](../src/server/agent/bobbit-archive.ts).
+
+For the Headquarters/server workspace itself, the archive endpoint returns
+`403 { code: "HEADQUARTERS_IMMUTABLE" }` instead of applying this allowlist.
 
 The allowlist covers (paths are relative to `<rootPath>/.bobbit/`):
 
@@ -241,12 +250,13 @@ Response shape:
 
 ### `POST /api/projects/archive-bobbit`
 
-Body: `{ "rootPath": "/abs/path" }`. Archives `<rootPath>/.bobbit/` content
-into `<rootPath>/.bobbit-archive-NNN/`, applying the `GATEWAY_OWNED_FILES`
-allowlist when the path is detected as gateway-owned (same detection as the
-preflight check: matches `getProjectRoot()`, has `state/gateway-url`, or has
-`state/watchdog.json`). Does **not** mutate the project registry — callers
-should re-run preflight after a successful archive.
+Body: `{ "rootPath": "/abs/path" }`. Archives normal project-scoped
+`<rootPath>/.bobbit/` content into `<rootPath>/.bobbit-archive-NNN/`, applying
+the `GATEWAY_OWNED_FILES` allowlist when the path is detected as gateway-owned
+but not Headquarters-owned. Does **not** mutate the project registry — callers
+should re-run preflight after a successful archive. If the path is the
+Headquarters/server workspace or the server `.bobbit` owner, the endpoint
+returns `403 { code: "HEADQUARTERS_IMMUTABLE" }` and moves nothing.
 
 Response shape on 200:
 
@@ -275,6 +285,7 @@ JSON is written to `<archiveDir>/MANIFEST.json` for audit.
 | 400 | `{ error, code: "bad-path" }` | Path exists but is not a directory. |
 | 409 | `{ error, code: "no-bobbit-dir" }` | `<rootPath>/.bobbit/` does not exist. |
 | 409 | `{ error, code: "empty-bobbit-dir" }` | `.bobbit/` exists but has nothing to archive. |
+| 403 | `{ error, code: "HEADQUARTERS_IMMUTABLE" }` | Path is the Headquarters/server workspace or server `.bobbit` owner. |
 | 500 | `{ error, stack }` | Unexpected server failure. |
 
 ### `POST /api/projects` — preflight rejection

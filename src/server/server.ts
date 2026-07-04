@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
 	bobbitStateDir,
 	bobbitConfigDir,
+	bobbitDir,
 	getProjectRoot,
 	globalAgentDir,
 	getAgentDirApiState,
@@ -519,7 +520,19 @@ import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getB
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
+import {
+	ProjectRegistry,
+	SymlinkProjectRootError,
+	PreflightFailedError,
+	SYSTEM_PROJECT_ID,
+	HEADQUARTERS_PROJECT_ID,
+	ProjectOrderError,
+	SpecialProjectMutationError,
+	assertNormalMutableProject,
+	isHeadquartersProject,
+	isSystemProject,
+	type RegisteredProject,
+} from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -537,7 +550,7 @@ import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
-import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
+import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
@@ -796,8 +809,10 @@ export function appendPiExtensionToolRows(tools: Array<Record<string, unknown>>,
 }
 
 function piExtensionToolScopeContext(scope: { projectId?: string; cwd?: string }): ScopedToolContext {
-	const scopeKey = scope.projectId ? `project:${scope.projectId}` : scope.cwd ? `cwd:${path.resolve(scope.cwd)}` : "default";
-	return { ...scope, scopeKey };
+	const projectId = normalizeConfigProjectId(scope.projectId);
+	const cwd = scope.projectId === HEADQUARTERS_PROJECT_ID ? undefined : scope.cwd;
+	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
+	return { ...(projectId ? { projectId } : {}), ...(cwd ? { cwd } : {}), scopeKey };
 }
 
 function annotatePiExtensionToolNameCollisions(contributions: readonly ResolvedPiExtensionContribution[]): void {
@@ -931,6 +946,30 @@ async function deleteRemoteGoalBranches(
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
+}
+
+const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {
+	return !!goal.branch && !!goal.worktreePath;
+}
+
+function noWorktreeGoalGitMessage(goal: Pick<PersistedGoal, "projectId">): string {
+	return goal.projectId === HEADQUARTERS_PROJECT_ID
+		? HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE
+		: GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE;
+}
+
+function goalGitUnavailablePayload(goal: Pick<PersistedGoal, "id" | "projectId" | "branch" | "worktreePath">, action: string): Record<string, unknown> {
+	return {
+		error: `${action} is unavailable. ${noWorktreeGoalGitMessage(goal)}`,
+		code: "GOAL_GIT_UNAVAILABLE",
+		goalId: goal.id,
+		projectId: goal.projectId,
+		branch: goal.branch ?? null,
+		worktreePath: goal.worktreePath ?? null,
+	};
 }
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
@@ -1715,10 +1754,8 @@ export function createGateway(config: GatewayConfig) {
 	initCompactionSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
-	// Project registry — persisted at server level.
-	// Zero projects is a valid state: a fresh install has no projects.json and the
-	// UI forces the user through "Add Project" before any goal/session work. Bobbit
-	// never registers a project implicitly.
+	// Project registry — persisted at server level. Every server exposes the
+	// built-in Headquarters project as the user-facing server workspace.
 	const projectRegistry = new ProjectRegistry(stateDir);
 
 	// Register the synthetic "system" project so system-scope tool-assistant
@@ -1739,8 +1776,14 @@ export function createGateway(config: GatewayConfig) {
 		console.warn(`[startup] Failed to register system project: ${err}`);
 	}
 
+	try {
+		projectRegistry.ensureHeadquartersProject(getProjectRoot(), { stateDir, configDir });
+	} catch (err) {
+		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
+	}
+
 	// Run one-time migration from centralized to per-project state
-	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
 
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.
@@ -1754,8 +1797,11 @@ export function createGateway(config: GatewayConfig) {
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
 
-	// Initialize per-project contexts
-	const projectContextManager = new ProjectContextManager(projectRegistry);
+	const projectConfigStore = new ProjectConfigStore(configDir);
+
+	// Initialize per-project contexts. Headquarters shares the server-scope
+	// ProjectConfigStore so server/HQ writes cannot stale-read or clobber.
+	const projectContextManager = new ProjectContextManager(projectRegistry, { headquartersProjectConfigStore: projectConfigStore });
 	projectContextManager.initAll();
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
@@ -1801,7 +1847,6 @@ export function createGateway(config: GatewayConfig) {
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
-	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -1906,11 +1951,13 @@ export function createGateway(config: GatewayConfig) {
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
 		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
-		// project
-		if (!projectId) return null;
-		const ctx = projectContextManager.getOrCreate(projectId);
+		// project. Headquarters is the user-facing server scope, so it intentionally
+		// has no independent project-scope market pack layer.
+		if (!effectiveProjectId) return null;
+		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 		if (!ctx) return null;
 		return { base: ctx.project.rootPath, store: ctx.projectConfigStore };
 	};
@@ -1936,13 +1983,15 @@ export function createGateway(config: GatewayConfig) {
 	// listing does — no split-brain between `/api/tools` and the renderer/action/
 	// surface-token/prompt-doc paths. `packActivationStore` is the SAME store the
 	// cascade reads (defined just below; referenced lazily at request time).
-	const marketToolRoots = (projectId?: string): MarketToolRoot[] =>
-		buildMarketToolRootsForProject({
-			projectId,
+	const marketToolRoots = (projectId?: string): MarketToolRoot[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		return buildMarketToolRootsForProject({
+			projectId: effectiveProjectId,
 			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir()),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
 		});
+	};
 	// Server-level toolManager (used by GET /api/tools/:name without a project)
 	// sees server + global-user market packs (project scope needs a projectId).
 	toolManager.setMarketToolRootsProvider(() => marketToolRoots(undefined));
@@ -1979,10 +2028,11 @@ export function createGateway(config: GatewayConfig) {
 	// `server`/`global-user` overrides live in the server config; `project` in the
 	// project config (same split as pack_order).
 	const packActivationStore = (scope: PackScope, projectId?: string): ProjectConfigStore | null => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		if (scope === "server" || scope === "global-user") return projectConfigStore;
 		if (scope === "project") {
-			if (!projectId) return null;
-			return projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? null;
+			if (!effectiveProjectId) return null;
+			return projectContextManager.getOrCreate(effectiveProjectId)?.projectConfigStore ?? null;
 		}
 		return null;
 	};
@@ -1991,6 +2041,7 @@ export function createGateway(config: GatewayConfig) {
 	// deduped-on-path) for a project — the registry collapses to the winning pack
 	// per packId before indexing.
 	const marketPackEntriesForProject = (projectId?: string): PackEntry[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		const out: PackEntry[] = [];
 		const seen = new Set<string>();
 		// Built-in first-party band (built-in-first-party-packs §7.5): the shipped
@@ -2006,7 +2057,7 @@ export function createGateway(config: GatewayConfig) {
 			out.push(e);
 		}
 		for (const scope of ["server", "global-user", "project"] as const) {
-			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
+			for (const e of marketPackProvider.marketEntries(scope, effectiveProjectId)) {
 				const key = path.resolve(e.path);
 				if (seen.has(key)) continue;
 				seen.add(key);
@@ -2017,7 +2068,7 @@ export function createGateway(config: GatewayConfig) {
 	};
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
-		const projectId = scope.projectId;
+		const projectId = normalizeConfigProjectId(scope.projectId);
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (entry.scope === "builtin" || !entry.manifest || (entry.manifest.contents.mcp ?? []).length === 0) continue;
 			const store = packActivationStore(entry.scope, projectId);
@@ -2068,7 +2119,7 @@ export function createGateway(config: GatewayConfig) {
 	};
 	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
 		const contributions: ResolvedPiExtensionContribution[] = [];
-		const projectId = scope.projectId;
+		const projectId = normalizeConfigProjectId(scope.projectId);
 		const scopedContext = piExtensionToolScopeContext(scope);
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
@@ -3672,6 +3723,34 @@ async function handleApiRoute(
 		json({ error: e.message, ...extra }, status);
 	};
 
+	const canonicalPathForCompare = (inputPath: string): string => {
+		let resolved = path.resolve(inputPath);
+		try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
+		const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const samePath = (a: string, b: string): boolean => canonicalPathForCompare(a) === canonicalPathForCompare(b);
+	const headquartersProject = (): RegisteredProject | undefined => projectRegistry.get(HEADQUARTERS_PROJECT_ID);
+	const bobbitOwnerPath = (): string => path.dirname(bobbitDir());
+	const isHeadquartersOwnedPath = (candidatePath: string): boolean => {
+		const hq = headquartersProject();
+		return (hq ? samePath(candidatePath, hq.rootPath) : samePath(candidatePath, getProjectRoot()))
+			|| samePath(candidatePath, getProjectRoot())
+			|| samePath(candidatePath, bobbitDir())
+			|| samePath(candidatePath, bobbitOwnerPath());
+	};
+	const shouldShowHeadquartersInProjectLists = (): boolean => preferencesStore.get("showHeadquartersInProjectLists") !== false;
+	const listProjectsForApi = (): RegisteredProject[] => projectRegistry.list().filter(project => {
+		if (project.hidden || isSystemProject(project)) return false;
+		if (isHeadquartersProject(project) && !shouldShowHeadquartersInProjectLists()) return false;
+		return true;
+	});
+	const writeSpecialProjectMutationError = (err: unknown): boolean => {
+		if (!(err instanceof SpecialProjectMutationError)) return false;
+		json({ error: err.message, code: err.code }, err.status);
+		return true;
+	};
+
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
 	function requireSubgoalsEnabled(): boolean {
 		// Subgoals default OFF (aligned with PR #497) — only an explicit `true` enables.
@@ -3731,11 +3810,35 @@ async function handleApiRoute(
 
 	/** Resolve per-project config store, falling back to the default. */
 	function resolveProjectConfigStore(pid: string | null): ProjectConfigStore {
-		if (pid && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(pid);
+		const effectiveProjectId = normalizeConfigProjectId(pid ?? undefined);
+		if (effectiveProjectId && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.projectConfigStore;
 		}
 		return projectConfigStore;
+	}
+
+	type RoleMutationTarget =
+		| { scope: "server"; store: RoleStore; manager: RoleManager }
+		| { scope: "project"; store: RoleStore; projectId: string };
+
+	function roleMutationProjectId(value: unknown): string | undefined {
+		if (typeof value !== "string") return undefined;
+		const trimmed = value.trim();
+		return trimmed ? trimmed : undefined;
+	}
+
+	/**
+	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
+	 * project ids still resolve to that project's role store.
+	 */
+	function resolveRoleMutationTarget(rawProjectId: unknown): RoleMutationTarget | null {
+		const requestedProjectId = roleMutationProjectId(rawProjectId);
+		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
+		if (!effectiveProjectId) return { scope: "server", store: serverRoleStore, manager: roleManager };
+		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
+		if (!ctx) return null;
+		return { scope: "project", store: ctx.roleStore, projectId: effectiveProjectId };
 	}
 
 	/**
@@ -3745,11 +3848,12 @@ async function handleApiRoute(
 	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
 	 */
 	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
-		if (projectId && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(projectId);
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
+		if (effectiveProjectId && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.project.rootPath;
 		}
-		return cwd;
+		return projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : cwd;
 	}
 
 	/**
@@ -3759,11 +3863,12 @@ async function handleApiRoute(
 	 * `pack_order` is read from the SERVER store (not the project store).
 	 */
 	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
-		const ctx = projectId && projectContextManager ? projectContextManager.getOrCreate(projectId) : undefined;
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
+		const ctx = effectiveProjectId && projectContextManager ? projectContextManager.getOrCreate(effectiveProjectId) : undefined;
 		return {
 			serverBase: getProjectRoot(),
 			globalUserBase: os.homedir(),
-			projectBase: ctx?.project.rootPath,
+			projectBase: ctx?.project.rootPath ?? "",
 			serverConfigStore: projectConfigStore,
 			projectConfigStore: ctx?.projectConfigStore,
 			// pack-schema-v1 §7: thread the SAME pack_activation store the roles/tools
@@ -4115,6 +4220,19 @@ async function handleApiRoute(
 					return ctx?.projectConfigStore.get("worktree_root") || undefined;
 				},
 			});
+			if (isHeadquartersOwnedPath(rawPath)) {
+				for (const check of report.checks) {
+					if (check.remediation?.kind === "archive-bobbit") delete check.remediation;
+					if (check.id === "bobbit.existing") {
+						check.title = "Server .bobbit/ belongs to Headquarters";
+						check.detail = "Headquarters already represents this server workspace. Its .bobbit/ state is gateway-owned and cannot be archived from Add Project.";
+					}
+					if (check.id === "bobbit.gateway-owned") {
+						check.title = "Headquarters workspace";
+						check.detail = "Headquarters already represents the running gateway's server workspace.";
+					}
+				}
+			}
 			json(report);
 		} catch (err: any) {
 			jsonError(500, err);
@@ -4139,6 +4257,13 @@ async function handleApiRoute(
 		}
 		if (!fs.existsSync(body.rootPath)) {
 			json({ error: "rootPath does not exist" }, 400);
+			return;
+		}
+		if (isHeadquartersOwnedPath(body.rootPath)) {
+			json({
+				error: "Headquarters owns the server .bobbit state. Hide Headquarters from project lists in Settings instead of archiving it.",
+				code: "HEADQUARTERS_IMMUTABLE",
+			}, 403);
 			return;
 		}
 		// Compute gateway-owned via the same logic as the preflight check.
@@ -4401,9 +4526,7 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		// Filter out hidden projects (e.g. the synthetic "system" project) so
-		// they never appear in the client's state.projects.
-		json(projectRegistry.list().filter(p => !p.hidden && p.id !== SYSTEM_PROJECT_ID));
+		json(listProjectsForApi());
 		return;
 	}
 
@@ -4425,6 +4548,27 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+
+			if (isHeadquartersOwnedPath(body.rootPath)) {
+				const hq = headquartersProject();
+				if (hq && upsert) {
+					const ctx = projectContextManager.getOrCreate(hq.id);
+					if (ctx) {
+						ctx.gateStore.onStatusChange = () => {
+							ctx.goalStore.bumpGeneration();
+						};
+						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+					}
+					json(hq, 200);
+					return;
+				}
+				json({
+					error: "Headquarters already represents the server workspace. Hide it from project lists in Settings instead of adding it again.",
+					code: "HEADQUARTERS_ALREADY_EXISTS",
+					projectId: HEADQUARTERS_PROJECT_ID,
+				}, 409);
+				return;
+			}
 
 			// Upsert: if a project already exists at this path, return it
 			if (upsert) {
@@ -4592,7 +4736,8 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
 		const body = await readBody(req);
 		try {
-			const projects = projectRegistry.setVisibleOrder(body?.projectIds);
+			projectRegistry.setVisibleOrder(body?.projectIds);
+			const projects = listProjectsForApi();
 			broadcastToAll({ type: "projects_changed", projects });
 			json({ projects });
 		} catch (err: any) {
@@ -4633,10 +4778,19 @@ async function handleApiRoute(
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
+		if (updates.rootPath && isHeadquartersOwnedPath(updates.rootPath)) {
+			json({
+				error: "Headquarters already represents the server workspace. Select Headquarters instead of moving another project to it.",
+				code: "HEADQUARTERS_ALREADY_EXISTS",
+				projectId: HEADQUARTERS_PROJECT_ID,
+			}, 409);
+			return;
+		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4651,6 +4805,7 @@ async function handleApiRoute(
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
 		try {
+			if (project) assertNormalMutableProject(project, "removed");
 			// Drain the project's worktree pool before removing
 			await sessionManager.removeWorktreePool(projectId);
 			// Terminate all live sessions belonging to the removed project
@@ -4667,6 +4822,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4707,6 +4863,7 @@ async function handleApiRoute(
 			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -5846,7 +6003,13 @@ async function handleApiRoute(
 
 		// For project assistants, register a provisional project at the target cwd
 		if (isProjectAssistant && cwd && !resolvedProjectId) {
-			const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			let provisionalProject: RegisteredProject;
+			try {
+				provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			} catch (err) {
+				if (writeSpecialProjectMutationError(err)) return;
+				throw err;
+			}
 			provisionalProjectId = provisionalProject.id;
 			resolvedProjectId = provisionalProject.id;
 			// Ensure a ProjectContext exists for the provisional project
@@ -6435,6 +6598,7 @@ async function handleApiRoute(
 				const n = Math.floor(body.maxConcurrentChildren);
 				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
 			}
+			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -6450,6 +6614,7 @@ async function handleApiRoute(
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
+				worktree: explicitWorktree,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -7881,6 +8046,7 @@ async function handleApiRoute(
 			}, 400);
 			return;
 		}
+		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
 		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
@@ -7894,8 +8060,11 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
-		json({ ok: true });
+		json(getSafePreferences());
 		broadcastPreferencesChanged();
+		if (headquartersVisibilityChanged) {
+			broadcastToAll({ type: "projects_changed", projects: listProjectsForApi() });
+		}
 		return;
 	}
 
@@ -7914,10 +8083,11 @@ async function handleApiRoute(
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId");
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		const resolvedStore = resolveProjectConfigStore(projectId);
-		const resolvedCwd = projectId && projectContextManager
-			? projectContextManager.getOrCreate(projectId)?.project.rootPath ?? config.defaultCwd
-			: config.defaultCwd;
+		const resolvedCwd = effectiveProjectId && projectContextManager
+			? projectContextManager.getOrCreate(effectiveProjectId)?.project.rootPath ?? config.defaultCwd
+			: (projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : config.defaultCwd);
 		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
 		return;
 	}
@@ -7962,7 +8132,7 @@ async function handleApiRoute(
 			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
 		// True iff a real user install of `(scope, packName)` exists in the ledger.
 		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
-			installer.listInstalled(allContexts(projectId)).some((p) => p.scope === scope && p.packName === packName);
+			installer.listInstalled(allContexts(normalizeConfigProjectId(projectId))).some((p) => p.scope === scope && p.packName === packName);
 
 		const sourceDisplayName = (source: Pick<MarketplaceSource, "id" | "displayName" | "type"> & { builtin?: boolean }): string =>
 			source.builtin ? "Built-in" : source.displayName ?? source.id;
@@ -7986,9 +8156,11 @@ async function handleApiRoute(
 			scope: InstallScope,
 			projectId: string | undefined,
 		): { ok: true; target: ScopeTarget } | { ok: false; status: number; error: string } => {
+			const effectiveProjectId = normalizeConfigProjectId(projectId);
 			if (scope === "project") {
 				if (!projectId) return { ok: false, status: 400, error: "projectId required for project scope" };
-				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!effectiveProjectId) return { ok: true, target: { scope: "server", store: projectConfigStore } };
+				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 				if (!ctx) return { ok: false, status: 404, error: "Project not found" };
 				return { ok: true, target: { scope, projectBase: ctx.project.rootPath, store: ctx.projectConfigStore } };
 			}
@@ -8017,12 +8189,13 @@ async function handleApiRoute(
 		// scope's `pack_order` so `listInstalled` returns rows in precedence order
 		// (finding #2) — the UI relies on that order to build reorder payloads.
 		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> => {
+			const effectiveProjectId = normalizeConfigProjectId(projectId);
 			const ctxs: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> = [
 				{ scope: "server", packOrder: projectConfigStore.getPackOrder("server") },
 				{ scope: "global-user", packOrder: projectConfigStore.getPackOrder("global-user") },
 			];
-			if (projectId) {
-				const ctx = projectContextManager.getOrCreate(projectId);
+			if (effectiveProjectId) {
+				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath, packOrder: ctx.projectConfigStore.getPackOrder("project") });
 			}
 			return ctxs;
@@ -8174,9 +8347,11 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
+				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
 			return;
@@ -8197,12 +8372,14 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const prior = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).find((p) => p.scope === scope && p.packName === body.packName);
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
-				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
-				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
+				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
 			} catch (err) { handleMarketErr(err, 409); }
 			return;
@@ -8223,10 +8400,12 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const prior = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).find((p) => p.scope === scope && p.packName === body.packName);
-				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(scope, body?.projectId);
+				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
 			return;
@@ -8262,7 +8441,8 @@ async function handleApiRoute(
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const st = resolveScopeTarget(scope, projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			json({ scope, order: st.target.store.getPackOrder(scope) });
+			const targetScope = st.target.scope;
+			json({ scope: targetScope, order: st.target.store.getPackOrder(targetScope) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-order" && req.method === "PUT") {
@@ -8272,20 +8452,22 @@ async function handleApiRoute(
 			if (!Array.isArray(body?.order) || !body.order.every((x: unknown) => typeof x === "string")) { json({ error: "order must be a string array" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 			// Normalize: drop names not installed at this scope; append on-disk-but-absent
 			// packs at lowest priority (front), preserving the requested order otherwise.
-			const installedNames = installer.listInstalled([{ scope, projectBase: st.target.projectBase }])
-				.filter((p) => p.scope === scope && p.status !== "corrupt")
+			const installedNames = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])
+				.filter((p) => p.scope === targetScope && p.status !== "corrupt")
 				.map((p) => p.packName);
 			const installedSet = new Set(installedNames);
 			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
 			const missing = installedNames.filter((n) => !filtered.includes(n));
 			const normalized = [...missing, ...filtered];
-			st.target.store.setPackOrder(scope, normalized);
+			st.target.store.setPackOrder(targetScope, normalized);
 			invalidateResolverCaches();
-			const hasMcp = installer.listInstalled([{ scope, projectBase: st.target.projectBase }]).some((p) => p.scope === scope && (p.manifest.contents.mcp?.length ?? 0) > 0);
-			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
-			json({ scope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
+			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
+			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 
@@ -8525,11 +8707,13 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, projectId);
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(projectId) : undefined;
+			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const disabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
-			json({ scope, packName, catalogue, disabled, revision: packActivationRevision(disabled) });
+			const disabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
+			json({ scope: targetScope, packName, catalogue, disabled, revision: packActivationRevision(disabled) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "PUT") {
@@ -8540,7 +8724,9 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, body?.projectId);
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			// Normalize the requested disabled refs against the pack's declared
 			// catalogue (drop refs for entities the pack does not declare).
@@ -8549,7 +8735,7 @@ async function handleApiRoute(
 			const mcpLookup = mcpContributionLookup(catalogue);
 			const catalogueMcpContributionIds = new Set(mcpLookup.values());
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const beforeActivation = cfgStore.getPackActivation(scope as PackOrderScope, packName);
+			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
 			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
@@ -8589,13 +8775,13 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
-			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
+			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
-			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(scope, body?.projectId) : undefined;
-			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName, body?.projectId) ?? catalogue : catalogue;
-			const nextDisabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
-			json({ scope, packName, catalogue: refreshedCatalogue, disabled: nextDisabled, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
+			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
+			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
+			json({ scope: targetScope, packName, catalogue: refreshedCatalogue, disabled: nextDisabled, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-activation/mcp-operation" && req.method === "PATCH") {
@@ -8608,12 +8794,14 @@ async function handleApiRoute(
 			if (typeof body?.disabled !== "boolean") { json({ error: "disabled must be boolean" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 			let matchedPackName = "";
 			let matchedCatalogue: ReturnType<typeof buildActivationCatalogue> = null;
 			let matchedEntry: Record<string, unknown> | undefined;
-			for (const installed of installer.listInstalled([{ scope, projectBase: st.target.projectBase }])) {
-				if (installed.scope !== scope || installed.status === "corrupt") continue;
-				const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, installed.packName, body?.projectId);
+			for (const installed of installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])) {
+				if (installed.scope !== targetScope || installed.status === "corrupt") continue;
+				const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, installed.packName, targetProjectId);
 				if (!catalogue) continue;
 				const lookup = mcpContributionLookup(catalogue);
 				if (lookup.get(contributionId) === contributionId) {
@@ -8628,10 +8816,10 @@ async function handleApiRoute(
 			}
 			if (!matchedPackName || !matchedCatalogue) { json({ error: "unknown MCP contribution for scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const current = cfgStore.getPackActivation(scope as PackOrderScope, matchedPackName);
+			const current = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
 			const currentRevision = packActivationRevision(current);
 			if (typeof body?.expectedRevision === "string" && body.expectedRevision !== currentRevision) {
-				json({ error: "stale activation revision", code: "STALE_REVISION", scope, packName: matchedPackName, contributionId, operationName, disabled: current, catalogue: matchedCatalogue, revision: currentRevision }, 409);
+				json({ error: "stale activation revision", code: "STALE_REVISION", scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: current, catalogue: matchedCatalogue, revision: currentRevision }, 409);
 				return;
 			}
 			const operationRows = Array.isArray(matchedEntry?.operations) ? matchedEntry.operations.filter((op): op is Record<string, unknown> => !!op && typeof op === "object" && !Array.isArray(op)) : [];
@@ -8646,15 +8834,15 @@ async function handleApiRoute(
 			else currentOps.delete(operationName);
 			if (currentOps.size > 0) nextOps[contributionId] = [...currentOps].sort();
 			else delete nextOps[contributionId];
-			cfgStore.setPackActivation(scope as PackOrderScope, matchedPackName, {
+			cfgStore.setPackActivation(targetScope as PackOrderScope, matchedPackName, {
 				...current,
 				mcpOperations: Object.keys(nextOps).length > 0 ? nextOps : undefined,
 			});
 			invalidateResolverCaches();
-			const mcpReload = await reloadMcpAfterMarketplaceMutation(scope, body?.projectId);
-			const refreshedCatalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, matchedPackName, body?.projectId) ?? matchedCatalogue;
-			const nextDisabled = cfgStore.getPackActivation(scope as PackOrderScope, matchedPackName);
-			json({ scope, packName: matchedPackName, contributionId, operationName, disabled: nextDisabled, catalogue: refreshedCatalogue, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
+			const mcpReload = await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
+			const refreshedCatalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, matchedPackName, targetProjectId) ?? matchedCatalogue;
+			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
+			json({ scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: nextDisabled, catalogue: refreshedCatalogue, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 
@@ -9192,16 +9380,26 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/roles (scope-aware: body.projectId → create in that project's store)
+	// POST /api/roles (scope-aware: body.projectId → create in that project's store; Headquarters aliases server scope)
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
-		const targetProjectId = body?.projectId;
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const target = resolveRoleMutationTarget(body?.projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			if (target.scope === "server") {
+				const role = target.manager.createRole({
+					name: body?.name,
+					label: body?.label,
+					promptTemplate: body?.promptTemplate || "",
+					accessory: body?.accessory,
+					toolPolicies: body?.toolPolicies,
+					model: modelStr,
+					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
+				});
+				json(role, 201);
+			} else {
 				const now = Date.now();
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 				const role = {
 					name: body?.name,
 					label: body?.label ?? body?.name,
@@ -9216,19 +9414,7 @@ async function handleApiRoute(
 				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
 				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				ctx.roleStore.put(role);
-				json(role, 201);
-			} else {
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				const role = roleManager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
-				});
+				target.store.put(role);
 				json(role, 201);
 			}
 		} catch (err: any) {
@@ -9248,12 +9434,12 @@ async function handleApiRoute(
 		const source = resolved.find(r => r.item.name === name);
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9273,12 +9459,12 @@ async function handleApiRoute(
 		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9312,10 +9498,10 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.roleStore.get(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
@@ -9348,7 +9534,7 @@ async function handleApiRoute(
 					name,
 					updatedAt: Date.now(),
 				};
-				ctx.roleStore.put(updated);
+				target.store.put(updated);
 				json({ ok: true });
 			} else {
 				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
@@ -9360,7 +9546,7 @@ async function handleApiRoute(
 					: undefined;
 				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
 				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = roleManager.getRole(name);
+					const existing = target.manager.getRole(name);
 					if (existing) {
 						const patched = {
 							...existing,
@@ -9368,10 +9554,10 @@ async function handleApiRoute(
 							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
 							updatedAt: Date.now(),
 						};
-						serverRoleStore.put(patched);
+						target.store.put(patched);
 					}
 				}
-				const ok = roleManager.updateRole(name, {
+				const ok = target.manager.updateRole(name, {
 					label: body.label,
 					promptTemplate: body.promptTemplate,
 					accessory: body.accessory,
@@ -9394,13 +9580,13 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				ctx.roleStore.remove(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				target.store.remove(name);
 				json({ ok: true });
 			} else {
-				const ok = roleManager.deleteRole(name);
+				const ok = target.manager.deleteRole(name);
 				if (!ok) { json({ error: "Role not found" }, 404); return; }
 				json({ ok: true });
 			}
@@ -10746,8 +10932,9 @@ async function handleApiRoute(
 		const goalId = commitsMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Commit history"), 409); return; }
 		if (!fs.existsSync(goal.cwd)) { json({ commits: [] }); return; }
-		const branch = goal.branch || "HEAD";
+		const branch = goal.branch;
 		// Validate branch name to prevent injection
 		if (!/^[a-zA-Z0-9/_.\-]+$/.test(branch)) { json({ error: "Invalid branch name" }, 400); return; }
 		const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 1), 100);
@@ -10783,6 +10970,7 @@ async function handleApiRoute(
 		const goalId = goalGitMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Git status"), 409); return; }
 		const cwd = goal.cwd;
 
 		// Resolve container ID for sandboxed goals + project `base_ref` config
@@ -10840,6 +11028,7 @@ async function handleApiRoute(
 		const goalId = goalDiffMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Git diff"), 409); return; }
 		const cwd = goal.cwd;
 
 		// Resolve container ID for sandboxed goals
@@ -10885,6 +11074,7 @@ async function handleApiRoute(
 		const goalId = goalPrStatusMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
@@ -10901,6 +11091,7 @@ async function handleApiRoute(
 		const goalId = goalGithubLinkMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+		if (!hasGoalGitWorktree(goal)) { json({ available: false, reason: "no-worktree", message: noWorktreeGoalGitMessage(goal) } satisfies GoalGithubLinkResponse); return; }
 
 		const cached = prStatusStore.get(goalId);
 		if (cached?.url) {
@@ -10955,6 +11146,7 @@ async function handleApiRoute(
 		const goalId = goalPrMergeMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const body = await readBody(req);

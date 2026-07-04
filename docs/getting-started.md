@@ -17,7 +17,7 @@ The quickest way to try Bobbit:
 npx bobbit
 ```
 
-This downloads and runs Bobbit in one step. It will scaffold a `.bobbit/` directory in your current project and start the server.
+This downloads and runs Bobbit in one step. It will scaffold a server `.bobbit/` directory, create the built-in **Headquarters** workspace for the current run directory, and start the server.
 
 If you'd prefer a permanent install:
 
@@ -41,16 +41,18 @@ The **auth token** is like a password — it keeps your Bobbit instance private.
 
 ## Your first session
 
-1. **Create a session** — Click the "+" button in the top bar (or the "New session" button on mobile).
+1. **Create a session** — Click **Quick Session**. On a fresh server this starts in **Headquarters**, the built-in workspace for the server run directory.
 2. **Send a prompt** — Type what you want the agent to do. For example: "Add a README to this project" or "Fix the failing tests".
 3. **Watch it work** — The agent will read files, run commands, and edit code. You'll see each step in real time.
 4. **Steer if needed** — If the agent goes in the wrong direction, type a follow-up message to guide it.
 
-That's it! The agent has full access to your project directory, so it can do anything you'd do from the terminal.
+That's it. The agent has full access to the selected workspace directory, so it can do anything you'd do from the terminal. Add more projects when you want Bobbit to manage multiple repos from the same browser.
 
 ## Key concepts
 
 Here's a quick overview of the main ideas in Bobbit. Don't worry about memorising these — you can always come back here.
+
+- **Headquarters** — The built-in server workspace. It appears automatically on first launch, uses the server run directory, and is where server-level configuration lives.
 
 - **Sessions** — Each session is a separate conversation with an AI agent. You can have multiple sessions running at once, each working on different things.
 
@@ -66,6 +68,7 @@ Here's a quick overview of the main ideas in Bobbit. Don't worry about memorisin
 
 Once you're comfortable with the basics, explore these references:
 
+- [Headquarters project](headquarters.md) — Built-in server workspace behavior
 - [REST API](rest-api.md) — Full API reference for programmatic access
 - [WebSocket Protocol](websocket-protocol.md) — Real-time communication protocol
 - [Security Model](security.md) — How Bobbit keeps your machine safe

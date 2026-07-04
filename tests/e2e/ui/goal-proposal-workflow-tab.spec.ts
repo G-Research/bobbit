@@ -17,7 +17,7 @@
 import type { Locator } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI, activeSessionId } from "./ui-helpers.js";
+import { openApp, sendMessage, createSessionViaUI, activeSessionId, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const INLINE_WORKFLOW_ID = "bespoke-inline-e2e";
 const INLINE_WORKFLOW_GATE_COUNT = 3;
@@ -145,23 +145,7 @@ async function seedConflictingInlineWorkflowGoalProposal(sessionId: string): Pro
 }
 
 async function openNewGoalAssistantSession(page: import("@playwright/test").Page): Promise<string> {
-	const previousSessionId = await activeSessionId(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	await newGoalBtn.click();
-	const handle = await page.waitForFunction(
-		(previous: string | null) => {
-			const selected = (window as any).bobbitState?.selectedSessionId;
-			if (typeof selected !== "string" || !selected || selected === previous) return null;
-			const routeSession = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? null;
-			if (routeSession !== selected) return null;
-			return selected;
-		},
-		previousSessionId,
-		{ timeout: 20_000 },
-	);
-	return await handle.jsonValue() as string;
+	return createGoalAssistantViaUI(page, { timeout: 60_000 });
 }
 
 async function selectOptionValues(locator: Locator): Promise<string[]> {

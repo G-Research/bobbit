@@ -9,15 +9,12 @@
  * than the legacy client-side `bobbit-session-visited` localStorage key.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, defaultProject } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<{ id: string; rootPath: string }> {
-	const resp = await apiFetch("/api/projects");
-	const data = await resp.json();
-	const projects = Array.isArray(data) ? data : (data.projects || []);
-	expect(projects.length).toBeGreaterThan(0);
-	return { id: projects[0].id, rootPath: projects[0].rootPath };
+	const project = await defaultProject();
+	return { id: project.id, rootPath: project.rootPath };
 }
 
 test.describe("Unseen-activity dot (server-backed read state)", () => {

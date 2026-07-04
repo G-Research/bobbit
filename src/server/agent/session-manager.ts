@@ -54,6 +54,7 @@ import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from 
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
+import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy, Role } from "./role-store.js";
@@ -2128,10 +2129,17 @@ export class SessionManager {
 
 	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
 		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
+		const projectScopeKey = this.mcpScopeKey({ projectId });
+		const targetCwdScopeKey = targetRoot ? this.mcpScopeKey({ cwd: targetRoot }) : undefined;
 		const keys: string[] = [];
 		for (const [key, mgr] of this.scopedMcpManagers) {
 			const scope = mgr.getDiscoveryScope();
-			if (key === this.mcpScopeKey({ projectId }) || scope.projectId === projectId || (targetRoot && path.resolve(scope.cwd) === targetRoot)) {
+			if (
+				key === projectScopeKey
+				|| key === targetCwdScopeKey
+				|| scope.projectId === projectId
+				|| (targetRoot && path.resolve(scope.cwd) === targetRoot)
+			) {
 				keys.push(key);
 			}
 		}
@@ -2709,18 +2717,19 @@ export class SessionManager {
 			// Best-available market-scope wiring (finding #3): thread the server
 			// base + server config store so server/global-user market skill packs
 			// resolve for the active project even when its root != server cwd.
+			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 			const marketContext: SkillMarketContext = {
 				serverBase: getProjectRoot(),
 				globalUserBase: os.homedir(),
-				projectBase: discoveryRoot,
+				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
-				projectConfigStore: projectConfigStore as SkillMarketContext["projectConfigStore"],
+				projectConfigStore: headquartersScope ? undefined : projectConfigStore as SkillMarketContext["projectConfigStore"],
 				// pack-schema-v1 §7: filter disabled market-pack skills out of the runtime
 				// activation catalog too, using the SAME pack_activation store (server/
 				// global-user → server config store; project → the project's config store).
 				packActivation: (scope, packName) => {
 					const store = scope === "project"
-						? (projectId && this.projectContextManager
+						? (!headquartersScope && projectId && this.projectContextManager
 							? this.projectContextManager.getOrCreate(projectId)?.projectConfigStore
 							: undefined)
 						: this.projectConfigStore;

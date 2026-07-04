@@ -50,6 +50,7 @@ export function showProjectPickerPopover(
 	picker.projects = state.projects.map(p => ({
 		id: p.id,
 		name: p.name,
+		kind: p.kind,
 		colorLight: p.colorLight,
 		colorDark: p.colorDark,
 		color: p.color,

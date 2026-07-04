@@ -74,9 +74,9 @@ test("agent-dir REST flow validates, saves restart-gated pending state, and migr
 	const bypassPrefs = fs.existsSync(bypassPrefsPath) ? JSON.parse(fs.readFileSync(bypassPrefsPath, "utf-8")) : {};
 	const safePref = await expectOkJson(await apiFetch("/api/preferences", {
 		method: "PUT",
-		body: JSON.stringify({ agentDirBypassRegressionSafeKey: true }),
+		body: JSON.stringify({ showHeadquartersInProjectLists: true }),
 	}));
-	expect(safePref.ok).toBe(true);
+	expect(safePref.showHeadquartersInProjectLists).toBe(true);
 	expect(String(bypass.error ?? bypass.message)).toMatch(/agentDir|agent directory|agent-dir\/pending/i);
 	expect(bypass.code).toBe("AGENT_DIR_PREFERENCE_FORBIDDEN");
 	expect(bypassPrefs.agentDir).toBeUndefined();

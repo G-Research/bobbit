@@ -1354,7 +1354,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
 				}
-			}}>Customize at Server Level</button>`;
+			}}>Customize in Headquarters</button>`;
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
@@ -1382,7 +1382,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
 				}
-			}}>Revert to Inherited</button>`;
+			}}>Revert to Headquarters</button>`;
 		}
 	}
 	return "";

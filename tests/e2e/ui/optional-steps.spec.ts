@@ -4,16 +4,14 @@
  * API/gate coverage lives in tests/e2e/optional-steps-api.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 test.describe("Optional steps", () => {
 	test("goal proposal with options field is parsed", async ({ page }) => {
 		await openApp(page);
 
 		// Click the "New Goal" button.
-		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-		await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-		await newGoalBtn.click();
+		await createGoalAssistantViaUI(page);
 
 		// Wait for textarea — 30s budget absorbs goal-assistant cold-start under
 		// 3-worker browser parallelism (sync FS work for config / prompt assembly

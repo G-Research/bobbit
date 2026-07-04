@@ -2,8 +2,8 @@
  * Mobile review commenting E2E — full mobile annotation flow with persistence.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
-import { createSession } from "../e2e-setup.js";
+import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { apiFetch, createSession } from "../e2e-setup.js";
 
 async function setupMobileEmulation(page: import("@playwright/test").Page) {
 	await page.addInitScript(() => {
@@ -27,8 +27,11 @@ async function setupMobileEmulation(page: import("@playwright/test").Page) {
 }
 
 async function openReviewTab(page: import("@playwright/test").Page) {
+	const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
+	const previousDoneCount = await doneMessages.count().catch(() => 0);
 	await sendMessage(page, "REVIEW_OPEN");
-	await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
+	await expect.poll(async () => doneMessages.count(), { timeout: 20_000 })
+		.toBeGreaterThan(previousDoneCount);
 
 	const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
 	await expect(reviewTab).toBeVisible({ timeout: 10_000 });
@@ -37,10 +40,41 @@ async function openReviewTab(page: import("@playwright/test").Page) {
 	await expect(page.locator("review-document").getByText("Some important text").first()).toBeVisible({ timeout: 5_000 });
 }
 
-async function createSessionViaAPI(page: import("@playwright/test").Page) {
+async function createSessionViaAPI(page: import("@playwright/test").Page): Promise<string> {
 	const sessionId = await createSession();
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	return sessionId;
+}
+
+async function expectReviewAnnotationCount(
+	page: import("@playwright/test").Page,
+	count: number,
+	comment: string,
+) {
+	await expect.poll(async () => page.evaluate(
+		({ count, comment }) => {
+			const pane = document.querySelector("review-pane") as any;
+			const doc = document.querySelector("review-document") as any;
+			const sessionId = pane?.sessionId || doc?.sessionId || (window as any).bobbitState?.selectedSessionId;
+			const bucket = pane?.activeTab || doc?.docTitle || "Test Document";
+			if (!sessionId || !doc?.backend?.get) return false;
+			const annotations = doc.backend.get({ sessionId, bucket }) ?? [];
+			return annotations.length === count && annotations.some((ann: any) => ann?.comment === comment);
+		},
+		{ count, comment },
+	), { timeout: 10_000 }).toBe(true);
+}
+
+async function expectReviewAnnotationPersisted(sessionId: string, comment: string) {
+	await expect.poll(async () => {
+		const resp = await apiFetch(`/api/sessions/${sessionId}/review/annotations`);
+		if (!resp.ok) return 0;
+		const data = await resp.json() as { annotations?: Record<string, Array<{ comment?: string }>> };
+		return Object.values(data.annotations ?? {})
+			.flat()
+			.filter((ann) => ann?.comment === comment).length;
+	}, { timeout: 10_000 }).toBe(1);
 }
 
 async function selectReviewText(page: import("@playwright/test").Page) {
@@ -71,7 +105,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaAPI(page);
+		const sessionId = await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		await selectReviewText(page);
@@ -88,13 +122,20 @@ test.describe("Mobile review commenting", () => {
 		})).toBe(true);
 
 		await page.locator("annotation-popover textarea").fill("Persisted mobile comment");
+		const annotationWrite = page.waitForResponse(
+			(resp) => resp.url().includes(`/api/sessions/${sessionId}/review/annotations`)
+				&& resp.request().method() === "POST"
+				&& resp.ok(),
+			{ timeout: 10_000 },
+		);
 		await page.locator("annotation-popover .review-popover-submit").click();
+		await annotationWrite;
 		await expect(floatingBtn).not.toBeVisible({ timeout: 3_000 });
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expectReviewAnnotationCount(page, 1, "Persisted mobile comment");
 
 		await page.reload();
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await openReviewTab(page);
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expectReviewAnnotationPersisted(sessionId, "Persisted mobile comment");
 	});
 });

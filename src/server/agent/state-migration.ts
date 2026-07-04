@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
+import YAML from "yaml";
+import {
+	HEADQUARTERS_PROJECT_ID,
+	HEADQUARTERS_PROJECT_NAME,
+	SYSTEM_PROJECT_ID,
+	type ProjectRegistry,
+	type RegisteredProject,
+} from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { PersistedStaff } from "./staff-store.js";
@@ -11,6 +18,426 @@ import type { GateState } from "./gate-store.js";
 const MIGRATION_MARKER = ".migrated-to-per-project";
 const PRE_MIGRATION_SUFFIX = ".pre-migration";
 const RECOVERY_MARKER = ".pre-migration-recovered";
+const HEADQUARTERS_ID_MIGRATION_MARKER = ".headquarters-project-id-migrated";
+const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
+
+/** Normalize paths for equality checks, including Windows drive-letter casing. */
+function pathKey(p: string): string {
+	const resolved = path.resolve(p);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function samePath(a: string, b: string): boolean {
+	return pathKey(a) === pathKey(b);
+}
+
+function canonicalPathKey(p: string): string {
+	try {
+		return pathKey(fs.realpathSync(p));
+	} catch {
+		return pathKey(p);
+	}
+}
+
+// Helper: read a JSON array file, return empty array if missing/corrupt.
+function readJsonArray<T>(filePath: string): T[] {
+	try {
+		if (!fs.existsSync(filePath)) return [];
+		const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		return Array.isArray(data) ? data : [];
+	} catch {
+		console.log(`[migration] Warning: could not parse ${filePath}, skipping`);
+		return [];
+	}
+}
+
+function writeJsonArray<T>(filePath: string, items: T[], opts: { backup?: boolean } = {}): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	if (opts.backup) backupForHeadquartersMigration(filePath);
+	fs.writeFileSync(filePath, JSON.stringify(items, null, 2), "utf-8");
+}
+
+function backupForHeadquartersMigration(filePath: string): void {
+	try {
+		if (!fs.existsSync(filePath)) return;
+		const backupPath = filePath + HEADQUARTERS_BACKUP_SUFFIX;
+		if (!fs.existsSync(backupPath)) {
+			fs.copyFileSync(filePath, backupPath);
+			console.log(`[migration] Backed up ${path.basename(filePath)} → ${path.basename(backupPath)}`);
+		}
+	} catch (err) {
+		console.log(`[migration] Warning: could not back up ${filePath}: ${err}`);
+	}
+}
+
+function registryProjectMap(projectRegistry: ProjectRegistry): Map<string, RegisteredProject> | null {
+	const candidate = projectRegistry as unknown as { projects?: unknown };
+	return candidate.projects instanceof Map
+		? candidate.projects as Map<string, RegisteredProject>
+		: null;
+}
+
+function registrySave(projectRegistry: ProjectRegistry): void {
+	(projectRegistry as unknown as { save(): void }).save();
+}
+
+function rewriteProjectIdReferences(value: unknown, oldProjectIds: Set<string>): boolean {
+	let changed = false;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (rewriteProjectIdReferences(item, oldProjectIds)) changed = true;
+		}
+		return changed;
+	}
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	for (const [key, nested] of Object.entries(record)) {
+		if ((key === "projectId" || key === "parentProjectId") && typeof nested === "string" && oldProjectIds.has(nested)) {
+			record[key] = HEADQUARTERS_PROJECT_ID;
+			changed = true;
+			continue;
+		}
+		if (key === "provisionalProjectId" && typeof nested === "string" && oldProjectIds.has(nested)) {
+			delete record[key];
+			changed = true;
+			continue;
+		}
+		if (rewriteProjectIdReferences(nested, oldProjectIds)) changed = true;
+	}
+	return changed;
+}
+
+function walkJsonFiles(root: string, visit: (filePath: string) => void): void {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const p = path.join(root, entry.name);
+		if (entry.isDirectory()) {
+			walkJsonFiles(p, visit);
+			continue;
+		}
+		if (!entry.isFile()) continue;
+		if (!entry.name.endsWith(".json")) continue;
+		if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX) || entry.name.endsWith(PRE_MIGRATION_SUFFIX)) continue;
+		if (entry.name.endsWith(".tmp")) continue;
+		visit(p);
+	}
+}
+
+function rewriteProjectIdsInJsonTree(root: string, oldProjectIds: Set<string>): void {
+	if (oldProjectIds.size === 0) return;
+	walkJsonFiles(root, (filePath) => {
+		let data: unknown;
+		try {
+			data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		} catch {
+			return;
+		}
+		if (!rewriteProjectIdReferences(data, oldProjectIds)) return;
+		backupForHeadquartersMigration(filePath);
+		fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+		console.log(`[migration] Rewrote stale project references in ${filePath}`);
+	});
+}
+
+function scanStaleProjectIdReferences(root: string, oldProjectIds: Set<string>): string[] {
+	const hits: string[] = [];
+	if (oldProjectIds.size === 0) return hits;
+	const visit = (value: unknown, filePath: string, trail: string): void => {
+		if (Array.isArray(value)) {
+			value.forEach((item, index) => visit(item, filePath, `${trail}[${index}]`));
+			return;
+		}
+		if (!value || typeof value !== "object") return;
+		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+			const nextTrail = trail ? `${trail}.${key}` : key;
+			if (
+				(key === "projectId" || key === "parentProjectId" || key === "provisionalProjectId") &&
+				typeof nested === "string" &&
+				oldProjectIds.has(nested)
+			) {
+				hits.push(`${filePath}:${nextTrail}`);
+			}
+			visit(nested, filePath, nextTrail);
+		}
+	};
+	walkJsonFiles(root, (filePath) => {
+		try {
+			visit(JSON.parse(fs.readFileSync(filePath, "utf-8")), filePath, "");
+		} catch {
+			// Ignore malformed sidecars; normal store loads already warn elsewhere.
+		}
+	});
+	return hits;
+}
+
+function dropSearchIndexesForHeadquartersMigration(stateDir: string): void {
+	for (const name of ["search.flex", "search.lance", "search.db", "search.db-wal", "search.db-shm"]) {
+		const target = path.join(stateDir, name);
+		if (!fs.existsSync(target)) continue;
+		const backup = target + HEADQUARTERS_BACKUP_SUFFIX;
+		try {
+			if (!fs.existsSync(backup)) {
+				fs.renameSync(target, backup);
+				console.log(`[migration] Moved search index ${name} → ${path.basename(backup)} for reindex`);
+			} else {
+				fs.rmSync(target, { recursive: true, force: true });
+				console.log(`[migration] Removed stale search index ${name} for reindex`);
+			}
+		} catch (err) {
+			console.log(`[migration] Warning: could not reset search index ${target}: ${err}`);
+		}
+	}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeLegacyIntoCurrent(legacy: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...legacy, ...current };
+	for (const [key, legacyValue] of Object.entries(legacy)) {
+		const currentValue = current[key];
+		if (isPlainRecord(legacyValue) && isPlainRecord(currentValue)) {
+			merged[key] = deepMergeLegacyIntoCurrent(legacyValue, currentValue);
+		}
+	}
+	return merged;
+}
+
+function readYamlRecord(filePath: string): Record<string, unknown> | null {
+	try {
+		if (!fs.existsSync(filePath)) return null;
+		const parsed = YAML.parse(fs.readFileSync(filePath, "utf-8"));
+		return isPlainRecord(parsed) ? parsed : null;
+	} catch (err) {
+		console.log(`[migration] Warning: could not parse YAML ${filePath}: ${err}`);
+		return null;
+	}
+}
+
+function mergeLegacyProjectYaml(legacyFile: string, targetFile: string): void {
+	const legacy = readYamlRecord(legacyFile);
+	if (!legacy) return;
+	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+	if (!fs.existsSync(targetFile)) {
+		fs.copyFileSync(legacyFile, targetFile);
+		console.log(`[migration] Preserved legacy Headquarters config ${legacyFile} → ${targetFile}`);
+		return;
+	}
+	const current = readYamlRecord(targetFile) ?? {};
+	const merged = deepMergeLegacyIntoCurrent(legacy, current);
+	if (JSON.stringify(merged) === JSON.stringify(current)) return;
+	backupForHeadquartersMigration(targetFile);
+	fs.writeFileSync(targetFile, YAML.stringify(merged), "utf-8");
+	console.log(`[migration] Merged legacy Headquarters config into ${targetFile}`);
+}
+
+function copyMissingLegacyConfig(legacyConfigDir: string, centralConfigDir: string): void {
+	if (samePath(legacyConfigDir, centralConfigDir) || !fs.existsSync(legacyConfigDir)) return;
+	const walk = (srcDir: string): void => {
+		let entries: fs.Dirent[];
+		try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const src = path.join(srcDir, entry.name);
+			const rel = path.relative(legacyConfigDir, src);
+			const dest = path.join(centralConfigDir, rel);
+			if (entry.isDirectory()) {
+				walk(src);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			if (rel.replace(/\\/g, "/") === "project.yaml") {
+				mergeLegacyProjectYaml(src, dest);
+				continue;
+			}
+			if (fs.existsSync(dest)) continue;
+			fs.mkdirSync(path.dirname(dest), { recursive: true });
+			fs.copyFileSync(src, dest);
+			console.log(`[migration] Preserved legacy Headquarters config ${src} → ${dest}`);
+		}
+	};
+	walk(legacyConfigDir);
+}
+
+function mergeLegacyJsonArrayFile(
+	legacyFile: string,
+	targetFile: string,
+	oldProjectIds: Set<string>,
+	keyFor: (item: Record<string, unknown>) => string,
+): void {
+	const legacy = readJsonArray<Record<string, unknown>>(legacyFile);
+	if (legacy.length === 0) return;
+	const rewritten = JSON.parse(JSON.stringify(legacy)) as Record<string, unknown>[];
+	rewriteProjectIdReferences(rewritten, oldProjectIds);
+	const existing = readJsonArray<Record<string, unknown>>(targetFile);
+	const seen = new Set(existing.map(keyFor).filter(Boolean));
+	let added = 0;
+	for (const item of rewritten) {
+		const key = keyFor(item);
+		if (!key || seen.has(key)) continue;
+		existing.push(item);
+		seen.add(key);
+		added++;
+	}
+	if (added === 0 && fs.existsSync(targetFile)) return;
+	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+	backupForHeadquartersMigration(targetFile);
+	fs.writeFileSync(targetFile, JSON.stringify(existing, null, 2), "utf-8");
+	console.log(`[migration] Preserved ${added} legacy Headquarters state entr${added === 1 ? "y" : "ies"} from ${legacyFile}`);
+}
+
+function preserveLegacyServerRootBobbitForHeadquarters(
+	centralStateDir: string,
+	centralConfigDir: string,
+	serverCwd: string,
+	oldProjectIds: Set<string>,
+): void {
+	if (oldProjectIds.size === 0) return;
+	const legacyBobbitDir = path.join(path.resolve(serverCwd), ".bobbit");
+	const legacyStateDir = path.join(legacyBobbitDir, "state");
+	const legacyConfigDir = path.join(legacyBobbitDir, "config");
+
+	if (!samePath(legacyStateDir, centralStateDir) && fs.existsSync(legacyStateDir)) {
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "goals.json"), path.join(centralStateDir, "goals.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "sessions.json"), path.join(centralStateDir, "sessions.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "staff.json"), path.join(centralStateDir, "staff.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "tasks.json"), path.join(centralStateDir, "tasks.json"), oldProjectIds, item => String(item.id ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "team-state.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gateway-swarms.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
+		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gates.json"), path.join(centralStateDir, "gates.json"), oldProjectIds, item => `${String(item.goalId ?? "")}::${String(item.gateId ?? "")}`);
+	}
+
+	copyMissingLegacyConfig(legacyConfigDir, centralConfigDir);
+}
+
+function migrateHeadquartersProjectAliases(
+	centralStateDir: string,
+	centralConfigDir: string,
+	projectRegistry: ProjectRegistry,
+	serverCwd: string,
+): { oldProjectIds: Set<string>; headquartersProject?: RegisteredProject } {
+	const oldProjectIds = new Set<string>();
+	const projects = registryProjectMap(projectRegistry);
+	if (!projects) return { oldProjectIds };
+
+	const projectsFile = path.join(centralStateDir, "projects.json");
+	const serverRoot = path.resolve(serverCwd);
+	const serverRootKey = canonicalPathKey(serverRoot);
+	let headquartersProject = projects.get(HEADQUARTERS_PROJECT_ID);
+	const serverRootCandidates = [...projects.values()].filter(project => {
+		if (project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters") return false;
+		if (project.id === SYSTEM_PROJECT_ID || project.kind === "system" || project.hidden) return false;
+		return canonicalPathKey(project.rootPath) === serverRootKey;
+	});
+
+	for (const project of serverRootCandidates) oldProjectIds.add(project.id);
+
+	let registryChanged = false;
+	const markProjectsBackup = (): void => backupForHeadquartersMigration(projectsFile);
+	const repairHeadquarters = (project: RegisteredProject): void => {
+		if (project.id !== HEADQUARTERS_PROJECT_ID) {
+			projects.delete(project.id);
+			project.id = HEADQUARTERS_PROJECT_ID;
+			projects.set(project.id, project);
+			registryChanged = true;
+		}
+		if (project.name !== HEADQUARTERS_PROJECT_NAME) {
+			project.name = HEADQUARTERS_PROJECT_NAME;
+			registryChanged = true;
+		}
+		const resolvedRoot = path.resolve(serverRoot);
+		if (path.resolve(project.rootPath) !== resolvedRoot) {
+			project.rootPath = resolvedRoot;
+			registryChanged = true;
+		}
+		if (project.kind !== "headquarters") {
+			project.kind = "headquarters";
+			registryChanged = true;
+		}
+		if (project.hidden !== undefined) {
+			delete project.hidden;
+			registryChanged = true;
+		}
+		if (project.provisional !== undefined) {
+			delete project.provisional;
+			registryChanged = true;
+		}
+		if (project.position !== undefined) {
+			delete project.position;
+			registryChanged = true;
+		}
+		if (project.parentProjectId !== undefined) {
+			delete project.parentProjectId;
+			registryChanged = true;
+		}
+	};
+
+	if (!headquartersProject && serverRootCandidates.length > 0) {
+		headquartersProject = serverRootCandidates[0];
+		markProjectsBackup();
+		repairHeadquarters(headquartersProject);
+	}
+
+	if (headquartersProject) {
+		repairHeadquarters(headquartersProject);
+	}
+
+	if (headquartersProject && serverRootCandidates.length > 0) {
+		markProjectsBackup();
+		for (const candidate of serverRootCandidates) {
+			if (candidate === headquartersProject || candidate.id === HEADQUARTERS_PROJECT_ID) continue;
+			projects.delete(candidate.id);
+			registryChanged = true;
+		}
+	}
+
+	if (oldProjectIds.size > 0) {
+		for (const project of projects.values()) {
+			if (project.parentProjectId && oldProjectIds.has(project.parentProjectId)) {
+				if (project.id === HEADQUARTERS_PROJECT_ID) delete project.parentProjectId;
+				else project.parentProjectId = HEADQUARTERS_PROJECT_ID;
+				registryChanged = true;
+			}
+		}
+	}
+
+	if (registryChanged) {
+		markProjectsBackup();
+		registrySave(projectRegistry);
+		const promotedIds = [...oldProjectIds].join(", ");
+		console.log(promotedIds
+			? `[migration] Promoted server-root project reference(s) ${promotedIds} to Headquarters`
+			: "[migration] Repaired Headquarters project registry record");
+	}
+
+	if (oldProjectIds.size > 0) {
+		preserveLegacyServerRootBobbitForHeadquarters(centralStateDir, centralConfigDir, serverCwd, oldProjectIds);
+		rewriteProjectIdsInJsonTree(centralStateDir, oldProjectIds);
+		dropSearchIndexesForHeadquartersMigration(centralStateDir);
+		const staleRefs = scanStaleProjectIdReferences(centralStateDir, oldProjectIds);
+		if (staleRefs.length > 0) {
+			throw new Error(
+				`Headquarters project id migration left stale project id references: ${staleRefs.slice(0, 20).join(", ")}`,
+			);
+		}
+	}
+
+	if (headquartersProject || oldProjectIds.size > 0) {
+		try {
+			fs.mkdirSync(centralStateDir, { recursive: true });
+			fs.writeFileSync(path.join(centralStateDir, HEADQUARTERS_ID_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
+		} catch (err) {
+			console.log(`[migration] Warning: could not write Headquarters id migration marker: ${err}`);
+		}
+	}
+
+	return { oldProjectIds, headquartersProject };
+}
 
 /**
  * One-time migration from centralized state (`<server-cwd>/.bobbit/state/`)
@@ -52,10 +479,14 @@ export function migrateToPerProjectState(
 	centralStateDir: string,
 	projectRegistry: ProjectRegistry,
 	serverCwd: string,
+	opts: { centralConfigDir?: string } = {},
 ): void {
+	const centralConfigDir = opts.centralConfigDir ?? path.join(path.dirname(centralStateDir), "config");
+	const headquartersAliasMigration = migrateHeadquartersProjectAliases(centralStateDir, centralConfigDir, projectRegistry, serverCwd);
 	const markerPath = path.join(centralStateDir, MIGRATION_MARKER);
 
-	// 1. Already migrated?
+	// 1. Already migrated? Headquarters id promotion still ran above because it
+	// is independent of the older per-project state marker.
 	if (fs.existsSync(markerPath)) return;
 
 	const projects = projectRegistry.list();
@@ -64,43 +495,40 @@ export function migrateToPerProjectState(
 		return;
 	}
 
-	// Find the default project: prefer the one at serverCwd, else first registered
+	// Find the default project: prefer Headquarters/serverCwd, else first registered.
 	const defaultProject =
-		projectRegistry.getByPath(serverCwd) ?? projects[0];
+		projectRegistry.get(HEADQUARTERS_PROJECT_ID) ??
+		projectRegistry.getByPath(serverCwd) ??
+		projects[0];
 
 	console.log(
 		`[migration] Starting per-project state migration. Default project: "${defaultProject.name}" (${defaultProject.id})`,
 	);
 
-	// Helper: resolve project for a given projectId
+	// Helper: resolve project for a given projectId.
 	const resolveProject = (projectId?: string): RegisteredProject => {
 		if (projectId) {
+			if (headquartersAliasMigration.oldProjectIds.has(projectId)) {
+				return projectRegistry.get(HEADQUARTERS_PROJECT_ID) ?? defaultProject;
+			}
 			const p = projectRegistry.get(projectId);
 			if (p) return p;
 		}
 		return defaultProject;
 	};
 
-	// Helper: ensure <project>/.bobbit/state/ exists
+	// Helper: ensure <project>/.bobbit/state/ exists. Headquarters aliases the
+	// server state dir, which may be redirected via BOBBIT_DIR and is not always
+	// `<server root>/.bobbit/state`.
 	const ensureProjectStateDir = (project: RegisteredProject): string => {
-		const dir = path.join(project.rootPath, ".bobbit", "state");
+		const dir = project.id === HEADQUARTERS_PROJECT_ID
+			? centralStateDir
+			: path.join(project.rootPath, ".bobbit", "state");
 		fs.mkdirSync(dir, { recursive: true });
 		return dir;
 	};
 
-	// Helper: read a JSON array file, return empty array if missing/corrupt
-	function readJsonArray<T>(filePath: string): T[] {
-		try {
-			if (!fs.existsSync(filePath)) return [];
-			const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-			return Array.isArray(data) ? data : [];
-		} catch {
-			console.log(`[migration] Warning: could not parse ${filePath}, skipping`);
-			return [];
-		}
-	}
-
-	// Helper: merge items into an existing JSON array file by ID field, write back
+	// Helper: merge items into an existing JSON array file by ID field, write back.
 	function mergeAndWrite<T>(
 		targetFile: string,
 		newItems: T[],
@@ -126,7 +554,34 @@ export function migrateToPerProjectState(
 		}
 	}
 
-	// Helper: safely rename a file with .pre-migration suffix
+	function writeBucket<T>(
+		centralFile: string,
+		fileName: string,
+		project: RegisteredProject,
+		items: T[],
+		idField: string,
+	): void {
+		const targetFile = path.join(ensureProjectStateDir(project), fileName);
+		if (samePath(targetFile, centralFile)) {
+			writeJsonArray(targetFile, items, { backup: true });
+			return;
+		}
+		mergeAndWrite(targetFile, items, idField);
+	}
+
+	function clearCentralBucketIfDefaultMissing<T>(
+		centralFile: string,
+		fileName: string,
+		groups: Map<string, T[]>,
+	): void {
+		const defaultTarget = path.join(ensureProjectStateDir(defaultProject), fileName);
+		if (!samePath(defaultTarget, centralFile)) return;
+		if (groups.has(defaultProject.id)) return;
+		if (!fs.existsSync(centralFile)) return;
+		writeJsonArray(centralFile, [], { backup: true });
+	}
+
+	// Helper: safely rename a file with .pre-migration suffix.
 	function renameForBackup(filePath: string): void {
 		try {
 			if (fs.existsSync(filePath)) {
@@ -150,6 +605,7 @@ export function migrateToPerProjectState(
 
 	for (const goal of centralGoals) {
 		const project = resolveProject(goal.projectId);
+		goal.projectId = project.id;
 		goalProjectMap.set(goal.id, project);
 		let bucket = goalsByProject.get(project.id);
 		if (!bucket) {
@@ -162,9 +618,9 @@ export function migrateToPerProjectState(
 	// Write goals to per-project state dirs
 	for (const [projectId, goals] of goalsByProject) {
 		const project = projectRegistry.get(projectId)!;
-		const stateDir = ensureProjectStateDir(project);
-		mergeAndWrite(path.join(stateDir, "goals.json"), goals, "id");
+		writeBucket(centralGoalsFile, "goals.json", project, goals, "id");
 	}
+	clearCentralBucketIfDefaultMissing(centralGoalsFile, "goals.json", goalsByProject);
 	console.log(`[migration] Distributed ${centralGoals.length} goals across ${goalsByProject.size} project(s)`);
 
 	// ── 3. Sessions ──
@@ -174,6 +630,7 @@ export function migrateToPerProjectState(
 
 	for (const session of centralSessions) {
 		const project = resolveProject(session.projectId);
+		session.projectId = project.id;
 		let bucket = sessionsByProject.get(project.id);
 		if (!bucket) {
 			bucket = [];
@@ -184,9 +641,9 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, sessions] of sessionsByProject) {
 		const project = projectRegistry.get(projectId)!;
-		const stateDir = ensureProjectStateDir(project);
-		mergeAndWrite(path.join(stateDir, "sessions.json"), sessions, "id");
+		writeBucket(centralSessionsFile, "sessions.json", project, sessions, "id");
 	}
+	clearCentralBucketIfDefaultMissing(centralSessionsFile, "sessions.json", sessionsByProject);
 	console.log(`[migration] Distributed ${centralSessions.length} sessions across ${sessionsByProject.size} project(s)`);
 
 	// ── 4. Tasks — resolve project via goalId → goal's project ──
@@ -206,9 +663,9 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, tasks] of tasksByProject) {
 		const project = projectRegistry.get(projectId)!;
-		const stateDir = ensureProjectStateDir(project);
-		mergeAndWrite(path.join(stateDir, "tasks.json"), tasks, "id");
+		writeBucket(centralTasksFile, "tasks.json", project, tasks, "id");
 	}
+	clearCentralBucketIfDefaultMissing(centralTasksFile, "tasks.json", tasksByProject);
 	console.log(`[migration] Distributed ${centralTasks.length} tasks`);
 
 	// ── 5. Teams — resolve project via goalId ──
@@ -232,9 +689,9 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, teams] of teamsByProject) {
 		const project = projectRegistry.get(projectId)!;
-		const stateDir = ensureProjectStateDir(project);
-		mergeAndWrite(path.join(stateDir, "team-state.json"), teams, "goalId");
+		writeBucket(centralTeamsFile, "team-state.json", project, teams, "goalId");
 	}
+	clearCentralBucketIfDefaultMissing(centralTeamsFile, "team-state.json", teamsByProject);
 	console.log(`[migration] Distributed ${centralTeams.length} teams`);
 
 	// ── 6. Gates — single gates.json file, distribute by goalId ──
@@ -254,9 +711,12 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, gates] of gatesByProject) {
 		const project = projectRegistry.get(projectId)!;
-		const stateDir = ensureProjectStateDir(project);
-		// Gates use composite key (goalId::gateId), so merge with a custom approach
-		const targetFile = path.join(stateDir, "gates.json");
+		const targetFile = path.join(ensureProjectStateDir(project), "gates.json");
+		if (samePath(targetFile, centralGatesFile)) {
+			writeJsonArray(targetFile, gates, { backup: true });
+			continue;
+		}
+		// Gates use composite key (goalId::gateId), so merge with a custom approach.
 		fs.mkdirSync(path.dirname(targetFile), { recursive: true });
 		const existing = readJsonArray<GateState>(targetFile);
 		const existingKeys = new Set(
@@ -275,29 +735,38 @@ export function migrateToPerProjectState(
 			console.log(`[migration] Wrote ${added} gate states to ${targetFile}`);
 		}
 	}
+	clearCentralBucketIfDefaultMissing(centralGatesFile, "gates.json", gatesByProject);
 	console.log(`[migration] Distributed ${centralGates.length} gate states`);
 
-	// ── 7. Staff — no projectId, all go to default project ──
+	// ── 7. Staff ──
 	const centralStaffFile = path.join(centralStateDir, "staff.json");
 	const centralStaff = readJsonArray<PersistedStaff>(centralStaffFile);
+	const staffByProject = new Map<string, PersistedStaff[]>();
+	for (const staff of centralStaff) {
+		const project = resolveProject(staff.projectId);
+		staff.projectId = project.id;
+		let bucket = staffByProject.get(project.id);
+		if (!bucket) {
+			bucket = [];
+			staffByProject.set(project.id, bucket);
+		}
+		bucket.push(staff);
+	}
+	for (const [projectId, staff] of staffByProject) {
+		const project = projectRegistry.get(projectId)!;
+		writeBucket(centralStaffFile, "staff.json", project, staff, "id");
+	}
+	clearCentralBucketIfDefaultMissing(centralStaffFile, "staff.json", staffByProject);
 	if (centralStaff.length > 0) {
-		const stateDir = ensureProjectStateDir(defaultProject);
-		mergeAndWrite(path.join(stateDir, "staff.json"), centralStaff, "id");
-		console.log(`[migration] Moved ${centralStaff.length} staff agents to default project`);
+		console.log(`[migration] Distributed ${centralStaff.length} staff agents across ${staffByProject.size} project(s)`);
 	}
 
 	// ── 8. Rename central files for backup ──
 	// Skip renaming when the central state dir IS the default project's state dir
 	// (same physical path). Renaming would delete the per-project file we just wrote.
-	const defaultProjectStateDir = path.resolve(
-		path.join(defaultProject.rootPath, ".bobbit", "state"),
-	);
+	const defaultProjectStateDir = path.resolve(ensureProjectStateDir(defaultProject));
 	const centralResolved = path.resolve(centralStateDir);
-	// Use case-insensitive comparison on Windows (drive letter casing can vary)
-	const pathsEqual = process.platform === "win32"
-		? centralResolved.toLowerCase() === defaultProjectStateDir.toLowerCase()
-		: centralResolved === defaultProjectStateDir;
-	if (!pathsEqual) {
+	if (!samePath(centralResolved, defaultProjectStateDir)) {
 		renameForBackup(centralGoalsFile);
 		renameForBackup(centralSessionsFile);
 		renameForBackup(centralTasksFile);
@@ -308,6 +777,8 @@ export function migrateToPerProjectState(
 		renameForBackup(path.join(centralStateDir, "gateway-swarms.json"));
 		// Search index — will be rebuilt per-project on first access
 		renameForBackup(path.join(centralStateDir, "search.db"));
+		renameForBackup(path.join(centralStateDir, "search.flex"));
+		renameForBackup(path.join(centralStateDir, "search.lance"));
 	} else {
 		console.log(
 			"[migration] Central state dir is the default project dir — skipping backup rename",

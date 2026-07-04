@@ -194,7 +194,7 @@ function collectValidationErrors(gates: WorkflowGate[]): { gateIdx: number; step
 
 async function loadProjectComponentsForEditor(): Promise<void> {
 	projectComponentNames = [];
-	const projectId = getConfigProjectId();
+	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	if (!projectId) return;
 	try {
 		const res = await gatewayFetch(`/api/projects/${encodeURIComponent(projectId)}/structured`);
@@ -216,7 +216,7 @@ async function loadProjectComponentsForEditor(): Promise<void> {
 // ============================================================================
 
 async function fetchWorkflowsScoped(): Promise<Workflow[]> {
-	const projectId = getConfigProjectId();
+	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	const url = projectId ? `/api/workflows?projectId=${encodeURIComponent(projectId)}` : "/api/workflows";
 	try {
 		const res = await gatewayFetch(url);
@@ -253,7 +253,7 @@ export async function loadWorkflowPageData(): Promise<void> {
 	resetPageInstance();
 	// Workflows are project-scoped only — if the shared config scope is
 	// "system", auto-switch to the first project before fetching. Other
-	// config pages keep their System tab.
+	// config pages keep their Headquarters server-scope tab.
 	if (getConfigScope() === "system") {
 		const firstProject = (state.projects || [])[0];
 		if (firstProject) setConfigScope(firstProject.id);
@@ -565,7 +565,7 @@ async function handleSave(): Promise<void> {
 			name: pageInstance.editName,
 			description: pageInstance.editDescription,
 			gates: gatesWithDeps,
-		}, getConfigProjectId() || undefined);
+		}, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 		if (result) {
 			workflows = await fetchWorkflowsScoped();
 			showEdit(result);
@@ -576,7 +576,7 @@ async function handleSave(): Promise<void> {
 			name: pageInstance.editName,
 			description: pageInstance.editDescription,
 			gates: gatesWithDeps,
-		}, getConfigProjectId() || undefined);
+		}, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 		if (ok) {
 			workflows = await fetchWorkflowsScoped();
 			const updated = workflows.find((w) => w.id === pageInstance.selectedWorkflow!.id);
@@ -599,7 +599,7 @@ async function handleDelete(workflow: Workflow): Promise<void> {
 	);
 	if (!confirmed) return;
 
-	const ok = await deleteWorkflow(workflow.id, getConfigProjectId() || undefined);
+	const ok = await deleteWorkflow(workflow.id, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 	if (ok) {
 		workflows = await fetchWorkflowsScoped();
 		if (pageInstance.selectedWorkflow?.id === workflow.id) {
@@ -1182,7 +1182,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 
 export async function openProjectAssistantForWorkflows(): Promise<void> {
 	if (state.creatingSession) return;
-	const projectId = getConfigProjectId();
+	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
 	if (!project?.rootPath) {
 		console.warn("openProjectAssistantForWorkflows: no active project with rootPath");
@@ -1437,11 +1437,11 @@ export function clearWorkflowEditorController(): void {
 }
 
 function renderListView(): TemplateResult {
-	if ((state.projects || []).length === 0) {
+	if ((state.projects || []).length === 0 && getConfigScope() !== "headquarters") {
 		return html`
 			<div class="wf-empty">
-				<p class="wf-empty-title">No projects yet</p>
-				<p class="wf-empty-desc">Workflows live inside projects. Add a project from the sidebar to start defining workflows.</p>
+				<p class="wf-empty-title">No workflow scopes yet</p>
+				<p class="wf-empty-desc">Workflows live inside projects. Show Headquarters or add a project from the sidebar to start defining workflows.</p>
 			</div>
 		`;
 	}
@@ -1853,7 +1853,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!pageInstance.selectedWorkflow || pageInstance.isNew) return "";
 	const origin = (pageInstance.selectedWorkflow as any).origin as ConfigOrigin | undefined;
 	if (origin !== "project") return "";
-	const projectId = getConfigProjectId();
+	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
 		if (await revertOverride("workflows", pageInstance.selectedWorkflow!.id, "project", projectId)) {
 			workflows = await fetchWorkflowsScoped();

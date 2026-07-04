@@ -359,7 +359,7 @@ test.describe("Staff Agents — REST API", () => {
 		expect(fetched.sandboxed).toBe(false);
 	});
 
-	test("sandboxed is persisted to staff.json on disk (survives reload)", async ({ gateway }) => {
+	test("sandboxed is persisted to staff.json on disk (survives reload)", async () => {
 		const { readFileSync } = await import("node:fs");
 		const { join } = await import("node:path");
 
@@ -370,9 +370,9 @@ test.describe("Staff Agents — REST API", () => {
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
 
-		// staff.json lives under <project-rootPath>/.bobbit/state/staff.json.
-		// The in-process harness registers the default project at `bobbitDir`.
-		const staffJsonPath = join(gateway.bobbitDir, ".bobbit", "state", "staff.json");
+		// staff.json lives under the normal harness default project's state dir.
+		const project = await defaultProject();
+		const staffJsonPath = join(project.rootPath, ".bobbit", "state", "staff.json");
 		const raw = readFileSync(staffJsonPath, "utf-8");
 		const persisted = JSON.parse(raw) as Array<Record<string, unknown>>;
 		const record = persisted.find((s) => s.id === staff.id);

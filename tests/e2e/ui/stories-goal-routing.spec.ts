@@ -1,16 +1,14 @@
 /**
  * Goal / session project-routing stories — CT-18, CT-19
  *
- * These stories characterize the target behavior of the
- * "eliminate default project" goal. They land FAILING against the
- * current server and turn green as the implementation tasks merge.
+ * These stories characterize goal/session routing with explicit project
+ * selection. Headquarters is now the built-in server workspace, so tests that
+ * need literal zero/single visible-project UX hide Headquarters via the
+ * persisted preference instead of deleting it.
  *
  * Each `beforeEach` registers two ephemeral projects A and B (except the
- * GR-09 zero-project and GR-10 single-project variants which own their
- * own setup). We never delete the server-cwd "default" project because
- * the current server refuses that; instead we add siblings and reason
- * about routing relative to them. GR-09 tolerates the default project
- * remaining because on master that is exactly what fails the assertion.
+ * GR-09 zero-visible-project and GR-10 single-visible-project variants which
+ * own their own setup).
  *
  * Phase annotations: setup (not tracked), act, assert, cleanup.
  */
@@ -29,6 +27,8 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const HEADQUARTERS_PROJECT_ID = "headquarters";
 
 // ---------------------------------------------------------------
 // Helpers
@@ -53,21 +53,36 @@ async function registerProject(name: string, rootPath: string): Promise<TestProj
 	return { id: body.id, name: body.name, rootPath };
 }
 
+function isHeadquartersProject(project: { id?: string; kind?: string }): boolean {
+	return project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
+}
+
 async function deleteProject(id: string, _opts: { force?: boolean } = {}): Promise<void> {
+	if (id === HEADQUARTERS_PROJECT_ID) return;
 	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
-/**
- * Delete every registered project, including the last one. Plain DELETE
- * works unconditionally; the GR-09 zero-project first-run UX is reached by
- * simply removing all projects.
- */
-async function forceDeleteAllProjects(): Promise<void> {
-	const projects = await listProjects();
-	for (const p of projects) await deleteProject(p.id);
+async function setHeadquartersVisible(visible: boolean): Promise<void> {
+	const res = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ showHeadquartersInProjectLists: visible }),
+	});
+	expect(res.ok, `set showHeadquartersInProjectLists=${visible}`).toBeTruthy();
 }
 
-async function listProjects(): Promise<Array<{ id: string; name: string; rootPath: string }>> {
+/**
+ * Delete every normal registered project and hide Headquarters so the visible
+ * project list is empty. Headquarters remains resolvable internally.
+ */
+async function forceDeleteAllProjects(): Promise<void> {
+	await setHeadquartersVisible(false);
+	const projects = await listProjects();
+	for (const p of projects) {
+		if (!isHeadquartersProject(p)) await deleteProject(p.id);
+	}
+}
+
+async function listProjects(): Promise<Array<{ id: string; name: string; rootPath: string; kind?: string }>> {
 	const res = await apiFetch("/api/projects");
 	if (!res.ok) return [];
 	const body = await res.json();
@@ -76,7 +91,9 @@ async function listProjects(): Promise<Array<{ id: string; name: string; rootPat
 
 async function deleteAllProjects(): Promise<void> {
 	const projects = await listProjects();
-	for (const p of projects) await deleteProject(p.id);
+	for (const p of projects) {
+		if (!isHeadquartersProject(p)) await deleteProject(p.id);
+	}
 }
 
 // ---------------------------------------------------------------
@@ -96,6 +113,7 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 	});
 
 	test.beforeEach(async ({ page, gateway }) => {
+		await setHeadquartersVisible(true);
 		s = new SpecContext(page, gateway);
 		const dirA = mkTempDir("A");
 		const dirB = mkTempDir("B");
@@ -351,7 +369,7 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 
 test.describe("CT-19: First-run and single-project UX", () => {
 	let s: SpecContext;
-	let initialProjects: Array<{ id: string; name: string; rootPath: string }> = [];
+	let initialProjects: Array<{ id: string; name: string; rootPath: string; kind?: string }> = [];
 	const createdProjects: string[] = [];
 	const tempDirs: string[] = [];
 
@@ -360,16 +378,16 @@ test.describe("CT-19: First-run and single-project UX", () => {
 	});
 
 	test.beforeEach(async ({ page, gateway }) => {
+		await setHeadquartersVisible(true);
 		s = new SpecContext(page, gateway);
-		initialProjects = await listProjects();
+		initialProjects = (await listProjects()).filter((project) => !isHeadquartersProject(project));
 	});
 
 	test.afterEach(async () => {
 		await s.cleanup();
-		// Wipe everything (including the lone project and any leftover harness
-		// projects) with the force-delete bypass, then restore initialProjects
-		// so later tests/workers see the pre-test state.
-		await forceDeleteAllProjects();
+		// Wipe normal projects and restore the normal pre-test list. Headquarters
+		// is immutable; restore it by showing the shortcut again.
+		await deleteAllProjects();
 		createdProjects.splice(0);
 		for (const p of initialProjects) {
 			await apiFetch("/api/projects", {
@@ -377,6 +395,7 @@ test.describe("CT-19: First-run and single-project UX", () => {
 				body: JSON.stringify({ name: p.name, rootPath: p.rootPath, upsert: true }),
 			}).catch(() => {});
 		}
+		await setHeadquartersVisible(true).catch(() => {});
 		for (const d of tempDirs.splice(0)) {
 			try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
 		}
@@ -389,7 +408,7 @@ test.describe("CT-19: First-run and single-project UX", () => {
 	test("GR-09: First-run zero-project UX disables New Goal", async () => {
 		s.begin(STORY_GR09);
 
-		// Delete every project so we can exercise the literal zero-project state.
+		// Hide Headquarters and delete every normal project so the visible list is empty.
 		await forceDeleteAllProjects();
 
 		s.act();
@@ -397,7 +416,7 @@ test.describe("CT-19: First-run and single-project UX", () => {
 		const projects = await listProjects();
 
 		s.assert();
-		expect(projects.length, "zero projects required for first-run UX").toBe(0);
+		expect(projects.length, "zero visible projects required for first-run UX").toBe(0);
 
 		// Toolbar New Goal button must be disabled with tooltip hint
 		const btn = s.page.locator('button[title="New goal (Alt+G)"], button[title="Add a project first"]').first();
@@ -407,12 +426,16 @@ test.describe("CT-19: First-run and single-project UX", () => {
 			"toolbar New Goal must be disabled in zero-project state",
 		).toBeDisabled({ timeout: 5_000 });
 
-		// API also enforces: POST /api/goals fails with 400
+		// API creation without a visible project still resolves to Headquarters,
+		// which remains usable internally while hidden.
 		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "GR-09 should fail", worktree: false }),
+			body: JSON.stringify({ title: "GR-09 hidden HQ goal", worktree: false, team: false, autoStartTeam: false }),
 		});
-		expect(resp.status, "goal creation must 400 in zero-project state").toBe(400);
+		expect(resp.status, "goal creation should resolve to hidden Headquarters").toBe(201);
+		const created = await resp.json();
+		expect(created.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+		await apiFetch(`/api/goals/${created.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
 	// -----------------------------------------------------------
@@ -422,8 +445,8 @@ test.describe("CT-19: First-run and single-project UX", () => {
 	test("GR-10: Single-project install skips the picker", async () => {
 		s.begin(STORY_GR10);
 
-		// Target state: exactly one project registered. Force-delete everything,
-		// then register the single lone project.
+		// Target state: exactly one visible normal project. Hide Headquarters,
+		// delete normal projects, then register the single lone project.
 		await forceDeleteAllProjects();
 
 		const lone = await registerProject(`lone-${Date.now()}`, mkTempDir("lone"));
@@ -434,7 +457,7 @@ test.describe("CT-19: First-run and single-project UX", () => {
 
 		s.act();
 		const projects = await listProjects();
-		expect(projects.length, "exactly one project required").toBe(1);
+		expect(projects.length, "exactly one visible normal project required").toBe(1);
 
 		const toolbarBtn = s.page.locator('button[title="New goal (Alt+G)"]').first();
 		await expect(toolbarBtn).toBeVisible({ timeout: 15_000 });

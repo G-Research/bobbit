@@ -291,27 +291,33 @@ test.describe("sidebar actions server endpoints", () => {
 
 	test("GET /api/goals/:id/github-link returns PR, branch fallback, and unavailable states", async ({ gateway }) => {
 		const prGoal = await createGoal({ title: `sidebar pr ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		const noBranchGoal = await createGoal({ title: `sidebar no branch ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		const noWorktreeGoal = await createGoal({ title: `sidebar no worktree ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		const branchGoal = await createGoal({ title: `sidebar branch ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		try {
+			const repo = gitCwd();
+			gateway.sessionManager.getGoalStoreForProject(prGoal.projectId).update(prGoal.id, {
+				branch: "feature/sidebar-pr-cache",
+				repoPath: repo,
+				cwd: repo,
+				worktreePath: repo,
+			});
 			gateway.sessionManager.prStatusStore.set(prGoal.id, { state: "OPEN", url: "https://github.com/acme/widget/pull/123" });
 			const prResp = await apiFetch(`/api/goals/${prGoal.id}/github-link`);
 			expect(prResp.status).toBe(200);
 			expect(await prResp.json()).toMatchObject({ available: true, kind: "pr", url: "https://github.com/acme/widget/pull/123" });
 
-			const noBranchResp = await apiFetch(`/api/goals/${noBranchGoal.id}/github-link`);
-			expect(noBranchResp.status).toBe(200);
-			expect(await noBranchResp.json()).toMatchObject({ available: false, reason: "no-branch" });
+			const noWorktreeResp = await apiFetch(`/api/goals/${noWorktreeGoal.id}/github-link`);
+			expect(noWorktreeResp.status).toBe(200);
+			expect(await noWorktreeResp.json()).toMatchObject({ available: false, reason: "no-worktree" });
 
 			const missingResp = await apiFetch(`/api/goals/does-not-exist/github-link`);
 			expect(missingResp.status).toBe(200);
 			expect(await missingResp.json()).toMatchObject({ available: false, reason: "goal-not-found" });
 
-			const repo = gitCwd();
 			try { execFileSync("git", ["remote", "remove", "origin"], { cwd: repo, stdio: "ignore" }); } catch { /* ignore */ }
 			execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: repo, stdio: "pipe" });
 			const branch = "feature/sidebar-actions";
-			gateway.sessionManager.getGoalStoreForProject(branchGoal.projectId).update(branchGoal.id, { branch, repoPath: repo, cwd: repo });
+			gateway.sessionManager.getGoalStoreForProject(branchGoal.projectId).update(branchGoal.id, { branch, repoPath: repo, cwd: repo, worktreePath: repo });
 			const branchResp = await apiFetch(`/api/goals/${branchGoal.id}/github-link`);
 			expect(branchResp.status).toBe(200);
 			expect(await branchResp.json()).toMatchObject({
@@ -321,7 +327,7 @@ test.describe("sidebar actions server endpoints", () => {
 			});
 		} finally {
 			await deleteGoal(prGoal.id);
-			await deleteGoal(noBranchGoal.id);
+			await deleteGoal(noWorktreeGoal.id);
 			await deleteGoal(branchGoal.id);
 		}
 	});

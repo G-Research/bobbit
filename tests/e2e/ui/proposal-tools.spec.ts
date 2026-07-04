@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel.
  *
@@ -21,9 +21,7 @@ import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
  * textarea visibility on the slowest worker). */
 async function triggerGoalProposal(page: import("@playwright/test").Page) {
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await newGoalBtn.click();
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 30_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");

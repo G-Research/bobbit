@@ -94,8 +94,11 @@ test.describe("Context window overrides in models.json", () => {
 				message:
 					"Expected contextWindow overrides for Claude Sonnet/Opus models " +
 					"in amazon-bedrock and anthropic providers of models.json",
-				timeout: 5_000,
-				intervals: [50, 100, 250, 500],
+				// In full-suite runs, the isolated agent models.json can be written
+				// after startup while other workers are still importing the server.
+				// Keep this assertion robust without reading any global agent cache.
+				timeout: 30_000,
+				intervals: [100, 250, 500, 1_000],
 			})
 			.toMatchObject({
 				ready: true,

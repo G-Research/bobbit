@@ -5,7 +5,7 @@
  * Pin for the "Robust goal workflow UX" goal §3.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -30,16 +30,7 @@ test("empty-workflows banner gates goal creation and opens project assistant", a
 	await openApp(page);
 
 	// Start the goal assistant via the sidebar +New Goal button.
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page);
 
 	// Drive a proposal so the goal preview form renders.
 	const textarea = page.locator("textarea").first();
