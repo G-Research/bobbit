@@ -305,4 +305,33 @@ describe("Source pin — merge-loss invariants", () => {
 			"this pin — restore the dropped opts field instead.",
 		);
 	});
+
+	it("pack-contributions.ts parses activation.activeWhenConfig (restored by the w2-activewhenconfig-restore fix)", () => {
+		const text = read("src/server/agent/pack-contributions.ts");
+		assert.ok(
+			text.includes("activeWhenConfig?: Record<string, string[]>;") && text.includes("isPlainObject(raw.activeWhenConfig)"),
+			"src/server/agent/pack-contributions.ts must declare `ProviderActivation.activeWhenConfig`\n" +
+			"and parse it in parseProviderActivation(). Without this OR escape hatch a managed\n" +
+			"deployment-mode provider (e.g. Hindsight memory) can never activate without an\n" +
+			"externalUrl, even in managed mode. Originally added by 21994f37; silently dropped\n" +
+			"by merge commit b687d93d (first parent 06498f81 had 7 references, merge result had\n" +
+			"0); restored by the w2-activewhenconfig-restore fix. DO NOT delete this pin — restore\n" +
+			"the dropped parsing instead. Independently pinned by the two activeWhenConfig tests\n" +
+			"in tests/pack-providers-loader.test.ts.",
+		);
+	});
+
+	it("pack-contribution-registry.ts consumes activation.activeWhenConfig (restored by the w2-activewhenconfig-restore fix)", () => {
+		const text = read("src/server/extension-host/pack-contribution-registry.ts");
+		assert.ok(
+			text.includes("const { activeWhenConfig, requiresConfig } = activation;"),
+			"src/server/extension-host/pack-contribution-registry.ts::providerActivationSatisfied\n" +
+			"must check `activation.activeWhenConfig` as an OR escape hatch before falling back to\n" +
+			"`requiresConfig`. Without this the parsed activeWhenConfig gate is dead data — a\n" +
+			"managed-mode provider stays dormant despite declaring the linkage. Originally added\n" +
+			"by 21994f37; silently dropped by the same merge (b687d93d) that dropped the parsing\n" +
+			"in pack-contributions.ts; restored by the w2-activewhenconfig-restore fix. DO NOT\n" +
+			"delete this pin — restore the dropped gating logic instead.",
+		);
+	});
 });
