@@ -283,36 +283,116 @@ export class ProjectRegistry {
     }
   }
 
-  /** Read projects from disk. Missing file is treated as empty registry. */
+  /**
+   * Read projects from disk.
+   *
+   * A MISSING file is the normal fresh-start condition: clear the map and
+   * return an empty registry (no throw).
+   *
+   * A PRESENT-but-unparseable file (invalid JSON, a non-ENOENT read error on
+   * an existing path, or a parsed value that is not an array) is FATAL.
+   * `projects.json` is the authoritative record of durable project identity;
+   * silently discarding it and continuing would let startup overwrite it with
+   * only synthetic records, permanently losing every normal project. Instead
+   * we preserve a timestamped raw-bytes backup and throw so startup fails
+   * loudly and the corrupt file is never overwritten.
+   */
   load(): void {
-    let changed = false;
+    let raw: string;
     try {
-      const raw = fs.readFileSync(this.storePath, "utf-8");
-      const arr: any[] = JSON.parse(raw);
-      this.projects.clear();
-      for (const p of arr) {
-        // Migration: ensure colorLight/colorDark always present
-        if (!p.colorLight || !p.colorDark) {
-          if (p.color) {
-            p.colorLight = p.colorLight || p.color;
-            p.colorDark = p.colorDark || p.color;
-          } else {
-            p.colorLight = p.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
-            p.colorDark = p.colorDark || DEFAULT_PROJECT_COLOR_DARK;
-          }
-          changed = true;
-        }
-        this.projects.set(p.id, p as RegisteredProject);
+      raw = fs.readFileSync(this.storePath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+        // File missing — fresh start.
+        this.projects.clear();
+        return;
       }
-    } catch {
-      // File missing or corrupt — start empty
-      this.projects.clear();
-      return;
+      // Present but unreadable (permissions, etc.) — corrupt/fatal.
+      this.failCorruptRegistry(err);
+    }
+
+    let arr: any[];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error(`expected a JSON array, got ${parsed === null ? "null" : typeof parsed}`);
+      }
+      arr = parsed;
+    } catch (err) {
+      this.failCorruptRegistry(err);
+    }
+
+    let changed = false;
+    this.projects.clear();
+    for (const p of arr) {
+      // Migration: ensure colorLight/colorDark always present
+      if (!p.colorLight || !p.colorDark) {
+        if (p.color) {
+          p.colorLight = p.colorLight || p.color;
+          p.colorDark = p.colorDark || p.color;
+        } else {
+          p.colorLight = p.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
+          p.colorDark = p.colorDark || DEFAULT_PROJECT_COLOR_DARK;
+        }
+        changed = true;
+      }
+      this.projects.set(p.id, p as RegisteredProject);
     }
 
     if (this.normalizeVisiblePositions()) changed = true;
     if (changed) {
       try { this.save(); } catch (err) { console.warn(`[project-registry] failed to persist migrations: ${err}`); }
+    }
+  }
+
+  /**
+   * Preserve a raw-bytes backup of the corrupt registry, then throw a clear
+   * fatal error. Never returns.
+   */
+  private failCorruptRegistry(cause: unknown): never {
+    const backupPath = this.backupCorruptRegistry();
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const backupNote = backupPath
+      ? `A raw backup was saved to ${backupPath}.`
+      : `A raw backup could not be created.`;
+    throw new Error(
+      `Authoritative project registry ${this.storePath} is malformed (${reason}); ` +
+      `refusing to start to avoid overwriting durable project identity. ` +
+      `${backupNote} Repair or restore projects.json and restart.`,
+    );
+  }
+
+  /**
+   * Best-effort: copy the corrupt registry to a timestamped
+   * `projects.json.corrupt-<epochMs>` sibling so the raw bytes are preserved
+   * before we refuse to start. Skips writing if an existing `.corrupt-*`
+   * backup already holds identical bytes (so repeated boots don't spam
+   * near-duplicate files). Returns the backup path, or null if none could be
+   * created.
+   */
+  private backupCorruptRegistry(): string | null {
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(this.storePath);
+    } catch {
+      return null;
+    }
+    try {
+      const dir = path.dirname(this.storePath);
+      const base = path.basename(this.storePath);
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(`${base}.corrupt-`)) continue;
+        try {
+          if (fs.readFileSync(path.join(dir, name)).equals(bytes)) {
+            return path.join(dir, name);
+          }
+        } catch { /* ignore an unreadable sibling backup */ }
+      }
+      const backupPath = path.join(dir, `${base}.corrupt-${Date.now()}`);
+      fs.writeFileSync(backupPath, bytes);
+      return backupPath;
+    } catch {
+      return null;
     }
   }
 

@@ -50,6 +50,71 @@ describe("ProjectRegistry", () => {
 		assert.deepStrictEqual(reg.list(), []);
 	});
 
+	// Regression: a MISSING file is a fresh start (empty), but a PRESENT-but-
+	// unparseable authoritative registry is FATAL. Previously load() collapsed
+	// both cases to "start empty", so a malformed projects.json was silently
+	// discarded and then overwritten with only synthetic records on startup,
+	// permanently losing every normal project.
+	it("throws fatally and preserves a backup when projects.json is present but malformed", () => {
+		const file = path.join(stateDir, "projects.json");
+		const corrupt = "{ this is: not valid json";
+		fs.writeFileSync(file, corrupt, "utf-8");
+
+		assert.throws(
+			() => new ProjectRegistry(stateDir),
+			/malformed/i,
+			"a present-but-unparseable registry must throw fatally instead of starting empty",
+		);
+
+		// The corrupt file is left intact — never overwritten with synthetic records.
+		assert.strictEqual(
+			fs.readFileSync(file, "utf-8"),
+			corrupt,
+			"corrupt projects.json must not be overwritten",
+		);
+
+		// A timestamped raw-bytes backup was preserved.
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "exactly one .corrupt-* backup should be created");
+		assert.strictEqual(
+			fs.readFileSync(path.join(stateDir, backups[0]), "utf-8"),
+			corrupt,
+			"backup must hold the raw corrupt bytes",
+		);
+	});
+
+	it("throws fatally when projects.json parses to a non-array value", () => {
+		const file = path.join(stateDir, "projects.json");
+		fs.writeFileSync(file, JSON.stringify({ not: "an array" }), "utf-8");
+		assert.throws(() => new ProjectRegistry(stateDir), /malformed/i);
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "a non-array registry is corrupt and must be backed up");
+	});
+
+	it("does not spam duplicate backups across repeated boots on the same corrupt file", () => {
+		const file = path.join(stateDir, "projects.json");
+		fs.writeFileSync(file, "not json", "utf-8");
+		assert.throws(() => new ProjectRegistry(stateDir));
+		assert.throws(() => new ProjectRegistry(stateDir));
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "identical corrupt bytes must reuse the existing backup");
+	});
+
+	it("loads a valid projects.json normally after a clean write", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const root = freshProjectRoot();
+		reg.register("valid-proj", root);
+		// A fresh instance reads the same file cleanly (no throw, no backup).
+		const reg2 = new ProjectRegistry(stateDir);
+		assert.strictEqual(reg2.list().length, 1);
+		assert.strictEqual(reg2.list()[0].name, "valid-proj");
+		assert.strictEqual(
+			fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-")).length,
+			0,
+			"a valid registry must never produce a corrupt backup",
+		);
+	});
+
 	it("register creates a project and persists to disk", () => {
 		const reg = new ProjectRegistry(stateDir);
 		const root = freshProjectRoot();
