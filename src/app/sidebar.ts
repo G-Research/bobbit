@@ -412,6 +412,41 @@ export function renderProjectReorderHandle(project: Project) {
 let _pickerRole = "";
 /** Whether the New Session role dropdown menu is expanded. */
 let _pickerRoleDropdownOpen = false;
+/** Whether the role dropdown opens upward (not enough room below the trigger). */
+let _pickerRoleDropdownUp = false;
+/** Max height (px) for the role dropdown so it never runs off the viewport. */
+let _pickerRoleDropdownMaxH = 240;
+
+/**
+ * Open/close the New Session role dropdown. When opening, measure the trigger
+ * against the viewport on the next frame so the menu flips up and/or caps its
+ * height instead of extending off the bottom edge.
+ */
+function _toggleRoleDropdown(open: boolean): void {
+	_pickerRoleDropdownOpen = open;
+	// Default assumption while measuring: open downward, full height.
+	if (open) { _pickerRoleDropdownUp = false; _pickerRoleDropdownMaxH = 240; }
+	renderApp();
+	if (!open) return;
+	requestAnimationFrame(() => {
+		if (!_pickerRoleDropdownOpen) return;
+		const btn = document.querySelector("#picker-role-container button") as HTMLElement | null;
+		if (!btn) return;
+		const rect = btn.getBoundingClientRect();
+		const MARGIN = 8;
+		const DESIRED = 240;
+		const spaceBelow = window.innerHeight - rect.bottom - MARGIN;
+		const spaceAbove = rect.top - MARGIN;
+		if (spaceBelow >= Math.min(DESIRED, 160) || spaceBelow >= spaceAbove) {
+			_pickerRoleDropdownUp = false;
+			_pickerRoleDropdownMaxH = Math.max(120, Math.min(DESIRED, spaceBelow - 4));
+		} else {
+			_pickerRoleDropdownUp = true;
+			_pickerRoleDropdownMaxH = Math.max(120, Math.min(DESIRED, spaceAbove - 4));
+		}
+		renderApp();
+	});
+}
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
@@ -532,7 +567,7 @@ export function renderRolePickerDropdown() {
 			</div>
 			<!-- Role (dropdown menu — mirrors the Modify Session dialog) -->
 			<div class="px-3 pt-1 pb-2 shrink-0" style="overflow: visible;">
-				<div class="pb-1.5 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Role</div>
+				<div class="text-xs text-muted-foreground mb-1.5">Role</div>
 				${allRoles.length === 0
 					? html`<div class="py-1 text-muted-foreground">No roles defined</div>`
 					: (() => {
@@ -544,14 +579,14 @@ export function renderRolePickerDropdown() {
 						<div class="relative" id="picker-role-container">
 							<button
 								class="w-full text-left px-3 py-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-2.5 ${focused ? "ring-2 ring-ring" : ""}"
-								@click=${(e: Event) => { e.stopPropagation(); _pickerRoleDropdownOpen = !_pickerRoleDropdownOpen; renderApp(); }}
+								@click=${(e: Event) => { e.stopPropagation(); _toggleRoleDropdown(!_pickerRoleDropdownOpen); }}
 								title="Select role">
 								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, selectedAccessory, true)}</span>
 								<span class="flex-1 truncate ${_pickerRole ? "text-foreground" : "text-muted-foreground"}">${selectedLabel}</span>
 								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${_pickerRoleDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
 							</button>
 							${_pickerRoleDropdownOpen ? html`
-								<div class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto">
+								<div class="absolute z-50 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 overflow-y-auto ${_pickerRoleDropdownUp ? "bottom-full mb-1" : "top-full mt-1"}" style="max-height: ${_pickerRoleDropdownMaxH}px;">
 									<button
 										class="w-full text-left px-3 py-2 text-sm text-popover-foreground/60 hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${!_pickerRole ? "bg-accent/50" : ""}"
 										@click=${(e: Event) => { e.stopPropagation(); selectRole(""); }}
@@ -705,8 +740,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		e.stopPropagation();
 		// If focused on a specific item, activate it; otherwise create session
 		if (focusedItem?.type === "role") {
-			_pickerRoleDropdownOpen = !_pickerRoleDropdownOpen;
-			renderApp();
+			_toggleRoleDropdown(!_pickerRoleDropdownOpen);
 		} else if (focusedItem?.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
 			renderApp();
@@ -726,8 +760,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
 		if (focusedItem.type === "role") {
-			_pickerRoleDropdownOpen = !_pickerRoleDropdownOpen;
-			renderApp();
+			_toggleRoleDropdown(!_pickerRoleDropdownOpen);
 		} else if (focusedItem.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
 			renderApp();
