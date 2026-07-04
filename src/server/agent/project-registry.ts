@@ -6,7 +6,7 @@ import {
   DEFAULT_PROJECT_COLOR_LIGHT,
   PALETTE_PRIMARY_COLORS,
 } from "../../shared/palette-colors.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { getProjectRoot, headquartersDir } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
@@ -412,10 +412,20 @@ export class ProjectRegistry {
       }
     }
 
-    // Check for duplicate rootPath
-    const existing = this.getByPath(rootPath);
-    if (existing) {
-      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+    // Check for duplicate normal projects by canonical path. Special hidden
+    // anchors do not block registering the server run directory as a normal
+    // project, but the physical Headquarters directory itself is immutable.
+    for (const existing of this.projects.values()) {
+      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
+      if (isHeadquartersProject(existing)) {
+        throw new SpecialProjectMutationError(
+          "HEADQUARTERS_IMMUTABLE",
+          `Headquarters owns ${rootPath}; choose the server run directory instead of the Headquarters directory.`,
+        );
+      }
+      if (!existing.hidden && !isSystemProject(existing)) {
+        throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+      }
     }
 
     // Defense in depth: re-run preflight server-side. The REST endpoint may
@@ -615,9 +625,13 @@ export class ProjectRegistry {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
 
+    // Compatibility: older startup code passed the server run directory here.
+    // Treat that as a request for the physical Headquarters directory; callers
+    // updated for the split pass headquartersDir() directly.
+    const requestedRoot = sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
     const canonicalRoot = (() => {
-      try { return path.resolve(fs.realpathSync(rootPath)); }
-      catch { return path.resolve(rootPath); }
+      try { return path.resolve(fs.realpathSync(requestedRoot)); }
+      catch { return path.resolve(requestedRoot); }
     })();
 
     try { if (opts.stateDir) fs.mkdirSync(opts.stateDir, { recursive: true }); } catch { /* best-effort */ }
@@ -651,9 +665,8 @@ export class ProjectRegistry {
     project.color = project.color || project.colorLight;
 
     this.projects.set(HEADQUARTERS_PROJECT_ID, project);
-    // Leave any legacy normal project at the server root in place for
-    // migrateToPerProjectState(), which rewrites its structured references
-    // before removing the duplicate. Doing it here would lose the old id.
+    // Same-root normal projects are independent user scopes; never promote,
+    // delete, or rewrite them as part of Headquarters repair.
 
     this.normalizeVisiblePositions();
     this.save();
@@ -757,7 +770,7 @@ export class ProjectRegistry {
       if (p.provisional && path.resolve(p.rootPath) === normalized) {
         return p;
       }
-      if (sameProjectPath(p.rootPath, normalized) && (isHeadquartersProject(p) || isSystemProject(p) || p.hidden)) {
+      if (sameProjectPath(p.rootPath, normalized) && isHeadquartersProject(p)) {
         assertNormalMutableProject(p, "used as a provisional project");
       }
     }

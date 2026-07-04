@@ -47,34 +47,48 @@ export function getProjectRoot(): string {
 }
 
 /**
- * Returns the .bobbit directory path.
- * Priority: BOBBIT_DIR env > BOBBIT_PI_DIR env (legacy) > <projectRoot>/.bobbit
+ * Returns the physical Headquarters/server workspace directory.
+ * Priority: BOBBIT_DIR env > BOBBIT_PI_DIR env (legacy) > <projectRoot>/.bobbit/headquarters.
  */
-export function bobbitDir(projectRoot?: string): string {
-  if (process.env.BOBBIT_DIR) return process.env.BOBBIT_DIR;
-  if (process.env.BOBBIT_PI_DIR) return process.env.BOBBIT_PI_DIR;
-  const root = projectRoot || getProjectRoot();
-  return path.join(root, ".bobbit");
+export function headquartersDir(projectRoot = getProjectRoot()): string {
+  if (process.env.BOBBIT_DIR) return path.resolve(process.env.BOBBIT_DIR);
+  if (process.env.BOBBIT_PI_DIR) return path.resolve(process.env.BOBBIT_PI_DIR);
+  return path.join(path.resolve(projectRoot), ".bobbit", "headquarters");
 }
 
-/** Returns .bobbit/config */
-export function bobbitConfigDir(projectRoot?: string): string {
-  return path.join(bobbitDir(projectRoot), "config");
+/** Server-level Bobbit dir alias. Normal projects must use normalProjectBobbitDir(projectRoot). */
+export function serverBobbitDir(): string {
+  return headquartersDir();
 }
 
-/** Returns .bobbit/state */
-export function bobbitStateDir(projectRoot?: string): string {
-  return path.join(bobbitDir(projectRoot), "state");
+/** Returns the normal project-local .bobbit directory path. */
+export function normalProjectBobbitDir(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ".bobbit");
 }
 
-/** Returns the project-local default agent directory. */
+/** Returns the server/Headquarters Bobbit directory path. Normal projects must not call this. */
+export function bobbitDir(projectRoot = getProjectRoot()): string {
+  return headquartersDir(projectRoot);
+}
+
+/** Returns <headquartersDir>/config. */
+export function bobbitConfigDir(projectRoot = getProjectRoot()): string {
+  return path.join(headquartersDir(projectRoot), "config");
+}
+
+/** Returns <headquartersDir>/state. */
+export function bobbitStateDir(projectRoot = getProjectRoot()): string {
+  return path.join(headquartersDir(projectRoot), "state");
+}
+
+/** Returns the server/Headquarters default agent directory. */
 export function defaultAgentDir(projectRoot = getProjectRoot()): string {
   return resolveDefaultAgentDir(projectRoot);
 }
 
 /**
  * Returns the startup-resolved global agent directory.
- * Priority at initialization: BOBBIT_AGENT_DIR env > persisted agentDir > <projectRoot>/.bobbit/agent/.
+ * Priority at initialization: BOBBIT_AGENT_DIR env > persisted agentDir > <headquartersDir>/agent/.
  */
 export function globalAgentDir(): string {
   try {

@@ -27,25 +27,75 @@ function tool(name: string, description: string) {
 	return { name, description, group: "custom", hasRenderer: false } as any;
 }
 
-describe("Headquarters storage and config aliasing", () => {
-	it("ProjectContext stores Headquarters under the server BOBBIT_DIR instead of <root>/.bobbit", async () => {
-		const serverRoot = mkTemp("server-root");
-		const redirectedBobbitDir = mkTemp("redirected-bobbit");
-		fs.mkdirSync(path.join(redirectedBobbitDir, "state"), { recursive: true });
-		fs.mkdirSync(path.join(redirectedBobbitDir, "config"), { recursive: true });
-		process.env.BOBBIT_DIR = redirectedBobbitDir;
+function withEnv<T>(updates: Record<string, string | undefined>, fn: () => T): T {
+	const old = new Map(Object.keys(updates).map((key) => [key, process.env[key]]));
+	try {
+		for (const [key, value] of Object.entries(updates)) {
+			if (value === undefined) delete process.env[key]; else process.env[key] = value;
+		}
+		return fn();
+	} finally {
+		for (const [key, value] of old) {
+			if (value === undefined) delete process.env[key]; else process.env[key] = value;
+		}
+	}
+}
 
-		const { setProjectRoot, bobbitDir, bobbitStateDir, bobbitConfigDir } = await import("../src/server/bobbit-dir.ts");
-		const { ProjectContext } = await import("../src/server/agent/project-context.ts");
+describe("Headquarters storage and config aliasing", () => {
+	it("bobbit-dir helpers split Headquarters from normal same-root project storage", async () => {
+		const serverRoot = mkTemp("server-root");
+		const { setProjectRoot, headquartersDir, bobbitDir, bobbitStateDir, bobbitConfigDir, normalProjectBobbitDir } = await import("../src/server/bobbit-dir.ts");
+
+		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: undefined }, () => {
+			setProjectRoot(serverRoot);
+			assert.equal(path.resolve(headquartersDir()), path.resolve(path.join(serverRoot, ".bobbit", "headquarters")));
+			assert.equal(path.resolve(bobbitDir()), path.resolve(path.join(serverRoot, ".bobbit", "headquarters")));
+			assert.equal(path.resolve(bobbitStateDir()), path.resolve(path.join(serverRoot, ".bobbit", "headquarters", "state")));
+			assert.equal(path.resolve(bobbitConfigDir()), path.resolve(path.join(serverRoot, ".bobbit", "headquarters", "config")));
+			assert.equal(path.resolve(normalProjectBobbitDir(serverRoot)), path.resolve(path.join(serverRoot, ".bobbit")));
+		});
+	});
+
+	it("BOBBIT_DIR and BOBBIT_PI_DIR override the Headquarters directory itself", async () => {
+		const serverRoot = mkTemp("override-root");
+		const custom = mkTemp("custom-hq");
+		const legacy = mkTemp("legacy-hq");
+		const { setProjectRoot, headquartersDir, bobbitStateDir, bobbitConfigDir } = await import("../src/server/bobbit-dir.ts");
 		setProjectRoot(serverRoot);
 
-		const ctx = new ProjectContext(minimalProject(HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, serverRoot, { kind: "headquarters" }));
+		withEnv({ BOBBIT_DIR: custom, BOBBIT_PI_DIR: legacy }, () => {
+			assert.equal(path.resolve(headquartersDir()), path.resolve(custom));
+			assert.equal(path.resolve(bobbitStateDir()), path.resolve(path.join(custom, "state")));
+			assert.equal(path.resolve(bobbitConfigDir()), path.resolve(path.join(custom, "config")));
+		});
 
-		assert.equal(path.resolve(ctx.bobbitDir), path.resolve(bobbitDir()));
-		assert.equal(path.resolve(ctx.stateDir), path.resolve(bobbitStateDir()));
-		assert.equal(path.resolve(ctx.configDir), path.resolve(bobbitConfigDir()));
-		assert.notEqual(path.resolve(ctx.stateDir), path.resolve(path.join(serverRoot, ".bobbit", "state")));
-		assert.notEqual(path.resolve(ctx.configDir), path.resolve(path.join(serverRoot, ".bobbit", "config")));
+		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: legacy }, () => {
+			assert.equal(path.resolve(headquartersDir()), path.resolve(legacy));
+			assert.equal(path.resolve(bobbitStateDir()), path.resolve(path.join(legacy, "state")));
+			assert.equal(path.resolve(bobbitConfigDir()), path.resolve(path.join(legacy, "config")));
+		});
+	});
+
+	it("ProjectContext stores Headquarters under Headquarters dir and normal same-root projects under <root>/.bobbit", async () => {
+		const serverRoot = mkTemp("context-root");
+		const { setProjectRoot, bobbitDir, bobbitStateDir, bobbitConfigDir } = await import("../src/server/bobbit-dir.ts");
+		const { ProjectContext } = await import("../src/server/agent/project-context.ts");
+
+		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: undefined }, () => {
+			setProjectRoot(serverRoot);
+			const headquartersRoot = path.join(serverRoot, ".bobbit", "headquarters");
+			const hq = new ProjectContext(minimalProject(HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, headquartersRoot, { kind: "headquarters" }));
+			const normal = new ProjectContext(minimalProject("normal", "Normal", serverRoot));
+
+			assert.equal(path.resolve(hq.bobbitDir), path.resolve(bobbitDir()));
+			assert.equal(path.resolve(hq.stateDir), path.resolve(bobbitStateDir()));
+			assert.equal(path.resolve(hq.configDir), path.resolve(bobbitConfigDir()));
+			assert.equal(path.resolve(hq.bobbitDir), path.resolve(headquartersRoot));
+
+			assert.equal(path.resolve(normal.bobbitDir), path.resolve(path.join(serverRoot, ".bobbit")));
+			assert.equal(path.resolve(normal.stateDir), path.resolve(path.join(serverRoot, ".bobbit", "state")));
+			assert.equal(path.resolve(normal.configDir), path.resolve(path.join(serverRoot, ".bobbit", "config")));
+		});
 	});
 
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {
@@ -134,34 +184,41 @@ describe("ProjectRegistry Headquarters ordering", () => {
 		const stateDir = mkTemp("registry-state");
 		const configDir = mkTemp("registry-config");
 		const serverRoot = mkTemp("registry-root");
+		const hqRoot = path.join(serverRoot, ".bobbit", "headquarters");
 		const systemRoot = path.join(stateDir, "system-project");
 		fs.mkdirSync(systemRoot, { recursive: true });
+		fs.mkdirSync(hqRoot, { recursive: true });
 
 		const registry = new ProjectRegistry(stateDir);
 		registry.registerSystemProject(systemRoot);
-		(registry as any).ensureHeadquartersProject(serverRoot, { stateDir, configDir });
+		(registry as any).ensureHeadquartersProject(hqRoot, { stateDir, configDir });
 
 		const hq = registry.get(HEADQUARTERS_PROJECT_ID) as any;
 		assert.ok(hq, "Headquarters should be registered by stable id");
 		assert.equal(hq.name, HEADQUARTERS_PROJECT_NAME);
 		assert.equal(hq.kind, "headquarters");
-		assert.equal(path.resolve(hq.rootPath), path.resolve(serverRoot));
+		assert.equal(path.resolve(hq.rootPath), path.resolve(hqRoot));
 		assert.notEqual(hq.hidden, true);
 		assert.notEqual(hq.provisional, true);
 		assert.equal(hq.position, undefined, "Headquarters is anchored, not user-positioned");
 
-		const a = registry.register("A", mkTemp("registry-a"), { acceptCanonical: true });
+		const sameRootNormal = registry.register("Server Root Normal", serverRoot, { acceptCanonical: true });
 		const b = registry.register("B", mkTemp("registry-b"), { acceptCanonical: true });
-		const reordered = registry.setVisibleOrder([b.id, a.id]);
-		assert.deepEqual(reordered.map(project => project.id), [HEADQUARTERS_PROJECT_ID, b.id, a.id]);
+		const reordered = registry.setVisibleOrder([b.id, sameRootNormal.id]);
+		assert.deepEqual(reordered.map(project => project.id), [HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id]);
 		assert.deepEqual(
 			registry.list().filter(project => !project.hidden && project.id !== SYSTEM_PROJECT_ID).map(project => project.id),
-			[HEADQUARTERS_PROJECT_ID, b.id, a.id],
+			[HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id],
 		);
 		assert.throws(
-			() => registry.setVisibleOrder([HEADQUARTERS_PROJECT_ID, b.id, a.id]),
+			() => registry.setVisibleOrder([HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id]),
 			/error|invalid_project_order/i,
 			"Headquarters must not be accepted in client-supplied reorder payloads",
+		);
+		assert.throws(
+			() => registry.register("HQ Dir", hqRoot, { acceptCanonical: true }),
+			/Headquarters|immutable/i,
+			"normal projects cannot be registered at the physical Headquarters directory",
 		);
 	});
 });

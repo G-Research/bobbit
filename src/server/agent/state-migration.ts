@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import YAML from "yaml";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -19,6 +18,8 @@ const MIGRATION_MARKER = ".migrated-to-per-project";
 const PRE_MIGRATION_SUFFIX = ".pre-migration";
 const RECOVERY_MARKER = ".pre-migration-recovered";
 const HEADQUARTERS_ID_MIGRATION_MARKER = ".headquarters-project-id-migrated";
+const HEADQUARTERS_DIR_MIGRATION_MARKER = ".headquarters-dir-migrated";
+const HEADQUARTERS_MIGRATION_DIAGNOSTICS = "headquarters-migration-diagnostics.json";
 const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
@@ -37,6 +38,32 @@ function canonicalPathKey(p: string): string {
 	} catch {
 		return pathKey(p);
 	}
+}
+
+function readJsonValue<T = unknown>(filePath: string): T | undefined {
+	try {
+		if (!fs.existsSync(filePath)) return undefined;
+		return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+	} catch {
+		console.log(`[migration] Warning: could not parse ${filePath}, skipping`);
+		return undefined;
+	}
+}
+
+function stableStringify(value: unknown): string {
+	return JSON.stringify(value, Object.keys(flattenObjectKeys(value)).sort(), 2);
+}
+
+function flattenObjectKeys(value: unknown, keys: Record<string, true> = {}): Record<string, true> {
+	if (Array.isArray(value)) {
+		for (const item of value) flattenObjectKeys(item, keys);
+	} else if (value && typeof value === "object") {
+		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+			keys[key] = true;
+			flattenObjectKeys(nested, keys);
+		}
+	}
+	return keys;
 }
 
 // Helper: read a JSON array file, return empty array if missing/corrupt.
@@ -81,238 +108,504 @@ function registrySave(projectRegistry: ProjectRegistry): void {
 	(projectRegistry as unknown as { save(): void }).save();
 }
 
-function rewriteProjectIdReferences(value: unknown, oldProjectIds: Set<string>): boolean {
-	let changed = false;
-	if (Array.isArray(value)) {
-		for (const item of value) {
-			if (rewriteProjectIdReferences(item, oldProjectIds)) changed = true;
-		}
-		return changed;
-	}
-	if (!value || typeof value !== "object") return false;
-	const record = value as Record<string, unknown>;
-	for (const [key, nested] of Object.entries(record)) {
-		if ((key === "projectId" || key === "parentProjectId") && typeof nested === "string" && oldProjectIds.has(nested)) {
-			record[key] = HEADQUARTERS_PROJECT_ID;
-			changed = true;
-			continue;
-		}
-		if (key === "provisionalProjectId" && typeof nested === "string" && oldProjectIds.has(nested)) {
-			delete record[key];
-			changed = true;
-			continue;
-		}
-		if (rewriteProjectIdReferences(nested, oldProjectIds)) changed = true;
-	}
-	return changed;
-}
-
-function walkJsonFiles(root: string, visit: (filePath: string) => void): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(root, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		const p = path.join(root, entry.name);
-		if (entry.isDirectory()) {
-			walkJsonFiles(p, visit);
-			continue;
-		}
-		if (!entry.isFile()) continue;
-		if (!entry.name.endsWith(".json")) continue;
-		if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX) || entry.name.endsWith(PRE_MIGRATION_SUFFIX)) continue;
-		if (entry.name.endsWith(".tmp")) continue;
-		visit(p);
-	}
-}
-
-function rewriteProjectIdsInJsonTree(root: string, oldProjectIds: Set<string>): void {
-	if (oldProjectIds.size === 0) return;
-	walkJsonFiles(root, (filePath) => {
-		let data: unknown;
-		try {
-			data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-		} catch {
-			return;
-		}
-		if (!rewriteProjectIdReferences(data, oldProjectIds)) return;
-		backupForHeadquartersMigration(filePath);
-		fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-		console.log(`[migration] Rewrote stale project references in ${filePath}`);
-	});
-}
-
-function scanStaleProjectIdReferences(root: string, oldProjectIds: Set<string>): string[] {
-	const hits: string[] = [];
-	if (oldProjectIds.size === 0) return hits;
-	const visit = (value: unknown, filePath: string, trail: string): void => {
-		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, filePath, `${trail}[${index}]`));
-			return;
-		}
-		if (!value || typeof value !== "object") return;
-		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-			const nextTrail = trail ? `${trail}.${key}` : key;
-			if (
-				(key === "projectId" || key === "parentProjectId" || key === "provisionalProjectId") &&
-				typeof nested === "string" &&
-				oldProjectIds.has(nested)
-			) {
-				hits.push(`${filePath}:${nextTrail}`);
-			}
-			visit(nested, filePath, nextTrail);
-		}
-	};
-	walkJsonFiles(root, (filePath) => {
-		try {
-			visit(JSON.parse(fs.readFileSync(filePath, "utf-8")), filePath, "");
-		} catch {
-			// Ignore malformed sidecars; normal store loads already warn elsewhere.
-		}
-	});
-	return hits;
-}
-
-function dropSearchIndexesForHeadquartersMigration(stateDir: string): void {
-	for (const name of ["search.flex", "search.lance", "search.db", "search.db-wal", "search.db-shm"]) {
-		const target = path.join(stateDir, name);
-		if (!fs.existsSync(target)) continue;
-		const backup = target + HEADQUARTERS_BACKUP_SUFFIX;
-		try {
-			if (!fs.existsSync(backup)) {
-				fs.renameSync(target, backup);
-				console.log(`[migration] Moved search index ${name} → ${path.basename(backup)} for reindex`);
-			} else {
-				fs.rmSync(target, { recursive: true, force: true });
-				console.log(`[migration] Removed stale search index ${name} for reindex`);
-			}
-		} catch (err) {
-			console.log(`[migration] Warning: could not reset search index ${target}: ${err}`);
-		}
-	}
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function deepMergeLegacyIntoCurrent(legacy: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...legacy, ...current };
-	for (const [key, legacyValue] of Object.entries(legacy)) {
-		const currentValue = current[key];
-		if (isPlainRecord(legacyValue) && isPlainRecord(currentValue)) {
-			merged[key] = deepMergeLegacyIntoCurrent(legacyValue, currentValue);
-		}
-	}
-	return merged;
+interface HeadquartersDirectoryMigrationInput {
+	serverRunDir: string;
+	headquartersDir: string;
+	headquartersStateDir: string;
+	headquartersConfigDir: string;
+	legacyServerBobbitDir: string;
 }
 
-function readYamlRecord(filePath: string): Record<string, unknown> | null {
+interface HeadquartersMigrationDiagnostics {
+	version: 1;
+	runAt: string;
+	paths: {
+		serverRunDir: string;
+		headquartersDir: string;
+		headquartersStateDir: string;
+		headquartersConfigDir: string;
+		legacyServerBobbitDir: string;
+		legacyStateDir: string;
+		legacyConfigDir: string;
+	};
+	copied: string[];
+	skipped: string[];
+	quarantinedConfigFiles: string[];
+	ambiguousRecords: Array<{ file: string; key: string; reason: string }>;
+	restoredNormalProjectIds: string[];
+	restoredNormalRecords: Array<{ file: string; key: string; projectId: string }>;
+	previousOverrideHints: string[];
+	failures: string[];
+}
+
+const SERVER_STATE_ENTRIES = new Set([
+	"projects.json",
+	"preferences.json",
+	"setup-complete",
+	"token",
+	"gateway-url",
+	"watchdog.json",
+	"actual-port",
+	"boot-timing.jsonl",
+	"session-prompts",
+	"proposal-drafts",
+	"preview",
+	"preview-artifacts",
+	"html-snapshots",
+	"mcp-extensions",
+	"tool-guard",
+	"tool-result-error-bridge",
+	"provider-bridge",
+	"google-code-assist",
+	"ext-store",
+	"marketplace-cache",
+	"pr-walkthrough",
+	"tls",
+	"sandbox-agent-auth",
+]);
+
+const PROJECT_STORE_FILES = new Set([
+	"goals.json",
+	"sessions.json",
+	"staff.json",
+	"tasks.json",
+	"team-state.json",
+	"gateway-swarms.json",
+	"gates.json",
+	"inbox.json",
+	"session-costs.json",
+	"session-colors.json",
+	"bg-processes.json",
+]);
+const PROJECT_OBJECT_STORE_FILES = new Set(["session-costs.json", "session-colors.json", "bg-processes.json"]);
+
+function newHeadquartersDiagnostics(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
+	const legacyStateDir = path.join(input.legacyServerBobbitDir, "state");
+	const legacyConfigDir = path.join(input.legacyServerBobbitDir, "config");
+	return {
+		version: 1,
+		runAt: new Date().toISOString(),
+		paths: {
+			serverRunDir: path.resolve(input.serverRunDir),
+			headquartersDir: path.resolve(input.headquartersDir),
+			headquartersStateDir: path.resolve(input.headquartersStateDir),
+			headquartersConfigDir: path.resolve(input.headquartersConfigDir),
+			legacyServerBobbitDir: path.resolve(input.legacyServerBobbitDir),
+			legacyStateDir: path.resolve(legacyStateDir),
+			legacyConfigDir: path.resolve(legacyConfigDir),
+		},
+		copied: [],
+		skipped: [],
+		quarantinedConfigFiles: [],
+		ambiguousRecords: [],
+		restoredNormalProjectIds: [],
+		restoredNormalRecords: [],
+		previousOverrideHints: [],
+		failures: [],
+	};
+}
+
+function writeHeadquartersDiagnostics(stateDir: string, diagnostics: HeadquartersMigrationDiagnostics): void {
 	try {
-		if (!fs.existsSync(filePath)) return null;
-		const parsed = YAML.parse(fs.readFileSync(filePath, "utf-8"));
-		return isPlainRecord(parsed) ? parsed : null;
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, HEADQUARTERS_MIGRATION_DIAGNOSTICS), stableStringify(diagnostics), "utf-8");
 	} catch (err) {
-		console.log(`[migration] Warning: could not parse YAML ${filePath}: ${err}`);
-		return null;
+		console.log(`[migration] Warning: could not write Headquarters migration diagnostics: ${err}`);
 	}
 }
 
-function mergeLegacyProjectYaml(legacyFile: string, targetFile: string): void {
-	const legacy = readYamlRecord(legacyFile);
-	if (!legacy) return;
-	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-	if (!fs.existsSync(targetFile)) {
-		fs.copyFileSync(legacyFile, targetFile);
-		console.log(`[migration] Preserved legacy Headquarters config ${legacyFile} → ${targetFile}`);
+function copyFilePreserveFirst(src: string, dest: string, rel: string, diagnostics: HeadquartersMigrationDiagnostics): void {
+	try {
+		if (fs.existsSync(dest)) {
+			try {
+				if (fs.statSync(src).isFile() && fs.statSync(dest).isFile()) {
+					const a = fs.readFileSync(src);
+					const b = fs.readFileSync(dest);
+					if (a.equals(b)) diagnostics.skipped.push(`${rel}: already present`);
+					else diagnostics.skipped.push(`${rel}: destination differs; preserved existing Headquarters file`);
+				} else {
+					diagnostics.skipped.push(`${rel}: destination exists; preserved existing Headquarters entry`);
+				}
+			} catch {
+				diagnostics.skipped.push(`${rel}: destination exists; preserved existing Headquarters entry`);
+			}
+			return;
+		}
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+		diagnostics.copied.push(rel);
+	} catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
+	}
+}
+
+function copyTreePreserveFirst(src: string, dest: string, rel: string, diagnostics: HeadquartersMigrationDiagnostics): void {
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(src);
+	} catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
 		return;
 	}
-	const current = readYamlRecord(targetFile) ?? {};
-	const merged = deepMergeLegacyIntoCurrent(legacy, current);
-	if (JSON.stringify(merged) === JSON.stringify(current)) return;
-	backupForHeadquartersMigration(targetFile);
-	fs.writeFileSync(targetFile, YAML.stringify(merged), "utf-8");
-	console.log(`[migration] Merged legacy Headquarters config into ${targetFile}`);
+	if (stat.isSymbolicLink()) {
+		diagnostics.skipped.push(`${rel}: symlink skipped`);
+		return;
+	}
+	if (stat.isFile()) {
+		copyFilePreserveFirst(src, dest, rel, diagnostics);
+		return;
+	}
+	if (!stat.isDirectory()) {
+		diagnostics.skipped.push(`${rel}: special filesystem entry skipped`);
+		return;
+	}
+	fs.mkdirSync(dest, { recursive: true });
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(src, { withFileTypes: true }); }
+	catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
+		return;
+	}
+	for (const entry of entries) {
+		copyTreePreserveFirst(path.join(src, entry.name), path.join(dest, entry.name), path.join(rel, entry.name), diagnostics);
+	}
 }
 
-function copyMissingLegacyConfig(legacyConfigDir: string, centralConfigDir: string): void {
-	if (samePath(legacyConfigDir, centralConfigDir) || !fs.existsSync(legacyConfigDir)) return;
-	const walk = (srcDir: string): void => {
-		let entries: fs.Dirent[];
-		try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
-		for (const entry of entries) {
-			const src = path.join(srcDir, entry.name);
-			const rel = path.relative(legacyConfigDir, src);
-			const dest = path.join(centralConfigDir, rel);
-			if (entry.isDirectory()) {
-				walk(src);
-				continue;
-			}
-			if (!entry.isFile()) continue;
-			if (rel.replace(/\\/g, "/") === "project.yaml") {
-				mergeLegacyProjectYaml(src, dest);
-				continue;
-			}
-			if (fs.existsSync(dest)) continue;
-			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.copyFileSync(src, dest);
-			console.log(`[migration] Preserved legacy Headquarters config ${src} → ${dest}`);
-		}
-	};
-	walk(legacyConfigDir);
+function recordKeyForFile(fileName: string, record: Record<string, unknown>): string {
+	if (fileName === "gates.json") return `${String(record.goalId ?? "")}::${String(record.gateId ?? "")}`;
+	if (fileName === "team-state.json" || fileName === "gateway-swarms.json") return String(record.goalId ?? "");
+	if (fileName === "session-costs.json" || fileName === "session-colors.json") return String(record.id ?? record.sessionId ?? "");
+	return String(record.id ?? record.goalId ?? record.staffId ?? "");
 }
 
-function mergeLegacyJsonArrayFile(
-	legacyFile: string,
-	targetFile: string,
-	oldProjectIds: Set<string>,
-	keyFor: (item: Record<string, unknown>) => string,
+function readJsonRecords(filePath: string): Record<string, unknown>[] {
+	const value = readJsonValue<unknown>(filePath);
+	if (Array.isArray(value)) return value.filter(isPlainRecord);
+	if (isPlainRecord(value)) {
+		return Object.entries(value).map(([id, record]) => isPlainRecord(record) ? { id, ...record } : { id, value: record });
+	}
+	return [];
+}
+
+function mergeRecordsByKey(
+	filePath: string,
+	fileName: string,
+	records: Record<string, unknown>[],
+	diagnostics: HeadquartersMigrationDiagnostics,
+	label: string,
 ): void {
-	const legacy = readJsonArray<Record<string, unknown>>(legacyFile);
-	if (legacy.length === 0) return;
-	const rewritten = JSON.parse(JSON.stringify(legacy)) as Record<string, unknown>[];
-	rewriteProjectIdReferences(rewritten, oldProjectIds);
-	const existing = readJsonArray<Record<string, unknown>>(targetFile);
-	const seen = new Set(existing.map(keyFor).filter(Boolean));
+	if (records.length === 0) return;
+	const existing = readJsonRecords(filePath);
+	const indexByKey = new Map(existing.map((record, index) => [recordKeyForFile(fileName, record), index] as const).filter(([key]) => Boolean(key)));
 	let added = 0;
-	for (const item of rewritten) {
-		const key = keyFor(item);
-		if (!key || seen.has(key)) continue;
-		existing.push(item);
-		seen.add(key);
+	let repaired = 0;
+	for (const record of records) {
+		const key = recordKeyForFile(fileName, record);
+		if (!key) continue;
+		const existingIndex = indexByKey.get(key);
+		if (existingIndex !== undefined) {
+			const current = existing[existingIndex];
+			if (
+				label.startsWith("normal:") &&
+				typeof record.projectId === "string" &&
+				current.projectId === HEADQUARTERS_PROJECT_ID &&
+				record.projectId !== HEADQUARTERS_PROJECT_ID
+			) {
+				existing[existingIndex] = { ...record, ...current, projectId: record.projectId };
+				repaired++;
+			}
+			continue;
+		}
+		existing.push(record);
+		indexByKey.set(key, existing.length - 1);
 		added++;
 	}
-	if (added === 0 && fs.existsSync(targetFile)) return;
-	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-	backupForHeadquartersMigration(targetFile);
-	fs.writeFileSync(targetFile, JSON.stringify(existing, null, 2), "utf-8");
-	console.log(`[migration] Preserved ${added} legacy Headquarters state entr${added === 1 ? "y" : "ies"} from ${legacyFile}`);
+	if (added === 0 && repaired === 0 && fs.existsSync(filePath)) return;
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), "utf-8");
+	diagnostics.copied.push(`${label}: ${added} added, ${repaired} repaired ${fileName} record${added + repaired === 1 ? "" : "s"}`);
 }
 
-function preserveLegacyServerRootBobbitForHeadquarters(
-	centralStateDir: string,
-	centralConfigDir: string,
-	serverCwd: string,
-	oldProjectIds: Set<string>,
-): void {
-	if (oldProjectIds.size === 0) return;
-	const legacyBobbitDir = path.join(path.resolve(serverCwd), ".bobbit");
-	const legacyStateDir = path.join(legacyBobbitDir, "state");
-	const legacyConfigDir = path.join(legacyBobbitDir, "config");
+function sameRootNormalProjectsFrom(
+	projects: Record<string, unknown>[],
+	serverRunDir: string,
+): Record<string, unknown>[] {
+	const serverKey = canonicalPathKey(serverRunDir);
+	return projects.filter(project => {
+		const id = typeof project.id === "string" ? project.id : "";
+		if (!id || id === HEADQUARTERS_PROJECT_ID || id === SYSTEM_PROJECT_ID) return false;
+		if (project.kind === "headquarters" || project.kind === "system" || project.hidden === true) return false;
+		return typeof project.rootPath === "string" && canonicalPathKey(project.rootPath) === serverKey;
+	});
+}
 
-	if (!samePath(legacyStateDir, centralStateDir) && fs.existsSync(legacyStateDir)) {
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "goals.json"), path.join(centralStateDir, "goals.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "sessions.json"), path.join(centralStateDir, "sessions.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "staff.json"), path.join(centralStateDir, "staff.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "tasks.json"), path.join(centralStateDir, "tasks.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "team-state.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gateway-swarms.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gates.json"), path.join(centralStateDir, "gates.json"), oldProjectIds, item => `${String(item.goalId ?? "")}::${String(item.gateId ?? "")}`);
+function readProjectsFile(filePath: string): Record<string, unknown>[] {
+	return readJsonArray<Record<string, unknown>>(filePath).filter(isPlainRecord);
+}
+
+function collectProjectEvidence(
+	headquartersStateDir: string,
+	legacyStateDir: string,
+	serverRunDir: string,
+): { current: Record<string, unknown>[]; backups: Record<string, unknown>[]; sameRoot: Record<string, unknown>[]; sameRootIds: Set<string> } {
+	const projectFiles = [
+		path.join(headquartersStateDir, "projects.json"),
+		path.join(legacyStateDir, "projects.json"),
+	];
+	const backupFiles = projectFiles.map(file => file + HEADQUARTERS_BACKUP_SUFFIX);
+	const current = projectFiles.flatMap(readProjectsFile);
+	const backups = backupFiles.flatMap(readProjectsFile);
+	const sameRoot = [...sameRootNormalProjectsFrom(current, serverRunDir), ...sameRootNormalProjectsFrom(backups, serverRunDir)];
+	const sameRootIds = new Set(sameRoot.map(project => String(project.id)).filter(Boolean));
+	return { current, backups, sameRoot, sameRootIds };
+}
+
+function repairProjectsFileForHeadquartersSplit(
+	projectsFile: string,
+	legacyProjectsFile: string,
+	serverRunDir: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): Set<string> {
+	let projects = readProjectsFile(projectsFile);
+	if (projects.length === 0) {
+		projects = readProjectsFile(legacyProjectsFile);
+	}
+	const backupProjects = [
+		...readProjectsFile(projectsFile + HEADQUARTERS_BACKUP_SUFFIX),
+		...readProjectsFile(legacyProjectsFile + HEADQUARTERS_BACKUP_SUFFIX),
+	];
+	const sameRootBackups = sameRootNormalProjectsFrom(backupProjects, serverRunDir);
+	const restoredIds = new Set<string>();
+	let changed = false;
+
+	for (const backup of sameRootBackups) {
+		const id = String(backup.id ?? "");
+		if (!id || projects.some(project => project.id === id)) continue;
+		projects.push({ ...backup });
+		restoredIds.add(id);
+		changed = true;
 	}
 
-	copyMissingLegacyConfig(legacyConfigDir, centralConfigDir);
+	for (const project of projects) {
+		if (project.id !== HEADQUARTERS_PROJECT_ID && project.kind !== "headquarters") continue;
+		if (project.id !== HEADQUARTERS_PROJECT_ID) {
+			project.id = HEADQUARTERS_PROJECT_ID;
+			changed = true;
+		}
+		if (project.name !== HEADQUARTERS_PROJECT_NAME) {
+			project.name = HEADQUARTERS_PROJECT_NAME;
+			changed = true;
+		}
+		if (project.kind !== "headquarters") {
+			project.kind = "headquarters";
+			changed = true;
+		}
+		if (typeof project.rootPath !== "string" || !samePath(project.rootPath, headquartersDirPath)) {
+			project.rootPath = path.resolve(headquartersDirPath);
+			changed = true;
+		}
+		for (const key of ["position", "provisional", "parentProjectId", "hidden"]) {
+			if (key in project) {
+				delete project[key];
+				changed = true;
+			}
+		}
+	}
+
+	const seen = new Set<string>();
+	projects = projects.filter(project => {
+		const id = String(project.id ?? "");
+		if (!id || seen.has(id)) return false;
+		seen.add(id);
+		return true;
+	});
+
+	if (changed || restoredIds.size > 0 || (projects.length > 0 && !fs.existsSync(projectsFile))) {
+		fs.mkdirSync(path.dirname(projectsFile), { recursive: true });
+		backupForHeadquartersMigration(projectsFile);
+		fs.writeFileSync(projectsFile, JSON.stringify(projects, null, 2), "utf-8");
+		for (const id of restoredIds) diagnostics.restoredNormalProjectIds.push(id);
+	}
+
+	return new Set(sameRootNormalProjectsFrom([...projects, ...backupProjects], serverRunDir).map(project => String(project.id)).filter(Boolean));
+}
+
+function routeLegacyProjectStoreFile(
+	fileName: string,
+	legacyFile: string,
+	targetFile: string,
+	projectEvidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const legacyRecords = readJsonRecords(legacyFile);
+	if (legacyRecords.length === 0) return;
+	const backupRecords = readJsonRecords(legacyFile + HEADQUARTERS_BACKUP_SUFFIX);
+	const backupByKey = new Map<string, Record<string, unknown>>();
+	for (const record of backupRecords) {
+		const key = recordKeyForFile(fileName, record);
+		if (key) backupByKey.set(key, record);
+	}
+	const projectsById = new Map(projectEvidence.current.map(project => [String(project.id ?? ""), project]));
+	const hqRecords: Record<string, unknown>[] = [];
+	const normalRecordsByProject = new Map<string, Record<string, unknown>[]>();
+	const seenLegacyKeys = new Set<string>();
+
+	const routeNormal = (projectId: string, record: Record<string, unknown>, key: string): void => {
+		const bucket = normalRecordsByProject.get(projectId) ?? [];
+		bucket.push(record);
+		normalRecordsByProject.set(projectId, bucket);
+		diagnostics.restoredNormalRecords.push({ file: fileName, key, projectId });
+	};
+
+	for (const record of legacyRecords) {
+		const key = recordKeyForFile(fileName, record);
+		if (key) seenLegacyKeys.add(key);
+		const backup = key ? backupByKey.get(key) : undefined;
+		const backupProjectId = typeof backup?.projectId === "string" ? backup.projectId : undefined;
+		const projectId = typeof record.projectId === "string" ? record.projectId : undefined;
+
+		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
+			routeNormal(backupProjectId, { ...backup, projectId: backupProjectId }, key);
+			continue;
+		}
+		if (projectId && projectId !== HEADQUARTERS_PROJECT_ID && projectsById.has(projectId)) {
+			routeNormal(projectId, record, key);
+			continue;
+		}
+		if (!projectId) {
+			if (projectEvidence.sameRootIds.size > 0) {
+				diagnostics.ambiguousRecords.push({ file: fileName, key, reason: "missing projectId while same-root normal project evidence exists" });
+				continue;
+			}
+			hqRecords.push({ ...record, projectId: HEADQUARTERS_PROJECT_ID });
+			continue;
+		}
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			hqRecords.push(record);
+			continue;
+		}
+		diagnostics.ambiguousRecords.push({ file: fileName, key, reason: `unknown projectId ${projectId}` });
+	}
+
+	for (const [key, backup] of backupByKey) {
+		if (seenLegacyKeys.has(key)) continue;
+		const backupProjectId = typeof backup.projectId === "string" ? backup.projectId : undefined;
+		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
+			routeNormal(backupProjectId, { ...backup, projectId: backupProjectId }, key);
+		}
+	}
+
+	mergeRecordsByKey(targetFile, fileName, hqRecords, diagnostics, "headquarters");
+	for (const [projectId, records] of normalRecordsByProject) {
+		const project = projectsById.get(projectId);
+		if (!project || typeof project.rootPath !== "string") continue;
+		const normalFile = path.join(project.rootPath, ".bobbit", "state", fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+		mergeRecordsByKey(normalFile, fileName, records, diagnostics, `normal:${projectId}`);
+	}
+}
+
+function quarantineLegacyConfig(
+	legacyConfigDir: string,
+	headquartersStateDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const quarantineDir = path.join(headquartersStateDir, "migration-quarantine", "config", "legacy-server-bobbit-config");
+	copyTreePreserveFirst(legacyConfigDir, quarantineDir, "migration-quarantine/config/legacy-server-bobbit-config", diagnostics);
+	const collect = (dir: string): void => {
+		let entries: fs.Dirent[];
+		try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const child = path.join(dir, entry.name);
+			if (entry.isDirectory()) collect(child);
+			else if (entry.isFile()) diagnostics.quarantinedConfigFiles.push(path.relative(quarantineDir, child).replace(/\\/g, "/"));
+		}
+	};
+	collect(quarantineDir);
+}
+
+export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
+	const serverRunDir = path.resolve(input.serverRunDir);
+	const headquartersDirPath = path.resolve(input.headquartersDir);
+	const headquartersStateDir = path.resolve(input.headquartersStateDir);
+	const headquartersConfigDir = path.resolve(input.headquartersConfigDir);
+	const legacyServerBobbitDir = path.resolve(input.legacyServerBobbitDir);
+	const legacyStateDir = path.join(legacyServerBobbitDir, "state");
+	const legacyConfigDir = path.join(legacyServerBobbitDir, "config");
+	const diagnostics = newHeadquartersDiagnostics({ serverRunDir, headquartersDir: headquartersDirPath, headquartersStateDir, headquartersConfigDir, legacyServerBobbitDir });
+
+	try {
+		fs.mkdirSync(headquartersStateDir, { recursive: true });
+		fs.mkdirSync(headquartersConfigDir, { recursive: true });
+	} catch (err) {
+		diagnostics.failures.push(`prepare Headquarters directories: ${(err as Error).message}`);
+		writeHeadquartersDiagnostics(headquartersStateDir, diagnostics);
+		throw err;
+	}
+
+	const defaultHeadquartersDir = path.join(serverRunDir, ".bobbit", "headquarters");
+	const usingOverride = !samePath(headquartersDirPath, defaultHeadquartersDir);
+	const sourceIsTarget = samePath(legacyStateDir, headquartersStateDir) && samePath(legacyConfigDir, headquartersConfigDir);
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
+		for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
+			const src = path.join(legacyStateDir, entry.name);
+			const dest = path.join(headquartersStateDir, entry.name);
+			if (PROJECT_STORE_FILES.has(entry.name)) continue;
+			if (SERVER_STATE_ENTRIES.has(entry.name) || entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
+				copyTreePreserveFirst(src, dest, entry.name, diagnostics);
+			}
+		}
+	} else if (usingOverride) {
+		diagnostics.skipped.push("legacy default .bobbit/state: BOBBIT_DIR/BOBBIT_PI_DIR-style Headquarters override is used in place");
+	}
+
+	const projectsFile = path.join(headquartersStateDir, "projects.json");
+	const legacyProjectsFile = path.join(legacyStateDir, "projects.json");
+	const sameRootIds = repairProjectsFileForHeadquartersSplit(projectsFile, legacyProjectsFile, serverRunDir, headquartersDirPath, diagnostics);
+	const evidence = collectProjectEvidence(headquartersStateDir, legacyStateDir, serverRunDir);
+	for (const id of sameRootIds) evidence.sameRootIds.add(id);
+	const sameRootEvidence = evidence.sameRootIds.size > 0;
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
+		for (const fileName of PROJECT_STORE_FILES) {
+			const legacyFile = path.join(legacyStateDir, fileName);
+			if (!fs.existsSync(legacyFile)) continue;
+			const targetFile = path.join(headquartersStateDir, fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+			if (PROJECT_OBJECT_STORE_FILES.has(fileName)) {
+				if (sameRootEvidence) {
+					diagnostics.ambiguousRecords.push({ file: fileName, key: "*", reason: "object-shaped project store requires manual attribution when same-root normal project evidence exists" });
+				} else {
+					copyTreePreserveFirst(legacyFile, targetFile, fileName, diagnostics);
+				}
+				continue;
+			}
+			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, evidence, diagnostics);
+		}
+	}
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir)) {
+		if (sameRootEvidence) {
+			quarantineLegacyConfig(legacyConfigDir, headquartersStateDir, diagnostics);
+			diagnostics.skipped.push("legacy default .bobbit/config: same-root normal project evidence exists; config quarantined instead of activated in Headquarters");
+		} else {
+			copyTreePreserveFirst(legacyConfigDir, headquartersConfigDir, "config", diagnostics);
+		}
+	} else if (usingOverride) {
+		diagnostics.skipped.push("legacy default .bobbit/config: Headquarters override config is used in place");
+	}
+
+	try {
+		fs.writeFileSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
+	} catch (err) {
+		diagnostics.failures.push(`write marker: ${(err as Error).message}`);
+	}
+	writeHeadquartersDiagnostics(headquartersStateDir, diagnostics);
+	return diagnostics;
 }
 
 function migrateHeadquartersProjectAliases(
@@ -321,121 +614,71 @@ function migrateHeadquartersProjectAliases(
 	projectRegistry: ProjectRegistry,
 	serverCwd: string,
 ): { oldProjectIds: Set<string>; headquartersProject?: RegisteredProject } {
+	void centralConfigDir;
 	const oldProjectIds = new Set<string>();
 	const projects = registryProjectMap(projectRegistry);
 	if (!projects) return { oldProjectIds };
 
 	const projectsFile = path.join(centralStateDir, "projects.json");
-	const serverRoot = path.resolve(serverCwd);
-	const serverRootKey = canonicalPathKey(serverRoot);
+	const headquartersRoot = path.resolve(path.dirname(centralStateDir));
 	let headquartersProject = projects.get(HEADQUARTERS_PROJECT_ID);
-	const serverRootCandidates = [...projects.values()].filter(project => {
-		if (project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters") return false;
-		if (project.id === SYSTEM_PROJECT_ID || project.kind === "system" || project.hidden) return false;
-		return canonicalPathKey(project.rootPath) === serverRootKey;
-	});
-
-	for (const project of serverRootCandidates) oldProjectIds.add(project.id);
-
 	let registryChanged = false;
-	const markProjectsBackup = (): void => backupForHeadquartersMigration(projectsFile);
-	const repairHeadquarters = (project: RegisteredProject): void => {
-		if (project.id !== HEADQUARTERS_PROJECT_ID) {
-			projects.delete(project.id);
-			project.id = HEADQUARTERS_PROJECT_ID;
-			projects.set(project.id, project);
-			registryChanged = true;
-		}
-		if (project.name !== HEADQUARTERS_PROJECT_NAME) {
-			project.name = HEADQUARTERS_PROJECT_NAME;
-			registryChanged = true;
-		}
-		const resolvedRoot = path.resolve(serverRoot);
-		if (path.resolve(project.rootPath) !== resolvedRoot) {
-			project.rootPath = resolvedRoot;
-			registryChanged = true;
-		}
-		if (project.kind !== "headquarters") {
-			project.kind = "headquarters";
-			registryChanged = true;
-		}
-		if (project.hidden !== undefined) {
-			delete project.hidden;
-			registryChanged = true;
-		}
-		if (project.provisional !== undefined) {
-			delete project.provisional;
-			registryChanged = true;
-		}
-		if (project.position !== undefined) {
-			delete project.position;
-			registryChanged = true;
-		}
-		if (project.parentProjectId !== undefined) {
-			delete project.parentProjectId;
-			registryChanged = true;
-		}
-	};
 
-	if (!headquartersProject && serverRootCandidates.length > 0) {
-		headquartersProject = serverRootCandidates[0];
-		markProjectsBackup();
-		repairHeadquarters(headquartersProject);
+	const backupProjects = readProjectsFile(projectsFile + HEADQUARTERS_BACKUP_SUFFIX);
+	const sameRootBackups = sameRootNormalProjectsFrom(backupProjects, serverCwd);
+	for (const backup of sameRootBackups) {
+		const id = String(backup.id ?? "");
+		if (!id || projects.has(id)) continue;
+		projects.set(id, backup as unknown as RegisteredProject);
+		registryChanged = true;
+		console.log(`[migration] Restored same-root normal project ${id} from Headquarters id migration backup`);
 	}
 
 	if (headquartersProject) {
-		repairHeadquarters(headquartersProject);
-	}
-
-	if (headquartersProject && serverRootCandidates.length > 0) {
-		markProjectsBackup();
-		for (const candidate of serverRootCandidates) {
-			if (candidate === headquartersProject || candidate.id === HEADQUARTERS_PROJECT_ID) continue;
-			projects.delete(candidate.id);
+		if (headquartersProject.name !== HEADQUARTERS_PROJECT_NAME) {
+			headquartersProject.name = HEADQUARTERS_PROJECT_NAME;
 			registryChanged = true;
 		}
-	}
-
-	if (oldProjectIds.size > 0) {
-		for (const project of projects.values()) {
-			if (project.parentProjectId && oldProjectIds.has(project.parentProjectId)) {
-				if (project.id === HEADQUARTERS_PROJECT_ID) delete project.parentProjectId;
-				else project.parentProjectId = HEADQUARTERS_PROJECT_ID;
-				registryChanged = true;
-			}
+		if (headquartersProject.kind !== "headquarters") {
+			headquartersProject.kind = "headquarters";
+			registryChanged = true;
+		}
+		if (!samePath(headquartersProject.rootPath, headquartersRoot)) {
+			headquartersProject.rootPath = headquartersRoot;
+			registryChanged = true;
+		}
+		if (headquartersProject.hidden !== undefined) {
+			delete headquartersProject.hidden;
+			registryChanged = true;
+		}
+		if (headquartersProject.provisional !== undefined) {
+			delete headquartersProject.provisional;
+			registryChanged = true;
+		}
+		if (headquartersProject.position !== undefined) {
+			delete headquartersProject.position;
+			registryChanged = true;
+		}
+		if (headquartersProject.parentProjectId !== undefined) {
+			delete headquartersProject.parentProjectId;
+			registryChanged = true;
 		}
 	}
 
 	if (registryChanged) {
-		markProjectsBackup();
+		backupForHeadquartersMigration(projectsFile);
 		registrySave(projectRegistry);
-		const promotedIds = [...oldProjectIds].join(", ");
-		console.log(promotedIds
-			? `[migration] Promoted server-root project reference(s) ${promotedIds} to Headquarters`
-			: "[migration] Repaired Headquarters project registry record");
-	}
-
-	if (oldProjectIds.size > 0) {
-		preserveLegacyServerRootBobbitForHeadquarters(centralStateDir, centralConfigDir, serverCwd, oldProjectIds);
-		rewriteProjectIdsInJsonTree(centralStateDir, oldProjectIds);
-		dropSearchIndexesForHeadquartersMigration(centralStateDir);
-		const staleRefs = scanStaleProjectIdReferences(centralStateDir, oldProjectIds);
-		if (staleRefs.length > 0) {
-			throw new Error(
-				`Headquarters project id migration left stale project id references: ${staleRefs.slice(0, 20).join(", ")}`,
-			);
-		}
-	}
-
-	if (headquartersProject || oldProjectIds.size > 0) {
 		try {
 			fs.mkdirSync(centralStateDir, { recursive: true });
 			fs.writeFileSync(path.join(centralStateDir, HEADQUARTERS_ID_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
 		} catch (err) {
-			console.log(`[migration] Warning: could not write Headquarters id migration marker: ${err}`);
+			console.log(`[migration] Warning: could not write Headquarters id repair marker: ${err}`);
 		}
 	}
 
+	// This function intentionally no longer returns old normal ids for rewrite.
+	// Same-root normal projects remain normal projects; per-store backup repair is
+	// handled by migrateLegacyHeadquartersDirectory().
 	return { oldProjectIds, headquartersProject };
 }
 
@@ -485,7 +728,7 @@ export function migrateToPerProjectState(
 	const headquartersAliasMigration = migrateHeadquartersProjectAliases(centralStateDir, centralConfigDir, projectRegistry, serverCwd);
 	const markerPath = path.join(centralStateDir, MIGRATION_MARKER);
 
-	// 1. Already migrated? Headquarters id promotion still ran above because it
+	// 1. Already migrated? Headquarters split repair still ran above because it
 	// is independent of the older per-project state marker.
 	if (fs.existsSync(markerPath)) return;
 
