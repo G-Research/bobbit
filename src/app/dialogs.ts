@@ -59,6 +59,35 @@ import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type Exp
 // Kept inline to avoid coupling the UI bundle to a server-only module.
 // ============================================================================
 
+/**
+ * Create a `<div>` appended to `document.body` for a mini-lit `Dialog(...)`
+ * to render into, tagged `role="dialog"` / `aria-modal="true"`.
+ *
+ * Mini-lit's `Dialog` component (node_modules/@mariozechner/mini-lit/dist/Dialog.js)
+ * renders no ARIA modality of its own, so every helper below must tag its own
+ * container. This matters beyond a11y: `AgentInterface._handleGlobalEscape`
+ * is a capture-phase `document` Escape handler that aborts the streaming
+ * agent unless it finds `[role="dialog"]` / `[aria-modal="true"]` in the DOM
+ * — without this tag, pressing Escape to dismiss an unrelated confirm/error
+ * dialog also silently kills the in-flight turn. See docs/debugging.md /
+ * AGENTS.md "Before editing" note — this is UX-01 in the Fable audit.
+ *
+ * `zIndex`, when provided, lifts the whole dialog (backdrop + panel) above a
+ * sibling stacking-context owner that would otherwise paint over it (e.g. an
+ * expanded bg-process popover at z-50).
+ */
+function createDialogContainer(zIndex?: number): HTMLDivElement {
+	const container = document.createElement("div");
+	container.setAttribute("role", "dialog");
+	container.setAttribute("aria-modal", "true");
+	if (zIndex !== undefined) {
+		container.style.position = "relative";
+		container.style.zIndex = String(zIndex);
+	}
+	document.body.appendChild(container);
+	return container;
+}
+
 export type PreflightLevel = "pass" | "warn" | "fail";
 
 export interface PreflightCheck {
@@ -95,16 +124,11 @@ export interface ArchiveResult {
 
 export function confirmAction(title: string, message: string, confirmLabel = "Confirm", destructive = false, zIndex?: number): Promise<boolean> {
 	return new Promise((resolve) => {
-		const container = document.createElement("div");
 		// When a stacking-context owner (e.g. an expanded bg-process popover at z-50)
 		// would otherwise paint over the dialog, callers pass an explicit zIndex. Making
 		// the container a positioned stacking context lifts the whole dialog — backdrop
 		// and panel — above that sibling regardless of their internal z-index values.
-		if (zIndex !== undefined) {
-			container.style.position = "relative";
-			container.style.zIndex = String(zIndex);
-		}
-		document.body.appendChild(container);
+		const container = createDialogContainer(zIndex);
 
 		const cleanup = (result: boolean) => {
 			document.removeEventListener("keydown", onKeydown);
@@ -155,8 +179,7 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 }
 
 export function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	const cleanup = () => {
 		render(html``, container);
@@ -204,8 +227,7 @@ function promptSymlinkConfirm(
 	onCancel: () => void,
 ): Promise<void> {
 	return new Promise((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		const close = () => {
 			render(html``, container);
@@ -352,8 +374,7 @@ function promptArchiveConfirm(opts: {
 	existingDetail: string;
 }): Promise<boolean> {
 	return new Promise((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		const close = (result: boolean) => {
 			render(html``, container);
@@ -531,8 +552,7 @@ export function showOAuthExpiryModal(credentials: readonly ExpiredAccountOAuthCr
 
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 	return new Promise((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		let flowId = "";
 		let authUrl = "";
@@ -748,8 +768,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 // ============================================================================
 
 export function openGatewayDialog(): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	let urlValue = localStorage.getItem(GW_URL_KEY) || window.location.origin;
 	let tokenValue = localStorage.getItem(GW_TOKEN_KEY) || "";
@@ -887,8 +906,7 @@ export function openGatewayDialog(): void {
 // ============================================================================
 
 export async function showQrCodeDialog(): Promise<void> {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	const cleanup = () => {
 		render(html``, container);
@@ -1046,8 +1064,7 @@ export async function showQrCodeDialog(): Promise<void> {
 // ============================================================================
 
 export function showRenameDialog(sessionId: string, currentTitle: string): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	let titleValue = currentTitle;
 	let generating = false;
@@ -1434,8 +1451,7 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 }
 
 function showGoalEditDialog(existingGoal: Goal): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	let titleValue = existingGoal.title;
 	let cwdValue = existingGoal.cwd;
@@ -1757,8 +1773,7 @@ function buildScanItems(
  */
 function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 	return new Promise((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		let current = "";
 		let parent: string | null = null;
@@ -1927,8 +1942,7 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
  * Single entry point invoked from `src/app/dialogs-lazy.ts::showProjectDialog`.
  */
 export function showProjectDialog(): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
+	const container = createDialogContainer();
 
 	type Step = "path" | "scan";
 	let step: Step = "path";
@@ -2668,8 +2682,7 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 	const descendantCount = preflightBody?.count ?? 0;
 
 	return new Promise<CascadeArchiveResult>((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		let confirming = false;
 
@@ -2796,8 +2809,7 @@ export async function showStopTeamDialog(
 ): Promise<"no-descendants" | "cascade" | "cancel"> {
 	if (descendantTeamCount === 0) return "no-descendants";
 	return new Promise<"no-descendants" | "cascade" | "cancel">((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 		let working = false;
 
 		const cleanup = (result: "no-descendants" | "cascade" | "cancel") => {
@@ -2878,8 +2890,7 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 	}
 
 	return new Promise<CascadePauseResult>((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		let cascade = true;
 		let working = false;
@@ -2990,8 +3001,7 @@ export async function showResumeGoalDialog(goal: Goal, descendantCount: number):
 	}
 
 	return new Promise<CascadeResumeResult>((resolve) => {
-		const container = document.createElement("div");
-		document.body.appendChild(container);
+		const container = createDialogContainer();
 
 		let cascade = false; // default OFF for resume — targeted by default
 		let working = false;
