@@ -10,12 +10,17 @@ import { changesetIdForGithub } from "./ids.js";
 import { deriveNavLabel, navLabelError } from "./nav-label.js";
 import type {
 	PrWalkthroughCard,
+	PrWalkthroughCardCoverageSummary,
 	PrWalkthroughCardSection,
 	PrWalkthroughChangesetRef,
+	PrWalkthroughCoverageSummary,
 	PrWalkthroughDiffBlock,
 	PrWalkthroughDiffBreakdownItem,
 	PrWalkthroughDiffLine,
 	PrWalkthroughHunk,
+	PrWalkthroughHunkPlacement,
+	PrWalkthroughNarrativeBlock,
+	PrWalkthroughReadReceipt,
 	PrWalkthroughOrientationConcern,
 	PrWalkthroughOrientationFileRole,
 	PrWalkthroughPhaseId,
@@ -39,6 +44,7 @@ export interface WalkthroughSynthesisResult {
 	changeset: PrWalkthroughChangesetRef;
 	cards: PrWalkthroughCard[];
 	warnings: WalkthroughWarning[];
+	coverage?: PrWalkthroughCoverageSummary;
 	limits?: WalkthroughSynthesisLimits;
 	export?: WalkthroughSynthesisExport;
 }
@@ -53,6 +59,20 @@ export interface PrWalkthroughValidationSummary {
 	message: string;
 	errors: PrWalkthroughValidationError[];
 	retryable: true;
+}
+
+export type PrWalkthroughSynthesisErrorCode =
+	| "PRW_HUNK_REF_UNRESOLVED"
+	| "PRW_DUPLICATE_PRIMARY_HUNK"
+	| "PRW_SECONDARY_WITHOUT_PRIMARY"
+	| "PRW_SKIP_REASON_REQUIRED"
+	| "PRW_MAJOR_REMAINING_HUNKS"
+	| "PRW_HUNK_PLACEMENT_CONFLICT";
+
+export interface PrWalkthroughSynthesisError extends Error {
+	code: PrWalkthroughSynthesisErrorCode;
+	retryable: true;
+	details?: Record<string, unknown>;
 }
 
 export type PrWalkthroughYamlValidationResult =
@@ -137,12 +157,35 @@ export interface PrWalkthroughYamlWalkthrough {
 	};
 }
 
-export interface PrWalkthroughYamlRelevantHunk {
-	file: string;
-	hunk_header: string;
+export type PrWalkthroughYamlHunkPlacement = "primary" | "secondary" | "skip";
+export type PrWalkthroughYamlSkipReason = "generated" | "binary" | "mechanical" | "unread" | "superseded" | "other";
+
+export interface PrWalkthroughYamlHunkReference {
+	hunk_id?: string;
+	file?: string;
+	hunk_index?: number;
+	hunk_header?: string;
+	old_start?: number;
+	old_lines?: number;
+	new_start?: number;
+	new_lines?: number;
 	line_range?: string;
+	placement?: PrWalkthroughYamlHunkPlacement;
+	why_relevant?: string;
+	primary_card_id?: string;
+	skip_reason?: PrWalkthroughYamlSkipReason | string;
+}
+
+export interface PrWalkthroughYamlRelevantHunk extends PrWalkthroughYamlHunkReference {
 	why_relevant: string;
 }
+
+export type PrWalkthroughYamlNarrativeEntry =
+	| { id: string; type: "text"; body: string }
+	| { id: string; type: "diff"; hunks: PrWalkthroughYamlHunkReference[] }
+	| { id: string; type: "note"; body: string; anchor?: PrWalkthroughYamlAnchor }
+	| { id: string; type: "suggested_comment"; severity: "blocking" | "non_blocking" | "question" | "nit"; intent: "inline" | "summary"; body: string; anchor?: PrWalkthroughYamlAnchor }
+	| { id: string; type: "checklist"; items: string[] };
 
 export interface PrWalkthroughYamlDesignDecision {
 	id: string;
@@ -165,6 +208,7 @@ export interface PrWalkthroughYamlReviewChunk {
 	explanation: string;
 	files: string[];
 	relevant_hunks: PrWalkthroughYamlRelevantHunk[];
+	narrative?: PrWalkthroughYamlNarrativeEntry[];
 	suggested_concerns: Array<{
 		severity: "blocking" | "non_blocking" | "question" | "nit";
 		concern: string;
@@ -174,10 +218,7 @@ export interface PrWalkthroughYamlReviewChunk {
 	positive_notes: string[];
 }
 
-export interface PrWalkthroughYamlAnchor {
-	file: string;
-	hunk_header: string;
-	line_range?: string;
+export interface PrWalkthroughYamlAnchor extends PrWalkthroughYamlHunkReference {
 	line?: number;
 }
 
@@ -210,6 +251,7 @@ export interface MapYamlToWalkthroughPayloadOptions {
 	warnings?: WalkthroughWarning[];
 	limits?: WalkthroughSynthesisLimits;
 	export?: WalkthroughSynthesisExport;
+	readReceipts?: PrWalkthroughReadReceipt[];
 }
 
 export interface WalkthroughParsedDiffForYamlMapping {
@@ -237,6 +279,10 @@ const PHASES = new Set(["orientation", "design", "significant", "other", "audit"
 const CONCERN_SEVERITIES = new Set(["blocking", "non_blocking", "question", "nit"]);
 const OMISSION_SEVERITIES = new Set(["blocking", "non_blocking", "question"]);
 const OMISSION_CATEGORIES = new Set(["tests", "docs", "migration", "telemetry", "security", "performance", "compatibility", "cleanup", "other"]);
+const HUNK_PLACEMENTS = new Set(["primary", "secondary", "skip"]);
+const HUNK_SKIP_REASONS = new Set(["generated", "binary", "mechanical", "unread", "superseded", "other"]);
+const NARRATIVE_TYPES = new Set(["text", "diff", "note", "suggested_comment", "checklist"]);
+const COMMENT_INTENTS = new Set(["inline", "summary"]);
 export function validatePrWalkthroughYaml(yamlText: string, options: PrWalkthroughYamlValidationOptions = {}): PrWalkthroughYamlValidationResult {
 	const errors: PrWalkthroughValidationError[] = [];
 	const maxYamlBytes = options.maxYamlBytes ?? DEFAULT_MAX_YAML_BYTES;
@@ -282,29 +328,30 @@ export function mapYamlToWalkthroughPayload(
 	const diffBlocks = flattenDiffBlocks(parsedDiff);
 	const mapper = new DiffReferenceMapper(diffBlocks);
 	const warnings: WalkthroughWarning[] = [...(options.warnings ?? []), ...(parsedDiff.warnings ?? [])];
-	const usedBlockIds = new Set<string>();
 	const cards: PrWalkthroughCard[] = [];
+	const allocatedCards: PrWalkthroughCard[] = [];
+	const cardPlans: HunkCardPlan[] = [];
 	const changesetId = options.changesetId ?? options.target?.changesetId ?? changesetIdForGithub(document.pr.owner, document.pr.repo, document.pr.number, document.pr.head_sha);
 
-	cards.push(buildOrientationCard(document));
+	const allocateCardId = (seed: string): string => {
+		const id = uniqueCardId(seed, allocatedCards);
+		allocatedCards.push({ id, phaseId: "other", title: id, summary: "", diffBlocks: [] });
+		return id;
+	};
+
+	const orientation = buildOrientationCard(document);
+	cards.push(orientation);
+	allocatedCards.push(orientation);
 
 	for (const decision of document.walkthrough.design_decisions) {
-		const mapped = mapRelevantHunks(decision.relevant_hunks, mapper, `walkthrough.design_decisions[id=${decision.id}].relevant_hunks`, warnings);
-		for (const block of mapped.blocks) usedBlockIds.add(block.id);
-		cards.push({
-			id: uniqueCardId(`design-${decision.id}`, cards),
+		const cardId = allocateCardId(`design-${decision.id}`);
+		const refs = mergeCardReferences(collectHunkReferences(decision.relevant_hunks, mapper, {
+			cardId,
+			cardTitle: decision.title,
 			phaseId: "design",
-			title: decision.title,
-			navLabel: decision.nav_label ?? deriveNavLabel(decision.title),
-			summary: decision.explanation,
-			rationale: compactJoin([
-				`Chosen approach: ${decision.chosen_approach}`,
-				formatAlternatives(decision.alternatives_considered),
-				formatList("Trade-offs", decision.tradeoffs),
-			]),
-			diffBlocks: mapped.blocks,
-			cardSuggestions: compactArray([...decision.suggested_reviewer_concerns, ...mapped.notes]),
-		});
+			path: `walkthrough.design_decisions[id=${decision.id}].relevant_hunks`,
+		}));
+		cardPlans.push({ kind: "design", cardId, title: decision.title, phaseId: "design", refs, decision });
 	}
 
 	const chunkById = new Map(document.walkthrough.review_chunks.map(chunk => [chunk.id, chunk]));
@@ -313,29 +360,44 @@ export function mapYamlToWalkthroughPayload(
 		...document.walkthrough.review_chunks.filter(chunk => !document.walkthrough.display.chunk_order.includes(chunk.id)),
 	];
 	for (const chunk of orderedChunks) {
-		const mappedHunks = mapRelevantHunks(chunk.relevant_hunks, mapper, `walkthrough.review_chunks[id=${chunk.id}].relevant_hunks`, warnings);
-		const fileBlocks = mapper.blocksForFiles(chunk.files);
-		const diffBlocksForCard = uniqueBlocks([...mappedHunks.blocks, ...fileBlocks]);
-		for (const block of diffBlocksForCard) usedBlockIds.add(block.id);
-		const cardId = uniqueCardId(`${chunk.phase}-${chunk.id}`, cards);
-		const commentMapping = mapSuggestedConcerns(chunk, cardId, mapper, warnings);
-		cards.push({
-			id: cardId,
-			phaseId: chunk.phase,
-			title: chunk.title,
-			navLabel: chunk.nav_label ?? deriveNavLabel(chunk.title),
-			summary: chunk.explanation,
-			rationale: compactJoin([`Reviewer goal: ${chunk.reviewer_goal}`, formatList("Positive notes", chunk.positive_notes)]),
-			diffBlocks: diffBlocksForCard,
-			...(commentMapping.comments.length > 0 ? { suggestedComments: commentMapping.comments } : {}),
-			cardSuggestions: compactArray([...mappedHunks.notes, ...commentMapping.notes]),
+		const cardId = allocateCardId(`${chunk.phase}-${chunk.id}`);
+		const refs = mergeCardReferences([
+			...collectHunkReferences(chunk.relevant_hunks, mapper, {
+				cardId,
+				cardTitle: chunk.title,
+				phaseId: chunk.phase,
+				path: `walkthrough.review_chunks[id=${chunk.id}].relevant_hunks`,
+			}),
+			...collectNarrativeDiffReferences(chunk, mapper, {
+				cardId,
+				cardTitle: chunk.title,
+				phaseId: chunk.phase,
+				path: `walkthrough.review_chunks[id=${chunk.id}].narrative`,
+			}),
+		]);
+		cardPlans.push({ kind: "review", cardId, title: chunk.title, phaseId: chunk.phase, refs, chunk });
+	}
+
+	const placement = validateHunkCoverage(mapper.allHunks(), cardPlans.flatMap(plan => plan.refs), options.readReceipts ?? []);
+	if (placement.majorRemaining.length > 0) {
+		throw synthesisError("PRW_MAJOR_REMAINING_HUNKS", "One or more major hunks would first appear in the completion sweep.", {
+			major_remaining: placement.majorRemaining,
+			suggestedFix: "Create a logical review card for each major remaining hunk, or mark it placement: skip with a reason if it is genuinely mechanical.",
 		});
+	}
+
+	for (const plan of cardPlans) {
+		if (plan.kind === "design") {
+			cards.push(buildDesignDecisionCard(plan, placement));
+		} else {
+			cards.push(buildReviewChunkCard(plan, mapper, placement, warnings));
+		}
 	}
 
 	const omissionsCard = buildOmissionsCard(document.walkthrough.omissions_and_followups, cards);
 	if (omissionsCard) cards.push(omissionsCard);
 
-	cards.push(buildAuditCard(document, diffBlocks.filter(block => !usedBlockIds.has(block.id)), cards));
+	cards.push(buildAuditCard(document, placement, mapper, cards));
 
 	return {
 		changesetId,
@@ -356,9 +418,464 @@ export function mapYamlToWalkthroughPayload(
 		},
 		cards: orderCards(cards, document.walkthrough.display.phase_order),
 		warnings: dedupeWarnings(warnings),
+		coverage: placement.summary,
 		limits: options.limits ?? parsedDiff.limits,
 		export: options.export ?? parsedDiff.export,
 	};
+}
+
+interface HunkReferenceContext {
+	cardId: string;
+	cardTitle: string;
+	phaseId: PrWalkthroughPhaseId;
+	path: string;
+	narrativeEntryId?: string;
+}
+
+interface IndexedHunk {
+	hunkId: string;
+	blockId: string;
+	block: PrWalkthroughDiffBlock;
+	hunk: PrWalkthroughHunk;
+	filePath: string;
+	oldPath?: string;
+	hunkIndex: number;
+	hunkHeader: string;
+	coordinates?: HunkCoordinates;
+	changedLines: number;
+	additions: number;
+	deletions: number;
+	generated: boolean;
+	binary: boolean;
+	truncated: boolean;
+	sourceTruncated: boolean;
+	fileCategory: string;
+}
+
+interface ResolvedHunkReference {
+	cardId: string;
+	cardTitle: string;
+	phaseId: PrWalkthroughPhaseId;
+	path: string;
+	narrativeEntryId?: string;
+	hunk: IndexedHunk;
+	placement: "primary" | "secondary" | "skip";
+	whyRelevant?: string;
+	primaryCardId?: string;
+	skipReason?: string;
+}
+
+interface HunkCardPlan {
+	kind: "design" | "review";
+	cardId: string;
+	title: string;
+	phaseId: PrWalkthroughPhaseId;
+	refs: ResolvedHunkReference[];
+	decision?: PrWalkthroughYamlDesignDecision;
+	chunk?: PrWalkthroughYamlReviewChunk;
+}
+
+interface HunkCoverageComputation {
+	placementsByCard: Map<string, PrWalkthroughHunkPlacement[]>;
+	completionSweepPlacements: PrWalkthroughHunkPlacement[];
+	records: Map<string, NonNullable<PrWalkthroughCoverageSummary["records"]>[number]>;
+	summary: PrWalkthroughCoverageSummary;
+	majorRemaining: NonNullable<PrWalkthroughCoverageSummary["majorRemaining"]>;
+}
+
+function collectHunkReferences(hunks: PrWalkthroughYamlHunkReference[], mapper: DiffReferenceMapper, context: HunkReferenceContext): ResolvedHunkReference[] {
+	return hunks.map((hunk, index) => resolveReference(mapper, hunk, { ...context, path: `${context.path}[${index}]` }));
+}
+
+function collectNarrativeDiffReferences(chunk: PrWalkthroughYamlReviewChunk, mapper: DiffReferenceMapper, context: HunkReferenceContext): ResolvedHunkReference[] {
+	const out: ResolvedHunkReference[] = [];
+	for (const [entryIndex, entry] of (chunk.narrative ?? []).entries()) {
+		if (entry.type !== "diff") continue;
+		for (const [hunkIndex, hunk] of entry.hunks.entries()) {
+			out.push(resolveReference(mapper, hunk, { ...context, narrativeEntryId: entry.id, path: `${context.path}[${entryIndex}].hunks[${hunkIndex}]` }));
+		}
+	}
+	return out;
+}
+
+function mergeCardReferences(refs: ResolvedHunkReference[]): ResolvedHunkReference[] {
+	const byHunk = new Map<string, ResolvedHunkReference>();
+	for (const ref of refs) {
+		const existing = byHunk.get(ref.hunk.hunkId);
+		if (!existing) {
+			byHunk.set(ref.hunk.hunkId, ref);
+			continue;
+		}
+		if (existing.placement !== ref.placement || (existing.primaryCardId ?? "") !== (ref.primaryCardId ?? "") || (existing.skipReason ?? "") !== (ref.skipReason ?? "")) {
+			throw synthesisError("PRW_HUNK_PLACEMENT_CONFLICT", "A hunk is referenced more than once in the same card with conflicting placement metadata.", {
+				hunkId: ref.hunk.hunkId,
+				cardId: ref.cardId,
+				firstPath: existing.path,
+				conflictingPath: ref.path,
+			});
+		}
+		if ((!existing.whyRelevant && ref.whyRelevant) || (!existing.narrativeEntryId && ref.narrativeEntryId)) {
+			byHunk.set(ref.hunk.hunkId, {
+				...existing,
+				...(existing.whyRelevant ? {} : ref.whyRelevant ? { whyRelevant: ref.whyRelevant } : {}),
+				...(existing.narrativeEntryId ? {} : ref.narrativeEntryId ? { narrativeEntryId: ref.narrativeEntryId } : {}),
+			});
+		}
+	}
+	return [...byHunk.values()];
+}
+
+function resolveReference(mapper: DiffReferenceMapper, ref: PrWalkthroughYamlHunkReference, context: HunkReferenceContext): ResolvedHunkReference {
+	const hunk = mapper.resolveHunk(ref, context.path, context.cardId);
+	const placement = ref.placement ?? "primary";
+	if (placement === "skip" && !ref.skip_reason) {
+		throw synthesisError("PRW_SKIP_REASON_REQUIRED", "Skipped hunk references require skip_reason.", {
+			cardId: context.cardId,
+			path: context.path,
+			hunkId: hunk.hunkId,
+			suggestedFix: "Add skip_reason: generated, binary, mechanical, unread, superseded, or other.",
+		});
+	}
+	return {
+		cardId: context.cardId,
+		cardTitle: context.cardTitle,
+		phaseId: context.phaseId,
+		path: context.path,
+		...(context.narrativeEntryId ? { narrativeEntryId: context.narrativeEntryId } : {}),
+		hunk,
+		placement,
+		...(ref.why_relevant ? { whyRelevant: ref.why_relevant } : {}),
+		...(ref.primary_card_id ? { primaryCardId: ref.primary_card_id } : {}),
+		...(ref.skip_reason ? { skipReason: ref.skip_reason } : {}),
+	};
+}
+
+function validateHunkCoverage(allHunks: IndexedHunk[], refs: ResolvedHunkReference[], receipts: PrWalkthroughReadReceipt[]): HunkCoverageComputation {
+	const primaryByHunk = new Map<string, ResolvedHunkReference[]>();
+	const secondaryByHunk = new Map<string, ResolvedHunkReference[]>();
+	const skipByHunk = new Map<string, ResolvedHunkReference[]>();
+	for (const ref of refs) {
+		const target = ref.placement === "primary" ? primaryByHunk : ref.placement === "secondary" ? secondaryByHunk : skipByHunk;
+		target.set(ref.hunk.hunkId, [...(target.get(ref.hunk.hunkId) ?? []), ref]);
+	}
+
+	const duplicateConflicts = [...primaryByHunk.entries()]
+		.map(([hunkId, hunkRefs]) => ({ hunkId, primaryCards: uniqueCardRefs(hunkRefs), hunk: hunkRefs[0]?.hunk }))
+		.filter(item => item.primaryCards.length > 1);
+	if (duplicateConflicts.length > 0) {
+		throw synthesisError("PRW_DUPLICATE_PRIMARY_HUNK", "One or more hunks have multiple primary placements.", {
+			conflicts: duplicateConflicts.map(conflict => ({
+				hunkId: conflict.hunkId,
+				file: conflict.hunk?.filePath,
+				hunkHeader: conflict.hunk?.hunkHeader,
+				primaryCards: conflict.primaryCards,
+			})),
+			suggestedFix: "Keep one primary placement and mark later mentions placement: secondary.",
+		});
+	}
+
+	for (const [hunkId, hunkRefs] of secondaryByHunk) {
+		const primary = primaryByHunk.get(hunkId)?.[0];
+		if (!primary) {
+			throw synthesisError("PRW_SECONDARY_WITHOUT_PRIMARY", "A secondary hunk reference has no primary owner.", {
+				hunkId,
+				secondaryCards: uniqueCardRefs(hunkRefs),
+				suggestedFix: "Make this reference primary, or add a primary placement in the card that first explains the hunk.",
+			});
+		}
+		for (const ref of hunkRefs) {
+			if (ref.primaryCardId && ref.primaryCardId !== primary.cardId) {
+				throw synthesisError("PRW_HUNK_PLACEMENT_CONFLICT", "A secondary hunk reference points at a different primary card than the resolved owner.", {
+					hunkId,
+					path: ref.path,
+					primaryCardId: primary.cardId,
+					suppliedPrimaryCardId: ref.primaryCardId,
+				});
+			}
+		}
+	}
+
+	for (const [hunkId, hunkRefs] of skipByHunk) {
+		if ((primaryByHunk.get(hunkId)?.length ?? 0) > 0) {
+			throw synthesisError("PRW_HUNK_PLACEMENT_CONFLICT", "A hunk cannot be both skipped and primary-reviewed.", {
+				hunkId,
+				skipCards: uniqueCardRefs(hunkRefs),
+				primaryCards: uniqueCardRefs(primaryByHunk.get(hunkId) ?? []),
+			});
+		}
+	}
+
+	const receiptsByHunk = indexReadReceipts(receipts);
+	const records = new Map<string, NonNullable<PrWalkthroughCoverageSummary["records"]>[number]>();
+	const placementsByCard = new Map<string, PrWalkthroughHunkPlacement[]>();
+	const completionSweepPlacements: PrWalkthroughHunkPlacement[] = [];
+	const majorRemaining: NonNullable<PrWalkthroughCoverageSummary["majorRemaining"]> = [];
+
+	for (const hunk of allHunks) {
+		const primary = primaryByHunk.get(hunk.hunkId)?.[0];
+		const secondaryRefs = secondaryByHunk.get(hunk.hunkId) ?? [];
+		const skip = skipByHunk.get(hunk.hunkId)?.[0];
+		const readReceiptIds = receiptsByHunk.get(hunk.hunkId) ?? [];
+		const primaryState = primary ? (readReceiptIds.length > 0 ? "primary-reviewed" : "unread") : skip ? "skipped" : "completion-sweep-remaining";
+		const record: NonNullable<PrWalkthroughCoverageSummary["records"]>[number] = {
+			hunkId: hunk.hunkId,
+			filePath: hunk.filePath,
+			hunkHeader: hunk.hunkHeader,
+			primaryState,
+			state: primaryState,
+			...(primary ? { primaryCardId: primary.cardId } : {}),
+			secondaryCardIds: uniqueStrings(secondaryRefs.map(ref => ref.cardId)),
+			repeatedReferenceCount: secondaryRefs.length,
+			...(skip?.skipReason ? { skippedReason: skip.skipReason } : {}),
+			readReceiptIds,
+			generated: hunk.generated,
+			binary: hunk.binary,
+			truncated: hunk.truncated,
+			changedLines: hunk.changedLines,
+			fileCategory: hunk.fileCategory,
+		};
+		records.set(hunk.hunkId, record);
+		if (!primary && !skip && isMajorRemaining(hunk)) {
+			majorRemaining.push({ hunkId: hunk.hunkId, filePath: hunk.filePath, hunkHeader: hunk.hunkHeader, changedLines: hunk.changedLines, fileCategory: hunk.fileCategory });
+		}
+	}
+
+	for (const ref of refs) {
+		const primary = primaryByHunk.get(ref.hunk.hunkId)?.[0];
+		const record = records.get(ref.hunk.hunkId);
+		const placement = placementForReference(ref, primary, record?.readReceiptIds ?? []);
+		placementsByCard.set(ref.cardId, [...(placementsByCard.get(ref.cardId) ?? []), placement]);
+	}
+
+	for (const hunk of allHunks) {
+		const record = records.get(hunk.hunkId);
+		if (record?.primaryState !== "completion-sweep-remaining") continue;
+		completionSweepPlacements.push({
+			hunkId: hunk.hunkId,
+			blockId: hunk.blockId,
+			filePath: hunk.filePath,
+			hunkHeader: hunk.hunkHeader,
+			placement: "completion_sweep",
+			defaultExpanded: false,
+			readReceiptIds: record.readReceiptIds,
+		});
+	}
+
+	const recordList = [...records.values()];
+	const summary: PrWalkthroughCoverageSummary = {
+		totalHunks: recordList.length,
+		primaryReviewed: recordList.filter(record => record.primaryState === "primary-reviewed").length,
+		unread: recordList.filter(record => record.primaryState === "unread").length,
+		skipped: recordList.filter(record => record.primaryState === "skipped").length,
+		completionSweepRemaining: recordList.filter(record => record.primaryState === "completion-sweep-remaining").length,
+		repeatedSecondaryReferences: recordList.reduce((sum, record) => sum + record.repeatedReferenceCount, 0),
+		uniqueSecondaryHunks: recordList.filter(record => record.secondaryCardIds.length > 0).length,
+		records: recordList,
+		majorRemaining,
+	};
+
+	return { placementsByCard, completionSweepPlacements, records, summary, majorRemaining };
+}
+
+function placementForReference(ref: ResolvedHunkReference, primary: ResolvedHunkReference | undefined, readReceiptIds: string[]): PrWalkthroughHunkPlacement {
+	return {
+		hunkId: ref.hunk.hunkId,
+		blockId: ref.hunk.blockId,
+		filePath: ref.hunk.filePath,
+		hunkHeader: ref.hunk.hunkHeader,
+		placement: ref.placement,
+		defaultExpanded: ref.placement === "primary",
+		...(primary && ref.placement === "secondary" ? { primaryCardId: primary.cardId, primaryCardTitle: primary.cardTitle } : {}),
+		...(ref.whyRelevant ? { whyRelevant: ref.whyRelevant } : {}),
+		...(ref.skipReason ? { skipReason: ref.skipReason } : {}),
+		readReceiptIds,
+	};
+}
+
+function buildDesignDecisionCard(plan: HunkCardPlan, placement: HunkCoverageComputation): PrWalkthroughCard {
+	const decision = plan.decision;
+	if (!decision) throw new Error("Missing design decision plan data.");
+	const hunkPlacements = placement.placementsByCard.get(plan.cardId) ?? [];
+	return {
+		id: plan.cardId,
+		phaseId: "design",
+		title: decision.title,
+		navLabel: decision.nav_label ?? deriveNavLabel(decision.title),
+		summary: decision.explanation,
+		rationale: compactJoin([
+			`Chosen approach: ${decision.chosen_approach}`,
+			formatAlternatives(decision.alternatives_considered),
+			formatList("Trade-offs", decision.tradeoffs),
+		]),
+		diffBlocks: hunkSlicedDiffBlocks(hunkPlacements.filter(item => item.placement !== "skip"), plan.refs),
+		hunkPlacements,
+		coverage: cardCoverageSummary(hunkPlacements, placement.records),
+		cardSuggestions: compactArray([...decision.suggested_reviewer_concerns, ...plan.refs.map(ref => ref.whyRelevant)]),
+	};
+}
+
+function buildReviewChunkCard(plan: HunkCardPlan, mapper: DiffReferenceMapper, placement: HunkCoverageComputation, warnings: WalkthroughWarning[]): PrWalkthroughCard {
+	const chunk = plan.chunk;
+	if (!chunk) throw new Error("Missing review chunk plan data.");
+	const hunkPlacements = placement.placementsByCard.get(plan.cardId) ?? [];
+	const commentMapping = mapSuggestedConcerns(chunk, plan.cardId, mapper, warnings);
+	const narrative = chunk.narrative
+		? mapAuthoredNarrative(chunk, plan, mapper)
+		: synthesizeLegacyNarrative(chunk, plan.refs.filter(ref => ref.placement !== "skip").map(ref => ref.hunk.hunkId), commentMapping.notes);
+	return {
+		id: plan.cardId,
+		phaseId: chunk.phase,
+		title: chunk.title,
+		navLabel: chunk.nav_label ?? deriveNavLabel(chunk.title),
+		summary: chunk.explanation,
+		rationale: compactJoin([`Reviewer goal: ${chunk.reviewer_goal}`, formatList("Positive notes", chunk.positive_notes)]),
+		diffBlocks: hunkSlicedDiffBlocks(hunkPlacements.filter(item => item.placement !== "skip"), plan.refs),
+		...(commentMapping.comments.length > 0 ? { suggestedComments: commentMapping.comments } : {}),
+		cardSuggestions: compactArray([...plan.refs.map(ref => ref.whyRelevant), ...commentMapping.notes]),
+		narrative,
+		hunkPlacements,
+		coverage: cardCoverageSummary(hunkPlacements, placement.records),
+	};
+}
+
+function mapAuthoredNarrative(chunk: PrWalkthroughYamlReviewChunk, plan: HunkCardPlan, mapper: DiffReferenceMapper): PrWalkthroughNarrativeBlock[] {
+	const blocks: PrWalkthroughNarrativeBlock[] = [];
+	for (const [index, entry] of (chunk.narrative ?? []).entries()) {
+		const path = `walkthrough.review_chunks[id=${chunk.id}].narrative[${index}]`;
+		switch (entry.type) {
+			case "text":
+				blocks.push({ type: "text", id: entry.id, body: entry.body });
+				break;
+			case "diff": {
+				const hunkIds = plan.refs.filter(ref => ref.narrativeEntryId === entry.id && ref.placement !== "skip").map(ref => ref.hunk.hunkId);
+				blocks.push({ type: "diff", id: entry.id, hunkIds: uniqueStrings(hunkIds) });
+				break;
+			}
+			case "note": {
+				const anchor = entry.anchor ? resolveNarrativeAnchor(mapper, entry.anchor, `${path}.anchor`, plan.cardId) : undefined;
+				blocks.push({ type: "note", id: entry.id, body: entry.body, ...(anchor ? { anchor } : {}) });
+				break;
+			}
+			case "suggested_comment": {
+				const anchor = entry.anchor ? resolveNarrativeAnchor(mapper, entry.anchor, `${path}.anchor`, plan.cardId) : undefined;
+				if (entry.intent === "inline" && !anchor) {
+					throw synthesisError("PRW_HUNK_REF_UNRESOLVED", "Inline narrative suggested comment could not resolve its anchor.", { cardId: plan.cardId, path: `${path}.anchor` });
+				}
+				blocks.push({ type: "suggested_comment", id: entry.id, severity: entry.severity, intent: anchor ? entry.intent : "summary", body: entry.body, ...(anchor ? { anchor } : {}) });
+				break;
+			}
+			case "checklist":
+				blocks.push({ type: "checklist", id: entry.id, items: entry.items });
+				break;
+		}
+	}
+	return blocks;
+}
+
+function synthesizeLegacyNarrative(chunk: PrWalkthroughYamlReviewChunk, hunkIds: string[], notes: string[]): PrWalkthroughNarrativeBlock[] {
+	const narrative: PrWalkthroughNarrativeBlock[] = [
+		{ type: "text", id: "summary", body: chunk.explanation },
+		{ type: "text", id: "reviewer-goal", body: `Reviewer goal: ${chunk.reviewer_goal}` },
+	];
+	if (hunkIds.length > 0) narrative.push({ type: "diff", id: "referenced-hunks", hunkIds: uniqueStrings(hunkIds) });
+	for (const [index, note] of notes.entries()) narrative.push({ type: "suggested_comment", id: `legacy-suggestion-${index + 1}`, severity: "question", intent: "summary", body: note });
+	if (chunk.positive_notes.length > 0) narrative.push({ type: "checklist", id: "positive-notes", items: chunk.positive_notes });
+	return narrative;
+}
+
+function resolveNarrativeAnchor(mapper: DiffReferenceMapper, anchor: PrWalkthroughYamlAnchor, path: string, cardId: string): { hunkId?: string; lineId?: string } {
+	const hunk = mapper.resolveHunk(anchor, path, cardId);
+	const line = selectLine(hunk.hunk, anchor);
+	return { hunkId: hunk.hunkId, ...(line ? { lineId: line.id } : {}) };
+}
+
+function hunkSlicedDiffBlocks(placements: PrWalkthroughHunkPlacement[], refs: ResolvedHunkReference[]): PrWalkthroughDiffBlock[] {
+	const refByHunk = new Map(refs.map(ref => [ref.hunk.hunkId, ref]));
+	const byBlock = new Map<string, { source: PrWalkthroughDiffBlock; placements: PrWalkthroughHunkPlacement[] }>();
+	for (const placement of placements) {
+		const ref = refByHunk.get(placement.hunkId);
+		if (!ref || placement.placement === "skip") continue;
+		const entry = byBlock.get(ref.hunk.blockId) ?? { source: ref.hunk.block, placements: [] };
+		entry.placements.push(placement);
+		byBlock.set(ref.hunk.blockId, entry);
+	}
+	return [...byBlock.values()].map(({ source, placements: blockPlacements }) => ({
+		...source,
+		hunks: blockPlacements.map(placement => {
+			const ref = refByHunk.get(placement.hunkId);
+			const hunk = ref?.hunk.hunk;
+			return {
+				...(hunk ?? { id: placement.hunkId, header: placement.hunkHeader, lines: [] }),
+				id: placement.hunkId,
+				placement: placement.placement,
+				defaultExpanded: placement.defaultExpanded,
+				...(placement.primaryCardId ? { primaryCardId: placement.primaryCardId } : {}),
+				...(placement.primaryCardTitle ? { primaryCardTitle: placement.primaryCardTitle } : {}),
+				...(placement.whyRelevant ? { whyRelevant: placement.whyRelevant } : {}),
+				...(placement.skipReason ? { skipReason: placement.skipReason } : {}),
+				readReceiptIds: placement.readReceiptIds,
+			};
+		}),
+		hunkPlacements: blockPlacements,
+	}));
+}
+
+function hunkSlicedDiffBlocksFromPlacements(placements: PrWalkthroughHunkPlacement[], mapper: DiffReferenceMapper): PrWalkthroughDiffBlock[] {
+	const refs: ResolvedHunkReference[] = [];
+	for (const placement of placements) {
+		const hunk = mapper.hunkById(placement.hunkId);
+		if (!hunk) continue;
+		refs.push({ cardId: "audit-checklist", cardTitle: "Audit and review checklist", phaseId: "audit", path: "completion_sweep", hunk, placement: "primary" });
+	}
+	return hunkSlicedDiffBlocks(placements, refs);
+}
+
+function cardCoverageSummary(placements: PrWalkthroughHunkPlacement[], records: Map<string, NonNullable<PrWalkthroughCoverageSummary["records"]>[number]>): PrWalkthroughCardCoverageSummary {
+	const hunkIds = uniqueStrings(placements.map(item => item.hunkId));
+	const cardRecords = hunkIds.map(id => records.get(id)).filter((record): record is NonNullable<PrWalkthroughCoverageSummary["records"]>[number] => Boolean(record));
+	return {
+		totalHunks: cardRecords.length,
+		primaryReviewed: cardRecords.filter(record => record.primaryState === "primary-reviewed").length,
+		unread: cardRecords.filter(record => record.primaryState === "unread").length,
+		skipped: cardRecords.filter(record => record.primaryState === "skipped").length,
+		completionSweepRemaining: cardRecords.filter(record => record.primaryState === "completion-sweep-remaining").length,
+		repeatedSecondaryReferences: cardRecords.reduce((sum, record) => sum + record.repeatedReferenceCount, 0),
+		hunkIds,
+	};
+}
+
+function indexReadReceipts(receipts: PrWalkthroughReadReceipt[]): Map<string, string[]> {
+	const out = new Map<string, string[]>();
+	for (const receipt of receipts) {
+		if (receipt.mode && receipt.mode !== "file") continue;
+		for (const hunkId of receipt.hunkIds ?? []) {
+			out.set(hunkId, uniqueStrings([...(out.get(hunkId) ?? []), receipt.id]));
+		}
+	}
+	return out;
+}
+
+function uniqueCardRefs(refs: ResolvedHunkReference[]): Array<{ cardId: string; title: string }> {
+	const seen = new Set<string>();
+	const out: Array<{ cardId: string; title: string }> = [];
+	for (const ref of refs) {
+		if (seen.has(ref.cardId)) continue;
+		seen.add(ref.cardId);
+		out.push({ cardId: ref.cardId, title: ref.cardTitle });
+	}
+	return out;
+}
+
+function isMajorRemaining(hunk: IndexedHunk): boolean {
+	return !hunk.generated && !hunk.binary && !hunk.sourceTruncated && hunk.changedLines >= 8 && !["test", "docs", "lockfile", "asset", "vendor", "generated"].includes(hunk.fileCategory);
+}
+
+function synthesisError(code: PrWalkthroughSynthesisErrorCode, message: string, details?: Record<string, unknown>): PrWalkthroughSynthesisError {
+	const error = new Error(message) as PrWalkthroughSynthesisError;
+	error.code = code;
+	error.retryable = true;
+	if (details) error.details = details;
+	return error;
 }
 
 function parseDocument(root: Record<string, unknown>, errors: PrWalkthroughValidationError[]): PrWalkthroughYamlDocument | null {
@@ -508,7 +1025,7 @@ function parseDesignDecisions(items: unknown[], errors: PrWalkthroughValidationE
 		const alternatives = parseAlternatives(requiredArray(item, "alternatives_considered", errors, `${path}.`) ?? [], errors, `${path}.alternatives_considered`);
 		const tradeoffs = requiredStringArray(item, "tradeoffs", errors, `${path}.`);
 		const concerns = requiredStringArray(item, "suggested_reviewer_concerns", errors, `${path}.`);
-		const hunks = parseRelevantHunks(requiredArray(item, "relevant_hunks", errors, `${path}.`) ?? [], errors, `${path}.relevant_hunks`, false);
+		const hunks = parseRelevantHunks(requiredArray(item, "relevant_hunks", errors, `${path}.`) ?? [], errors, `${path}.relevant_hunks`);
 		if (id && title && explanation && chosenApproach && alternatives && tradeoffs && concerns && hunks) {
 			out.push({ id, title, ...(navLabel !== undefined ? { nav_label: navLabel } : {}), explanation, chosen_approach: chosenApproach, alternatives_considered: alternatives, tradeoffs, suggested_reviewer_concerns: concerns, relevant_hunks: hunks });
 		}
@@ -532,11 +1049,13 @@ function parseReviewChunks(items: unknown[], errors: PrWalkthroughValidationErro
 		const reviewerGoal = requiredString(item, "reviewer_goal", errors, `${path}.`);
 		const explanation = requiredString(item, "explanation", errors, `${path}.`);
 		const files = requiredStringArray(item, "files", errors, `${path}.`);
-		const hunks = parseRelevantHunks(requiredArray(item, "relevant_hunks", errors, `${path}.`) ?? [], errors, `${path}.relevant_hunks`, true);
+		const narrative = item.narrative === undefined ? undefined : parseNarrative(requiredArray(item, "narrative", errors, `${path}.`) ?? [], errors, `${path}.narrative`);
+		const hunkItems = item.relevant_hunks === undefined && narrative ? [] : requiredArray(item, "relevant_hunks", errors, `${path}.`) ?? [];
+		const hunks = parseRelevantHunks(hunkItems, errors, `${path}.relevant_hunks`);
 		const suggestedConcerns = parseSuggestedConcerns(requiredArray(item, "suggested_concerns", errors, `${path}.`) ?? [], errors, `${path}.suggested_concerns`);
 		const positiveNotes = requiredStringArray(item, "positive_notes", errors, `${path}.`);
-		if (id && phase && title && reviewerGoal && explanation && files && hunks && suggestedConcerns && positiveNotes) {
-			out.push({ id, phase, title, ...(navLabel !== undefined ? { nav_label: navLabel } : {}), reviewer_goal: reviewerGoal, explanation, files, relevant_hunks: hunks, suggested_concerns: suggestedConcerns, positive_notes: positiveNotes });
+		if (id && phase && title && reviewerGoal && explanation && files && hunks && suggestedConcerns && positiveNotes && narrative !== null) {
+			out.push({ id, phase, title, ...(navLabel !== undefined ? { nav_label: navLabel } : {}), reviewer_goal: reviewerGoal, explanation, files, relevant_hunks: hunks, ...(narrative ? { narrative } : {}), suggested_concerns: suggestedConcerns, positive_notes: positiveNotes });
 		}
 	});
 	validateUniqueIds(out, "$.walkthrough.review_chunks", errors);
@@ -596,7 +1115,7 @@ function parseAlternatives(items: unknown[], errors: PrWalkthroughValidationErro
 	return errorsForPrefix(errors, path) ? null : out;
 }
 
-function parseRelevantHunks(items: unknown[], errors: PrWalkthroughValidationError[], path: string, lineRangeAllowed: boolean): PrWalkthroughYamlRelevantHunk[] | null {
+function parseRelevantHunks(items: unknown[], errors: PrWalkthroughValidationError[], path: string): PrWalkthroughYamlRelevantHunk[] | null {
 	const out: PrWalkthroughYamlRelevantHunk[] = [];
 	items.forEach((item, index) => {
 		const itemPath = `${path}[${index}]`;
@@ -604,12 +1123,112 @@ function parseRelevantHunks(items: unknown[], errors: PrWalkthroughValidationErr
 			addError(errors, itemPath, "Expected an object.");
 			return;
 		}
-		const file = requiredString(item, "file", errors, `${itemPath}.`);
-		const hunkHeader = requiredString(item, "hunk_header", errors, `${itemPath}.`);
-		const whyRelevant = requiredString(item, "why_relevant", errors, `${itemPath}.`);
-		const lineRange = optionalString(item, "line_range", errors, `${itemPath}.`);
-		if (lineRange && !lineRangeAllowed) addError(errors, `${itemPath}.line_range`, "line_range is only supported on review chunk hunk references.");
-		if (file && hunkHeader && whyRelevant) out.push({ file, hunk_header: hunkHeader, why_relevant: whyRelevant, ...(lineRange ? { line_range: lineRange } : {}) });
+		const reference = parseHunkReference(item, errors, itemPath, { requireWhy: true });
+		if (reference?.why_relevant) out.push(reference as PrWalkthroughYamlRelevantHunk);
+	});
+	return errorsForPrefix(errors, path) ? null : out;
+}
+
+function parseHunkReference(root: Record<string, unknown>, errors: PrWalkthroughValidationError[], path: string, options: { requireWhy?: boolean } = {}): PrWalkthroughYamlHunkReference | null {
+	const hunkId = optionalString(root, "hunk_id", errors, `${path}.`);
+	const file = optionalString(root, "file", errors, `${path}.`);
+	const hunkHeader = optionalString(root, "hunk_header", errors, `${path}.`);
+	const hunkIndex = optionalNumber(root, "hunk_index", errors, `${path}.`, { integer: true, min: 0 });
+	const oldStart = optionalNumber(root, "old_start", errors, `${path}.`, { integer: true, min: 0 });
+	const oldLines = optionalNumber(root, "old_lines", errors, `${path}.`, { integer: true, min: 0 });
+	const newStart = optionalNumber(root, "new_start", errors, `${path}.`, { integer: true, min: 0 });
+	const newLines = optionalNumber(root, "new_lines", errors, `${path}.`, { integer: true, min: 0 });
+	const lineRange = optionalString(root, "line_range", errors, `${path}.`);
+	const placement = root.placement === undefined ? undefined : requiredEnum(root, "placement", HUNK_PLACEMENTS, errors, `${path}.`) as PrWalkthroughYamlHunkPlacement | undefined;
+	const whyRelevant = options.requireWhy ? requiredString(root, "why_relevant", errors, `${path}.`) : optionalString(root, "why_relevant", errors, `${path}.`);
+	const primaryCardId = optionalString(root, "primary_card_id", errors, `${path}.`);
+	const skipReason = root.skip_reason === undefined ? undefined : requiredEnum(root, "skip_reason", HUNK_SKIP_REASONS, errors, `${path}.`);
+	if (!hunkId && !(file && hunkHeader) && !(file && (hunkIndex !== undefined || oldStart !== undefined || newStart !== undefined))) {
+		addError(errors, path, "Expected hunk_id or a file plus hunk_header/hunk_index/coordinates.");
+	}
+	if (primaryCardId && !STABLE_ID_RE.test(primaryCardId)) addError(errors, `${path}.primary_card_id`, "Expected a stable card id.");
+	if (errorsForPrefix(errors, path)) return null;
+	return {
+		...(hunkId ? { hunk_id: hunkId } : {}),
+		...(file ? { file } : {}),
+		...(hunkIndex !== undefined ? { hunk_index: hunkIndex } : {}),
+		...(hunkHeader ? { hunk_header: hunkHeader } : {}),
+		...(oldStart !== undefined ? { old_start: oldStart } : {}),
+		...(oldLines !== undefined ? { old_lines: oldLines } : {}),
+		...(newStart !== undefined ? { new_start: newStart } : {}),
+		...(newLines !== undefined ? { new_lines: newLines } : {}),
+		...(lineRange ? { line_range: lineRange } : {}),
+		...(placement ? { placement } : {}),
+		...(whyRelevant ? { why_relevant: whyRelevant } : {}),
+		...(primaryCardId ? { primary_card_id: primaryCardId } : {}),
+		...(skipReason ? { skip_reason: skipReason } : {}),
+	};
+}
+
+function parseNarrative(items: unknown[], errors: PrWalkthroughValidationError[], path: string): PrWalkthroughYamlNarrativeEntry[] | null {
+	const out: PrWalkthroughYamlNarrativeEntry[] = [];
+	const seen = new Map<string, number>();
+	items.forEach((item, index) => {
+		const itemPath = `${path}[${index}]`;
+		if (!isRecord(item) || Array.isArray(item)) {
+			addError(errors, itemPath, "Expected an object.");
+			return;
+		}
+		const id = requiredStableId(item, "id", errors, `${itemPath}.`);
+		const type = requiredEnum(item, "type", NARRATIVE_TYPES, errors, `${itemPath}.`) as PrWalkthroughYamlNarrativeEntry["type"] | undefined;
+		if (id) {
+			const previous = seen.get(id);
+			if (previous !== undefined) addError(errors, `${itemPath}.id`, `Duplicate narrative entry id ${id}; first used at ${path}[${previous}].id.`);
+			else seen.set(id, index);
+		}
+		if (!id || !type) return;
+		switch (type) {
+			case "text": {
+				const body = requiredString(item, "body", errors, `${itemPath}.`);
+				if (body) out.push({ id, type, body });
+				break;
+			}
+			case "diff": {
+				const hunksRoot = requiredArray(item, "hunks", errors, `${itemPath}.`) ?? [];
+				const hunks = parseNarrativeHunkReferences(hunksRoot, errors, `${itemPath}.hunks`);
+				if (hunks) out.push({ id, type, hunks });
+				break;
+			}
+			case "note": {
+				const body = requiredString(item, "body", errors, `${itemPath}.`);
+				const anchor = item.anchor === undefined ? undefined : parseAnchor(requiredRecord(item, "anchor", errors, `${itemPath}.`), errors, `${itemPath}.anchor`);
+				if (body && anchor !== null) out.push({ id, type, body, ...(anchor ? { anchor } : {}) });
+				break;
+			}
+			case "suggested_comment": {
+				const severity = requiredEnum(item, "severity", CONCERN_SEVERITIES, errors, `${itemPath}.`) as "blocking" | "non_blocking" | "question" | "nit" | undefined;
+				const intent = requiredEnum(item, "intent", COMMENT_INTENTS, errors, `${itemPath}.`) as "inline" | "summary" | undefined;
+				const body = requiredString(item, "body", errors, `${itemPath}.`);
+				const anchor = item.anchor === undefined ? undefined : parseAnchor(requiredRecord(item, "anchor", errors, `${itemPath}.`), errors, `${itemPath}.anchor`);
+				if (intent === "inline" && !anchor) addError(errors, `${itemPath}.anchor`, "Inline suggested comments require an anchor.");
+				if (severity && intent && body && anchor !== null) out.push({ id, type, severity, intent, body, ...(anchor ? { anchor } : {}) });
+				break;
+			}
+			case "checklist": {
+				const itemsValue = requiredStringArray(item, "items", errors, `${itemPath}.`);
+				if (itemsValue) out.push({ id, type, items: itemsValue });
+				break;
+			}
+		}
+	});
+	return errorsForPrefix(errors, path) ? null : out;
+}
+
+function parseNarrativeHunkReferences(items: unknown[], errors: PrWalkthroughValidationError[], path: string): PrWalkthroughYamlHunkReference[] | null {
+	const out: PrWalkthroughYamlHunkReference[] = [];
+	items.forEach((item, index) => {
+		const itemPath = `${path}[${index}]`;
+		if (!isRecord(item) || Array.isArray(item)) {
+			addError(errors, itemPath, "Expected an object.");
+			return;
+		}
+		const reference = parseHunkReference(item, errors, itemPath);
+		if (reference) out.push(reference);
 	});
 	return errorsForPrefix(errors, path) ? null : out;
 }
@@ -639,14 +1258,19 @@ function parseAnchors(items: unknown[], errors: PrWalkthroughValidationError[], 
 			addError(errors, itemPath, "Expected an object.");
 			return;
 		}
-		const file = requiredString(item, "file", errors, `${itemPath}.`);
-		const hunkHeader = requiredString(item, "hunk_header", errors, `${itemPath}.`);
-		const lineRange = optionalString(item, "line_range", errors, `${itemPath}.`);
-		const lineRaw = item.line;
-		if (lineRaw !== undefined && (!Number.isInteger(lineRaw) || Number(lineRaw) < 1)) addError(errors, `${itemPath}.line`, "Expected a positive integer line number.");
-		if (file && hunkHeader) out.push({ file, hunk_header: hunkHeader, ...(lineRange ? { line_range: lineRange } : {}), ...(Number.isInteger(lineRaw) ? { line: Number(lineRaw) } : {}) });
+		const anchor = parseAnchor(item, errors, itemPath);
+		if (anchor) out.push(anchor);
 	});
 	return errorsForPrefix(errors, path) ? null : out;
+}
+
+function parseAnchor(root: Record<string, unknown> | undefined, errors: PrWalkthroughValidationError[], path: string): PrWalkthroughYamlAnchor | null {
+	if (!root) return null;
+	const reference = parseHunkReference(root, errors, path);
+	const lineRaw = root.line;
+	if (lineRaw !== undefined && (!Number.isInteger(lineRaw) || Number(lineRaw) < 1)) addError(errors, `${path}.line`, "Expected a positive integer line number.");
+	if (!reference || errorsForPrefix(errors, path)) return null;
+	return { ...reference, ...(Number.isInteger(lineRaw) ? { line: Number(lineRaw) } : {}) };
 }
 
 function validateCrossFieldRules(document: PrWalkthroughYamlDocument, target: PrWalkthroughYamlLaunchTarget | undefined, errors: PrWalkthroughValidationError[]): void {
@@ -804,8 +1428,11 @@ function buildOmissionsCard(omissions: PrWalkthroughYamlOmission[], existingCard
 	};
 }
 
-function buildAuditCard(document: PrWalkthroughYamlDocument, remainingBlocks: PrWalkthroughDiffBlock[], existingCards: PrWalkthroughCard[]): PrWalkthroughCard {
+function buildAuditCard(document: PrWalkthroughYamlDocument, placement: HunkCoverageComputation, mapper: DiffReferenceMapper, existingCards: PrWalkthroughCard[]): PrWalkthroughCard {
 	const audit = document.walkthrough.audit;
+	const completionPlacements = placement.completionSweepPlacements;
+	const groupedRemaining = groupPlacementsByFile(completionPlacements);
+	const skipped = [...placement.records.values()].filter(record => record.primaryState === "skipped");
 	return {
 		id: uniqueCardId("audit-checklist", existingCards),
 		phaseId: "audit",
@@ -813,37 +1440,19 @@ function buildAuditCard(document: PrWalkthroughYamlDocument, remainingBlocks: Pr
 		navLabel: deriveNavLabel("Audit and review checklist"),
 		summary: compactJoin([
 			formatList("Remaining changed areas", audit.remaining_changed_areas),
-			remainingBlocks.length > 0 ? `Unassigned diff blocks: ${remainingBlocks.map(block => block.filePath).join(", ")}` : undefined,
+			completionPlacements.length > 0 ? `Completion sweep remaining: ${groupedRemaining}` : undefined,
+			`Coverage: ${placement.summary.primaryReviewed} primary reviewed, ${placement.summary.unread} unread primary, ${placement.summary.skipped} skipped, ${placement.summary.completionSweepRemaining} remaining, ${placement.summary.repeatedSecondaryReferences} repeated references.`,
 		]),
 		rationale: compactJoin([
 			formatList("Low-signal or mechanical changes", audit.low_signal_or_mechanical_changes),
 			formatList("Generated or binary files", audit.generated_or_binary_files),
+			skipped.length > 0 ? `Explicit skips: ${skipped.map(record => `${record.filePath} (${record.skippedReason ?? "other"})`).join("; ")}` : undefined,
 		]),
-		diffBlocks: remainingBlocks,
+		diffBlocks: hunkSlicedDiffBlocksFromPlacements(completionPlacements, mapper),
+		hunkPlacements: completionPlacements,
+		coverage: cardCoverageSummary(completionPlacements, placement.records),
 		checklist: audit.reviewer_checklist,
 	};
-}
-
-function mapRelevantHunks(hunks: PrWalkthroughYamlRelevantHunk[], mapper: DiffReferenceMapper, path: string, warnings: WalkthroughWarning[]): { blocks: PrWalkthroughDiffBlock[]; notes: string[] } {
-	const blocks: PrWalkthroughDiffBlock[] = [];
-	const notes: string[] = [];
-	hunks.forEach((hunk, index) => {
-		const match = mapper.findHunkLenient(hunk.file, hunk.hunk_header);
-		if (match) {
-			blocks.push(match.block);
-			return;
-		}
-		const fileBlock = mapper.blockForFile(hunk.file);
-		const message = `${hunk.file} ${hunk.hunk_header}: ${hunk.why_relevant}`;
-		if (fileBlock) {
-			blocks.push(fileBlock);
-			notes.push(`File-level fallback for hunk: ${message}`);
-			return;
-		}
-		warnings.push({ code: "unmapped_hunk", severity: "warning", message: `Could not map hunk reference at ${path}[${index}]: ${message}`, filePath: hunk.file });
-		notes.push(`Unmapped hunk: ${message}`);
-	});
-	return { blocks: uniqueBlocks(blocks), notes };
 }
 
 function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: string, mapper: DiffReferenceMapper, warnings: WalkthroughWarning[]): { comments: PrWalkthroughSuggestedComment[]; notes: string[] } {
@@ -852,21 +1461,22 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 	chunk.suggested_concerns.forEach((concern, concernIndex) => {
 		let mapped = false;
 		concern.anchors.forEach((anchor, anchorIndex) => {
-			const match = anchor.line != null || anchor.line_range ? mapper.findHunkLenient(anchor.file, anchor.hunk_header) : mapper.findHunk(anchor.file, anchor.hunk_header);
+			const match = mapper.tryResolveHunk(anchor);
 			const line = match ? selectLine(match.hunk, anchor) : undefined;
 			if (match && line) {
 				mapped = true;
 				comments.push({
 					id: `suggested-${chunk.id}-${concernIndex + 1}-${anchorIndex + 1}`,
 					cardId,
-					diffBlockId: match.block.id,
+					diffBlockId: match.blockId,
 					lineId: line.id,
 					body: concern.suggested_comment,
 				});
 				return;
 			}
-			if (!mapper.blockForFile(anchor.file)) {
-				warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${anchor.file} ${anchor.hunk_header}.`, filePath: anchor.file });
+			const file = anchor.file;
+			if (file && !mapper.hasFile(file)) {
+				warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${file} ${anchor.hunk_header ?? anchor.hunk_id ?? ""}.`, filePath: file });
 			}
 			notes.push(`Unmapped suggested comment anchor (${concern.severity}): ${concern.concern} — ${concern.suggested_comment}`);
 		});
@@ -876,48 +1486,126 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 }
 
 class DiffReferenceMapper {
-	private readonly byFile = new Map<string, PrWalkthroughDiffBlock[]>();
+	private readonly byFile = new Map<string, IndexedHunk[]>();
+	private readonly byHunkId = new Map<string, IndexedHunk>();
+	private readonly hunks: IndexedHunk[] = [];
 
 	constructor(blocks: PrWalkthroughDiffBlock[]) {
 		for (const block of blocks) {
-			for (const file of [block.filePath, block.oldPath].filter((value): value is string => Boolean(value))) {
-				const key = normalizePath(file);
-				this.byFile.set(key, [...(this.byFile.get(key) ?? []), block]);
-			}
+			block.hunks.forEach((hunk, hunkIndex) => {
+				const indexed = indexHunk(block, hunk, hunkIndex);
+				this.hunks.push(indexed);
+				this.byHunkId.set(indexed.hunkId, indexed);
+				for (const file of [block.filePath, block.oldPath].filter((value): value is string => Boolean(value))) {
+					const key = normalizePath(file);
+					this.byFile.set(key, [...(this.byFile.get(key) ?? []), indexed]);
+				}
+			});
 		}
 	}
 
-	blockForFile(file: string): PrWalkthroughDiffBlock | undefined {
-		return this.blocksForFiles([file])[0];
+	allHunks(): IndexedHunk[] {
+		return [...this.hunks];
 	}
 
-	blocksForFiles(files: string[]): PrWalkthroughDiffBlock[] {
-		return uniqueBlocks(files.flatMap(file => this.byFile.get(normalizePath(file)) ?? []));
+	hunkById(hunkId: string): IndexedHunk | undefined {
+		return this.byHunkId.get(hunkId);
 	}
 
-	findHunk(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
-		const normalizedHeader = normalizeHunkHeader(hunkHeader);
-		const coordinates = parseHunkCoordinates(hunkHeader);
-		for (const block of this.byFile.get(normalizePath(file)) ?? []) {
-			const hunk = block.hunks.find(candidate => candidate.header === hunkHeader || normalizeHunkHeader(candidate.header) === normalizedHeader);
-			if (hunk) return { block, hunk };
-			if (coordinates) {
-				const coordinateMatch = block.hunks.find(candidate => hunkCoordinatesEqual(parseHunkCoordinates(candidate.header), coordinates));
-				if (coordinateMatch) return { block, hunk: coordinateMatch };
-			}
+	hasFile(file: string): boolean {
+		return this.byFile.has(normalizePath(file));
+	}
+
+	tryResolveHunk(ref: PrWalkthroughYamlHunkReference): IndexedHunk | undefined {
+		try {
+			return this.resolveHunk(ref, "anchor", "anchor");
+		} catch {
+			return undefined;
 		}
-		return undefined;
 	}
 
-	findHunkLenient(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
-		const strict = this.findHunk(file, hunkHeader);
-		if (strict) return strict;
-		const blocks = this.byFile.get(normalizePath(file)) ?? [];
-		const totalHunkCount = blocks.reduce((count, item) => count + item.hunks.length, 0);
-		const soleHunkBlock = totalHunkCount === 1 ? blocks.find(block => block.hunks.length === 1) : undefined;
-		if (soleHunkBlock?.hunks[0]) return { block: soleHunkBlock, hunk: soleHunkBlock.hunks[0] };
-		return undefined;
+	resolveHunk(ref: PrWalkthroughYamlHunkReference, path: string, cardId: string): IndexedHunk {
+		if (ref.hunk_id) {
+			const exact = this.byHunkId.get(ref.hunk_id);
+			if (exact && referenceMatchesProvidedFields(exact, ref)) return exact;
+			throw unresolvedHunkError(path, cardId, ref, exact ? 1 : 0, exact ? "hunk_id matched but supplied file/index/coordinates contradicted it" : "hunk_id did not match any changed hunk");
+		}
+
+		const candidates = ref.file ? [...(this.byFile.get(normalizePath(ref.file)) ?? [])] : [...this.hunks];
+		let narrowed = candidates.filter(candidate => referenceMatchesProvidedFields(candidate, ref));
+		if (ref.hunk_index === undefined && ref.old_start === undefined && ref.new_start === undefined && ref.hunk_header) {
+			const headerMatches = candidates.filter(candidate => normalizeHunkHeader(candidate.hunkHeader) === normalizeHunkHeader(ref.hunk_header ?? ""));
+			if (headerMatches.length > 0) narrowed = headerMatches.filter(candidate => referenceMatchesProvidedFields(candidate, ref));
+		}
+		if (narrowed.length === 1) return narrowed[0];
+
+		const noContradictoryCoords = ref.hunk_index === undefined && ref.old_start === undefined && ref.old_lines === undefined && ref.new_start === undefined && ref.new_lines === undefined;
+		if (ref.file && noContradictoryCoords && candidates.length === 1) return candidates[0];
+
+		throw unresolvedHunkError(path, cardId, ref, narrowed.length, narrowed.length > 1 ? "reference matched multiple hunks" : "reference did not match any hunk");
 	}
+}
+
+function indexHunk(block: PrWalkthroughDiffBlock, hunk: PrWalkthroughHunk, hunkIndex: number): IndexedHunk {
+	const coordinates = parseHunkCoordinates(hunk.header);
+	const additions = hunk.lines.filter(line => line.kind === "add").length;
+	const deletions = hunk.lines.filter(line => line.kind === "del").length;
+	const hunkId = typeof hunk.id === "string" && hunk.id.trim().length > 0 ? hunk.id : fallbackHunkId(block, hunk, hunkIndex, coordinates);
+	const sourceFlags = block as { sourceIsTruncated?: unknown; source_is_truncated?: unknown };
+	return {
+		hunkId,
+		blockId: block.id,
+		block,
+		hunk: { ...hunk, id: hunkId },
+		filePath: block.filePath,
+		...(block.oldPath ? { oldPath: block.oldPath } : {}),
+		hunkIndex,
+		hunkHeader: hunk.header,
+		...(coordinates ? { coordinates } : {}),
+		changedLines: additions + deletions,
+		additions,
+		deletions,
+		generated: Boolean(block.isGenerated),
+		binary: Boolean(block.isBinary || block.status === "binary"),
+		truncated: Boolean(block.isTruncated),
+		sourceTruncated: Boolean(sourceFlags.sourceIsTruncated ?? sourceFlags.source_is_truncated ?? block.isTruncated),
+		fileCategory: fileCategory(block.filePath, block),
+	};
+}
+
+function referenceMatchesProvidedFields(candidate: IndexedHunk, ref: PrWalkthroughYamlHunkReference): boolean {
+	if (ref.file && normalizePath(ref.file) !== normalizePath(candidate.filePath) && (!candidate.oldPath || normalizePath(ref.file) !== normalizePath(candidate.oldPath))) return false;
+	if (ref.hunk_index !== undefined && ref.hunk_index !== candidate.hunkIndex) return false;
+	if (ref.hunk_header) {
+		const supplied = parseHunkCoordinates(ref.hunk_header);
+		const normalizedHeaderMatches = normalizeHunkHeader(candidate.hunkHeader) === normalizeHunkHeader(ref.hunk_header);
+		const coordinatesMatch = supplied ? hunkCoordinatesEqual(candidate.coordinates, supplied) : false;
+		if (!normalizedHeaderMatches && !coordinatesMatch) return false;
+	}
+	if (ref.old_start !== undefined && candidate.coordinates?.oldStart !== ref.old_start) return false;
+	if (ref.old_lines !== undefined && candidate.coordinates?.oldCount !== ref.old_lines) return false;
+	if (ref.new_start !== undefined && candidate.coordinates?.newStart !== ref.new_start) return false;
+	if (ref.new_lines !== undefined && candidate.coordinates?.newCount !== ref.new_lines) return false;
+	return true;
+}
+
+function unresolvedHunkError(path: string, cardId: string, ref: PrWalkthroughYamlHunkReference, candidateCount: number, reason: string): PrWalkthroughSynthesisError {
+	return synthesisError("PRW_HUNK_REF_UNRESOLVED", "A hunk reference could not be resolved unambiguously.", {
+		cardId,
+		path,
+		supplied: {
+			...(ref.hunk_id ? { hunk_id: ref.hunk_id } : {}),
+			...(ref.file ? { file: ref.file } : {}),
+			...(ref.hunk_index !== undefined ? { hunk_index: ref.hunk_index } : {}),
+			...(ref.hunk_header ? { hunk_header: ref.hunk_header } : {}),
+			...(ref.old_start !== undefined ? { old_start: ref.old_start } : {}),
+			...(ref.old_lines !== undefined ? { old_lines: ref.old_lines } : {}),
+			...(ref.new_start !== undefined ? { new_start: ref.new_start } : {}),
+			...(ref.new_lines !== undefined ? { new_lines: ref.new_lines } : {}),
+		},
+		candidateCount,
+		reason,
+	});
 }
 
 interface HunkCoordinates {
@@ -1178,6 +1866,47 @@ function normalizePath(value: string): string {
 
 function normalizeHunkHeader(value: string): string {
 	return value.replace(/\s+/g, " ").trim();
+}
+
+function fallbackHunkId(block: PrWalkthroughDiffBlock, hunk: PrWalkthroughHunk, hunkIndex: number, coordinates: HunkCoordinates | undefined): string {
+	return `hunk-${hashString([
+		block.filePath,
+		block.id,
+		String(hunkIndex),
+		hunk.header,
+		`${coordinates?.oldStart ?? ""}:${coordinates?.oldCount ?? ""}`,
+		`${coordinates?.newStart ?? ""}:${coordinates?.newCount ?? ""}`,
+	].join("\u0000"))}`;
+}
+
+function hashString(value: string): string {
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < value.length; index += 1) {
+		hash ^= value.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(36);
+}
+
+function fileCategory(filePath: string, block: PrWalkthroughDiffBlock): string {
+	const normalized = normalizePath(filePath);
+	if (block.isGenerated || /(^|\/)(dist|build|generated|coverage|vendor)\//.test(normalized) || /\.min\.[a-z0-9]+$/.test(normalized)) return "generated";
+	if (/(^|\/)(vendor|third_party|node_modules)\//.test(normalized)) return "vendor";
+	if (/(^|\/)(__tests__|tests?|spec)\//.test(normalized) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(normalized)) return "test";
+	if (/(^|\/)docs?\//.test(normalized) || /\.(md|mdx|rst|adoc)$/.test(normalized)) return "docs";
+	if (/(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|gemfile\.lock|poetry\.lock|cargo\.lock)$/.test(normalized)) return "lockfile";
+	if (/\.(png|jpe?g|gif|webp|svg|ico|pdf|zip|gz|woff2?|ttf|eot|mp4|mov|mp3|wav)$/.test(normalized)) return "asset";
+	return "source";
+}
+
+function groupPlacementsByFile(placements: PrWalkthroughHunkPlacement[]): string {
+	const counts = new Map<string, number>();
+	for (const placement of placements) counts.set(placement.filePath, (counts.get(placement.filePath) ?? 0) + 1);
+	return [...counts.entries()].map(([file, count]) => `${file} (${count})`).join("; ");
+}
+
+function uniqueStrings(values: string[]): string[] {
+	return [...new Set(values)];
 }
 
 function compactArray(values: Array<string | undefined>): string[] {

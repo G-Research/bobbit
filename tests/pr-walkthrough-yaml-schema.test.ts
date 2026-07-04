@@ -109,10 +109,13 @@ describe("PR walkthrough YAML schema", () => {
 
 		const review = payload.cards.find(card => card.id === "significant-chunk-api");
 		assert.ok(review);
-		assert.deepEqual(review.diffBlocks.map(block => block.id), ["block-src-a", "block-src-b"]);
+		assert.deepEqual(review.diffBlocks.map(block => block.id), ["block-src-a"]);
 		assert.equal(review.suggestedComments?.length, 1);
 		assert.equal(review.suggestedComments?.[0]?.cardId, review.id);
 		assert.equal(review.suggestedComments?.[0]?.lineId, "block-src-a:h0:l1");
+
+		const finalAudit = payload.cards.find(card => card.title === "Audit and review checklist");
+		assert.ok(finalAudit?.diffBlocks.some(block => block.id === "block-src-b"));
 
 		assert.ok(payload.cards.some(card => card.title === "Omissions and follow-ups"));
 		assert.ok(payload.cards.some(card => card.title === "Audit and review checklist"));
@@ -216,18 +219,24 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(payload.changeset.headSha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 	});
 
-	it("preserves truly unmapped hunk references as warnings and file-fallback anchors as card suggestions", () => {
+	it("fails unresolved hunk references with structured retryable details", () => {
+		const validation = validatePrWalkthroughYaml(validYaml().replace("placement: secondary\n          primary_card_id: significant-chunk-api\n          why_relevant: Shows the submission path.", "placement: secondary\n          primary_card_id: significant-chunk-api\n          why_relevant: Shows the submission path.\n        - file: src/missing.ts\n          hunk_header: \"@@ -9,1 +9,1 @@\"\n          why_relevant: Intentional unmapped reference."));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() }));
+		assert.equal(error.code, "PRW_HUNK_REF_UNRESOLVED");
+		assert.equal(error.retryable, true);
+		assert.equal(error.details?.supplied?.file, "src/missing.ts");
+	});
+
+	it("keeps legacy suggested concern anchors as notes when they cannot be mapped", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
 
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
-		const warningCodes = payload.warnings.map(warning => warning.code);
-		assert.ok(warningCodes.includes("unmapped_hunk"));
-		assert.equal(warningCodes.includes("unmapped_anchor"), false);
-
-		const design = payload.cards.find(card => card.phaseId === "design");
-		assert.ok(design?.cardSuggestions?.some(note => /Unmapped hunk/.test(note)));
+		assert.ok(payload.warnings.some(warning => warning.code === "unmapped_anchor"));
 		const review = payload.cards.find(card => card.id === "significant-chunk-api");
 		assert.ok(review?.cardSuggestions?.some(note => /Unmapped suggested comment anchor/.test(note)));
 	});
@@ -286,17 +295,15 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
 	});
 
-	it("uses file-level fallback without global warnings when hunk numeric ranges do not match", () => {
+	it("fails closed when an older header reference is ambiguous across multiple hunks", () => {
 		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -11,2 +10,3 @@ function renderExample"));
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
 
-		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiHunkContextDiffBlock()] });
-
-		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
-		const review = payload.cards.find(card => card.id === "significant-context-review");
-		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
-		assert.equal(review?.suggestedComments?.length ?? 0, 0);
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [multiHunkContextDiffBlock()] }));
+		assert.equal(error.code, "PRW_HUNK_REF_UNRESOLVED");
+		assert.equal(error.retryable, true);
+		assert.equal(error.details?.cardId, "design-context-design");
 	});
 
 	it("does not duplicate diff blocks when mapped hunks and file fallback overlap", () => {
@@ -308,9 +315,279 @@ describe("PR walkthrough YAML schema", () => {
 		const review = payload.cards.find(card => card.id === "significant-context-review");
 
 		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
+		assert.equal(review?.diffBlocks[0]?.hunks.length, 1);
 		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 	});
+
+	it("renders same-file logical cards with only their explicit hunk slices", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("first", "First hunk", hunkRefYaml("block-multi:h0")),
+			reviewChunkYaml("second", "Second hunk", hunkRefYaml("block-multi:h1")),
+		].join("\n"), ["first", "second"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(2)] });
+		const first = payload.cards.find(card => card.id === "significant-first");
+		const second = payload.cards.find(card => card.id === "significant-second");
+		assert.deepEqual(first?.diffBlocks[0]?.hunks.map(hunk => hunk.id), ["block-multi:h0"]);
+		assert.deepEqual(second?.diffBlocks[0]?.hunks.map(hunk => hunk.id), ["block-multi:h1"]);
+	});
+
+	it("keeps secondary repeated hunk metadata separate from primary coverage", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("primary", "Primary hunk", hunkRefYaml("block-multi:h0")),
+			reviewChunkYaml("repeat", "Repeated hunk", hunkRefYaml("block-multi:h0", "secondary", "significant-primary")),
+		].join("\n"), ["primary", "repeat"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] }, { readReceipts: [{ schemaVersion: 1, id: "receipt-1", mode: "file", hunkIds: ["block-multi:h0"], truncated: false }] });
+		const record = payload.coverage?.records?.find(item => item.hunkId === "block-multi:h0");
+		assert.equal(record?.primaryState, "primary-reviewed");
+		assert.deepEqual(record?.secondaryCardIds, ["significant-repeat"]);
+		assert.equal(record?.repeatedReferenceCount, 1);
+		const repeated = payload.cards.find(card => card.id === "significant-repeat");
+		assert.equal(repeated?.hunkPlacements?.[0]?.placement, "secondary");
+		assert.equal(repeated?.hunkPlacements?.[0]?.defaultExpanded, false);
+		assert.equal(repeated?.hunkPlacements?.[0]?.primaryCardTitle, "Primary hunk");
+	});
+
+	it("rejects duplicate primary hunk ownership", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("one", "One", hunkRefYaml("block-multi:h0")),
+			reviewChunkYaml("two", "Two", hunkRefYaml("block-multi:h0")),
+		].join("\n"), ["one", "two"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] }));
+		assert.equal(error.code, "PRW_DUPLICATE_PRIMARY_HUNK");
+		assert.equal(error.details?.conflicts?.[0]?.hunkId, "block-multi:h0");
+	});
+
+	it("rejects secondary hunk references without a primary owner", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("repeat", "Repeated hunk", hunkRefYaml("block-multi:h0", "secondary")),
+		].join("\n"), ["repeat"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] }));
+		assert.equal(error.code, "PRW_SECONDARY_WITHOUT_PRIMARY");
+	});
+
+	it("rejects skipped hunk references without an explicit skip reason", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("skip", "Skipped hunk", hunkRefYaml("block-multi:h0", "skip")),
+		].join("\n"), ["skip"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] }));
+		assert.equal(error.code, "PRW_SKIP_REASON_REQUIRED");
+	});
+
+	it("preserves V2 narrative order and resolves narrative anchors", () => {
+		const yaml = synthesisYaml(`    - id: narrative
+      phase: significant
+      title: Narrative chunk
+      reviewer_goal: Follow the ordered narrative.
+      explanation: The narrative should drive rendering.
+      files:
+        - src/multi.ts
+      relevant_hunks:
+        - hunk_id: block-multi:h0
+          placement: primary
+          why_relevant: Top-level duplicate agrees with the narrative diff.
+      narrative:
+        - id: setup
+          type: text
+          body: Start with setup.
+        - id: diff-one
+          type: diff
+          hunks:
+            - hunk_id: block-multi:h0
+              placement: primary
+              why_relevant: Shows the change.
+        - id: note-one
+          type: note
+          anchor:
+            hunk_id: block-multi:h0
+          body: Note near the diff.
+        - id: comment-one
+          type: suggested_comment
+          severity: question
+          intent: inline
+          anchor:
+            hunk_id: block-multi:h0
+            line: 1
+          body: Should this be guarded?
+        - id: checks
+          type: checklist
+          items:
+            - Check the guard.
+      suggested_concerns: []
+      positive_notes: []`, ["narrative"]);
+		const validation = validatePrWalkthroughYaml(yaml);
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] });
+		const card = payload.cards.find(item => item.id === "significant-narrative");
+		assert.deepEqual(card?.narrative?.map(block => block.type), ["text", "diff", "note", "suggested_comment", "checklist"]);
+		assert.deepEqual(card?.narrative?.[1], { type: "diff", id: "diff-one", hunkIds: ["block-multi:h0"] });
+		assert.equal(card?.narrative?.[3]?.type, "suggested_comment");
+	});
+
+	it("treats review chunk files as metadata only", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("metadata", "Metadata only", "        []", "src/multi.ts"),
+		].join("\n"), ["metadata"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] });
+		const card = payload.cards.find(item => item.id === "significant-metadata");
+		const audit = payload.cards.find(item => item.title === "Audit and review checklist");
+		assert.deepEqual(card?.diffBlocks, []);
+		assert.deepEqual(audit?.diffBlocks[0]?.hunks.map(hunk => hunk.id), ["block-multi:h0"]);
+	});
+
+	it("publishes more than twelve logical cards without truncation", () => {
+		const chunks = Array.from({ length: 13 }, (_, index) => reviewChunkYaml(`chunk-${index}`, `Chunk ${index}`, hunkRefYaml(`block-${index}:h0`))).join("\n");
+		const validation = validatePrWalkthroughYaml(synthesisYaml(chunks, Array.from({ length: 13 }, (_, index) => `chunk-${index}`)));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: Array.from({ length: 13 }, (_, index) => logicalDiffBlock(`block-${index}`, `src/file-${index}.ts`, 1)) });
+		assert.equal(payload.cards.filter(card => card.phaseId === "significant").length, 13);
+	});
+
+	it("blocks major remaining hunks from hiding in the completion sweep", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("metadata", "Metadata only", "        []", "src/major.ts"),
+		].join("\n"), ["metadata"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [logicalDiffBlock("block-major", "src/major.ts", 8)] }));
+		assert.equal(error.code, "PRW_MAJOR_REMAINING_HUNKS");
+		assert.equal(error.details?.major_remaining?.[0]?.hunkId, "block-major:h0");
+	});
 });
+
+function synthesisYaml(reviewChunks: string, chunkOrder: string[]): string {
+	return `schema_version: 1
+pr:
+  provider: github
+  owner: SuuBro
+  repo: bobbit
+  number: 42
+  title: Logical cards
+  url: https://github.com/SuuBro/bobbit/pull/42
+  base_sha: abcdef1234567890
+  head_sha: fedcba9876543210
+  original_description:
+    body: Test logical cards.
+    source: gh_api
+    fetched_at: "2026-05-30T00:00:00.000Z"
+  stats:
+    files_changed: 1
+    additions: 2
+    deletions: 0
+walkthrough:
+  context:
+    why_created: Test logical card synthesis.
+    problem_solved: Cards should map to explicit hunks.
+    why_worth_merging: It keeps reviews focused.
+    merge_concerns: Keep coverage visible.
+    author_intent: Exercise shared synthesis.
+    reviewer_map: Review chunks in order.
+  merge_assessment:
+    recommendation: comment
+    confidence: high
+    summary: Focused synthesis looks good.
+    blocking_concerns: []
+    non_blocking_concerns: []
+  design_decisions: []
+  review_chunks:
+${reviewChunks}
+  omissions_and_followups: []
+  audit:
+    remaining_changed_areas: []
+    low_signal_or_mechanical_changes: []
+    generated_or_binary_files: []
+    reviewer_checklist:
+      - Confirm hunk coverage.
+  display:
+    phase_order:
+      - orientation
+      - design
+      - significant
+      - other
+      - audit
+    chunk_order:
+${chunkOrder.map(id => `      - ${id}`).join("\n")}
+`;
+}
+
+function reviewChunkYaml(id: string, title: string, relevantHunks: string, file = "src/multi.ts"): string {
+	return `    - id: ${id}
+      phase: significant
+      title: ${title}
+      reviewer_goal: Review ${title}.
+      explanation: Explains ${title}.
+      files:
+        - ${file}
+      relevant_hunks:
+${relevantHunks}
+      suggested_concerns: []
+      positive_notes: []`;
+}
+
+function hunkRefYaml(hunkId: string, placement = "primary", primaryCardId?: string): string {
+	return `        - hunk_id: ${hunkId}
+          placement: ${placement}${primaryCardId ? `\n          primary_card_id: ${primaryCardId}` : ""}
+          why_relevant: Covers ${hunkId}.`;
+}
+
+function multiLogicalDiffBlock(hunkCount: number): PrWalkthroughDiffBlock {
+	return {
+		id: "block-multi",
+		filePath: "src/multi.ts",
+		status: "modified",
+		hunks: Array.from({ length: hunkCount }, (_, index) => ({
+			id: `block-multi:h${index}`,
+			header: `@@ -${index + 1},1 +${index + 1},2 @@`,
+			lines: [{ id: `block-multi:h${index}:l0`, side: "new", newLine: index + 1, text: `change ${index}`, kind: "add" }],
+		})),
+	};
+}
+
+function logicalDiffBlock(id: string, filePath: string, changedLines: number): PrWalkthroughDiffBlock {
+	return {
+		id,
+		filePath,
+		status: "modified",
+		hunks: [{
+			id: `${id}:h0`,
+			header: "@@ -1,1 +1,1 @@",
+			lines: Array.from({ length: changedLines }, (_, index) => ({ id: `${id}:h0:l${index}`, side: "new", newLine: index + 1, text: `change ${index}`, kind: "add" })),
+		}],
+	};
+}
+
+function captureError(fn: () => unknown): Error & { code?: string; retryable?: boolean; details?: any } {
+	let caught: unknown;
+	try {
+		fn();
+	} catch (error) {
+		caught = error;
+	}
+	assert.ok(caught, "Expected function to throw.");
+	return caught as Error & { code?: string; retryable?: boolean; details?: any };
+}
 
 function assertError(errors: Array<{ path: string; message: string }>, path: string, message: RegExp): void {
 	const error = errors.find(item => item.path === path);
@@ -383,11 +660,18 @@ function assertNoUnmappedForFile(warnings: Array<{ code: string; filePath?: stri
 }
 
 function hunkMappingYaml(hunkHeader: string, anchorHeader = hunkHeader, extraRelevantHunks: Array<{ header: string; why: string }> = []): string {
-	const relevantHunks = [
+	const hunkItems = [
 		{ header: hunkHeader, why: "Primary mapped context change." },
 		...extraRelevantHunks,
-	].map(item => `        - file: src/context.ts
+	];
+	const designRelevantHunks = hunkItems.map(item => `        - file: src/context.ts
           hunk_header: "${yamlDoubleQuoted(item.header)}"
+          placement: secondary
+          primary_card_id: significant-context-review
+          why_relevant: ${item.why}`).join("\n");
+	const reviewRelevantHunks = hunkItems.map(item => `        - file: src/context.ts
+          hunk_header: "${yamlDoubleQuoted(item.header)}"
+          placement: primary
           why_relevant: ${item.why}`).join("\n");
 
 	return `schema_version: 1
@@ -431,7 +715,7 @@ walkthrough:
       tradeoffs: []
       suggested_reviewer_concerns: []
       relevant_hunks:
-${relevantHunks}
+${designRelevantHunks}
   review_chunks:
     - id: context-review
       phase: significant
@@ -441,7 +725,7 @@ ${relevantHunks}
       files:
         - src/context.ts
       relevant_hunks:
-${relevantHunks}
+${reviewRelevantHunks}
       suggested_concerns:
         - severity: question
           concern: Is the hunk anchor stable?
@@ -548,10 +832,9 @@ walkthrough:
       relevant_hunks:
         - file: src/a.ts
           hunk_header: "@@ -1,2 +1,3 @@"
+          placement: secondary
+          primary_card_id: significant-chunk-api
           why_relevant: Shows the submission path.
-        - file: src/missing.ts
-          hunk_header: "@@ -9,1 +9,1 @@"
-          why_relevant: Intentional unmapped reference.
   review_chunks:
     - id: chunk-api
       phase: significant
@@ -577,7 +860,7 @@ walkthrough:
           concern: Missing anchor should become a card note.
           suggested_comment: This should not disappear.
           anchors:
-            - file: src/a.ts
+            - file: src/missing.ts
               hunk_header: "@@ -50,1 +50,1 @@"
       positive_notes:
         - Clear resolver split
