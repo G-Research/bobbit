@@ -300,6 +300,9 @@ export class RpcBridge {
 	private requestId = 0;
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<typeof setTimeout> }>();
 	private eventListeners: RpcEventListener[] = [];
+	/** Holds only the not-yet-terminated trailing fragment between calls —
+	 *  never the whole accumulated stream. See handleData() for why this
+	 *  matters. */
 	private lineBuffer = "";
 	/** Persistent UTF-8 decoders so a multibyte char split across two stdout/
 	 *  stderr reads is reassembled instead of corrupted into U+FFFD (S14 — the
@@ -810,35 +813,72 @@ export class RpcBridge {
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${rawMessage}`);
 	}
 
+	/**
+	 * PERF-02: scan only the newly-arrived chunk, not the whole accumulated
+	 * buffer.
+	 *
+	 * The old implementation appended each chunk to `lineBuffer` and then ran
+	 * `lineBuffer.split("\n")` over the ENTIRE accumulated buffer on every
+	 * single chunk. A large JSONL line with no interior newline (e.g. a
+	 * multi-MB get_messages transcript or tool_result) arrives as
+	 * K ≈ len/64KiB chunks, so total scanning work was Σ O(bufLen) ≈ O(len²) —
+	 * a single such line could synchronously stall the whole gateway event
+	 * loop (measured: 1MB→0.48ms, 4MB→8.16ms, 16MB→188.9ms per-chunk stall;
+	 * see tests/rpc-bridge-line-buffer-perf.test.ts).
+	 *
+	 * Naively "just remembering how far we scanned" doesn't fix this: V8
+	 * represents repeated `lineBuffer += data` as a rope of ConsStrings, and
+	 * calling `.indexOf()` on that rope forces a full flatten of everything
+	 * accumulated so far — so even an incremental-looking scan over
+	 * `lineBuffer` still costs O(bufLen) per chunk (verified empirically:
+	 * that approach reproduced the same ~O(len²) growth this test pins
+	 * against). The actual fix is to run `indexOf("\n")` only over `data`
+	 * (the current chunk, naturally bounded to ~64KiB) and fall back to
+	 * `lineBuffer` only to prefix the *one* line that finally completes —
+	 * flattening the leftover fragment then costs O(that line's length),
+	 * paid exactly once per line, never repeated. Framing semantics
+	 * (trailing \r, empty lines, multiple lines per chunk, partial lines)
+	 * are unchanged from the naive implementation; see
+	 * tests/rpc-bridge-line-buffer-correctness.test.ts.
+	 */
 	private handleData(data: string) {
-		this.lineBuffer += data;
-		const lines = this.lineBuffer.split("\n");
-		this.lineBuffer = lines.pop()!; // keep incomplete trailing fragment
+		let start = 0;
+		let newlineIdx: number;
+		while ((newlineIdx = data.indexOf("\n", start)) !== -1) {
+			const segment = data.slice(start, newlineIdx);
+			const line = this.lineBuffer.length > 0 ? this.lineBuffer + segment : segment;
+			this.lineBuffer = "";
+			start = newlineIdx + 1;
+			this.processLine(line);
+		}
+		if (start < data.length) {
+			this.lineBuffer += data.slice(start);
+		}
+	}
 
-		for (const line of lines) {
-			const trimmed = line.replace(/\r$/, "").trim();
-			if (!trimmed) continue;
+	private processLine(line: string): void {
+		const trimmed = line.replace(/\r$/, "").trim();
+		if (!trimmed) return;
 
-			let parsed: any;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				continue; // skip non-JSON output (e.g. log lines)
-			}
+		let parsed: any;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			return; // skip non-JSON output (e.g. log lines)
+		}
 
-			// Response to a pending request
-			if (parsed.type === "response" && parsed.id && this.pending.has(parsed.id)) {
-				const p = this.pending.get(parsed.id)!;
-				clearTimeout(p.timeout);
-				this.pending.delete(parsed.id);
-				p.resolve(parsed);
-			} else {
-				this.recordPiExtensionLoadFailureFromEvent(parsed);
-				const normalized = normalizeToolResultErrorEvent(parsed);
-				// Agent event — forward to listeners
-				for (const listener of this.eventListeners) {
-					listener(normalized);
-				}
+		// Response to a pending request
+		if (parsed.type === "response" && parsed.id && this.pending.has(parsed.id)) {
+			const p = this.pending.get(parsed.id)!;
+			clearTimeout(p.timeout);
+			this.pending.delete(parsed.id);
+			p.resolve(parsed);
+		} else {
+			this.recordPiExtensionLoadFailureFromEvent(parsed);
+			const normalized = normalizeToolResultErrorEvent(parsed);
+			// Agent event — forward to listeners
+			for (const listener of this.eventListeners) {
+				listener(normalized);
 			}
 		}
 	}
