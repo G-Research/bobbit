@@ -746,6 +746,47 @@ test.describe("Headquarters no-git goals", () => {
 			await gw.shutdown();
 		}
 	});
+
+	test("PUT /api/goals/:id validates a cwd update against the goal's project scope", async () => {
+		const gw = await startWithNormalSameRoot();
+		try {
+			// Headquarters goal: the goal id fixes HQ scope, so a cwd update must
+			// stay inside the Headquarters directory. serverRoot is the PARENT of
+			// the Headquarters dir and must be rejected.
+			const hqGoal = await createGoal(gw, HEADQUARTERS_PROJECT_ID);
+			const hqOutside = await gw.json(`/api/goals/${hqGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.serverRoot }),
+			});
+			expect(hqOutside.status, hqOutside.text).toBe(422);
+			expect(hqOutside.body?.code).toBe("CWD_OUTSIDE_PROJECT");
+
+			const hqInside = await gw.json(`/api/goals/${hqGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.headquartersDir }),
+			});
+			expect(hqInside.status, hqInside.text).toBe(200);
+
+			// Normal same-root goal: cwd update must stay inside the project root
+			// (or an owned worktree). A wholly unrelated directory is rejected.
+			const normalGoal = await createGoal(gw, SAME_ROOT_PROJECT_ID, SAME_ROOT_WORKFLOW_ID);
+			const outside = uniqueDir("goal-cwd-escape");
+			const normalOutside = await gw.json(`/api/goals/${normalGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: outside }),
+			});
+			expect(normalOutside.status, normalOutside.text).toBe(422);
+			expect(normalOutside.body?.code).toBe("CWD_OUTSIDE_PROJECT");
+
+			const normalInside = await gw.json(`/api/goals/${normalGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.serverRoot }),
+			});
+			expect(normalInside.status, normalInside.text).toBe(200);
+		} finally {
+			await gw.shutdown();
+		}
+	});
 });
 
 test.describe("Headquarters session git isolation", () => {

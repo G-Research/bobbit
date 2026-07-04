@@ -231,6 +231,45 @@ test("delegate session creation validates cwd against the parent project and def
 	assert.ok(samePath(inherited.body.cwd, parentCwd), `expected delegate cwd ${inherited.body.cwd} to match parent cwd ${parentCwd}`);
 });
 
+test("server-scope role assistant without cwd defaults to the Headquarters directory", async (t) => {
+	const serverRoot = tmpDir("bobbit-role-assistant-default-cwd-");
+	const { baseUrl } = await startGateway(t, serverRoot);
+	const created = await api(baseUrl, "/api/sessions", { assistantType: "role", worktree: false });
+	assert.equal(created.status, 201, JSON.stringify(created.body));
+	const hqDir = path.join(serverRoot, ".bobbit", "headquarters");
+	assert.ok(samePath(created.body.cwd, hqDir), `expected role assistant cwd ${created.body.cwd} to default to Headquarters dir ${hqDir}`);
+});
+
+test("server-scope role assistant rejects an explicit cwd outside the Headquarters directory", async (t) => {
+	const serverRoot = tmpDir("bobbit-role-assistant-outside-cwd-");
+	const { baseUrl } = await startGateway(t, serverRoot);
+	// An existing on-disk dir outside HQ — the escape must be rejected on scope
+	// grounds (422) before any stale-cwd existence check.
+	const outside = tmpDir("bobbit-role-assistant-escape-");
+	const rejected = await api(baseUrl, "/api/sessions", { assistantType: "role", worktree: false, cwd: outside });
+	assert.equal(rejected.status, 422, JSON.stringify(rejected.body));
+	assert.equal(rejected.body.code, "CWD_OUTSIDE_PROJECT");
+});
+
+test("server-scope tool assistant rejects an explicit cwd outside the Headquarters directory", async (t) => {
+	const serverRoot = tmpDir("bobbit-tool-assistant-outside-cwd-");
+	const { baseUrl } = await startGateway(t, serverRoot);
+	const outside = tmpDir("bobbit-tool-assistant-escape-");
+	const rejected = await api(baseUrl, "/api/sessions", { assistantType: "tool", worktree: false, cwd: outside });
+	assert.equal(rejected.status, 422, JSON.stringify(rejected.body));
+	assert.equal(rejected.body.code, "CWD_OUTSIDE_PROJECT");
+});
+
+test("server-scope assistant accepts an explicit cwd inside the Headquarters directory", async (t) => {
+	const serverRoot = tmpDir("bobbit-role-assistant-inside-cwd-");
+	const { baseUrl } = await startGateway(t, serverRoot);
+	const hqSubdir = path.join(serverRoot, ".bobbit", "headquarters", "workspace");
+	fs.mkdirSync(hqSubdir, { recursive: true });
+	const accepted = await api(baseUrl, "/api/sessions", { assistantType: "role", worktree: false, cwd: hqSubdir });
+	assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
+	assert.ok(samePath(accepted.body.cwd, hqSubdir), `expected role assistant cwd ${accepted.body.cwd} to be preserved inside Headquarters dir`);
+});
+
 test("MCP server API requires explicit projectId", async (t) => {
 	const serverRoot = tmpDir("bobbit-mcp-api-project-required-");
 	const { baseUrl } = await startGateway(t, serverRoot);
