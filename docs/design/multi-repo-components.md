@@ -840,7 +840,15 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 
 ### 8.6 Sub-section diff in proposal panel
 
-`src/ui/components/ProjectProposalPanel.ts` (existing): teach the diff renderer to scope diffs by top-level YAML key. When the user expands "workflows", they see only that block's diff. Done by parsing both old and new YAML to AST, computing per-key diffs, rendering each in its own collapsible section.
+Historical note: this section originally proposed teaching
+`src/ui/components/ProjectProposalPanel.ts` to scope diffs by top-level YAML
+key (parse both old/new YAML to AST, compute per-key diffs, render each in
+its own collapsible section). That module was never wired into rendering and
+was removed as dead code (CQ-04) — it was superseded by the field-editor
+approach in `src/app/proposal-panels.ts::projectProposalPanel()`, which
+renders `components`/`workflows` via structured per-field editors instead of
+a YAML sub-section diff view. If per-key diffing is wanted again, it should
+be built directly in `proposal-panels.ts`.
 
 ---
 
