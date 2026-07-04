@@ -863,13 +863,21 @@ function renderRoleRowModelControl(role: RoleData, control: RoleRowModelControl)
 					"",
 					// Compact list placement: a fixed-width, non-fit-content thinking
 					// Select so its trigger never injects an inline min-width:180px
-					// (the source of the row-control chevron overflow). `onThinkingClear`
-					// puts the thinking reset INSIDE the box next to the model reset, so
-					// both fields reset from the same place (no split-brain UX).
+					// (the source of the row-control chevron overflow). The width must
+					// be DEFINITE (no percentage): with `fitContent: false` the Select
+					// puts this value as an inline `width:` on the trigger, whose
+					// shrink-to-fit wrapper treats a %-bearing clamp() as auto during
+					// intrinsic sizing. A short value (e.g. a role thinkingLevel of
+					// "High") then yields a ~92px wrapper around a 220px trigger — the
+					// trigger and its chevron overflow the row control (latent until
+					// built-in roles started shipping thinkingLevel tiers).
+					// `onThinkingClear` puts the thinking reset INSIDE the box next to
+					// the model reset, so both fields reset from the same place (no
+					// split-brain UX).
 					{
 						fallbackLabel: inlineFallback(display.model),
 						thinkingFallbackLabel: inlineFallback(display.thinking),
-						thinkingWidth: "clamp(220px, 36%, 360px)",
+						thinkingWidth: "220px",
 						thinkingFitContent: false,
 						onThinkingClear: () => control.onThinkingChange(role, ""),
 						// In the Roles list these resets clear a per-role OVERRIDE
