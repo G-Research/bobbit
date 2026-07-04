@@ -2196,13 +2196,11 @@ export class SessionManager {
 
 	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
 		if (projectId) return this.getMcpManager({ projectId, cwd });
-		if (cwd) return this.getMcpManager({ cwd });
 		return this.mcpManager;
 	}
 
 	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
 		if (projectId) return this.ensureMcpManager({ projectId, cwd });
-		if (cwd) return this.ensureMcpManager({ cwd });
 		return this.mcpManager;
 	}
 
@@ -2224,11 +2222,9 @@ export class SessionManager {
 
 	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
 		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		const { projectId } = this.getMcpSessionScope(sessionId);
 		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
 		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
-		const cwdScopeKey = cwd ? this.mcpScopeKey({ cwd }) : undefined;
-		if (!projectId && cwd && scopeKey === cwdScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ cwd, scopeKey });
 		return null;
 	}
 
@@ -5827,13 +5823,12 @@ export class SessionManager {
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
+		const parentStore = this.resolveStoreForId(parentSessionId);
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
-			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
-		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
-		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
+			?? parentStore?.get(parentSessionId)?.projectId;
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
+		const parentMeta = parentStore?.get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed) {
 			// Always use the parent's validated host-side cwd — never trust the
@@ -5845,6 +5840,9 @@ export class SessionManager {
 			opts.cwd = parentMeta.cwd;
 			delegateSandboxed = true;
 		}
+
+		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
+		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
 
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
 

@@ -550,6 +550,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	const defaultHeadquartersDir = path.join(serverRunDir, ".bobbit", "headquarters");
 	const usingOverride = !samePath(headquartersDirPath, defaultHeadquartersDir);
 	const sourceIsTarget = samePath(legacyStateDir, headquartersStateDir) && samePath(legacyConfigDir, headquartersConfigDir);
+	const useLegacyDefaultSource = !usingOverride || sourceIsTarget;
 
 	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
 		for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
@@ -566,8 +567,16 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 
 	const projectsFile = path.join(headquartersStateDir, "projects.json");
 	const legacyProjectsFile = path.join(legacyStateDir, "projects.json");
-	const sameRootIds = repairProjectsFileForHeadquartersSplit(projectsFile, legacyProjectsFile, serverRunDir, headquartersDirPath, diagnostics);
-	const evidence = collectProjectEvidence(headquartersStateDir, legacyStateDir, serverRunDir);
+	const inactiveLegacyProjectsFile = path.join(headquartersStateDir, ".inactive-legacy-default-projects.json");
+	const inactiveLegacyStateDir = path.join(headquartersStateDir, ".inactive-legacy-default-state");
+	const sameRootIds = repairProjectsFileForHeadquartersSplit(
+		projectsFile,
+		useLegacyDefaultSource ? legacyProjectsFile : inactiveLegacyProjectsFile,
+		serverRunDir,
+		headquartersDirPath,
+		diagnostics,
+	);
+	const evidence = collectProjectEvidence(headquartersStateDir, useLegacyDefaultSource ? legacyStateDir : inactiveLegacyStateDir, serverRunDir);
 	for (const id of sameRootIds) evidence.sameRootIds.add(id);
 	const sameRootEvidence = evidence.sameRootIds.size > 0;
 

@@ -547,7 +547,7 @@ import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy 
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
-import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -1743,6 +1743,13 @@ export interface GatewayConfig {
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
+	migrateLegacyHeadquartersDirectory({
+		serverRunDir: getProjectRoot(),
+		headquartersDir: bobbitDir(),
+		headquartersStateDir: stateDir,
+		headquartersConfigDir: configDir,
+		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
+	});
 	fs.mkdirSync(stateDir, { recursive: true });
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
@@ -4273,15 +4280,18 @@ async function handleApiRoute(
 			}, 403);
 			return;
 		}
-		// Compute gateway-owned via the same logic as the preflight check.
-		const sameAsGateway = path.resolve(body.rootPath) === path.resolve(getProjectRoot());
+		// Compute gateway-owned via canonical paths so a symlink/junction to the
+		// server run dir cannot archive Headquarters by dodging a textual compare.
+		const sameAsGateway = samePath(body.rootPath, getProjectRoot());
 		const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
 		const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
 		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
-		const preserveHeadquartersDir = sameAsGateway && fs.existsSync(path.join(body.rootPath, ".bobbit", "headquarters"));
-		const allowlist = preserveHeadquartersDir
-			? [...GATEWAY_OWNED_FILES, "headquarters/"]
-			: undefined;
+		const preserveHeadquartersDir = fs.existsSync(path.join(body.rootPath, ".bobbit", "headquarters"));
+		const allowlistEntries = [
+			...(gatewayOwned ? GATEWAY_OWNED_FILES : []),
+			...(preserveHeadquartersDir ? ["headquarters/"] : []),
+		];
+		const allowlist = allowlistEntries.length > 0 ? allowlistEntries : undefined;
 		try {
 			const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned, ...(allowlist ? { allowlist } : {}) });
 			json(result);
@@ -5862,17 +5872,48 @@ async function handleApiRoute(
 
 		// ── Delegate session creation ──
 		if (body?.delegateOf && body?.instructions) {
+			const parentId = typeof body.delegateOf === "string" ? body.delegateOf.trim() : "";
+			if (!parentId) {
+				json({ error: "delegateOf must reference a parent session" }, 400);
+				return;
+			}
 			// Sandbox guard: delegate parent must be own session or registered child
 			if (sandboxScope) {
-				const parentId = body.delegateOf;
 				if (!sandboxScope.sessionIds.has(parentId)) {
 					json({ error: "Forbidden: delegate parent must be own session" }, 403);
 					return;
 				}
 			}
+			const parentSession = sessionManager.getSession(parentId);
+			const parentPersisted = parentSession ? undefined : sessionManager.getPersistedSession(parentId);
+			if (!parentSession && !parentPersisted) {
+				json({ error: "Delegate parent session not found" }, 404);
+				return;
+			}
+			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
+			if (!parentProjectId) {
+				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
+				return;
+			}
+			const explicitDelegateProjectId = typeof body?.projectId === "string" && body.projectId.trim().length > 0
+				? body.projectId.trim()
+				: undefined;
+			if (explicitDelegateProjectId && explicitDelegateProjectId !== parentProjectId) {
+				json({ error: "projectId must match the delegate parent session's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
+				return;
+			}
+			const parentProject = resolveProjectForRequest(projectRegistry, { projectId: parentProjectId }, {
+				allowSystem: parentProjectId === SYSTEM_PROJECT_ID,
+			});
+			if (!parentProject.ok) { writeProjectResolutionError(parentProject); return; }
+			const requestedCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
+				? body.cwd.trim()
+				: undefined;
+			const cwd = requestedCwd ?? parentSession?.cwd ?? parentPersisted?.cwd ?? parentProject.project.rootPath;
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, parentProjectId, cwd, { kind: "session", sessionId: parentId });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 			try {
-				const cwd = body.cwd || config.defaultCwd;
-				const session = await sessionManager.createDelegateSession(body.delegateOf, {
+				const session = await sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
