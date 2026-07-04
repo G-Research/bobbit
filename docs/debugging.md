@@ -2,6 +2,14 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Unit `node-logic` runner timed out with no assertion failure
+
+- **Symptom**: the `unit:` gate fails with `[run-unit] node-logic timed out after 1050000ms`; `browser-fixtures` passed; no test reported an assertion failure. The retained tail shows whatever printed last, not the culprit file.
+- **Cause**: a single test/hook (or a leaked handle) never settles, so node's run never completes and `--test-force-exit` never fires; the wrapper then kills the runner at its own timeout without naming the offending file.
+- **Fix**: `scripts/run-unit.mjs` passes `--test-timeout` (default 120s; `BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS`) so a hung test/hook fails fast and node names it + file + line, well before the wrapper/gate timeout; and it pairs the `tap` reporter with `tests/helpers/hung-test-reporter.mjs`, whose on-disk heartbeat lets the wrapper's timeout path print `HUNG FILE: <path>` for files still in flight (the leaked-handle backstop). Diagnostics rendering is `scripts/lib/unit-heartbeat.mjs`.
+- **First look**: the failure tail now contains either `test timed out after <n>ms` (with `test at <file>:<line>`) or `[run-unit] HUNG FILE: <path>`. Do not just raise the timeout — read the named file/test.
+- **Pinning tests**: `tests/run-unit-wrapper.test.ts`, `tests/hung-test-reporter.test.ts`, `tests/run-unit-heartbeat-diagnostics.test.ts`, `tests/run-unit-hung-test-integration.test.ts`.
+
 ## Verification step stuck in `running`
 
 - **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
