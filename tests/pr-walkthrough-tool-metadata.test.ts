@@ -53,6 +53,36 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(text, /YAML/);
 	});
 
+	it("documents the V2 chunk/status/finalize contract in tool metadata", () => {
+		const chunk = readToolText("submit_chunk.yaml");
+		assert.match(chunk, /logical review card/);
+		assert.match(chunk, /files.*navigation metadata only/s);
+		assert.match(chunk, /narrative\[\]\.diff\.hunks\[\]/);
+		assert.match(chunk, /hunk_id/);
+		assert.match(chunk, /primary/);
+		assert.match(chunk, /secondary/);
+		assert.match(chunk, /skip_reason/);
+		assert.match(chunk, /raw diff bodies/);
+
+		const status = readToolText("submission_status.yaml");
+		assert.match(status, /read-receipt/);
+		assert.match(status, /coverage summaries/);
+		assert.match(status, /major_remaining/);
+		assert.match(status, /resume without rereading broad diffs/);
+
+		const finalize = readToolText("finalize_submission.yaml");
+		assert.match(finalize, /PRW_DUPLICATE_PRIMARY_HUNK/);
+		assert.match(finalize, /PRW_HUNK_REF_UNRESOLVED/);
+		assert.match(finalize, /PRW_SECONDARY_WITHOUT_PRIMARY/);
+		assert.match(finalize, /PRW_MAJOR_REMAINING_HUNKS/);
+		assert.match(finalize, /More than 12 required cards/);
+
+		const submit = readToolText("submit.yaml");
+		assert.match(submit, /V2 review contract/);
+		assert.match(submit, /explicit hunk_id references and placement values/);
+		assert.match(submit, /no raw diff bodies/);
+	});
+
 	it("extension registers in any session and posts session-secret-authenticated YAML payloads (no proof secret)", () => {
 		// host.agents reviewer migration (design Decision C): the env-gate + submit-proof
 		// secret are GONE. Registration ≠ activation — the boundary is the pr-reviewer role
