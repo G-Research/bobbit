@@ -151,6 +151,7 @@ function formatWaitText(result: WaitResult): string {
 	}
 	return lines.join("\n");
 }
+
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -5885,6 +5886,7 @@ async function handleApiRoute(
 					id: session.id,
 					cwd: session.cwd,
 					status: session.status,
+					projectId: session.projectId,
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
@@ -6143,6 +6145,7 @@ async function handleApiRoute(
 				id: session.id,
 				cwd: session.cwd,
 				status: session.status,
+				projectId: session.projectId ?? resolvedProjectId,
 				goalId: session.goalId,
 				assistantType: session.assistantType,
 				// Legacy boolean fields for backward compat
