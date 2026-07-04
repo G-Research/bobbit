@@ -1296,8 +1296,9 @@ export class SessionManager {
 
 		for (const session of sessionsToRecover) {
 			try {
-				// Verify/repair/recreate worktree if needed
-				if (session.cwd?.startsWith("/workspace-wt/")) {
+				// Verify/repair/recreate worktree if needed. Headquarters never owns
+				// sandbox worktrees, even for legacy sessions with /workspace-wt cwd.
+				if (projectId !== HEADQUARTERS_PROJECT_ID && session.cwd?.startsWith("/workspace-wt/")) {
 					let worktreeOk = false;
 
 					// Check if worktree still exists (volumes may survive rm -f)
@@ -1911,7 +1912,8 @@ export class SessionManager {
 
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
-		if (opts?.sandboxBranch) {
+		// Headquarters is always no-worktree, so ignore any legacy sandboxBranch.
+		if (opts?.sandboxBranch && projectId !== HEADQUARTERS_PROJECT_ID) {
 			// Capture the HOST-side working directory BEFORE it is remapped into the
 			// container worktree below. The `goalProvisioned` provider runs HOST-side
 			// (LifecycleHub.dispatchGoalProvisioned executes the provider module on
@@ -2348,6 +2350,10 @@ export class SessionManager {
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
 	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			this.worktreePools.delete(projectId);
+			return;
+		}
 		if (this.worktreePools.has(projectId)) return;
 		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
 		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
@@ -2378,6 +2384,7 @@ export class SessionManager {
 
 	/** Get the worktree pool for a specific project. */
 	getWorktreePool(projectId?: string): WorktreePool | null {
+		if (projectId === HEADQUARTERS_PROJECT_ID) return null;
 		if (projectId === undefined) {
 			// Legacy: return the first pool (backward compat for callers that don't pass projectId)
 			const first = this.worktreePools.values().next();
@@ -2393,6 +2400,10 @@ export class SessionManager {
 
 	/** Drain and remove a project's worktree pool (for project deletion). */
 	async removeWorktreePool(projectId: string): Promise<void> {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			this.worktreePools.delete(projectId);
+			return;
+		}
 		const pool = this.worktreePools.get(projectId);
 		if (pool) {
 			await pool.drain();
@@ -5079,8 +5090,9 @@ export class SessionManager {
 				projectId: ps.projectId,
 				goalId: ps.goalId,
 			});
-			// Verify the sandbox worktree still exists inside the container
-			if (ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			// Verify the sandbox worktree still exists inside the container. Headquarters
+			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
 				try {
 					await execFileAsync("docker", [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
@@ -5503,8 +5515,16 @@ export class SessionManager {
 		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
 			? [...opts.allowedTools]
 			: undefined;
-		// Resolve projectId from opts or from the goal's project
+		// Resolve projectId from opts or from the goal's project.
+		// Headquarters is a server/data workspace: ignore every worktree request at
+		// the lifecycle boundary so downstream setup never claims a pool, creates a
+		// git worktree, or asks sandbox wiring for a branch worktree.
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
+		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
+		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
+		const worktreePushPolicy = headquartersScope ? undefined : opts?.worktreePushPolicy;
+		const sandboxBranch = headquartersScope ? undefined : opts?.sandboxBranch;
+		const sandboxBaseBranch = headquartersScope ? undefined : opts?.sandboxBaseBranch;
 		await this.ensureMcpManagerForContext(projectId, cwd);
 		const ctx = this.buildPipelineContext(projectId, cwd);
 
@@ -5534,8 +5554,8 @@ export class SessionManager {
 			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
-		if (opts?.worktreeOpts) {
-			const repoPath = opts.worktreeOpts.repoPath;
+		if (worktreeOpts) {
+			const repoPath = worktreeOpts.repoPath;
 			const uuid8 = id.slice(0, 8);
 			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
 
@@ -5589,7 +5609,7 @@ export class SessionManager {
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				worktreePath,
-				worktreePushPolicy: opts?.worktreePushPolicy,
+				worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -5629,7 +5649,7 @@ export class SessionManager {
 				readOnly: opts?.readOnly,
 				sessionScopedAllowedTools,
 				worktreePath,
-				worktreePushPolicy: opts?.worktreePushPolicy,
+				worktreePushPolicy,
 				repoPath,
 				branch,
 				sandboxed: opts?.sandboxed,
@@ -5643,8 +5663,8 @@ export class SessionManager {
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
-				sandboxBranch: opts?.sandboxBranch,
-				sandboxBaseBranch: opts?.sandboxBaseBranch,
+				sandboxBranch,
+				sandboxBaseBranch,
 				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
@@ -5713,7 +5733,7 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
-			worktreePushPolicy: opts?.worktreePushPolicy,
+			worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
@@ -5730,8 +5750,8 @@ export class SessionManager {
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: optsAllowedTagged,
 			projectId,
-			sandboxBranch: opts?.sandboxBranch,
-			sandboxBaseBranch: opts?.sandboxBaseBranch,
+			sandboxBranch,
+			sandboxBaseBranch,
 			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,

@@ -8,7 +8,7 @@ import { buildStaffSystemPrompt } from "./role-prompt.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
-import { SYSTEM_PROJECT_ID } from "./project-registry.js";
+import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
 import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, shouldSkipRemoteGitForTests } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
@@ -194,6 +194,7 @@ export class StaffManager {
 	}
 
 	private async projectSupportsWorktree(projectId: string, cwd: string): Promise<{ supported: boolean; repoPath?: string; multiRepo: boolean; components: Component[] }> {
+		if (isHeadquartersProject(projectId)) return { supported: false, multiRepo: false, components: [] };
 		const ctx = this.pcm.getOrCreate(projectId);
 		if (!ctx) return { supported: false, multiRepo: false, components: [] };
 		const components = ctx.projectConfigStore.getComponents();
@@ -208,7 +209,7 @@ export class StaffManager {
 	}
 
 	private async provisionStaffWorktree(projectId: string, name: string, id: string, cwd: string, worktree?: boolean): Promise<StaffWorktreePlan> {
-		if (worktree === false) return { sessionCwd: cwd };
+		if (isHeadquartersProject(projectId) || worktree === false) return { sessionCwd: cwd };
 
 		const support = await this.projectSupportsWorktree(projectId, cwd);
 		if (!shouldCreateWorktree({ worktree }, support.supported) || !support.repoPath) {
@@ -265,14 +266,14 @@ export class StaffManager {
 	}
 
 	private staffSessionCwd(staff: PersistedStaff, projectId: string): string {
-		if (!staff.worktreePath) return staff.cwd;
+		if (isHeadquartersProject(projectId) || !staff.worktreePath) return staff.cwd;
 		const ctx = this.pcm.getOrCreate(projectId);
 		const repoPath = staff.repoPath ?? ctx?.project.rootPath;
 		return offsetCwd(repoPath, staff.cwd, staff.worktreePath);
 	}
 
 	private staffWorktreeEntries(staff: PersistedStaff, projectId?: string): Array<{ repo: string; repoPath: string; worktreePath: string }> {
-		if (!staff.worktreePath) return [];
+		if (isHeadquartersProject(projectId) || !staff.worktreePath) return [];
 		const ctx = projectId ? this.pcm.getOrCreate(projectId) : undefined;
 		const repoPath = staff.repoPath ?? ctx?.project.rootPath ?? staff.cwd;
 		if (staff.repoWorktrees && Object.keys(staff.repoWorktrees).length > 0) {
@@ -286,7 +287,7 @@ export class StaffManager {
 	}
 
 	private staffSessionWorktreeMeta(staff: PersistedStaff, projectId?: string): { worktreePath: string; branch?: string; repoPath?: string; repoWorktrees?: Record<string, string> } | undefined {
-		if (!staff.worktreePath) return undefined;
+		if (isHeadquartersProject(projectId) || !staff.worktreePath) return undefined;
 		const ctx = projectId ? this.pcm.getOrCreate(projectId) : undefined;
 		const repoPath = staff.repoPath ?? ctx?.project.rootPath;
 		return {
@@ -561,7 +562,7 @@ export class StaffManager {
 	 * Non-fatal — logs warnings on failure so the agent can still operate.
 	 */
 	private async refreshWorktree(staff: PersistedStaff, projectId: string): Promise<void> {
-		if (!staff.worktreePath) return;
+		if (isHeadquartersProject(projectId) || !staff.worktreePath) return;
 		// Sandboxed staff refresh inside the container; host-side worktree refresh is skipped.
 		if (staff.sandboxed) return;
 
