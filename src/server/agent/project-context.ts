@@ -21,6 +21,7 @@ import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
+import { SwarmGroupStore } from "./swarm-group-store.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -55,6 +56,8 @@ export class ProjectContext {
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
   readonly planMutationStore: PlanMutationStore;
+  /** SWARM-W0 — restart-durable swarm-group barrier + artifact store (seam only, see docs/design/swarm-orchestration-w0.md). */
+  readonly swarmGroupStore: SwarmGroupStore;
 
   /**
    * Optional dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -98,6 +101,7 @@ export class ProjectContext {
     this.costTracker = new CostTracker(this.stateDir);
     this.secretsStore = new SecretsStore(this.stateDir);
     this.planMutationStore = new PlanMutationStore(this.stateDir);
+    this.swarmGroupStore = new SwarmGroupStore(this.stateDir);
 
     // Instantiate config stores with project-scoped config directory.
     // ProjectConfigStore must come before WorkflowStore — the inline

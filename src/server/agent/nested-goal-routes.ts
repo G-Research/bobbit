@@ -1097,7 +1097,7 @@ export async function tryHandleNestedGoalRoute(
 				// child held (if it was started under the scheduler) so the next
 				// capacity-blocked sibling can start. Best-effort + idempotent
 				// (a child that never held a permit is a no-op).
-				try { verificationHarness.notifyChildTerminal(childId); } catch (err) {
+				try { await verificationHarness.notifyChildTerminal(childId, "done"); } catch (err) {
 					console.warn(`[integrate-child] notifyChildTerminal failed (non-fatal):`, err);
 				}
 				// dependsOn scheduling — auto-unblock any sibling whose deps are
@@ -1137,6 +1137,25 @@ export async function tryHandleNestedGoalRoute(
 				broadcastToAll({ type: "goal_state_changed", goalId: childId });
 				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
 				json({ merged: true, alreadyMerged: !!outcome.alreadyMerged, pushed: !!outcome.pushed });
+				return true;
+			}
+			// SWARM-W0 (design/swarm-orchestration.md §5.1/§5.2): the child carries
+			// `swarmGroup` — the auto-merge was deliberately SKIPPED (its branch is
+			// a merge CANDIDATE, not disjoint-merged). Still tear down the team and
+			// archive the goal record (its work is captured, not its git branch),
+			// and fire the SAME terminal event non-swarm children use so the
+			// swarm-group barrier/artifact capture runs off the existing seam.
+			if (outcome.skippedSwarmGroup) {
+				try { await teamManager.teardownTeam(childId); } catch (err) {
+					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
+				}
+				await goalManager.archiveGoalAfterMerge(childId);
+				try { await verificationHarness.notifyChildTerminal(childId, "done"); } catch (err) {
+					console.warn(`[integrate-child] notifyChildTerminal failed (non-fatal):`, err);
+				}
+				broadcastToAll({ type: "goal_state_changed", goalId: childId });
+				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
+				json({ merged: false, skipped: true, code: "SWARM_SIBLING_CANDIDATE", branch: child.branch ?? null, output: outcome.output ?? "" });
 				return true;
 			}
 			if (outcome.conflict) {

@@ -118,7 +118,8 @@ import { GoalPausedError } from "./goal-paused-guard.js";
 import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
+import { detectPrimaryBranch, parseBaseRef, getHeadCommitSha } from "../skills/git.js";
+import type { SwarmArtifact, SwarmTerminalStatus } from "./swarm-group-store.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
@@ -5424,9 +5425,68 @@ export class VerificationHarness {
 	 * completion) so its permit is released and the next capacity-blocked child
 	 * starts. Best-effort + idempotent. Thin delegator to
 	 * `ChildTeamScheduler.notifyTerminal`.
+	 *
+	 * SWARM-W0 (design/swarm-orchestration.md §5.2 "terminal barrier +
+	 * artifact capture"): when the terminating child carries `swarmGroup`,
+	 * ALSO captures a per-sibling artifact into the restart-durable
+	 * `SwarmGroupStore` and recomputes the barrier. `status` defaults to
+	 * "done" (today's only reachable terminal via this path — merge/archive);
+	 * callers that archive a non-complete goal (e.g. the general goal-archive
+	 * route) pass "killed" explicitly. Zero overhead for a non-swarm child:
+	 * the capture is a single `swarmGroup` field check that returns
+	 * immediately when unset.
 	 */
-	notifyChildTerminal(childGoalId: string): void {
+	async notifyChildTerminal(childGoalId: string, status: SwarmTerminalStatus = "done"): Promise<void> {
 		this.childScheduler.notifyTerminal(childGoalId);
+		try {
+			await this._captureSwarmArtifactIfTagged(childGoalId, status);
+		} catch (err) {
+			console.warn(`[verification-harness] notifyChildTerminal: swarm artifact capture failed for ${childGoalId} (non-fatal):`, err);
+		}
+	}
+
+	/**
+	 * SWARM-W0 — capture `childGoalId`'s terminal artifact into its swarm
+	 * group's barrier record, IF it carries `swarmGroup`. No-op (zero
+	 * overhead) for any goal without the tag. Reuses the existing
+	 * `SessionManager.getSessionOutput` collected-output mechanism verbatim —
+	 * no new transcript reader.
+	 */
+	private async _captureSwarmArtifactIfTagged(childGoalId: string, status: SwarmTerminalStatus): Promise<void> {
+		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
+		if (!ctx) return;
+		const child = ctx.goalStore.get(childGoalId);
+		if (!child?.swarmGroup) return;
+		const swarmGroup = child.swarmGroup;
+
+		let output = "";
+		if (child.teamLeadSessionId && this.sessionManager) {
+			try {
+				output = await this.sessionManager.getSessionOutput(child.teamLeadSessionId);
+			} catch {
+				/* best-effort — a missing/dormant session leaves output "" */
+			}
+		}
+
+		const childCwd = child.repoWorktrees?.["."] ?? child.worktreePath;
+		const commitSha = childCwd ? await getHeadCommitSha(childCwd) : undefined;
+
+		const artifact: SwarmArtifact = {
+			goalId: childGoalId,
+			sessionId: child.teamLeadSessionId,
+			output,
+			branch: child.branch,
+			commitSha,
+			status,
+			verifierScore: null,
+			capturedAt: Date.now(),
+		};
+
+		const siblingIds = ctx.goalStore.getAll()
+			.filter(g => g.swarmGroup === swarmGroup)
+			.map(g => g.id);
+
+		ctx.swarmGroupStore.recordArtifact(swarmGroup, artifact, siblingIds, child.rootGoalId);
 	}
 
 	/**
@@ -5737,6 +5797,15 @@ export class VerificationHarness {
 					try { await teamManager?.teardownTeam(childId); } catch { /* non-fatal */ }
 					await goalManager.archiveGoalAfterMerge(childId);
 					return { passed: true, output: `Recovered workflow-less complete child ${childId} (${outcome.merged ? "merged" : "already merged"})` };
+				}
+				// SWARM-W0: swarm sibling — auto-merge suppressed, branch recorded
+				// as a candidate. Still archive + fire the terminal event so the
+				// swarm-group barrier/artifact capture runs off the existing seam.
+				if (outcome.skippedSwarmGroup) {
+					try { await teamManager?.teardownTeam(childId); } catch { /* non-fatal */ }
+					await goalManager.archiveGoalAfterMerge(childId);
+					try { await this.notifyChildTerminal(childId, "done"); } catch { /* non-fatal */ }
+					return { passed: true, output: `Recovered workflow-less swarm sibling ${childId} — auto-merge suppressed, candidate recorded` };
 				}
 				if (outcome.conflict) {
 					return {
@@ -6054,6 +6123,17 @@ export class VerificationHarness {
 				// harness merge path. Best-effort: never fails the step.
 				await this._autoUnblockDependents(parentGoalId, childGoalId, goalManager);
 				return { passed: true, output: `Subgoal merged + archived (${outcome.merged ? "merged" : "already merged"}): ${childGoalId}` };
+			}
+			// SWARM-W0: swarm sibling — auto-merge suppressed (its branch is a
+			// merge CANDIDATE, not disjoint-merged). Still tear down + archive
+			// (its work is captured, not its git branch) and fire the SAME
+			// terminal event non-swarm children use so the swarm-group
+			// barrier/artifact capture runs off this existing seam.
+			if (outcome.skippedSwarmGroup) {
+				try { await teamManager?.teardownTeam(childGoalId); } catch { /* non-fatal */ }
+				await goalManager.archiveGoalAfterMerge(childGoalId);
+				try { await this.notifyChildTerminal(childGoalId, "done"); } catch { /* non-fatal */ }
+				return { passed: true, output: `Swarm sibling ${childGoalId} terminal — auto-merge suppressed, candidate recorded` };
 			}
 			if (outcome.conflict) {
 				// Durable merge-conflict flag: persist + broadcast so the Plan

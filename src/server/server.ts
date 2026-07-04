@@ -6903,7 +6903,14 @@ async function handleApiRoute(
 			// this child held (or drop it from the capacity queue) so the next
 			// capacity-blocked sibling can start. Best-effort + idempotent.
 			if (g.parentGoalId) {
-				try { verificationHarness.notifyChildTerminal(g.id); } catch (err) {
+				// SWARM-W0: this is a general archive, not necessarily a merge — a
+				// goal archived without ever reaching state=complete is an
+				// operator-initiated "kill" from the swarm barrier's point of view
+				// (see docs/design/swarm-orchestration-w0.md for why goals have no
+				// separate "failed" state yet). Mirrors the mergedManually stamp
+				// above (which flips this same goal's state to "complete" first).
+				const swarmTerminalStatus = (g.state === "complete" || (mergedManually && g.id === id)) ? "done" : "killed";
+				try { await verificationHarness.notifyChildTerminal(g.id, swarmTerminalStatus); } catch (err) {
 					console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
 				}
 			}

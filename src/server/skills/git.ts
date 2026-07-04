@@ -410,6 +410,22 @@ export async function hasResolvedHead(repoPath: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Resolve the HEAD commit sha at `cwd`, or `undefined` if it can't be
+ * resolved (no repo, unborn HEAD, worktree already torn down). Never throws.
+ * SWARM-W0: used to stamp `commitSha` on a swarm sibling's terminal artifact
+ * (see `verification-harness.ts` `notifyChildTerminal`).
+ */
+export async function getHeadCommitSha(cwd: string): Promise<string | undefined> {
+	try {
+		const { stdout } = await execGit(["rev-parse", "HEAD"], { cwd, timeout: 5_000 });
+		const sha = stdout.trim();
+		return sha || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Exec-injected variant for sandbox/container git callers. Never throws. */
 export async function hasResolvedHeadWithExec(exec: (args: string[]) => Promise<string>): Promise<boolean> {
 	try {

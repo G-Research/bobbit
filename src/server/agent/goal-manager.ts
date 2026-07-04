@@ -65,6 +65,15 @@ export interface MergeChildOutcome extends MergeChildResult {
 	pushed: boolean;
 	/** Error message from a failed push — non-fatal, surfaced for logging. */
 	pushError?: string;
+	/**
+	 * SWARM-W0 (design/swarm-orchestration.md §5.1): true when the child
+	 * carries `swarmGroup` and the auto-merge was SUPPRESSED entirely — no git
+	 * operation ran. `merged`/`alreadyMerged`/`conflict` are all `false` in
+	 * this case; the sibling's branch is a merge CANDIDATE, not something
+	 * disjoint-merged. Callers should treat this as neither success nor
+	 * failure of the merge itself.
+	 */
+	skippedSwarmGroup?: boolean;
 }
 
 /**
@@ -788,6 +797,27 @@ export class GoalManager {
 			(err as any).code = "PARENT_MISMATCH";
 			throw err;
 		}
+
+		// SWARM-W0 (design/swarm-orchestration.md §5.1 "suppress the auto
+		// git-merge for swarm siblings"): a swarm sibling's branch is a
+		// CANDIDATE for the (not-yet-built, SWARM-W1+) reconciler to pick from —
+		// never a disjoint auto-merge target. Skip ALL git operations (no
+		// mergeChildBranchLocal call, no push) the moment the child carries
+		// `swarmGroup`. Checked BEFORE the branch/worktree presence checks below
+		// so a swarm sibling that hasn't set up a worktree yet never throws
+		// GOAL_GIT_UNAVAILABLE. Non-swarm children (swarmGroup undefined) fall
+		// through to the unchanged merge path below — zero behavior change.
+		if (child.swarmGroup) {
+			return {
+				merged: false,
+				alreadyMerged: false,
+				conflict: false,
+				pushed: false,
+				skippedSwarmGroup: true,
+				output: `Auto-merge suppressed for swarm sibling ${childGoalId} (swarmGroup=${child.swarmGroup}) — branch "${child.branch ?? "(none)"}" recorded as a merge candidate, not merged.`,
+			};
+		}
+
 		if (!parent.branch || !child.branch) {
 			const err = new Error(
 				`mergeChild: missing branch — parent="${parent.branch}", child="${child.branch}"`,
