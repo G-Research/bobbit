@@ -98,10 +98,17 @@ shadows the server-level role of the same name, exactly as `toolPolicies`
 does today. Verified by inspection of `resolve()` at lines 142-176 and the
 generic call site at line 60.
 
-### 1.6 No builtin roles change
+### 1.6 Builtin role defaults
 
-`defaults/roles/*.yaml` ship without `model` / `thinkingLevel` — leaving them
-unset preserves today's behaviour (inherit `default.sessionModel`).
+> **Superseded (F5, Fable audit):** builtin roles originally shipped without
+> either field, which left the whole mechanism inert. `defaults/roles/*.yaml`
+> now ship with `thinkingLevel` tiers — `high` for team-lead / architect /
+> security-reviewer / spec-auditor / bug-hunter, explicit `medium` for coder /
+> reviewer / code-reviewer / test-engineer / qa-tester, `low` for docs-writer;
+> assistant / general / ux-designer stay unset. `model` remains unset on every
+> builtin role (inherit `default.sessionModel`). The current tier table lives
+> in [docs/internals.md § Per-role model & thinking-level overrides](../internals.md#per-role-model--thinking-level-overrides)
+> and is pinned by `tests/builtin-role-thinking-tiers.test.ts`.
 
 ---
 
