@@ -425,7 +425,7 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 
 ### 3.7 Re-generation flow
 
-When the user adds/removes/renames a component in Settings → project tab, the project assistant offers to regenerate workflows. The proposal panel renders a sub-section diff scoped to `workflows:` (see §8.6). Hand edits are merged: any hand-added gate not in the regenerated set is preserved with a comment marker.
+When the user adds/removes/renames a component in Settings → project tab, the project assistant offers to regenerate workflows. The proposal panel shows the regenerated `workflows` via the structured per-field editors in `src/app/proposal-panels.ts::projectProposalPanel()` (the sub-section YAML diff originally designed for this was never shipped — see the historical note in §8.6). Hand edits are merged: any hand-added gate not in the regenerated set is preserved with a comment marker.
 
 ---
 
@@ -840,7 +840,15 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 
 ### 8.6 Sub-section diff in proposal panel
 
-`src/ui/components/ProjectProposalPanel.ts` (existing): teach the diff renderer to scope diffs by top-level YAML key. When the user expands "workflows", they see only that block's diff. Done by parsing both old and new YAML to AST, computing per-key diffs, rendering each in its own collapsible section.
+Historical note: this section originally proposed teaching
+`src/ui/components/ProjectProposalPanel.ts` to scope diffs by top-level YAML
+key (parse both old/new YAML to AST, compute per-key diffs, render each in
+its own collapsible section). That module was never wired into rendering and
+was removed as dead code (CQ-04) — it was superseded by the field-editor
+approach in `src/app/proposal-panels.ts::projectProposalPanel()`, which
+renders `components`/`workflows` via structured per-field editors instead of
+a YAML sub-section diff view. If per-key diffing is wanted again, it should
+be built directly in `proposal-panels.ts`.
 
 ---
 
@@ -919,7 +927,7 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 - `src/server/agent/task-store.ts` — `gitHandoff` field + read-helper; migration.
 - `src/server/server.ts` — multi-repo `git-status`/`git-diff`; `propose_project` schema; manual-pass endpoint.
 - `src/server/skills/git.ts` — generalized `createWorktree` callers; `setupWorktreeDeps` thin wrapper kept for legacy.
-- `src/ui/components/ProjectPickerPopover.ts`, `SettingsView.ts`, `ProjectProposalPanel.ts`, `GitStatusWidget.ts`, `GoalCreationDialog.ts`, `AgentInterface.ts` — UI surface §8.
+- `src/ui/components/ProjectPickerPopover.ts`, `SettingsView.ts`, `ProjectProposalPanel.ts` (since removed as dead code — see §8.6), `GitStatusWidget.ts`, `GoalCreationDialog.ts`, `AgentInterface.ts` — UI surface §8.
 - `defaults/tools/proposals/extension.ts` — `propose_project` schema (§8.5).
 - `AGENTS.md` — Worktrees, Git conventions sections.
 - `docs/internals.md` — multi-repo, components, inline workflows, sandbox layout, pool, sweeper.
