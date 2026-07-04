@@ -243,11 +243,22 @@ function run(label, args) {
 	});
 }
 
+// Per-test timeout for node-logic. node's default is Infinity, so a single test
+// whose body awaits something that never resolves hangs the ENTIRE phase until
+// the outer runner kill (~1050s) — an opaque, unactionable gate timeout. Bound
+// it generously: the slowest real node-logic test is ~1s, so 120s never flakes a
+// legitimate test even under heavy gate contention, but converts an infinite
+// hang into a named `test timed out` failure that points straight at the culprit.
+const nodePerTestTimeoutMs = Math.max(
+	10_000,
+	Number.parseInt(process.env.BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS || "120000", 10) || 120_000,
+);
 const nodeArgs = [
 	"tsx",
 	"--import", "./tests/helpers/css-stub-loader.mjs",
 	"--test",
 	"--test-force-exit",
+	`--test-timeout=${nodePerTestTimeoutMs}`,
 	`--test-concurrency=${nodeConcurrency}`,
 	...NODE_UNIT_GLOBS,
 ];
