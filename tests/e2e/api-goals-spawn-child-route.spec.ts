@@ -30,10 +30,10 @@ import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
+	defaultProjectId,
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
-	registerProject,
 	seedTeamLeadHeader,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
@@ -47,12 +47,9 @@ let gw: any;
 test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
-	const project = await registerProject({
-		name: `spawn-child-git-${Date.now()}`,
-		rootPath: gitCwd(),
-		upsert: true,
-	});
-	gitProjectId = project.id;
+	gitCwd();
+	gitProjectId = (await defaultProjectId())!;
+	expect(gitProjectId).toBeTruthy();
 });
 
 /**

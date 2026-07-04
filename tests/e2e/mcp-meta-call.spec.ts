@@ -221,8 +221,9 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
 
 		const cwdReadOnly = await apiFetch(`/api/mcp-servers?cwd=${encodeURIComponent(gateway.bobbitDir)}`);
-		expect(cwdReadOnly.status).toBe(200);
-		expect(await cwdReadOnly.json()).toEqual([]);
+		expect(cwdReadOnly.status).toBe(400);
+		const cwdReadOnlyBody = await cwdReadOnly.json().catch(() => ({}));
+		expect(String(cwdReadOnlyBody.code ?? cwdReadOnlyBody.error ?? "").toLowerCase()).toContain("project");
 		expect(gateway.sessionManager.getMcpManager({ cwd: gateway.bobbitDir })).toBeNull();
 
 		const ensured = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}&ensure=true`);

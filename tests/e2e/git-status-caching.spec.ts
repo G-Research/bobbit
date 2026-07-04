@@ -15,10 +15,9 @@
  * layer doesn't care whether the producer is git or a fake.
  */
 import { mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { apiFetch, deleteSession, defaultProjectId, nonGitCwd } from "./e2e-setup.js";
 
 let serverModule: any;
 
@@ -35,7 +34,7 @@ test.beforeAll(async () => {
 // repo — the fake returns whatever we program). We still need cwd to exist
 // so the handler's fs.existsSync check passes.
 async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> {
-	const cwd = join(tmpdir(), `bobbit-e2e-gitfake-${tag}-${process.pid}-${Date.now()}`);
+	const cwd = join(nonGitCwd(), `gitfake-${tag}-${process.pid}-${Date.now()}`);
 	mkdirSync(cwd, { recursive: true });
 	const projectId = await defaultProjectId();
 	const resp = await apiFetch("/api/sessions", {

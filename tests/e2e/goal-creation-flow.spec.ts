@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, apiFetch } from "./e2e-setup.js";
+import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the goal creation flow — verifying:
@@ -26,7 +26,7 @@ test.describe("Goal creation flow", () => {
 		// Create a goal (simulates what the UI does)
 		const goalRes = await apiFetch(`/api/goals`, {
 			method: "POST",
-			body: JSON.stringify({ title: "Test goal for silent cleanup", cwd: ".", spec: "Test spec" }),
+			body: JSON.stringify({ title: "Test goal for silent cleanup", cwd: nonGitCwd(), spec: "Test spec" }),
 		});
 		expect(goalRes.status).toBe(201);
 		const goal = await goalRes.json();
@@ -53,7 +53,7 @@ test.describe("Goal creation flow", () => {
 	test("createGoal returns goal object with id for dashboard navigation", async () => {
 		const goalRes = await apiFetch(`/api/goals`, {
 			method: "POST",
-			body: JSON.stringify({ title: "Navigation test goal", cwd: ".", spec: "Test" }),
+			body: JSON.stringify({ title: "Navigation test goal", cwd: nonGitCwd(), spec: "Test" }),
 		});
 		expect(goalRes.status).toBe(201);
 		const goal = await goalRes.json();
