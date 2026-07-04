@@ -1,0 +1,141 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const apiSource = readFileSync(new URL("../src/app/api.ts", import.meta.url), "utf8");
+
+function section(start: string, end: string): string {
+	const startIndex = apiSource.indexOf(start);
+	assert.notEqual(startIndex, -1, `missing start marker: ${start}`);
+	const endIndex = apiSource.indexOf(end, startIndex + start.length);
+	assert.notEqual(endIndex, -1, `missing end marker: ${end}`);
+	return apiSource.slice(startIndex, endIndex);
+}
+
+const refreshSessionsSource = section(
+	"export async function refreshSessions(): Promise<void> {",
+	"/** Check whether archived goals have been loaded",
+);
+
+const createGoalSource = section(
+	"export async function createGoal(",
+	"export async function updateGoal(",
+);
+
+const refreshAutoExpandBlock = refreshSessionsSource.match(
+	/if \(!isInitial\) \{\s*for \(const g of incoming\) \{\s*if \(!prevGoalIds\.has\(g\.id\) && !g\.parentGoalId && state\.gatewaySessions\.some\(\(s\) => s\.goalId === g\.id \|\| s\.teamGoalId === g\.id\)\) \{\s*expandSidebarTreeNode\(\{ kind: "goal", goalId: g\.id \}, \{ explicit: false \}\);\s*}\s*}\s*}/,
+)?.[0];
+assert.ok(refreshAutoExpandBlock, "refreshSessions auto-expand block should keep initial, top-level, and live-session guards");
+
+const runRefreshAutoExpand = new Function(
+	"incoming",
+	"prevGoalIds",
+	"state",
+	"isInitial",
+	"expandSidebarTreeNode",
+	`${refreshAutoExpandBlock}`,
+) as (
+	incoming: Array<{ id: string; parentGoalId?: string }>,
+	prevGoalIds: Set<string>,
+	state: { gatewaySessions: Array<{ goalId?: string; teamGoalId?: string }> },
+	isInitial: boolean,
+	expandSidebarTreeNode: (key: unknown, opts?: unknown) => void,
+) => void;
+
+const createGoalExpansionBlock = createGoalSource.match(
+	/const goalsById = new Map\(state\.goals\.map\(g => \[g\.id, g\]\)\);\s*let cursor: Goal \| undefined = goalsById\.get\(goal\.id\) \?\? goal;\s*const seenGoalIds = new Set<string>\(\);\s*while \(cursor && !seenGoalIds\.has\(cursor\.id\)\) \{\s*seenGoalIds\.add\(cursor\.id\);\s*expandSidebarTreeNode\(\{ kind: "goal", goalId: cursor\.id \}, \{ explicit: false \}\);\s*cursor = cursor\.parentGoalId \? goalsById\.get\(cursor\.parentGoalId\) : undefined;\s*}/,
+)?.[0];
+assert.ok(createGoalExpansionBlock, "createGoal should expand the created goal and ancestors as non-explicit preferences");
+
+const runCreateGoalExpansion = new Function(
+	"goal",
+	"state",
+	"expandSidebarTreeNode",
+	`${createGoalExpansionBlock.replace(/: Goal \| undefined/g, "").replace(/<string>/g, "")}`,
+) as (
+	goal: { id: string; parentGoalId?: string },
+	state: { goals: Array<{ id: string; parentGoalId?: string }> },
+	expandSidebarTreeNode: (key: unknown, opts?: unknown) => void,
+) => void;
+
+describe("api sidebar expansion regression", () => {
+	it("refreshSessions uses the unified sidebar tree API, not legacy expanded-goals persistence", () => {
+		assert.match(apiSource, /import \{ expandSidebarTreeNode \} from "\.\/sidebar-tree-state\.js";/);
+		assert.doesNotMatch(apiSource, /\bexpandedGoals\b/);
+		assert.doesNotMatch(apiSource, /\bsaveExpandedGoals\b/);
+	});
+
+	it("refreshSessions auto-expands newly discovered top-level goals with live owning sessions as non-explicit", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+
+		runRefreshAutoExpand(
+			[{ id: "root" }],
+			new Set(),
+			{ gatewaySessions: [{ goalId: "root" }] },
+			false,
+			(key, opts) => calls.push({ key, opts }),
+		);
+
+		assert.deepEqual(calls, [
+			{ key: { kind: "goal", goalId: "root" }, opts: { explicit: false } },
+		]);
+	});
+
+	it("refreshSessions suppresses system expansion during initial hydration", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+
+		runRefreshAutoExpand(
+			[{ id: "existing-root" }],
+			new Set(),
+			{ gatewaySessions: [{ goalId: "existing-root" }] },
+			true,
+			(key, opts) => calls.push({ key, opts }),
+		);
+
+		assert.deepEqual(calls, []);
+	});
+
+	it("refreshSessions treats teamGoalId-only live owning sessions as top-level goal owners", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+
+		runRefreshAutoExpand(
+			[{ id: "team-root" }],
+			new Set(),
+			{ gatewaySessions: [{ teamGoalId: "team-root" }] },
+			false,
+			(key, opts) => calls.push({ key, opts }),
+		);
+
+		assert.deepEqual(calls, [
+			{ key: { kind: "goal", goalId: "team-root" }, opts: { explicit: false } },
+		]);
+	});
+
+	it("refreshSessions leaves a collapsed parent closed when a new child/sub-goal appears", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+
+		runRefreshAutoExpand(
+			[{ id: "child", parentGoalId: "collapsed-parent" }],
+			new Set(["collapsed-parent"]),
+			{ gatewaySessions: [{ goalId: "child" }] },
+			false,
+			(key, opts) => calls.push({ key, opts }),
+		);
+
+		assert.deepEqual(calls, []);
+	});
+
+	it("createGoal reveals created child goals by expanding the child and ancestors when unset", () => {
+		const calls: Array<{ key: unknown; opts?: unknown }> = [];
+		const state = { goals: [{ id: "root" }, { id: "parent" }, { id: "child", parentGoalId: "parent" }] };
+
+		runCreateGoalExpansion({ id: "root" }, state, (key, opts) => calls.push({ key, opts }));
+		runCreateGoalExpansion({ id: "child", parentGoalId: "parent" }, state, (key, opts) => calls.push({ key, opts }));
+
+		assert.deepEqual(calls, [
+			{ key: { kind: "goal", goalId: "root" }, opts: { explicit: false } },
+			{ key: { kind: "goal", goalId: "child" }, opts: { explicit: false } },
+			{ key: { kind: "goal", goalId: "parent" }, opts: { explicit: false } },
+		]);
+	});
+});

@@ -2,6 +2,10 @@
 // the production send()/getQueue()/_flushOutbox() with a fake WebSocket whose
 // readyState the test controls.
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import { setRenderApp, state } from "../../src/app/state.js";
+
+let renderCount = 0;
+setRenderApp(() => { renderCount++; });
 
 function makeAgent(readyState: number) {
 	const ra: any = new RemoteAgent();
@@ -19,6 +23,14 @@ function makeAgent(readyState: number) {
 (window as any).__setReadyState = (ra: any, rs: number) => { ra.ws.readyState = rs; };
 (window as any).__flush = (ra: any) => ra._flushOutbox();
 (window as any).__event = (ra: any, event: any) => ra.handleAgentEvent(event);
+(window as any).__serverMessage = async (ra: any, msg: any) => { await ra.handleServerMessage(msg); };
+(window as any).__setHeadquartersVisibleState = (visible: boolean) => { state.showHeadquartersInProjectLists = visible; };
+(window as any).__getHeadquartersVisibleState = () => state.showHeadquartersInProjectLists;
+(window as any).__resetRenderCount = () => { renderCount = 0; };
+(window as any).__renderCount = () => renderCount;
+(window as any).__nextRenderFrame = () => new Promise<void>((resolve) => {
+	requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+});
 (window as any).__snapshot = (ra: any) => ({
 	outboxLen: ra._pendingOutbox.length,
 	sent: ra.__sentFrames.map((s: string) => JSON.parse(s)),

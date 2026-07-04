@@ -29,16 +29,27 @@ import {
 	state,
 	SIDEBAR_FONT_SCALE_KEY,
 	SIDEBAR_FONT_SCALE_DEFAULT,
-	SIDEBAR_FONT_SCALE_STOPS,
+	SIDEBAR_FONT_SIZE_MIN_PX,
+	SIDEBAR_FONT_SIZE_MAX_PX,
+	SIDEBAR_FONT_SIZE_STEP_PX,
 	loadSidebarFontScale,
 	applySidebarFontScaleVar,
-	nearestStop,
+	sidebarFontSizePxToScale,
+	sidebarFontScaleToDisplayPx,
+	SIDEBAR_TREE_INDENT_DEFAULT_PX,
+	SIDEBAR_TREE_INDENT_MIN_PX,
+	SIDEBAR_TREE_INDENT_MAX_PX,
+	SIDEBAR_TREE_INDENT_STEP_PX,
+	loadSidebarTreeIndentPx,
+	saveSidebarTreeIndentPx,
+	resetSidebarTreeIndentPreference,
+	applySidebarTreeLayoutVars,
 } from "./state.js";
+import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
-import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
+import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
-import { GW_URL_KEY } from "./gateway-fetch.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
@@ -46,6 +57,7 @@ import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog, confirmAction } from "./dialogs.js";
+import { ACCOUNT_OAUTH_PROVIDERS, clearDismissedAccountOAuthExpiryRemindersForProvider, type AccountOAuthProviderId } from "./account-oauth-providers.js";
 import "../ui/components/ProviderKeyInput.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
@@ -76,10 +88,16 @@ const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 ];
 
 function getActiveScope(): string {
-	return (getRouteFromHash() as any).settingsScope ?? "system";
+	const route = getRouteFromHash() as any;
+	const scope = route.settingsScope ?? "system";
+	// Headquarters is the user-facing server scope. Only Workflows currently use
+	// the explicit project id because workflow storage remains project-scoped.
+	if (isHeadquartersProject(scope) && route.settingsTab !== "workflows") return "system";
+	return scope;
 }
 
 function getTabsForScope(scope: string): { id: SettingsTab; label: string }[] {
+	if (isHeadquartersProject(scope)) return PROJECT_TABS;
 	return scope === "system" ? SYSTEM_TABS : PROJECT_TABS;
 }
 
@@ -112,6 +130,8 @@ let settingsShowTimestamps = true;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
 let settingsReplaceBobbitWithText = false;
+let settingsShowHeadquartersInProjectLists = true;
+let settingsHeadquartersVisibilityStatus: "" | "saving" | "saved" | "error" = "";
 let settingsSubgoalsEnabled = true;
 let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
@@ -1460,34 +1480,10 @@ let prefImageModel = "";     // same format, defaults to openai/gpt-image-2 when
 let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|""
 let prefReviewThinking = "";
 let prefNamingThinking = "";
-let allModels: Array<{ id: string; provider: string; reasoning: boolean; runtime?: string; localRuntime?: boolean; runtimeLabel?: string }> = [];
+let allowSessionModelFallback = false; // Global controlled-fallback opt-in; absent preference defaults off.
+let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
-
-type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
-type ClaudeCodeStatus = {
-	available?: boolean;
-	authenticated?: boolean;
-	ready?: boolean;
-	checking?: boolean;
-	commandPath?: string;
-	executablePath?: string;
-	version?: string;
-	modelAliases?: string[];
-	permissionMode?: ClaudeCodePermissionMode;
-	reason?: string;
-	message?: string;
-	authenticationStatus?: "verified" | "login-required" | "unknown";
-	checkedAt?: number;
-};
-
-let claudeCodeStatus: ClaudeCodeStatus | null = null;
-let claudeCodeStatusLoading = false;
-let claudeCodeStatusError = "";
-let prefClaudeCodeExecutable = "claude";
-let prefClaudeCodeDefaultModel = "claude-opus-4-8";
-let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "default";
-let prefClaudeCodeAllowBypass = false;
 
 // Per-row Test-button state. Keyed by the pref value ("provider/id").
 // Cached results live ~30s so repeated clicks don't re-hit the gateway.
@@ -1495,35 +1491,6 @@ type ModelTestResult = { ok: boolean; latencyMs?: number; error?: string; at: nu
 let modelTestResults: Record<string, ModelTestResult> = {};
 let modelTestInFlight: Record<string, boolean> = {};
 const MODEL_TEST_TTL_MS = 30_000;
-
-function normalizeClaudeCodePermissionMode(value: unknown): ClaudeCodePermissionMode {
-	return value === "acceptEdits" || value === "bypassPermissions" ? value : "default";
-}
-
-function claudeCodeStatusTitle(status: ClaudeCodeStatus | null): string {
-	if (!status) return claudeCodeStatusError || "Status not checked";
-	if (status.checking || claudeCodeStatusLoading) return "Checking Claude Code…";
-	if (status.authenticationStatus === "login-required") return "Claude Code login required";
-	if (status.authenticationStatus === "unknown" && status.available !== false) return "CLI available; auth checked at session start";
-	if (status.ready) return "Ready";
-	const reason = String(status.reason ?? "").toLowerCase();
-	if (reason.includes("cli_missing") || reason.includes("not found")) return "Claude Code CLI not found";
-	if (reason.includes("auth_required") || reason.includes("login required")) return "Claude Code login required";
-	if (reason.includes("probe_failed") || reason.includes("probe failed")) return "Claude Code probe failed";
-	if (status.available === false) return status.reason || status.message || "Claude Code not ready";
-	return status.message || "Claude Code not ready";
-}
-
-function claudeCodeStatusTone(status: ClaudeCodeStatus | null): "ready" | "checking" | "warning" {
-	if (status?.ready) return "ready";
-	if (status?.checking || claudeCodeStatusLoading) return "checking";
-	return "warning";
-}
-
-function currentProjectQuery(): string {
-	const projectId = getConfigProjectId();
-	return projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-}
 
 async function runModelTest(pref: string): Promise<void> {
 	if (!pref) return;
@@ -1578,13 +1545,11 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const projectQuery = currentProjectQuery();
-			const [statusRes, prefsRes, modelsRes, imageModelsRes, claudeCodeStatusRes] = await Promise.all([
+			const [statusRes, prefsRes, modelsRes, imageModelsRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
-				gatewayFetch(`/api/models${projectQuery}`),
+				gatewayFetch("/api/models"),
 				gatewayFetch("/api/image-models"),
-				gatewayFetch(`/api/claude-code/status${projectQuery}`),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -1604,11 +1569,7 @@ function loadModelsState(): void {
 				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
-				prefClaudeCodeExecutable = prefs["claudeCode.executablePath"] || "claude";
-				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "claude-opus-4-8";
-				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
-				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
-				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "default";
+				allowSessionModelFallback = prefs.allowSessionModelFallback === true; // default false
 				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
 			}
 			if (modelsRes.ok) {
@@ -1621,48 +1582,13 @@ function loadModelsState(): void {
 				const imageModels = await imageModelsRes.json();
 				if (Array.isArray(imageModels)) allImageModels = imageModels;
 			}
-			if (claudeCodeStatusRes.ok) {
-				claudeCodeStatus = await claudeCodeStatusRes.json();
-				claudeCodeStatusError = "";
-			} else if (claudeCodeStatusRes.status !== 404) {
-				claudeCodeStatusError = `Status unavailable (${claudeCodeStatusRes.status})`;
-			}
 		} catch {}
 		renderApp();
 	})();
 }
 
-async function operatorPreferenceFetch(path: string, init: RequestInit): Promise<Response> {
-	const url = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-	const doFetch = () => fetch(`${url}${path}`, {
-		...init,
-		credentials: "include",
-		headers: {
-			"Content-Type": "application/json",
-			...(init.headers as Record<string, string> | undefined),
-		},
-	});
-	let res = await doFetch();
-	if (res.status === 403 || res.status === 401) {
-		// In localhost mode a same-origin, no-Authorization request mints the
-		// operator-capable cookie. Retry once so existing tabs whose only cookie
-		// was minted from bearer/API traffic keep the normal settings UX.
-		await fetch(`${url}/api/health`, { credentials: "include" }).catch(() => undefined);
-		res = await doFetch();
-	}
-	return res;
-}
-
-async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
+async function savePref(key: string, value: string | boolean | null): Promise<void> {
 	try {
-		if (operatorConfirmationToken) {
-			await operatorPreferenceFetch("/api/preferences", {
-				method: "PUT",
-				headers: { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken },
-				body: JSON.stringify({ [key]: value }),
-			});
-			return;
-		}
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ [key]: value }),
@@ -1670,26 +1596,13 @@ async function savePref(key: string, value: string | boolean | null, operatorCon
 	} catch {}
 }
 
-async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
-	const res = await operatorPreferenceFetch("/api/preferences/claude-code/confirmation", {
-		method: "POST",
-		body: JSON.stringify(patch),
-	});
-	if (!res.ok) return undefined;
-	const data = await res.json().catch(() => ({}));
-	return typeof data.confirmationToken === "string" ? data.confirmationToken : undefined;
-}
-
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
-export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string; image: string; claudeCodeExecutable: string; claudeCodeDefaultModel: string; claudeCodePermissionMode: ClaudeCodePermissionMode; claudeCodeAllowBypass: boolean }>): void {
+export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string; image: string; allowFallback: boolean }>): void {
 	if (p.session !== undefined) prefSessionModel = p.session;
 	if (p.review !== undefined) prefReviewModel = p.review;
 	if (p.naming !== undefined) prefNamingModel = p.naming;
 	if (p.image !== undefined) prefImageModel = p.image;
-	if (p.claudeCodeExecutable !== undefined) prefClaudeCodeExecutable = p.claudeCodeExecutable;
-	if (p.claudeCodeDefaultModel !== undefined) prefClaudeCodeDefaultModel = p.claudeCodeDefaultModel;
-	if (p.claudeCodePermissionMode !== undefined) prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(p.claudeCodePermissionMode);
-	if (p.claudeCodeAllowBypass !== undefined) prefClaudeCodeAllowBypass = p.claudeCodeAllowBypass;
+	if (p.allowFallback !== undefined) allowSessionModelFallback = p.allowFallback;
 }
 
 async function setSessionModel(value: string): Promise<void> {
@@ -1721,91 +1634,6 @@ async function setSessionThinking(value: string): Promise<void> {
 	await savePref("default.sessionThinkingLevel", value || null);
 	renderApp();
 }
-
-async function setClaudeCodeExecutable(value: string): Promise<void> {
-	const next = value.trim() ? value.trim() : null;
-	if ((next || "claude") === prefClaudeCodeExecutable) return;
-	const confirmed = await confirmAction(
-		"Change Claude Code executable?",
-		"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
-		"Change executable",
-		true,
-	);
-	if (!confirmed) return;
-	const confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
-	if (!confirmationToken) return;
-	prefClaudeCodeExecutable = next || "claude";
-	await savePref("claudeCode.executablePath", next, confirmationToken);
-	renderApp();
-}
-
-async function setClaudeCodeDefaultModel(value: string): Promise<void> {
-	prefClaudeCodeDefaultModel = value || "claude-opus-4-8";
-	await savePref("claudeCode.defaultModel", value || null);
-	renderApp();
-}
-
-async function setClaudeCodePermissionMode(value: string): Promise<void> {
-	const next = normalizeClaudeCodePermissionMode(value);
-	if (next === "bypassPermissions" && !prefClaudeCodeAllowBypass) return;
-	let confirmationToken: string | undefined;
-	if (next === "bypassPermissions") {
-		const confirmed = await confirmAction(
-			"Use bypass permissions?",
-			"Bypass mode can let Claude Code run local actions without normal permission prompts.",
-			"Use bypass",
-			true,
-		);
-		if (!confirmed) return;
-		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.permissionMode": next });
-		if (!confirmationToken) return;
-	}
-	prefClaudeCodePermissionMode = next;
-	await savePref("claudeCode.permissionMode", next === "default" ? null : next, confirmationToken);
-	renderApp();
-}
-
-async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
-	if (value) {
-		const confirmed = await confirmAction(
-			"Allow bypass permissions?",
-			"Bypass mode can let Claude Code run local actions without normal permission prompts. Enable it only if you understand the local-machine risk.",
-			"Allow bypass",
-			true,
-		);
-		if (!confirmed) return;
-	}
-	let confirmationToken: string | undefined;
-	if (value) {
-		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.allowBypassPermissions": true });
-		if (!confirmationToken) return;
-	}
-	prefClaudeCodeAllowBypass = value;
-	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
-		prefClaudeCodePermissionMode = "default";
-		await savePref("claudeCode.permissionMode", null);
-	}
-	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
-	renderApp();
-}
-
-async function refreshClaudeCodeStatus(): Promise<void> {
-	claudeCodeStatusLoading = true;
-	claudeCodeStatusError = "";
-	renderApp();
-	try {
-		const res = await gatewayFetch(`/api/claude-code/status/refresh${currentProjectQuery()}`, { method: "POST" });
-		if (res.ok) {
-			claudeCodeStatus = await res.json();
-		} else {
-			claudeCodeStatusError = `Refresh failed (${res.status})`;
-		}
-	} catch (err: any) {
-		claudeCodeStatusError = err?.message || "Refresh failed";
-	}
-	claudeCodeStatusLoading = false;
-	renderApp();
-}
 async function setReviewThinking(value: string): Promise<void> {
 	prefReviewThinking = value;
 	await savePref("default.reviewThinkingLevel", value || null);
@@ -1815,6 +1643,12 @@ async function setNamingThinking(value: string): Promise<void> {
 	prefNamingThinking = value;
 	await savePref("default.namingThinkingLevel", value || null);
 	renderApp();
+}
+
+async function setAllowSessionModelFallback(value: boolean): Promise<void> {
+	allowSessionModelFallback = value;
+	renderApp();
+	await savePref("allowSessionModelFallback", value);
 }
 
 async function testAigwConnection(): Promise<void> {
@@ -1878,7 +1712,7 @@ async function setAigwExclusive(value: boolean): Promise<void> {
 	} catch {}
 	// Refresh the selector lists used on this page (registry cache is keyed on prefs version).
 	try {
-		const res = await gatewayFetch(`/api/models${currentProjectQuery()}`);
+		const res = await gatewayFetch("/api/models");
 		if (res.ok) {
 			const models = await res.json();
 			if (Array.isArray(models)) allModels = models;
@@ -1932,49 +1766,6 @@ export function formatModelPref(value: string, fallbackLabel: string = "Auto (be
 	return slash > 0 ? value.slice(slash + 1) : value;
 }
 
-// ============================================================================
-// ROLES PAGE — shared default-model display helpers
-//
-// Roles UI display heuristic (NOT authoritative runtime resolution). Inherited
-// role list rows need a deterministic at-a-glance default to show. Roles in
-// this allowlist display the review-model default; all other roles (including
-// custom) display the session-model default. Runtime model selection remains
-// contextual — verification/QA sessions use review defaults regardless of the
-// role name. Keep this allowlist deliberate; it is pinned by tests.
-// ============================================================================
-export const REVIEW_DEFAULT_ROLE_NAMES = new Set<string>([
-	"architect",
-	"code-reviewer",
-	"reviewer",
-	"security-reviewer",
-	"spec-auditor",
-	"qa-tester",
-]);
-
-export function getRoleDefaultModelPrefKey(roleName: string): "default.sessionModel" | "default.reviewModel" {
-	return REVIEW_DEFAULT_ROLE_NAMES.has(roleName) ? "default.reviewModel" : "default.sessionModel";
-}
-
-/** Effective default model + thinking a role inherits when it has no override. */
-export function getRoleDefaultModel(roleName: string): { model: string; thinking: string } {
-	return getRoleDefaultModelPrefKey(roleName) === "default.reviewModel"
-		? { model: prefReviewModel, thinking: prefReviewThinking }
-		: { model: prefSessionModel, thinking: prefSessionThinking };
-}
-
-/** Label for an inherited role row, e.g. "gpt-5.5 · default" or
- *  "Auto (best available) · default" when the default pref is unset. */
-export function formatRoleDefaultModelLabel(roleName: string): string {
-	return `${formatModelPref(getRoleDefaultModel(roleName).model)} \u00b7 default`;
-}
-
-/** Ensure default model prefs + the model registry are loaded for the Roles
- *  page even when the user opens Roles directly without visiting Settings.
- *  loadModelsState() is idempotent and calls renderApp() once resolved. */
-export function ensureModelDefaultsLoaded(): void {
-	loadModelsState();
-}
-
 function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	// Build a pseudo-Model from the current pref so the selector can highlight it
 	let currentModel = null;
@@ -2010,20 +1801,9 @@ export function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
-	opts?: {
-		fallbackLabel?: string;
-		thinkingFallbackLabel?: string;
-		thinkingWidth?: string;
-		thinkingFitContent?: boolean;
-		onThinkingClear?: () => void;
-		clearModelTitle?: string;
-		clearThinkingTitle?: string;
-		modelTitle?: string;
-		thinkingTitle?: string;
-	},
+	opts?: { fallbackLabel?: string },
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
-	const thinkingFallbackLabel = opts?.thinkingFallbackLabel ?? opts?.fallbackLabel;
 
 	// Determine the selected model's capabilities. When the model is
 	// unknown (not in allModels yet — registry still loading, or the saved
@@ -2081,8 +1861,7 @@ export function renderModelRow(
 							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
 							flex-1 min-w-0 text-left
 							${modelValue ? "text-foreground" : "text-muted-foreground"}"
-						title=${opts?.modelTitle ?? "Choose model"}
-						data-testid="model-picker-btn"
+						title="Choose model"
 						@click=${() => openModelPicker(modelValue, onModelChange)}
 					>
 						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
@@ -2098,8 +1877,7 @@ export function renderModelRow(
 					${modelValue ? html`
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-							title=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
-							aria-label=${showUnavailable ? "Clear unavailable model" : (opts?.clearModelTitle ?? "Reset model to auto")}
+							title=${showUnavailable ? "Clear unavailable model" : "Reset model to auto"}
 							data-testid="model-clear-btn"
 							@click=${() => {
 								delete modelTestResults[modelValue];
@@ -2138,36 +1916,20 @@ export function renderModelRow(
 					<div class="w-px h-5 bg-border shrink-0"></div>
 					<!-- Thinking picker -->
 					<div class="shrink-0 ${thinkingDisabled ? "opacity-40 pointer-events-none" : ""}"
-						title=${thinkingDisabled ? "Selected model does not support thinking" : (opts?.thinkingTitle ?? "Thinking level")}
+						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
 					>
 						${Select({
-							value: displayedThinking || (thinkingFallbackLabel ? "" : thinkingDefault),
+							value: displayedThinking || (opts?.fallbackLabel ? "" : thinkingDefault),
 							options: [
-								...(thinkingFallbackLabel ? [{ value: "", label: thinkingFallbackLabel, icon: icon(Brain, "sm") }] : []),
+								...(opts?.fallbackLabel ? [{ value: "", label: opts.fallbackLabel, icon: icon(Brain, "sm") }] : []),
 								...supportedLevels.map(lvl => ({ value: lvl, label: thinkingLabels[lvl], icon: icon(Brain, "sm") })),
 							] as SelectOption[],
 							onChange: (value: string) => { onThinkingChange(value); },
 							size: "sm",
 							variant: "ghost",
-							// Settings callers pass neither opt → Select keeps its default
-							// 180px fit-content sizing. Compact list rows pass an explicit
-							// fixed width + fitContent:false so the trigger never injects an
-							// inline min-width:180px that overflows the narrow row cell.
-							...(opts?.thinkingWidth ? { width: opts.thinkingWidth } : {}),
-							fitContent: opts?.thinkingFitContent ?? true,
+							fitContent: true,
 						})}
 					</div>
-					<!-- Optional in-box thinking reset: keeps model + thinking resets in
-					     the SAME control (opt-in; Settings rows don't pass it). -->
-					${opts?.onThinkingClear && thinkingValue ? html`
-						<button
-							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-							title=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
-							aria-label=${opts?.clearThinkingTitle ?? "Reset thinking to default"}
-							data-testid="model-thinking-clear-btn"
-							@click=${() => opts.onThinkingClear!()}
-						>${icon(X, "xs")}</button>
-					` : ""}
 				</div>
 			</div>
 			${testResult && !testing ? html`
@@ -2183,105 +1945,6 @@ export function renderModelRow(
 				</p>
 			` : ""}
 			<p class="text-xs text-muted-foreground">${hint}</p>
-		</div>
-	`;
-}
-
-function renderClaudeCodeSection() {
-	const status = claudeCodeStatus;
-	const tone = claudeCodeStatusTone(status);
-	const title = claudeCodeStatusTitle(status);
-	const commandPath = status?.commandPath || status?.executablePath || prefClaudeCodeExecutable || "claude";
-	const aliases = Array.isArray(status?.modelAliases) && status!.modelAliases!.length
-		? status!.modelAliases!
-		: ["claude-opus-4-8", "default", "sonnet", "opus"];
-	const statusClass = tone === "ready"
-		? "bg-green-500/10 border-green-500/20"
-		: tone === "checking"
-			? "bg-muted border-border"
-			: "bg-destructive/10 border-destructive/20";
-	const dotClass = tone === "ready" ? "bg-green-500" : tone === "checking" ? "bg-muted-foreground animate-pulse" : "bg-destructive";
-	return html`
-		<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="claude-code-section">
-			<h3 class="text-sm font-semibold text-foreground">Claude Code (local)</h3>
-			<p class="text-sm text-muted-foreground">
-				Runs sessions through your local Claude Code CLI and existing Claude Code login. You are responsible for complying with Anthropic and Claude Code terms.
-			</p>
-
-			<div class="flex flex-col gap-2 px-3 py-2 rounded-md border ${statusClass}" data-testid="claude-code-status-card">
-				<div class="flex items-center gap-2">
-					<span class="w-2 h-2 rounded-full ${dotClass}"></span>
-					<span class="text-sm font-medium text-foreground" data-testid="claude-code-status-title">${title}</span>
-					${status?.version ? html`<span class="text-xs text-muted-foreground">${status.version}</span>` : ""}
-				</div>
-				<div class="text-xs text-muted-foreground">
-					Command: <code>${commandPath}</code>${status?.message ? html` · ${status.message}` : ""}
-				</div>
-				<div>
-					<button
-						class="px-3 py-1.5 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
-						data-testid="claude-code-refresh-status"
-						?disabled=${claudeCodeStatusLoading}
-						@click=${refreshClaudeCodeStatus}
-					>${claudeCodeStatusLoading ? "Checking…" : "Refresh status"}</button>
-				</div>
-				${claudeCodeStatusError ? html`<div class="text-xs text-destructive">${claudeCodeStatusError}</div>` : ""}
-			</div>
-
-			<div class="flex flex-col gap-2">
-				<label class="text-sm font-medium text-foreground">Executable path</label>
-				<input
-					type="text"
-					class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-					placeholder="claude"
-					.value=${prefClaudeCodeExecutable}
-					data-testid="claude-code-executable"
-					@blur=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
-				/>
-			</div>
-
-			<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-				<label class="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-					Default model alias
-					<select
-						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-						.value=${prefClaudeCodeDefaultModel}
-						data-testid="claude-code-default-model"
-						@change=${(e: Event) => setClaudeCodeDefaultModel((e.target as HTMLSelectElement).value)}
-					>
-						${aliases.map((alias) => html`<option value=${alias}>${alias}</option>`)}
-					</select>
-				</label>
-				<label class="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-					Permission mode
-					<select
-						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-						.value=${prefClaudeCodePermissionMode}
-						data-testid="claude-code-permission-mode"
-						@change=${(e: Event) => setClaudeCodePermissionMode((e.target as HTMLSelectElement).value)}
-					>
-						<option value="default">default</option>
-						<option value="acceptEdits">acceptEdits</option>
-						<option value="bypassPermissions" ?disabled=${!prefClaudeCodeAllowBypass}>bypassPermissions</option>
-					</select>
-				</label>
-			</div>
-			<p class="text-xs text-muted-foreground">
-				default asks normally; acceptEdits accepts edit operations when Claude Code requests them; bypassPermissions disables normal prompts and is gated below.
-			</p>
-			<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
-				<input
-					type="checkbox"
-					class="mt-0.5"
-					.checked=${prefClaudeCodeAllowBypass}
-					data-testid="claude-code-allow-bypass"
-					@change=${(e: Event) => setClaudeCodeAllowBypass((e.target as HTMLInputElement).checked)}
-				/>
-				<span class="flex flex-col">
-					<span>Allow bypassPermissions mode</span>
-					<span class="text-xs text-muted-foreground">Only enable if you understand the local-machine risk.</span>
-				</span>
-			</label>
 		</div>
 	`;
 }
@@ -2344,17 +2007,13 @@ export function __testResetModelsTab(opts: {
 	aigwConfigured?: boolean;
 	aigwUrl?: string;
 	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }>;
-	allModels?: Array<{ id: string; provider: string; reasoning: boolean; runtime?: string; localRuntime?: boolean; runtimeLabel?: string }>;
+	allModels?: Array<{ id: string; provider: string; reasoning: boolean }>;
 	allImageModels?: ImageGenerationModel[];
 	prefSessionModel?: string;
 	prefReviewModel?: string;
 	prefNamingModel?: string;
 	prefImageModel?: string;
-	claudeCodeStatus?: ClaudeCodeStatus | null;
-	prefClaudeCodeExecutable?: string;
-	prefClaudeCodeDefaultModel?: string;
-	prefClaudeCodePermissionMode?: ClaudeCodePermissionMode;
-	prefClaudeCodeAllowBypass?: boolean;
+	allowSessionModelFallback?: boolean;
 } = {}): void {
 	_modelsLoaded = true; // skip the fetcher
 	aigwConfigured = opts.aigwConfigured ?? false;
@@ -2367,16 +2026,10 @@ export function __testResetModelsTab(opts: {
 	prefReviewModel = opts.prefReviewModel ?? "";
 	prefNamingModel = opts.prefNamingModel ?? "";
 	prefImageModel = opts.prefImageModel ?? "";
-	claudeCodeStatus = opts.claudeCodeStatus ?? null;
-	claudeCodeStatusLoading = false;
-	claudeCodeStatusError = "";
-	prefClaudeCodeExecutable = opts.prefClaudeCodeExecutable ?? "claude";
-	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "claude-opus-4-8";
-	prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(opts.prefClaudeCodePermissionMode);
-	prefClaudeCodeAllowBypass = opts.prefClaudeCodeAllowBypass ?? false;
 	prefSessionThinking = "";
 	prefReviewThinking = "";
 	prefNamingThinking = "";
+	allowSessionModelFallback = opts.allowSessionModelFallback ?? false;
 	modelTestResults = {};
 	modelTestInFlight = {};
 }
@@ -2406,6 +2059,11 @@ export function renderModelsTab() {
 							type="text"
 							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
 								focus:outline-none focus:ring-2 focus:ring-ring"
+							data-testid="aigw-url-input"
+							name="bobbit-aigw-url"
+							autocomplete="off"
+							autocapitalize="off"
+							spellcheck="false"
 							placeholder="http://gateway-host/v1"
 							.value=${aigwUrl}
 							?disabled=${busy}
@@ -2482,8 +2140,6 @@ export function renderModelsTab() {
 
 			</div>
 
-			${renderClaudeCodeSection()}
-
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="defaults-section">
 				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
@@ -2519,6 +2175,21 @@ export function renderModelsTab() {
 					prefImageModel,
 					setImageModel,
 				)}
+				<label class="flex items-start gap-2 rounded-lg border border-border bg-card px-3 py-3 text-sm text-foreground cursor-pointer">
+					<input
+						type="checkbox"
+						class="mt-0.5 w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="allow-session-model-fallback-toggle"
+						.checked=${allowSessionModelFallback}
+						@change=${(e: Event) => setAllowSessionModelFallback((e.target as HTMLInputElement).checked)}
+					/>
+					<span class="flex flex-col gap-1">
+						<span class="font-medium">Allow controlled session-model fallback</span>
+						<span class="text-xs text-muted-foreground leading-relaxed">
+							Off by default. When enabled, a failed explicit session, review, or role model may try exactly one fallback: <code>default.sessionModel</code>. Image generation is separate and does not use this fallback.
+						</span>
+					</span>
+				</label>
 				${hasModels ? html`
 					<div>
 						<button
@@ -2595,6 +2266,9 @@ function loadGeneralSettings() {
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					// Replace bobbit sprite with text (chat blob) — default OFF; only an explicit `true` enables.
 					settingsReplaceBobbitWithText = prefs.replaceBobbitWithText === true;
+					// Headquarters visibility — default ON; only an explicit `false` hides the shortcut.
+					settingsShowHeadquartersInProjectLists = prefs.showHeadquartersInProjectLists !== false;
+					state.showHeadquartersInProjectLists = settingsShowHeadquartersInProjectLists;
 					// Subgoals (Experimental) — default OFF; only an explicit `true` enables. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					const rawDepth = prefs.maxNestingDepth;
@@ -2729,6 +2403,42 @@ async function toggleReplaceBobbitWithText(): Promise<void> {
 	} catch {}
 }
 
+async function setShowHeadquartersInProjectLists(checked: boolean): Promise<void> {
+	const previous = settingsShowHeadquartersInProjectLists;
+	settingsShowHeadquartersInProjectLists = checked;
+	state.showHeadquartersInProjectLists = checked;
+	settingsHeadquartersVisibilityStatus = "saving";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: checked }),
+		});
+		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		setProjects(await fetchProjects());
+		settingsHeadquartersVisibilityStatus = "saved";
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
+			detail: {
+				kind: "pending",
+				message: checked
+					? "Headquarters shown in project lists."
+					: "Headquarters hidden from project lists.",
+			},
+		}));
+		setTimeout(() => {
+			if (settingsHeadquartersVisibilityStatus === "saved") {
+				settingsHeadquartersVisibilityStatus = "";
+				renderApp();
+			}
+		}, 2000);
+	} catch {
+		settingsShowHeadquartersInProjectLists = previous;
+		state.showHeadquartersInProjectLists = previous;
+		settingsHeadquartersVisibilityStatus = "error";
+	}
+	renderApp();
+}
+
 async function setMaxNestingDepth(raw: number): Promise<void> {
 	if (!Number.isFinite(raw)) return;
 	let n = Math.floor(raw);
@@ -2772,11 +2482,10 @@ async function toggleSubgoalsEnabled(): Promise<void> {
 	} catch {}
 }
 
-function setSidebarFontScaleStop(stopIndex: number): void {
-	const clampedIndex = Math.max(0, Math.min(SIDEBAR_FONT_SCALE_STOPS.length - 1, Math.round(stopIndex)));
-	const value = SIDEBAR_FONT_SCALE_STOPS[clampedIndex].value;
-	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(value)); } catch { /* private mode */ }
-	applySidebarFontScaleVar(value);
+function setSidebarFontSizePx(px: number): void {
+	const scale = sidebarFontSizePxToScale(px);
+	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(scale)); } catch { /* private mode */ }
+	applySidebarFontScaleVar(scale);
 	renderApp();
 }
 
@@ -2786,35 +2495,126 @@ function resetSidebarFontScale(): void {
 	renderApp();
 }
 
+function handleSidebarFontSizeInput(e: Event): void {
+	const input = e.target as HTMLInputElement;
+	const raw = input.value.trim();
+	const px = Number.parseFloat(raw);
+	if (!Number.isFinite(px)) return;
+	if (e.type === "input" && px < SIDEBAR_FONT_SIZE_MIN_PX && raw.length < String(SIDEBAR_FONT_SIZE_MIN_PX).length) return;
+	setSidebarFontSizePx(px);
+}
+
 function renderSidebarFontScaleControl() {
-	const current = loadSidebarFontScale();
-	const stop = nearestStop(current);
-	const index = SIDEBAR_FONT_SCALE_STOPS.findIndex(s => s.id === stop.id);
+	const currentPx = sidebarFontScaleToDisplayPx(loadSidebarFontScale());
+	const defaultPx = sidebarFontScaleToDisplayPx(SIDEBAR_FONT_SCALE_DEFAULT);
 	return html`
 		<div class="flex flex-col gap-1.5">
-			<span class="text-sm font-medium text-foreground">Sidebar font size</span>
-			<p class="text-xs text-muted-foreground">
+			<label for="sidebar-font-size-input" class="text-sm font-medium text-foreground">Sidebar font size</label>
+			<p id="sidebar-font-size-help" class="text-xs text-muted-foreground">
 				Scale all sidebar text proportionally. Affects only the sidebar — chat, header, and other surfaces are unchanged. Saved per browser.
 			</p>
 			<div class="flex items-center gap-3">
-				<input
-					type="range"
-					min="0"
-					max="${SIDEBAR_FONT_SCALE_STOPS.length - 1}"
-					step="1"
-					.value=${String(index)}
-					data-testid="sidebar-font-scale-slider"
-					class="flex-1 max-w-xs accent-primary cursor-pointer"
-					@input=${(e: Event) => setSidebarFontScaleStop(Number((e.target as HTMLInputElement).value))}
-				/>
-				<span class="text-sm text-foreground tabular-nums min-w-16" data-testid="sidebar-font-scale-label">${stop.label}</span>
+				<label class="flex items-center gap-2 text-sm text-foreground">
+					<input
+						id="sidebar-font-size-input"
+						type="number"
+						min=${String(SIDEBAR_FONT_SIZE_MIN_PX)}
+						max=${String(SIDEBAR_FONT_SIZE_MAX_PX)}
+						step=${String(SIDEBAR_FONT_SIZE_STEP_PX)}
+						.value=${live(String(currentPx))}
+						aria-describedby="sidebar-font-size-help"
+						data-testid="sidebar-font-size-input"
+						class="w-20 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						@input=${handleSidebarFontSizeInput}
+						@change=${handleSidebarFontSizeInput}
+					/>
+					<span class="text-sm text-muted-foreground">px</span>
+				</label>
 				<button
 					class="text-xs text-muted-foreground hover:text-foreground underline"
 					data-testid="sidebar-font-scale-reset"
 					@click=${resetSidebarFontScale}
-				>Reset to Default</button>
+				>Reset to ${defaultPx} px</button>
 			</div>
 		</div>
+	`;
+}
+
+function setSidebarTreeIndentPx(px: number): void {
+	const clamped = saveSidebarTreeIndentPx(px);
+	applySidebarTreeLayoutVars(clamped);
+	renderApp();
+}
+
+function resetSidebarTreeIndent(): void {
+	const px = resetSidebarTreeIndentPreference();
+	applySidebarTreeLayoutVars(px);
+	renderApp();
+}
+
+function handleSidebarTreeIndentInput(e: Event): void {
+	const input = e.target as HTMLInputElement;
+	const raw = input.value.trim();
+	const px = Number.parseFloat(raw);
+	if (!Number.isFinite(px)) return;
+	if (e.type === "input" && px < SIDEBAR_TREE_INDENT_MIN_PX) return;
+	setSidebarTreeIndentPx(px);
+}
+
+function renderSidebarTreeIndentControl() {
+	const currentPx = loadSidebarTreeIndentPx();
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<label for="sidebar-tree-indent-input" class="text-sm font-medium text-foreground">Sidebar tree indentation</label>
+			<p id="sidebar-tree-indent-help" class="text-xs text-muted-foreground">
+				Sets how far each nested sidebar level steps inward. Larger values make goal trees easier to scan; smaller values leave more room for names. Affects only the sidebar. Saved per browser.
+			</p>
+			<div class="flex items-center gap-3">
+				<label class="flex items-center gap-2 text-sm text-foreground">
+					<input
+						id="sidebar-tree-indent-input"
+						type="number"
+						min=${String(SIDEBAR_TREE_INDENT_MIN_PX)}
+						max=${String(SIDEBAR_TREE_INDENT_MAX_PX)}
+						step=${String(SIDEBAR_TREE_INDENT_STEP_PX)}
+						.value=${live(String(currentPx))}
+						aria-describedby="sidebar-tree-indent-help"
+						data-testid="sidebar-tree-indent-input"
+						class="w-20 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						@input=${handleSidebarTreeIndentInput}
+						@change=${handleSidebarTreeIndentInput}
+					/>
+					<span class="text-sm text-muted-foreground">px</span>
+				</label>
+				<button
+					class="text-xs text-muted-foreground hover:text-foreground underline"
+					data-testid="sidebar-tree-indent-reset"
+					@click=${resetSidebarTreeIndent}
+				>Reset to ${SIDEBAR_TREE_INDENT_DEFAULT_PX} px</button>
+			</div>
+		</div>
+	`;
+}
+
+function renderHeadquartersVisibilityControl() {
+	return html`
+		<label class="flex items-start gap-2 text-sm text-foreground" data-testid="headquarters-visibility-setting">
+			<input
+				type="checkbox"
+				class="mt-0.5 w-4 h-4 rounded border-input accent-primary cursor-pointer"
+				.checked=${settingsShowHeadquartersInProjectLists}
+				?disabled=${settingsHeadquartersVisibilityStatus === "saving"}
+				@change=${(e: Event) => { void setShowHeadquartersInProjectLists((e.target as HTMLInputElement).checked); }}
+			/>
+			<span class="flex flex-col gap-1">
+				<span class="text-sm font-medium text-foreground">Show Headquarters in project lists</span>
+				<span class="text-xs text-muted-foreground">
+					Displays Headquarters in the sidebar, project pickers, and project lists. Hiding it only removes the shortcut; Headquarters sessions, staff, goals, and server configuration are kept.
+				</span>
+				${settingsHeadquartersVisibilityStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}
+				${settingsHeadquartersVisibilityStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+			</span>
+		</label>
 	`;
 }
 
@@ -2825,6 +2625,8 @@ function renderGeneralTab() {
 			<div class="flex flex-col gap-2">
 				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
 				${renderSidebarFontScaleControl()}
+				${renderSidebarTreeIndentControl()}
+				${renderHeadquartersVisibilityControl()}
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">
@@ -2896,7 +2698,7 @@ function renderGeneralTab() {
 				<span class="text-sm font-medium text-foreground">Max subgoal depth</span>
 				<p class="text-xs text-muted-foreground">
 					Maximum nesting depth for subgoal trees. Depth 3 = root → child → grandchild.
-					Setting this higher risks runaway spawning. System setting is the ceiling —
+					Setting this higher risks runaway spawning. The Headquarters setting is the ceiling —
 					per-goal overrides can only tighten, not loosen. Range: ${MAX_NESTING_DEPTH_MIN}–${MAX_NESTING_DEPTH_MAX}.
 				</p>
 				<div class="flex items-center gap-3">
@@ -2984,7 +2786,7 @@ function renderGeneralTab() {
 				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
-				<span class="text-sm font-medium text-foreground">System prompt</span>
+				<span class="text-sm font-medium text-foreground">Default agent prompt</span>
 				<p class="text-xs text-muted-foreground">
 					Copy the shipped default to <code>.bobbit/config/system-prompt.md</code> so you can edit it.
 					If the file already exists it is left unchanged.
@@ -2994,7 +2796,7 @@ function renderGeneralTab() {
 						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
 						data-testid="general-customise-system-prompt"
 						@click=${customiseSystemPrompt}
-					>Customise system prompt</button>
+					>Customise default prompt</button>
 					${customisePromptStatus ? html`<span class="text-xs text-muted-foreground">${customisePromptStatus}</span>` : ""}
 				</div>
 			</div>
@@ -3288,33 +3090,8 @@ function renderDirectoriesTab() {
 // `google` is reserved for the Google AI Studio / Gemini Developer API-key
 // provider rendered in Settings → Models → Provider API Keys; it is NEVER an
 // Account-tab OAuth id. See docs/design/google-oauth-settings-ux.md.
-type AccountProviderId = "anthropic" | "openai-codex" | "google-gemini-cli";
-
-const ACCOUNT_PROVIDERS: Array<{
-	id: AccountProviderId;
-	title: string;
-	description: string;
-	authenticatedLabel: string;
-}> = [
-	{
-		id: "anthropic",
-		title: "Anthropic OAuth",
-		description: "OAuth credentials used by agent sessions to access the Anthropic API. Re-authenticate to refresh expired tokens or switch accounts.",
-		authenticatedLabel: "Authenticated",
-	},
-	{
-		id: "openai-codex",
-		title: "OpenAI OAuth",
-		description: "OAuth credentials used by agent sessions to access ChatGPT subscription GPT models through the OpenAI Codex provider.",
-		authenticatedLabel: "Authenticated",
-	},
-	{
-		id: "google-gemini-cli",
-		title: "Google OAuth",
-		description: "Connect your Google account to run Gemini (Code Assist) in agent sessions. This account path is unofficial and depends on your account's Code Assist quota and Google's terms — separate from a Google AI Studio API key. Re-authenticate to refresh expired tokens or switch accounts.",
-		authenticatedLabel: "Authenticated",
-	},
-];
+type AccountProviderId = AccountOAuthProviderId;
+const ACCOUNT_PROVIDERS = ACCOUNT_OAUTH_PROVIDERS;
 
 let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
 let accountLoading = false;
@@ -3368,6 +3145,7 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	try {
 		const success = await openOAuthDialog(provider);
 		if (success) {
+			clearDismissedAccountOAuthExpiryRemindersForProvider(provider);
 			// Refresh status after successful re-auth
 			accountStatus = null;
 			loadAccountStatus();
@@ -3378,14 +3156,8 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	}
 }
 
-const ACCOUNT_LOGOUT_LABELS: Record<AccountProviderId, string> = {
-	anthropic: "Anthropic",
-	"openai-codex": "OpenAI",
-	"google-gemini-cli": "Google",
-};
-
 async function handleAccountLogout(provider: AccountProviderId): Promise<void> {
-	const label = ACCOUNT_LOGOUT_LABELS[provider] ?? provider;
+	const label = ACCOUNT_PROVIDERS.find((accountProvider) => accountProvider.id === provider)?.label ?? provider;
 	const confirmed = await confirmAction(
 		`Log out of ${label}?`,
 		`Agent sessions will lose access to ${label} models until you log in again.`,
@@ -3509,19 +3281,26 @@ export function renderAccountTab() {
 }
 
 function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: string }[]) {
-	const projects = state.projects || [];
-	// Only show scope row when there are projects to choose between
-	if (projects.length === 0) return "";
+	const projects = (state.projects || []).filter((project: any) => !isHeadquartersProject(project));
+	const currentTab = getActiveTab();
+	const headquartersActive = currentScope === "system" || isHeadquartersProject(currentScope);
+	const headquartersTarget = isHeadquartersProject(currentScope) && currentTab === "workflows"
+		? `${HEADQUARTERS_PROJECT_ID}/workflows`
+		: `system/${SYSTEM_TABS[0].id}`;
 
 	return html`
 		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
 			<button
-				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
-					${currentScope === "system"
+				data-testid="settings-headquarters-scope"
+				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5
+					${headquartersActive
 						? "bg-background text-foreground shadow-sm border border-border"
 						: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
-				@click=${() => { setHashRoute("settings", `system/${SYSTEM_TABS[0].id}`, true); }}
-			>System</button>
+				@click=${() => { setHashRoute("settings", headquartersTarget, true); }}
+			>
+				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent(HEADQUARTERS_PROJECT_ID), "xs")}</span>
+				${HEADQUARTERS_PROJECT_NAME}
+			</button>
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
 				const isDark = document.documentElement.classList.contains("dark");
@@ -3534,7 +3313,7 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						@click=${() => { setHashRoute("settings", `${project.id}/${PROJECT_TABS[0].id}`, true); }}
 					>
-						<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>
+						<span data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} class="inline-flex items-center" style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>
 						${project.name}
 					</button>
 				`;
@@ -4255,10 +4034,124 @@ function renderAppearanceTab(projectId: string) {
 
 // ── Maintenance tab state ──
 
-let maintenanceWorktrees: Array<{ path: string; branch: string }> | null = null;
+type WorktreeInventorySource =
+	| "runtime-session"
+	| "persisted-live-session"
+	| "archived-session"
+	| "goal"
+	| "team"
+	| "delegate"
+	| "staff"
+	| "pool"
+	| "git-worktree"
+	| "filesystem";
+
+type WorktreeInventoryClassification =
+	| "ready-to-clean"
+	| "protected-in-use"
+	| "archived-owned"
+	| "unowned-git-worktree"
+	| "pool-entry"
+	| "already-cleaned"
+	| "stale-filesystem-only"
+	| "scan-error";
+
+type WorktreeInventoryDisposition = "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
+
+type WorktreeInventoryOwner = { type: string; id: string; title?: string; archived?: boolean };
+
+type WorktreeMaintenanceItem = {
+	id: string;
+	classification: WorktreeInventoryClassification;
+	disposition: WorktreeInventoryDisposition;
+	actionable: boolean;
+	selectable: boolean;
+	defaultSelected: boolean;
+	projectId?: string;
+	projectName?: string;
+	componentName?: string;
+	repo?: string;
+	repoPath?: string;
+	repoDisplayName?: string;
+	worktreeRoot?: string;
+	path: string;
+	branch?: string;
+	sources: WorktreeInventorySource[];
+	owners?: WorktreeInventoryOwner[];
+	reason: string;
+	detail: string;
+	pathExists?: boolean;
+	gitWorktreeMetadataExists?: boolean;
+	localBranchExists?: boolean;
+	willDeleteBranch: boolean;
+	branchDeleteBlockedReason?: string;
+	legacy?: Record<string, unknown>;
+};
+
+type WorktreeMaintenanceCounts = {
+	total: number;
+	readyToClean: number;
+	protectedInUse: number;
+	archivedOwned: number;
+	unownedGitWorktrees: number;
+	poolEntries: number;
+	alreadyCleaned: number;
+	needsAttention: number;
+	scanErrors: number;
+	defaultSelected: number;
+	byClassification: Record<string, number>;
+	byReason: Record<string, number>;
+	bySource: Record<string, number>;
+};
+
+type WorktreeInventoryReport = {
+	items: WorktreeMaintenanceItem[];
+	counts: WorktreeMaintenanceCounts;
+	generatedAt: number;
+	scanned?: { projects?: number; repos?: number; worktreeRoots?: number };
+	projectCount?: number;
+	repoCount?: number;
+	worktreeRootCount?: number;
+};
+
+type WorktreeCleanupResponse = {
+	counts: {
+		requested: number;
+		cleaned: number;
+		branchDeleted: number;
+		skipped: number;
+		alreadyCleaned: number;
+		failed: number;
+	};
+	results?: Array<{
+		id?: string;
+		itemId?: string;
+		path?: string;
+		branch?: string;
+		repo?: string;
+		repoPath?: string;
+		projectId?: string;
+		projectName?: string;
+		classification?: string;
+		disposition?: WorktreeInventoryDisposition;
+		status?: "cleaned" | "skipped" | "already-cleaned" | "failed";
+		reason?: string;
+		detail?: string;
+		error?: string;
+		worktreeRemoved?: boolean;
+		branchDeleted?: boolean;
+	}>;
+};
+
 let maintenanceSessions: Array<{ id: string; title: string; createdAt: number }> | null = null;
 let maintenanceArchives: { count: number; totalSizeBytes: number } | null = null;
-let maintenanceLoading: "worktrees" | "sessions" | "archives" | "search" | "orphanRows" | null = null;
+let maintenanceLoading: "worktreeInventory" | "sessions" | "archives" | "search" | "orphanRows" | null = null;
+let worktreeInventoryReport: WorktreeInventoryReport | null = null;
+let worktreeInventorySelection = new Set<string>();
+let worktreeInventoryCleanup: WorktreeCleanupResponse | null = null;
+let worktreeInventoryError: string | null = null;
+let worktreeInventoryShowDiagnostics = false;
+const worktreeInventoryExpandedGroups = new Set<string>();
 
 // Search Index panel state
 let searchIndexStats: SearchStats | null = null;
@@ -4267,6 +4160,53 @@ let searchIndexProgress: { completed: number; total: number } | null = null;
 let searchIndexError: string | null = null;
 let searchIndexWsSubscribed = false;
 let orphanIndexRows: OrphanedIndexRows | null = null;
+
+// Agent directory settings (system Maintenance). Settings are restart-gated: this
+// UI only saves the next-start preference and optionally copy-migrates data.
+type AgentDirDisplayState = {
+	activePath: string;
+	startupSource: string;
+	defaultPath: string;
+	persistedPath: string | null;
+	pendingPath: string | null;
+	nextStartPath: string;
+	nextStartSource: string;
+	restartRequired: boolean;
+	envOverride: string | null;
+	history: string[];
+	guidance?: string;
+};
+
+type AgentDirValidationState = {
+	ok: boolean;
+	resolvedPath?: string;
+	message?: string;
+	code?: string;
+};
+
+type AgentDirMigrationReport = {
+	copied?: number | unknown[];
+	skipped?: number | unknown[];
+	overwritten?: number | unknown[];
+	missing?: number | unknown[];
+	warnings?: string[];
+	errors?: string[];
+	[key: string]: unknown;
+};
+
+let agentDirState: AgentDirDisplayState | null = null;
+let agentDirLoaded = false;
+let agentDirLoading = false;
+let agentDirError = "";
+let agentDirInput = "";
+let agentDirValidation: AgentDirValidationState | null = null;
+let agentDirSaving = false;
+let agentDirSaveMessage = "";
+let agentDirSaveIsError = false;
+let agentDirMigrating = false;
+let agentDirMigrateOverwrite = false;
+let agentDirMigrationReport: AgentDirMigrationReport | null = null;
+let agentDirMigrationError = "";
 
 function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
@@ -4382,32 +4322,692 @@ async function cleanupOrphanRows(): Promise<void> {
 	await scanOrphanIndexRows();
 }
 
-async function scanWorktrees(): Promise<void> {
-	maintenanceLoading = "worktrees";
+function emptyWorktreeMaintenanceCounts(): WorktreeMaintenanceCounts {
+	return {
+		total: 0,
+		readyToClean: 0,
+		protectedInUse: 0,
+		archivedOwned: 0,
+		unownedGitWorktrees: 0,
+		poolEntries: 0,
+		alreadyCleaned: 0,
+		needsAttention: 0,
+		scanErrors: 0,
+		defaultSelected: 0,
+		byClassification: {},
+		byReason: {},
+		bySource: {},
+	};
+}
+
+function emptyWorktreeInventoryReport(): WorktreeInventoryReport {
+	return { items: [], counts: emptyWorktreeMaintenanceCounts(), generatedAt: Date.now() };
+}
+
+function isWorktreeInventoryActionable(item: WorktreeMaintenanceItem): boolean {
+	return item.actionable !== false && item.selectable !== false && item.disposition === "ready-to-clean";
+}
+
+function worktreeReasonDetail(reason: string): string {
+	const details: Record<string, string> = {
+		"safe-archived-session-worktree": "Archived-session-owned worktrees that the server classified as safe to remove.",
+		"safe-unowned-session-worktree": "Git metadata contains Bobbit session worktrees that no durable Bobbit record owns.",
+		"safe-pool-entry": "Pool-owned worktrees are shown for audit and reclaim diagnostics, not selected by maintenance by default.",
+		"pool-entry": "Pool-owned worktrees are shown for audit and reclaim diagnostics, not selected by maintenance by default.",
+		"already-cleaned": "Bobbit remembers metadata for this worktree, but no host cleanup remains.",
+		"filesystem-only-needs-attention": "A directory exists under a worktree root without enough Bobbit/Git provenance for automatic cleanup. Inspect it manually.",
+		"stale-filesystem-only": "A filesystem-only directory needs manual inspection before deletion.",
+		"sandbox-container-path": "This path is inside a sandbox/container and is not a host cleanup target.",
+		"scan-error": "The server could not safely classify one or more worktrees.",
+		"git-scan-error": "Git worktree metadata could not be scanned for this repo.",
+		"fs-scan-error": "A worktree-root directory could not be scanned.",
+		"cleanup-failed": "Cleanup was requested, but Git or filesystem operations did not complete for this record.",
+	};
+	return details[reason] ?? "These records are shown for troubleshooting and audit only.";
+}
+
+function normalizeWorktreeInventoryReport(data: Partial<WorktreeInventoryReport> | null | undefined): WorktreeInventoryReport {
+	const items = Array.isArray(data?.items) ? data!.items.map((item, index) => ({
+		...item,
+		id: String(item.id || `${item.projectId || "unknown"}:${item.repo || "."}:${item.path || item.branch || index}`),
+		path: item.path || "",
+		sources: Array.isArray(item.sources) ? item.sources : [],
+		owners: Array.isArray(item.owners) ? item.owners : [],
+		reason: item.reason || item.classification || "unknown",
+		detail: item.detail || worktreeReasonDetail(item.reason || item.classification || "unknown"),
+		actionable: Boolean(item.actionable),
+		selectable: item.selectable !== false,
+		defaultSelected: item.defaultSelected !== false,
+		willDeleteBranch: Boolean(item.willDeleteBranch),
+	})) : [];
+	const raw = data?.counts ?? emptyWorktreeMaintenanceCounts();
+	const counts: WorktreeMaintenanceCounts = {
+		...emptyWorktreeMaintenanceCounts(),
+		...raw,
+		total: raw.total ?? items.length,
+		readyToClean: raw.readyToClean ?? items.filter(isWorktreeInventoryActionable).length,
+		protectedInUse: raw.protectedInUse ?? items.filter(item => item.disposition === "protected" || item.classification === "protected-in-use").length,
+		archivedOwned: raw.archivedOwned ?? items.filter(item => item.classification === "archived-owned").length,
+		unownedGitWorktrees: raw.unownedGitWorktrees ?? items.filter(item => item.classification === "unowned-git-worktree").length,
+		poolEntries: raw.poolEntries ?? items.filter(item => item.classification === "pool-entry").length,
+		alreadyCleaned: raw.alreadyCleaned ?? items.filter(item => item.disposition === "already-cleaned" || item.classification === "already-cleaned").length,
+		needsAttention: raw.needsAttention ?? items.filter(item => item.disposition === "needs-attention" || item.disposition === "failed" || item.classification === "stale-filesystem-only" || item.classification === "scan-error").length,
+		scanErrors: raw.scanErrors ?? items.filter(item => item.classification === "scan-error").length,
+		defaultSelected: raw.defaultSelected ?? items.filter(item => isWorktreeInventoryActionable(item) && item.defaultSelected !== false).length,
+		byClassification: raw.byClassification ?? {},
+		byReason: raw.byReason ?? {},
+		bySource: raw.bySource ?? {},
+	};
+	return {
+		items,
+		counts,
+		generatedAt: data?.generatedAt ?? Date.now(),
+		scanned: data?.scanned,
+		projectCount: data?.projectCount,
+		repoCount: data?.repoCount,
+		worktreeRootCount: data?.worktreeRootCount,
+	};
+}
+
+function worktreeInventoryActionableRows(): WorktreeMaintenanceItem[] {
+	return (worktreeInventoryReport?.items ?? []).filter(isWorktreeInventoryActionable);
+}
+
+function selectedWorktreeInventoryItemIds(): string[] {
+	const ids = new Set(worktreeInventoryActionableRows().map(item => item.id));
+	return Array.from(worktreeInventorySelection).filter(id => ids.has(id));
+}
+
+function toggleWorktreeInventorySelection(id: string, checked: boolean): void {
+	if (checked) worktreeInventorySelection.add(id);
+	else worktreeInventorySelection.delete(id);
+	renderApp();
+}
+
+function setWorktreeInventorySelection(items: WorktreeMaintenanceItem[]): void {
+	worktreeInventorySelection = new Set(items.filter(isWorktreeInventoryActionable).map(item => item.id));
+	renderApp();
+}
+
+async function scanWorktreeInventory(options: { preserveCleanupResult?: boolean } = {}): Promise<void> {
+	maintenanceLoading = "worktreeInventory";
+	worktreeInventoryError = null;
+	if (!options.preserveCleanupResult) worktreeInventoryCleanup = null;
+	const previousScan = worktreeInventoryReport;
+	const previousSelection = new Set(worktreeInventorySelection);
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/maintenance/orphaned-worktrees");
+		const res = await gatewayFetch("/api/maintenance/worktrees");
 		if (res.ok) {
-			const data = await res.json();
-			maintenanceWorktrees = data.worktrees ?? [];
+			const data = await res.json() as WorktreeInventoryReport;
+			worktreeInventoryReport = normalizeWorktreeInventoryReport(data);
+			const actionable = worktreeInventoryActionableRows();
+			worktreeInventorySelection = previousScan
+				? new Set(actionable.filter(item => previousSelection.has(item.id)).map(item => item.id))
+				: new Set(actionable.filter(item => item.defaultSelected !== false).map(item => item.id));
+			worktreeInventoryExpandedGroups.clear();
+			if (!options.preserveCleanupResult) worktreeInventoryShowDiagnostics = false;
 		} else {
-			maintenanceWorktrees = [];
+			worktreeInventoryReport = emptyWorktreeInventoryReport();
+			worktreeInventorySelection = new Set();
+			worktreeInventoryError = `Worktree scan failed (HTTP ${res.status})`;
 		}
-	} catch {
-		maintenanceWorktrees = [];
+	} catch (err) {
+		worktreeInventoryReport = emptyWorktreeInventoryReport();
+		worktreeInventorySelection = new Set();
+		worktreeInventoryError = `Worktree scan failed: ${(err as Error).message || "Scan failed"}`;
 	}
 	maintenanceLoading = null;
 	renderApp();
 }
 
-async function cleanupWorktrees(): Promise<void> {
-	maintenanceLoading = "worktrees";
+function normalizeWorktreeCleanupResponse(data: Partial<WorktreeCleanupResponse> | null | undefined): WorktreeCleanupResponse {
+	return {
+		counts: {
+			requested: data?.counts?.requested ?? 0,
+			cleaned: data?.counts?.cleaned ?? 0,
+			branchDeleted: data?.counts?.branchDeleted ?? 0,
+			skipped: data?.counts?.skipped ?? 0,
+			alreadyCleaned: data?.counts?.alreadyCleaned ?? 0,
+			failed: data?.counts?.failed ?? 0,
+		},
+		results: Array.isArray(data?.results) ? data!.results : [],
+	};
+}
+
+async function cleanupWorktreeInventory(mode: "selected" | "all-safe" = "selected"): Promise<void> {
+	const itemIds = selectedWorktreeInventoryItemIds();
+	const readyToClean = worktreeInventoryReport?.counts.readyToClean ?? 0;
+	if (mode === "selected" && itemIds.length === 0) return;
+	if (mode === "all-safe" && readyToClean === 0) return;
+	if (mode === "all-safe") {
+		const confirmed = await confirmAction(
+			`Clean ${readyToClean} worktree${readyToClean === 1 ? "" : "s"}?`,
+			"Bobbit will rescan before deleting and will remove only server-classified safe candidates. Transcripts, archived sessions, goals, proposals, prompts, and search records are preserved.",
+			"Clean worktrees",
+			true,
+		);
+		if (!confirmed) return;
+	}
+	maintenanceLoading = "worktreeInventory";
+	worktreeInventoryError = null;
+	let shouldRescan = false;
 	renderApp();
 	try {
-		await gatewayFetch("/api/maintenance/cleanup-worktrees", { method: "POST" });
-	} catch { /* ignore */ }
+		const res = await gatewayFetch("/api/maintenance/cleanup-worktrees", {
+			method: "POST",
+			body: JSON.stringify(mode === "all-safe" ? { mode: "all-safe" } : { mode: "selected", itemIds }),
+		});
+		if (res.ok) {
+			worktreeInventoryCleanup = normalizeWorktreeCleanupResponse(await res.json());
+			worktreeInventoryShowDiagnostics = (worktreeInventoryCleanup.counts.failed + worktreeInventoryCleanup.counts.skipped) > 0;
+			shouldRescan = true;
+		} else {
+			worktreeInventoryCleanup = null;
+			worktreeInventoryError = `Cleanup failed (HTTP ${res.status})`;
+		}
+	} catch (err) {
+		worktreeInventoryCleanup = null;
+		worktreeInventoryError = (err as Error).message || "Cleanup failed";
+	}
 	maintenanceLoading = null;
-	await scanWorktrees();
+	if (shouldRescan) await scanWorktreeInventory({ preserveCleanupResult: true });
+	else renderApp();
+}
+
+function worktreeStatusClass(itemOrDisposition: WorktreeMaintenanceItem | WorktreeInventoryDisposition | string): string {
+	const disposition = typeof itemOrDisposition === "string" ? itemOrDisposition : itemOrDisposition.disposition;
+	if (disposition === "ready-to-clean") return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20";
+	if (disposition === "already-cleaned") return "bg-secondary text-muted-foreground border border-border";
+	if (disposition === "failed") return "bg-destructive/10 text-destructive border border-destructive/20";
+	return "bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20";
+}
+
+function worktreeStatusLabel(item: WorktreeMaintenanceItem): string {
+	if (item.disposition === "ready-to-clean") return "Ready to clean";
+	if (item.classification === "pool-entry") return "Pool entry";
+	if (item.disposition === "protected") return "Protected/in use";
+	if (item.disposition === "already-cleaned") return "Already cleaned";
+	if (item.disposition === "failed") return "Cleanup failed";
+	return "Needs attention";
+}
+
+function humanizeWorktreeToken(value: string): string {
+	return (value || "unknown").replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function worktreeClassificationLabel(value: string): string {
+	const labels: Record<string, string> = {
+		"ready-to-clean": "Ready to clean",
+		"protected-in-use": "Protected/in use",
+		"archived-owned": "Archived-owned",
+		"unowned-git-worktree": "Unowned Git worktree",
+		"pool-entry": "Pool entry",
+		"already-cleaned": "Already cleaned",
+		"stale-filesystem-only": "Filesystem-only",
+		"scan-error": "Scan error",
+	};
+	return labels[value] ?? humanizeWorktreeToken(value);
+}
+
+function worktreeReasonLabel(reason: string): string {
+	const labels: Record<string, string> = {
+		"safe-archived-session-worktree": "Archived cleanup target",
+		"safe-unowned-session-worktree": "Unowned Git worktree",
+		"safe-pool-entry": "Pool entry",
+		"referenced-by-live-session": "Referenced by live session",
+		"referenced-by-live-goal": "Referenced by live goal",
+		"referenced-by-live-team": "Referenced by live team",
+		"referenced-by-delegate": "Referenced by delegate",
+		"referenced-by-staff": "Referenced by staff",
+		"referenced-by-pool": "Referenced by pool",
+		"branch-referenced-by-live-record": "Branch referenced by live record",
+		"branch-referenced-by-archived-record": "Branch referenced by archived record",
+		"git-worktree-metadata-missing": "Git metadata missing",
+		"filesystem-only-needs-attention": "Filesystem-only needs attention",
+		"sandbox-container-path": "Sandbox/container path",
+		"primary-worktree": "Primary worktree",
+		"missing-repo-path": "Missing repo path",
+		"missing-worktree-path": "Missing worktree path",
+		"git-scan-error": "Git scan error",
+		"fs-scan-error": "Filesystem scan error",
+		"cleanup-failed": "Cleanup failed",
+		"pool-entry": "Pool entries",
+		"already-cleaned": "Already cleaned",
+		"scan-error": "Scan errors",
+	};
+	return labels[reason] ?? humanizeWorktreeToken(reason);
+}
+
+function worktreeSourceLabel(source: string): string {
+	const labels: Record<string, string> = {
+		"runtime-session": "Runtime session",
+		"persisted-live-session": "Live session",
+		"archived-session": "Archived session",
+		goal: "Goal",
+		team: "Team",
+		delegate: "Delegate",
+		staff: "Staff",
+		pool: "Pool",
+		"git-worktree": "Git metadata",
+		filesystem: "Filesystem",
+	};
+	return labels[source] ?? humanizeWorktreeToken(source);
+}
+
+function worktreeSourcesLabel(sources: string[]): string {
+	return sources.length > 0 ? sources.map(worktreeSourceLabel).join(", ") : "Unknown";
+}
+
+function sanitizeWorktreeGroupId(value: string): string {
+	return (value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+
+function shortWorktreeId(id: string): string {
+	return id.length > 12 ? id.slice(0, 8) : id;
+}
+
+function worktreeItemTitle(item: WorktreeMaintenanceItem): string {
+	const ownerTitle = item.owners?.find(owner => owner.title)?.title;
+	if (ownerTitle) return ownerTitle;
+	if (item.branch) return item.branch;
+	const path = item.path || "Worktree";
+	return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function worktreeRepoLabel(item: WorktreeMaintenanceItem): string {
+	return item.repoDisplayName || item.componentName || item.repo || ".";
+}
+
+function worktreeProjectLabel(item: WorktreeMaintenanceItem): string {
+	return item.projectName || item.projectId || "No project";
+}
+
+function worktreeBranchOutcome(item: WorktreeMaintenanceItem): string {
+	if (item.willDeleteBranch) return "Branch will be deleted";
+	if (item.branchDeleteBlockedReason) return `Branch will be kept: ${item.branchDeleteBlockedReason}`;
+	return item.branch ? "Branch will be kept" : "No branch recorded";
+}
+
+function focusWorktreeCleanupElement(id: string): void {
+	window.setTimeout(() => {
+		const el = document.getElementById(id) as HTMLElement | null;
+		el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+		el?.focus({ preventScroll: true });
+	}, 0);
+}
+
+function showWorktreeDiagnosticsAndFocus(groupId?: string): void {
+	worktreeInventoryShowDiagnostics = true;
+	renderApp();
+	focusWorktreeCleanupElement(groupId ? `worktree-cleanup-group-${sanitizeWorktreeGroupId(groupId)}` : "worktree-cleanup-troubleshooting-panel");
+}
+
+function renderWorktreeSummaryChip(label: string, value: number, testId: string, onClick?: () => void) {
+	const content = html`
+		<span class="text-[11px] text-muted-foreground">${label}:</span>
+		<span class="text-sm font-semibold text-foreground">${value}</span>
+	`;
+	const classes = "flex min-w-[8rem] flex-col gap-0.5 rounded-md border border-border bg-secondary/30 px-3 py-2 text-left";
+	return onClick && value > 0 ? html`
+		<button type="button" class="${classes} hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-ring" data-testid=${testId} aria-controls="worktree-cleanup-actionable-list worktree-cleanup-troubleshooting-panel" @click=${onClick}>${content}</button>
+	` : html`
+		<div class="${classes}" data-testid=${testId}>${content}</div>
+	`;
+}
+
+function renderWorktreeCleanupRow(item: WorktreeMaintenanceItem, options: { selectable: boolean }) {
+	const selected = worktreeInventorySelection.has(item.id);
+	const repoLabel = worktreeRepoLabel(item);
+	const title = worktreeItemTitle(item);
+	const checkboxLabel = `Select worktree ${title} repo ${repoLabel} branch ${item.branch || "none"} path ${item.path || "none"}`;
+	const ownerIds = (item.owners ?? []).map(owner => `${owner.type}:${owner.id}`).join(", ");
+	const body = html`
+		<div class="min-w-0 flex-1 flex flex-col gap-1">
+			<div class="flex flex-wrap items-center gap-1.5">
+				<span class="text-[10px] px-1.5 py-0.5 rounded ${worktreeStatusClass(item)}">${worktreeStatusLabel(item)}</span>
+				<span class="font-medium text-foreground truncate max-w-full">${title}</span>
+				<span class="font-mono text-[10px] text-muted-foreground">${shortWorktreeId(item.id)}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${worktreeProjectLabel(item)}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${repoLabel}</span>
+				<span class="text-[10px] px-1.5 py-0.5 rounded bg-background text-muted-foreground border border-border">${worktreeClassificationLabel(item.classification)}</span>
+			</div>
+			<div class="text-muted-foreground">${item.detail || worktreeReasonDetail(item.reason)}</div>
+			<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-muted-foreground">
+				<div class="break-all">repo: ${repoLabel}</div>
+				<div class="break-all">branch: ${item.branch || "none"}</div>
+				<div class="sm:col-span-2 break-all">worktree: ${item.path || "No worktree path recorded"}</div>
+				${item.repoPath ? html`<div class="sm:col-span-2 break-all">repo path: ${item.repoPath}</div>` : ""}
+				<div class="sm:col-span-2 break-all">sources: ${worktreeSourcesLabel(item.sources)}</div>
+				${ownerIds ? html`<div class="sm:col-span-2 break-all">owners: ${ownerIds}</div>` : ""}
+			</div>
+			<div class="text-muted-foreground">${worktreeBranchOutcome(item)}</div>
+			<details class="mt-1">
+				<summary class="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">Technical details</summary>
+				<div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
+					<div>classification: ${item.classification}</div>
+					<div>disposition: ${item.disposition}</div>
+					<div>reason: ${item.reason}</div>
+					<div>sources: ${item.sources.join(", ") || "none"}</div>
+					<div class="sm:col-span-2 break-all">item id: ${item.id}</div>
+					${ownerIds ? html`<div class="sm:col-span-2 break-all">owner ids: ${ownerIds}</div>` : ""}
+				</div>
+			</details>
+		</div>
+	`;
+	return options.selectable ? html`
+		<label
+			class="flex items-start gap-2 rounded border border-border bg-background/70 p-2 text-xs cursor-pointer"
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${item.id}
+			data-disposition=${item.disposition}
+			data-classification=${item.classification}
+			data-reason=${item.reason}
+		>
+			<input
+				type="checkbox"
+				class="mt-0.5 w-4 h-4 rounded border-input accent-primary shrink-0"
+				aria-label=${checkboxLabel}
+				.checked=${selected}
+				?disabled=${maintenanceLoading === "worktreeInventory"}
+				@change=${(e: Event) => toggleWorktreeInventorySelection(item.id, (e.target as HTMLInputElement).checked)}
+			/>
+			${body}
+		</label>
+	` : html`
+		<div
+			class="flex items-start gap-2 rounded border border-border bg-background/70 p-2 text-xs opacity-90"
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${item.id}
+			data-disposition=${item.disposition}
+			data-classification=${item.classification}
+			data-reason=${item.reason}
+		>
+			${body}
+		</div>
+	`;
+}
+
+type WorktreeDiagnosticExample = {
+	key: string;
+	groupKey: string;
+	label: string;
+	detail: string;
+	item?: WorktreeMaintenanceItem;
+	status?: "skipped" | "already-cleaned" | "failed";
+	path?: string;
+	branch?: string;
+	repo?: string;
+};
+
+function worktreeTroubleshootingGroupKey(item: WorktreeMaintenanceItem): string {
+	if (item.classification === "pool-entry") return "pool-entry";
+	if (item.classification === "already-cleaned" || item.disposition === "already-cleaned") return "already-cleaned";
+	if (item.classification === "scan-error" || item.disposition === "failed") return "scan-error";
+	return item.reason || item.classification;
+}
+
+function worktreeDiagnosticsByGroup(): Array<{ key: string; label: string; detail: string; count: number; examples: WorktreeDiagnosticExample[] }> {
+	const buckets = new Map<string, WorktreeDiagnosticExample[]>();
+	const add = (example: WorktreeDiagnosticExample) => {
+		buckets.set(example.groupKey, [...(buckets.get(example.groupKey) || []), example]);
+	};
+	for (const item of worktreeInventoryReport?.items ?? []) {
+		if (isWorktreeInventoryActionable(item)) continue;
+		const groupKey = worktreeTroubleshootingGroupKey(item);
+		add({ key: item.id, groupKey, label: worktreeItemTitle(item), detail: item.detail || worktreeReasonDetail(groupKey), item });
+	}
+	for (const result of worktreeInventoryCleanup?.results ?? []) {
+		if (result.status !== "failed" && result.status !== "skipped" && result.status !== "already-cleaned") continue;
+		const groupKey = result.status === "failed" ? "cleanup-failed" : (result.reason || result.status);
+		add({
+			key: result.itemId || result.id || `${groupKey}:${result.path || "unknown"}`,
+			groupKey,
+			label: result.path || result.itemId || result.id || "Cleanup result",
+			detail: result.error || result.detail || result.reason || worktreeReasonDetail(groupKey),
+			status: result.status === "already-cleaned" ? "already-cleaned" : result.status === "failed" ? "failed" : "skipped",
+			path: result.path,
+			branch: result.branch,
+			repo: result.repo,
+		});
+	}
+	const order = (key: string): number => {
+		if (/referenced|protected|branch-referenced|primary-worktree/.test(key)) return 1;
+		if (key === "pool-entry" || /pool/.test(key)) return 2;
+		if (/filesystem|missing|sandbox|needs-attention|metadata/.test(key)) return 3;
+		if (key === "already-cleaned") return 4;
+		if (/scan-error|cleanup-failed|failed|error/.test(key)) return 5;
+		return 6;
+	};
+	return Array.from(buckets.entries()).map(([key, examples]) => ({
+		key,
+		label: worktreeReasonLabel(key),
+		detail: worktreeReasonDetail(key),
+		count: examples.length,
+		examples,
+	})).sort((a, b) => order(a.key) - order(b.key) || a.label.localeCompare(b.label));
+}
+
+function renderWorktreeDiagnosticExample(example: WorktreeDiagnosticExample) {
+	if (example.item) return renderWorktreeCleanupRow(example.item, { selectable: false });
+	const disposition = example.status === "failed" ? "failed" : example.status === "already-cleaned" ? "already-cleaned" : "needs-attention";
+	return html`
+		<div
+			class="rounded border border-border bg-background/70 p-2 text-xs"
+			data-testid="worktree-cleanup-row"
+			data-worktree-id=${example.key}
+			data-disposition=${disposition}
+			data-classification="cleanup-result"
+			data-reason=${example.groupKey}
+		>
+			<div class="flex flex-wrap items-center gap-1.5">
+				<span class="text-[10px] px-1.5 py-0.5 rounded ${worktreeStatusClass(disposition)}">${example.status === "already-cleaned" ? "Already cleaned" : example.status === "failed" ? "Cleanup failed" : "Needs attention"}</span>
+				<span class="font-medium text-foreground">${example.label}</span>
+			</div>
+			<div class="mt-1 text-muted-foreground">${example.detail}</div>
+			<div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 font-mono text-muted-foreground">
+				${example.repo ? html`<div class="break-all">repo: ${example.repo}</div>` : ""}
+				${example.branch ? html`<div class="break-all">branch: ${example.branch}</div>` : ""}
+				${example.path ? html`<div class="sm:col-span-2 break-all">worktree: ${example.path}</div>` : ""}
+			</div>
+		</div>
+	`;
+}
+
+function renderWorktreeTroubleshooting() {
+	const groups = worktreeDiagnosticsByGroup();
+	if (groups.length === 0) return html``;
+	return html`
+		<div id="worktree-cleanup-troubleshooting-panel" tabindex="-1" class="flex flex-col gap-2 rounded-md border border-border bg-secondary/20 p-3" data-testid="worktree-cleanup-troubleshooting">
+			<p class="text-xs text-muted-foreground">These records are not cleanup actions. They are shown for troubleshooting and audit only.</p>
+			${groups.map(group => {
+				const id = sanitizeWorktreeGroupId(group.key);
+				const expanded = worktreeInventoryExpandedGroups.has(id);
+				const visible = expanded ? group.examples : group.examples.slice(0, 5);
+				return html`
+					<section
+						id="worktree-cleanup-group-${id}"
+						tabindex="-1"
+						class="flex flex-col gap-1 rounded-md border border-border bg-background/60 p-2"
+						data-testid="worktree-cleanup-group-${id}"
+						data-reason=${group.key}
+					>
+						<div class="flex flex-wrap items-start justify-between gap-2">
+							<div>
+								<h4 class="text-xs font-semibold text-foreground">${group.label} (${group.count})</h4>
+								<p class="text-[11px] text-muted-foreground">${group.detail}</p>
+							</div>
+							${group.examples.length > 5 ? html`
+								<button
+									type="button"
+									class="px-2 py-1 text-[11px] rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors"
+									data-testid="worktree-cleanup-show-all-${id}"
+									data-action="show-all-worktree-cleanup-examples"
+									data-reason=${group.key}
+									@click=${() => {
+										if (expanded) worktreeInventoryExpandedGroups.delete(id);
+										else worktreeInventoryExpandedGroups.add(id);
+										renderApp();
+									}}
+								>${expanded ? "Show first 5" : `Show all (${group.examples.length})`}</button>
+							` : ""}
+						</div>
+						<div class="flex flex-col gap-1 mt-1">
+							${visible.map(renderWorktreeDiagnosticExample)}
+						</div>
+					</section>
+				`;
+			})}
+		</div>
+	`;
+}
+
+function renderWorktreeCleanupResult() {
+	const cleanup = worktreeInventoryCleanup;
+	if (!cleanup) return html``;
+	const attention = cleanup.counts.failed + cleanup.counts.skipped;
+	return html`
+		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground mt-1" data-testid="worktree-cleanup-result" aria-live=${attention > 0 ? "assertive" : "polite"}>
+			<div class="text-foreground font-medium">${attention > 0 ? "Cleanup finished with attention needed" : "Cleanup complete"}</div>
+			<div>
+				Cleaned: ${cleanup.counts.cleaned}, branches deleted: ${cleanup.counts.branchDeleted}, skipped: ${cleanup.counts.skipped}, already cleaned: ${cleanup.counts.alreadyCleaned}, failed: ${cleanup.counts.failed}.
+			</div>
+			${attention > 0 ? html`<div class="mt-1 text-muted-foreground">Open diagnostics to inspect skipped or failed cleanup examples.</div>` : ""}
+		</div>
+	`;
+}
+
+function renderWorktreeCleanupMaintenance(scanBtnClass: string, actionBtnClass: string) {
+	const actionableRows = worktreeInventoryActionableRows();
+	const counts = worktreeInventoryReport?.counts ?? emptyWorktreeMaintenanceCounts();
+	const selectedCount = selectedWorktreeInventoryItemIds().length;
+	const hasScan = !!worktreeInventoryReport;
+	const loading = maintenanceLoading === "worktreeInventory";
+	const currentProjectRows = state.activeProjectId ? actionableRows.filter(item => item.projectId === state.activeProjectId) : [];
+	const archivedOwnedRows = actionableRows.filter(item => item.classification === "archived-owned" || item.sources.includes("archived-session"));
+	const gitOrphanRows = actionableRows.filter(item => item.classification === "unowned-git-worktree");
+	const diagnosticsGroups = worktreeDiagnosticsByGroup();
+	const cleanupHelper = !hasScan
+		? "Scan first to find safe cleanup candidates."
+		: counts.readyToClean === 0
+			? "Cleanup is disabled because there are 0 safe candidates."
+			: selectedCount === 0
+				? "Select at least one safe candidate. Bobbit will rescan before deleting anything."
+				: "Bobbit will rescan before deleting and remove only server-classified safe candidates; records and transcripts are preserved.";
+	const scanLabel = loading && !hasScan ? "Scanning..." : hasScan ? "Rescan" : "Scan";
+	const scannedProjects = worktreeInventoryReport?.scanned?.projects ?? worktreeInventoryReport?.projectCount;
+	const scannedRepos = worktreeInventoryReport?.scanned?.repos ?? worktreeInventoryReport?.repoCount;
+	const scannedRoots = worktreeInventoryReport?.scanned?.worktreeRoots ?? worktreeInventoryReport?.worktreeRootCount;
+	const metadataParts = [
+		scannedProjects !== undefined ? `${scannedProjects} projects` : "known projects",
+		scannedRepos !== undefined ? `${scannedRepos} repos` : "component repos",
+		scannedRoots !== undefined ? `${scannedRoots} worktree-root directories` : "worktree-root directories",
+	];
+	return html`
+		<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="worktree-cleanup" data-testid="worktree-cleanup-maintenance" role="region" aria-labelledby="worktree-cleanup-title">
+			<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+				<div>
+					<h3 id="worktree-cleanup-title" class="text-sm font-semibold text-foreground" data-testid="worktree-cleanup-title">Worktree Cleanup</h3>
+					<p class="text-xs text-muted-foreground">
+						Reclaim safe Bobbit worktrees from archived sessions, orphaned Git metadata, and known worktree roots while surfacing pool entries and protected paths for troubleshooting.
+					</p>
+				</div>
+				<div class="flex flex-wrap items-center gap-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${loading}
+						@click=${() => scanWorktreeInventory()}
+						data-testid="worktree-cleanup-scan"
+						data-action="scan-worktrees"
+					>${scanLabel}</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${loading || !hasScan || counts.readyToClean === 0}
+						@click=${() => cleanupWorktreeInventory("all-safe")}
+						data-testid="worktree-cleanup-clean-all"
+						data-action="cleanup-all-worktrees"
+					>${loading && hasScan ? "Cleaning..." : `Clean all safe candidates${counts.readyToClean > 0 ? ` (${counts.readyToClean})` : ""}`}</button>
+				</div>
+			</div>
+
+			<div aria-live="polite" class="flex flex-col gap-2">
+				${hasScan ? html`
+					<div class="grid grid-cols-2 lg:grid-cols-5 gap-2 mt-1" aria-controls="worktree-cleanup-actionable-list worktree-cleanup-troubleshooting-panel">
+						${renderWorktreeSummaryChip("Ready to clean", counts.readyToClean, "worktree-cleanup-summary-ready", counts.readyToClean > 0 ? () => focusWorktreeCleanupElement("worktree-cleanup-actionable-list") : undefined)}
+						${renderWorktreeSummaryChip("Selected", selectedCount, "worktree-cleanup-summary-selected")}
+						${renderWorktreeSummaryChip("Protected/in use", counts.protectedInUse, "worktree-cleanup-summary-protected", counts.protectedInUse > 0 ? () => showWorktreeDiagnosticsAndFocus(diagnosticsGroups.find(group => /referenced|protected|branch-referenced|primary-worktree/.test(group.key))?.key) : undefined)}
+						${renderWorktreeSummaryChip("Already cleaned", counts.alreadyCleaned, "worktree-cleanup-summary-already-cleaned", counts.alreadyCleaned > 0 ? () => showWorktreeDiagnosticsAndFocus("already-cleaned") : undefined)}
+						${renderWorktreeSummaryChip("Needs attention", counts.needsAttention, "worktree-cleanup-summary-needs-attention", counts.needsAttention > 0 ? () => showWorktreeDiagnosticsAndFocus(diagnosticsGroups.find(group => !/referenced|protected|already-cleaned/.test(group.key))?.key) : undefined)}
+					</div>
+					<p class="text-[11px] text-muted-foreground" data-testid="worktree-cleanup-metadata-count">
+						Scanned ${metadataParts.join(", ")}. Last scanned ${formatTimestamp(worktreeInventoryReport?.generatedAt ?? null)}. Pool entries: ${counts.poolEntries}. Default selected: ${counts.defaultSelected}.
+					</p>
+				` : ""}
+
+				${renderWorktreeCleanupResult()}
+
+				${worktreeInventoryError ? html`
+					<p class="text-xs text-destructive mt-1" data-testid="worktree-cleanup-error" aria-live="assertive">${worktreeInventoryError}</p>
+				` : ""}
+
+				<p class="text-xs text-muted-foreground" data-testid="worktree-cleanup-helper">${cleanupHelper}</p>
+
+				${hasScan && counts.readyToClean === 0 ? html`
+					<div class="rounded-md border border-border bg-secondary/20 p-3 text-xs" data-testid="worktree-cleanup-empty-state">
+						<h4 class="text-sm font-semibold text-foreground">${counts.total === counts.alreadyCleaned && counts.total > 0 ? "Worktree inventory is clean" : "Nothing safe to clean right now"}</h4>
+						<p class="mt-1 text-muted-foreground">Bobbit scanned known sessions, archives, goals, teams, delegates, staff, pool entries, Git worktree metadata, and worktree-root directories. No server-classified safe worktree cleanup candidates were found.</p>
+					</div>
+				` : ""}
+
+				${hasScan && counts.readyToClean > 0 ? html`
+					<div id="worktree-cleanup-actionable-list" tabindex="-1" class="flex flex-col gap-2 mt-1" data-testid="worktree-cleanup-actionable-list">
+						<div class="flex flex-wrap items-center gap-2">
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors" data-testid="worktree-cleanup-select-all-safe" data-action="select-all-safe-worktrees" @click=${() => setWorktreeInventorySelection(actionableRows)}>Select all safe (${actionableRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${currentProjectRows.length === 0} data-testid="worktree-cleanup-select-current-project" data-action="select-current-project-worktrees" @click=${() => setWorktreeInventorySelection(currentProjectRows)}>Current project (${currentProjectRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${archivedOwnedRows.length === 0} data-testid="worktree-cleanup-select-archived-owned" data-action="select-archived-owned-worktrees" @click=${() => setWorktreeInventorySelection(archivedOwnedRows)}>Archived-owned (${archivedOwnedRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${gitOrphanRows.length === 0} data-testid="worktree-cleanup-select-git-orphan" data-action="select-git-orphan-worktrees" @click=${() => setWorktreeInventorySelection(gitOrphanRows)}>Git orphan (${gitOrphanRows.length})</button>
+							<button type="button" class="px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50" ?disabled=${selectedCount === 0} data-testid="worktree-cleanup-clear-selection" data-action="clear-worktree-cleanup-selection" @click=${() => setWorktreeInventorySelection([])}>Clear selection</button>
+						</div>
+						<div class="flex flex-col gap-1 max-h-96 overflow-y-auto">
+							${actionableRows.map(item => renderWorktreeCleanupRow(item, { selectable: true }))}
+						</div>
+						<div class="flex items-center gap-2">
+							<button
+								class="${actionBtnClass}"
+								?disabled=${loading || selectedCount === 0}
+								@click=${() => cleanupWorktreeInventory("selected")}
+								data-testid="worktree-cleanup-clean-selected"
+								data-action="cleanup-selected-worktrees"
+							>${loading ? "Cleaning..." : `Clean selected (${selectedCount})`}</button>
+							<span class="text-xs text-muted-foreground">${selectedCount} selected</span>
+						</div>
+					</div>
+				` : html`
+					<button
+						type="button"
+						class="self-start px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						data-testid="worktree-cleanup-clean-selected"
+						data-action="cleanup-selected-worktrees"
+						?disabled=${true}
+					>Clean selected${hasScan ? " (0)" : ""}</button>
+				`}
+
+				${hasScan && diagnosticsGroups.length > 0 ? html`
+					<div class="flex flex-col gap-2 mt-1">
+						<button
+							type="button"
+							class="self-start px-2 py-1 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors"
+							aria-expanded=${worktreeInventoryShowDiagnostics ? "true" : "false"}
+							aria-controls="worktree-cleanup-troubleshooting-panel"
+							data-testid="worktree-cleanup-show-diagnostics"
+							@click=${() => { worktreeInventoryShowDiagnostics = !worktreeInventoryShowDiagnostics; renderApp(); }}
+						>${worktreeInventoryShowDiagnostics ? "Hide diagnostics" : counts.readyToClean === 0 ? "Show why not removable" : "Show protected, already cleaned, and needs-attention diagnostics"}</button>
+						${worktreeInventoryShowDiagnostics ? renderWorktreeTroubleshooting() : ""}
+					</div>
+				` : ""}
+			</div>
+		</div>
+	`;
 }
 
 async function scanSessions(): Promise<void> {
@@ -4465,6 +5065,368 @@ async function purgeArchives(): Promise<void> {
 	await scanArchives();
 }
 
+function stringField(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+	for (const value of values) {
+		const s = stringField(value);
+		if (s) return s;
+	}
+	return undefined;
+}
+
+function parseAgentDirState(data: any): AgentDirDisplayState {
+	const source = data?.state ?? data?.agentDir ?? data;
+	const activePath = firstString(source?.activePath, source?.activeDir, source?.active?.dir, source?.startup?.dir) ?? "";
+	const startupSource = firstString(source?.startupSource, source?.activeSource, source?.active?.source, source?.startup?.source) ?? "unknown";
+	const defaultPath = firstString(source?.defaultPath, source?.defaultDir, source?.startup?.defaultDir, source?.nextStart?.defaultDir) ?? "";
+	const persistedPath = firstString(source?.persistedPath, source?.persisted, source?.pendingPersistedPath) ?? null;
+	const pendingPath = firstString(source?.pendingPath, source?.pendingDir, source?.pending?.dir, source?.pending) ?? persistedPath;
+	const nextStartPath = firstString(source?.nextStartPath, source?.nextStartDir, source?.nextStart?.dir, source?.effectiveNextStartPath, pendingPath, activePath) ?? "";
+	const nextStartSource = firstString(source?.nextStartSource, source?.nextStart?.source, source?.effectiveNextStartSource) ?? startupSource;
+	const envOverride = (() => {
+		const raw = source?.envOverride;
+		if (raw === true) return startupSource === "BOBBIT_AGENT_DIR" ? startupSource : "environment variable";
+		if (!raw) return startupSource === "BOBBIT_AGENT_DIR" ? startupSource : null;
+		if (typeof raw === "string") return raw;
+		return firstString(raw.name, raw.source, raw.key, raw.variable) ?? (startupSource === "BOBBIT_AGENT_DIR" ? startupSource : null);
+	})();
+	return {
+		activePath,
+		startupSource,
+		defaultPath,
+		persistedPath,
+		pendingPath,
+		nextStartPath,
+		nextStartSource,
+		restartRequired: source?.restartRequired === true,
+		envOverride,
+		history: Array.isArray(source?.history) ? source.history.filter((x: unknown): x is string => typeof x === "string") : [],
+		guidance: firstString(source?.guidance, source?.restartGuidance, source?.message, data?.guidance, data?.restartGuidance, data?.message),
+	};
+}
+
+function agentDirInputFromState(s: AgentDirDisplayState): string {
+	return s.persistedPath ?? s.pendingPath ?? "";
+}
+
+function samePathForDisplay(a: string | null | undefined, b: string | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function agentDirMigrationDestination(s: AgentDirDisplayState): string {
+	return s.pendingPath || s.persistedPath || s.nextStartPath;
+}
+
+function loadAgentDirState(force = false): void {
+	if ((agentDirLoaded && !force) || agentDirLoading) return;
+	agentDirLoading = true;
+	agentDirError = "";
+	(async () => {
+		try {
+			const res = await gatewayFetch("/api/agent-dir");
+			if (!res.ok) throw new Error(`Failed to load agent directory settings (HTTP ${res.status})`);
+			agentDirState = parseAgentDirState(await res.json());
+			agentDirLoaded = true;
+			agentDirInput = agentDirInputFromState(agentDirState);
+		} catch (err) {
+			agentDirError = (err as Error).message || "Failed to load agent directory settings";
+		} finally {
+			agentDirLoading = false;
+			renderApp();
+		}
+	})();
+}
+
+function resetAgentDirFlowState(): void {
+	agentDirValidation = null;
+	agentDirSaveMessage = "";
+	agentDirSaveIsError = false;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+}
+
+async function validateAgentDirInput(): Promise<void> {
+	const path = agentDirInput.trim();
+	if (!path) return;
+	agentDirValidation = null;
+	agentDirSaving = true;
+	agentDirSaveMessage = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/validate", {
+			method: "POST",
+			body: JSON.stringify({ path }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok || data?.ok === false) {
+			agentDirValidation = {
+				ok: false,
+				resolvedPath: firstString(data?.resolvedPath, data?.error?.resolvedPath),
+				code: firstString(data?.error?.code, data?.code),
+				message: firstString(data?.error?.message, data?.message) ?? `Validation failed (HTTP ${res.status})`,
+			};
+		} else {
+			agentDirValidation = {
+				ok: true,
+				resolvedPath: firstString(data?.resolvedPath, data?.path) ?? path,
+				message: "Directory is valid and writable.",
+			};
+		}
+	} catch (err) {
+		agentDirValidation = { ok: false, message: (err as Error).message || "Validation failed" };
+	} finally {
+		agentDirSaving = false;
+		renderApp();
+	}
+}
+
+async function saveAgentDirPending(path: string | null): Promise<void> {
+	agentDirSaving = true;
+	agentDirSaveMessage = "";
+	agentDirSaveIsError = false;
+	agentDirValidation = null;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/pending", {
+			method: "PUT",
+			body: JSON.stringify({ path }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(firstString(data?.error?.message, data?.message) ?? `Save failed (HTTP ${res.status})`);
+		agentDirState = parseAgentDirState(data);
+		agentDirLoaded = true;
+		agentDirInput = agentDirInputFromState(agentDirState);
+		agentDirSaveMessage = agentDirState.guidance || "Saved for the next server start.";
+	} catch (err) {
+		agentDirSaveIsError = true;
+		agentDirSaveMessage = (err as Error).message || "Save failed";
+	} finally {
+		agentDirSaving = false;
+		renderApp();
+	}
+}
+
+async function saveAgentDirInput(): Promise<void> {
+	await saveAgentDirPending(agentDirInput.trim() || null);
+}
+
+async function clearAgentDirPending(): Promise<void> {
+	agentDirInput = "";
+	await saveAgentDirPending(null);
+}
+
+function reportCount(value: unknown): number {
+	if (Array.isArray(value)) return value.length;
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	return 0;
+}
+
+async function migrateAgentDirData(): Promise<void> {
+	if (!agentDirState) return;
+	const destinationPath = agentDirMigrationDestination(agentDirState);
+	if (!destinationPath || samePathForDisplay(agentDirState.activePath, destinationPath)) return;
+	agentDirMigrating = true;
+	agentDirMigrationReport = null;
+	agentDirMigrationError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/agent-dir/migrate", {
+			method: "POST",
+			body: JSON.stringify({
+				sourcePath: agentDirState.activePath,
+				destinationPath,
+				overwrite: agentDirMigrateOverwrite,
+			}),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(firstString(data?.error?.message, data?.message) ?? `Migration failed (HTTP ${res.status})`);
+		agentDirMigrationReport = (data?.report && typeof data.report === "object" ? data.report : data) as AgentDirMigrationReport;
+	} catch (err) {
+		agentDirMigrationError = (err as Error).message || "Migration failed";
+	} finally {
+		agentDirMigrating = false;
+		renderApp();
+	}
+}
+
+function renderAgentDirPathRow(label: string, value: string | null | undefined, testId: string, badge?: string) {
+	return html`
+		<div class="flex flex-col gap-0.5 min-w-0">
+			<div class="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+				<span>${label}</span>
+				${badge ? html`<span class="normal-case tracking-normal px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">${badge}</span>` : ""}
+			</div>
+			<code class="text-xs text-foreground font-mono break-all" data-testid=${testId}>${value || "—"}</code>
+		</div>
+	`;
+}
+
+function renderAgentDirMigrationReport(report: AgentDirMigrationReport) {
+	const counts = [
+		["Copied", reportCount(report.copied), "agent-dir-migrate-copied"],
+		["Skipped", reportCount(report.skipped), "agent-dir-migrate-skipped"],
+		["Overwritten", reportCount(report.overwritten), "agent-dir-migrate-overwritten"],
+		["Missing", reportCount(report.missing), "agent-dir-migrate-missing"],
+		["Warnings", reportCount(report.warnings), "agent-dir-migrate-warnings"],
+		["Errors", reportCount(report.errors), "agent-dir-migrate-errors"],
+	] as const;
+	return html`
+		<div class="rounded-md bg-secondary/30 border border-border p-2 text-xs text-muted-foreground" data-testid="agent-dir-migration-report">
+			<div class="flex flex-wrap gap-1.5">
+				${counts.map(([label, count, testId]) => html`
+					<span class="px-1.5 py-0.5 rounded bg-background border border-border" data-testid=${testId}>${label}: <span class="text-foreground font-medium">${count}</span></span>
+				`)}
+			</div>
+			${Array.isArray(report.warnings) && report.warnings.length > 0 ? html`
+				<div class="mt-2 flex flex-col gap-1">
+					${report.warnings.map((warning) => html`<div class="text-amber-600 dark:text-amber-300 break-all">${warning}</div>`)}
+				</div>
+			` : ""}
+			${Array.isArray(report.errors) && report.errors.length > 0 ? html`
+				<div class="mt-2 flex flex-col gap-1">
+					${report.errors.map((error) => html`<div class="text-destructive break-all">${error}</div>`)}
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
+function renderAgentDirSettingsCard(scanBtnClass: string, actionBtnClass: string) {
+	loadAgentDirState();
+	const s = agentDirState;
+	const destinationPath = s ? agentDirMigrationDestination(s) : "";
+	const showMigration = !!s && !!destinationPath && !samePathForDisplay(s.activePath, destinationPath);
+	const envMessage = s?.envOverride
+		? `${s.envOverride} is active. Saved paths remain pending until that environment override is removed and the server is restarted.`
+		: "No environment override is active; saved settings determine the next server start before the default path.";
+	const restartGuidance = s
+		? `Active now: ${s.activePath || "unknown"}. After restart: ${s.nextStartPath || "unknown"}.`
+		: "";
+
+	return html`
+		<div class="flex flex-col gap-3 rounded-md border border-border p-4" data-section="agent-dir" data-testid="agent-dir-settings">
+			<div class="flex items-start justify-between gap-3">
+				<div>
+					<h3 class="text-sm font-semibold text-foreground">Agent Directory</h3>
+					<p class="text-xs text-muted-foreground mt-1">
+						Stores agent sessions, provider caches, model metadata, and staged agent binaries. Changes apply on the next server start; current sessions keep using the active directory.
+					</p>
+				</div>
+				<button
+					class="${scanBtnClass} shrink-0"
+					?disabled=${agentDirLoading}
+					@click=${() => loadAgentDirState(true)}
+					data-testid="agent-dir-refresh"
+				>${agentDirLoading ? "Refreshing…" : "Refresh"}</button>
+			</div>
+
+			${agentDirError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-load-error">${agentDirError}</p>` : ""}
+			${!s && agentDirLoading ? html`<p class="text-xs text-muted-foreground italic">Loading agent directory settings…</p>` : ""}
+			${s ? html`
+				<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+					${renderAgentDirPathRow("Active directory", s.activePath, "agent-dir-active")}
+					${renderAgentDirPathRow("Startup source", s.startupSource, "agent-dir-startup-source")}
+					${renderAgentDirPathRow("Default", s.defaultPath, "agent-dir-default")}
+					${renderAgentDirPathRow("Persisted / pending", s.pendingPath || s.persistedPath, "agent-dir-persisted")}
+					${renderAgentDirPathRow("Effective after restart", s.nextStartPath, "agent-dir-next-start", s.nextStartSource)}
+				</div>
+
+				<div class="rounded-md border ${s.restartRequired ? "border-amber-500/30 bg-amber-500/10" : "border-border bg-secondary/20"} p-3 text-xs" data-testid="agent-dir-restart-guidance">
+					<div class="font-medium ${s.restartRequired ? "text-amber-700 dark:text-amber-300" : "text-foreground"}">
+						${s.restartRequired ? "Restart required" : "No restart required"}
+					</div>
+					<div class="mt-1 text-muted-foreground break-all">${s.guidance || restartGuidance}</div>
+					<div class="mt-1 text-muted-foreground" data-testid="agent-dir-env-override">${envMessage}</div>
+				</div>
+
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-medium text-foreground" for="agent-dir-path-input">Directory for next server start</label>
+					<p class="text-xs text-muted-foreground">
+						Leave empty and save to clear the persisted setting and use environment/default precedence. Relative paths are resolved by the server against the project root.
+					</p>
+					<div class="flex flex-col sm:flex-row gap-2">
+						<input
+							id="agent-dir-path-input"
+							type="text"
+							placeholder=${s.defaultPath ? `Use default: ${s.defaultPath}` : "Use default"}
+							class="flex-1 min-w-0 px-2 py-1.5 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							.value=${live(agentDirInput)}
+							@input=${(e: Event) => { agentDirInput = (e.target as HTMLInputElement).value; resetAgentDirFlowState(); renderApp(); }}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void saveAgentDirInput(); } }}
+							data-testid="agent-dir-path-input"
+						/>
+						<div class="flex items-center gap-2 shrink-0">
+							<button class="${scanBtnClass}" ?disabled=${agentDirSaving || !agentDirInput.trim()} @click=${validateAgentDirInput} data-testid="agent-dir-validate">Validate</button>
+							<button class="${actionBtnClass}" ?disabled=${agentDirSaving} @click=${saveAgentDirInput} data-testid="agent-dir-save">${agentDirSaving ? "Saving…" : "Save for next restart"}</button>
+						</div>
+					</div>
+					<div>
+						<button
+							class="text-xs text-muted-foreground hover:text-foreground underline disabled:opacity-50"
+							?disabled=${agentDirSaving || (!s.persistedPath && !agentDirInput.trim())}
+							@click=${clearAgentDirPending}
+							data-testid="agent-dir-clear-default"
+						>Clear to default/env precedence</button>
+					</div>
+					${agentDirValidation ? html`
+						<p class="text-xs ${agentDirValidation.ok ? "text-emerald-600 dark:text-emerald-300" : "text-destructive"}" data-testid="agent-dir-validation-result">
+							${agentDirValidation.ok ? "Valid" : "Invalid"}${agentDirValidation.code ? ` (${agentDirValidation.code})` : ""}: ${agentDirValidation.message || ""}${agentDirValidation.resolvedPath ? ` Resolved: ${agentDirValidation.resolvedPath}` : ""}
+						</p>
+					` : ""}
+					${agentDirSaveMessage ? html`
+						<p class="text-xs ${agentDirSaveIsError ? "text-destructive" : "text-muted-foreground"}" data-testid="agent-dir-save-message">${agentDirSaveMessage}</p>
+					` : ""}
+				</div>
+
+				${showMigration ? html`
+					<div class="flex flex-col gap-3 rounded-md border border-border bg-secondary/20 p-3" data-testid="agent-dir-migration-card">
+						<div>
+							<h4 class="text-sm font-semibold text-foreground">Copy data to pending directory</h4>
+							<p class="text-xs text-muted-foreground mt-1">
+								Copies selected agent data from the active directory to the pending directory. The source directory is preserved.
+							</p>
+						</div>
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+							${renderAgentDirPathRow("Source active", s.activePath, "agent-dir-migrate-source")}
+							${renderAgentDirPathRow("Destination pending", destinationPath, "agent-dir-migrate-destination")}
+						</div>
+						<div class="text-xs text-muted-foreground">
+							<div class="font-medium text-foreground mb-1">Copy allowlist</div>
+							<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1" data-testid="agent-dir-migration-allowlist">
+								${["sessions/", "auth.json", "models.json", "settings.json", "google-code-assist.json", "bin/"].map(item => html`
+									<div class="flex items-center gap-1.5"><span class="text-emerald-600 dark:text-emerald-300">✓</span><code>${item}</code></div>
+								`)}
+							</div>
+						</div>
+						<label class="flex items-start gap-2 text-xs text-muted-foreground">
+							<input
+								type="checkbox"
+								class="mt-0.5 w-4 h-4 rounded border-input accent-primary"
+								.checked=${agentDirMigrateOverwrite}
+								@change=${(e: Event) => { agentDirMigrateOverwrite = (e.target as HTMLInputElement).checked; renderApp(); }}
+								data-testid="agent-dir-migrate-overwrite"
+							/>
+							<span><span class="font-medium text-foreground">Overwrite existing destination files</span><br />Default is skip existing files.</span>
+						</label>
+						<div class="flex items-center gap-2">
+							<button class="${actionBtnClass}" ?disabled=${agentDirMigrating} @click=${migrateAgentDirData} data-testid="agent-dir-migrate-start">${agentDirMigrating ? "Copying…" : "Copy data"}</button>
+							<span class="text-xs text-muted-foreground">Restart after saving/migrating to use the next-start directory.</span>
+						</div>
+						${agentDirMigrationReport ? renderAgentDirMigrationReport(agentDirMigrationReport) : ""}
+						${agentDirMigrationError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-migration-error">${agentDirMigrationError}</p>` : ""}
+					</div>
+				` : ""}
+			` : ""}
+		</div>
+	`;
+}
+
 function renderMaintenanceTab() {
 	const scanBtnClass = "px-3 py-1.5 text-sm rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50";
 	const actionBtnClass = "px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50";
@@ -4480,12 +5442,13 @@ function renderMaintenanceTab() {
 		if (total <= 0) return 0; // indeterminate
 		return Math.min(100, Math.round((completed / total) * 100));
 	})();
-
 	return html`
 		<div class="flex flex-col gap-6">
 			<p class="text-sm text-muted-foreground">
 				Review and clean up orphaned resources. No cleanup happens automatically on server restart — use these tools to manage resources manually.
 			</p>
+
+			${renderAgentDirSettingsCard(scanBtnClass, actionBtnClass)}
 
 			<!-- Search Index -->
 			<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="search-index">
@@ -4549,37 +5512,8 @@ function renderMaintenanceTab() {
 				</div>
 			</div>
 
-			<!-- Orphaned Worktrees -->
-			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
-				<h3 class="text-sm font-semibold text-foreground">Orphaned Worktrees</h3>
-				<p class="text-xs text-muted-foreground">
-					Session worktrees with no matching active session.
-				</p>
-				${maintenanceWorktrees !== null && maintenanceWorktrees.length > 0 ? html`
-					<div class="flex flex-col gap-1 mt-1 max-h-40 overflow-y-auto">
-						${maintenanceWorktrees.map(wt => html`
-							<div class="flex items-center gap-2 text-xs font-mono text-muted-foreground px-2 py-1 rounded bg-secondary/30">
-								<span class="truncate flex-1">${wt.path}</span>
-								<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground shrink-0">${wt.branch}</span>
-							</div>
-						`)}
-					</div>
-				` : maintenanceWorktrees !== null ? html`
-					<p class="text-xs text-muted-foreground italic mt-1">No orphaned worktrees found.</p>
-				` : ""}
-				<div class="flex items-center gap-2 mt-2">
-					<button
-						class="${scanBtnClass}"
-						?disabled=${maintenanceLoading === "worktrees"}
-						@click=${scanWorktrees}
-					>${maintenanceLoading === "worktrees" && maintenanceWorktrees === null ? "Scanning..." : "Scan"}</button>
-					<button
-						class="${actionBtnClass}"
-						?disabled=${maintenanceLoading === "worktrees" || !maintenanceWorktrees || maintenanceWorktrees.length === 0}
-						@click=${cleanupWorktrees}
-					>${maintenanceLoading === "worktrees" && maintenanceWorktrees !== null ? "Cleaning..." : `Clean Up${maintenanceWorktrees && maintenanceWorktrees.length > 0 ? ` (${maintenanceWorktrees.length})` : ""}`}</button>
-				</div>
-			</div>
+			<!-- Worktree Cleanup -->
+			${renderWorktreeCleanupMaintenance(scanBtnClass, actionBtnClass)}
 
 			<!-- Orphaned Sessions -->
 			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
@@ -4688,7 +5622,8 @@ export function renderSettingsPage() {
 	const currentScope = getActiveScope();
 	const tabs = getTabsForScope(currentScope);
 	const currentTab = getActiveTab();
-	const isProjectScope = currentScope !== "system";
+	const isHeadquartersScope = isHeadquartersProject(currentScope);
+	const isProjectScope = currentScope !== "system" && !isHeadquartersScope;
 
 	return html`
 		<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -4732,6 +5667,8 @@ export function renderSettingsPage() {
 						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
 						${currentTab === "workflows" ? renderProjectScopeWorkflowsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
+					` : isHeadquartersScope && currentTab === "workflows" ? html`
+						${renderProjectScopeWorkflowsTab(HEADQUARTERS_PROJECT_ID)}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}
 						${currentTab === "models" ? renderModelsTab() : ""}

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { routes } from "../market-packs/pr-walkthrough/lib/routes.mjs";
 import { ModuleHost } from "../src/server/extension-host/module-host-worker.ts";
+import { createPackStore } from "../src/server/extension-host/pack-store.ts";
 
 class MemoryStore {
 	data = new Map<string, unknown>();
@@ -34,9 +37,8 @@ const sessionId = "reviewer-1";
 const packRoot = resolve("market-packs/pr-walkthrough");
 const routesModule = resolve(packRoot, "lib/routes.mjs");
 
-function seedCtx() {
-	const store = new MemoryStore();
-	const binding = {
+function reviewBinding() {
+	return {
 		jobId,
 		changesetId: "github:SuuBro/bobbit#42:bbbbbbb",
 		parentSessionId: "owner-1",
@@ -44,10 +46,65 @@ function seedCtx() {
 		headSha,
 		target: { provider: "github", owner: "SuuBro", repo: "bobbit", number: 42, prUrl: "https://github.com/SuuBro/bobbit/pull/42" },
 	};
+}
+
+function seedCtx() {
+	const store = new MemoryStore();
+	const binding = reviewBinding();
 	store.data.set(`reviewers/${sessionId}`, { jobId });
 	store.data.set(`reviews/${jobId}/binding/${sessionId}`, binding);
 	return { ctx: { sessionId, host: { store } }, store };
 }
+
+async function seedQuotaCtx(rootDir: string) {
+	const packId = "pr-walkthrough-quota-regression";
+	const packStore = createPackStore({
+		rootDir,
+		quota: {
+			maxValueBytes: 128 * 1024,
+			maxKeys: 100,
+			maxTotalBytes: 512,
+			maxTotalBytesEmergency: 256 * 1024,
+			profiles: {
+				default: { maxTotalBytes: 64 * 1024 },
+				"review-draft": { maxTotalBytes: 64 * 1024 },
+				"review-final": { maxTotalBytes: 128 * 1024 },
+			},
+		},
+	});
+	const puts: Array<{ key: string; value: unknown; opts?: unknown }> = [];
+	const errors: Array<{ key: string; err: unknown }> = [];
+	const store = {
+		puts,
+		errors,
+		async get(key: string): Promise<unknown | null> { return packStore.get(packId, key); },
+		async put(key: string, value: unknown, opts?: unknown): Promise<void> {
+			puts.push({ key, value, opts });
+			try {
+				await packStore.put(packId, key, value, opts as any);
+			} catch (err) {
+				errors.push({ key, err });
+				throw err;
+			}
+		},
+		async list(prefix = ""): Promise<string[]> { return packStore.list(packId, prefix); },
+		async delete(key: string): Promise<boolean> { return packStore.delete(packId, key); },
+		async deletePrefix(prefix: string): Promise<number> { return packStore.deletePrefix(packId, prefix); },
+	};
+	await store.put(`reviewers/${sessionId}`, { jobId }, { quotaScope: { prefix: `reviewers/${sessionId}`, profile: "default" } });
+	await store.put(`reviews/${jobId}/binding/${sessionId}`, reviewBinding(), { quotaScope: { prefix: `reviews/${jobId}/`, profile: "default" } });
+	return { ctx: { sessionId, host: { store } }, store, packStore, packId };
+}
+
+test("PR walkthrough status stops polling archived reviewer self sessions", async () => {
+	const { ctx } = seedCtx();
+	const running = await routes.status(ctx, { body: { childSessionId: sessionId, jobId } });
+	assert.equal(running.phase, "running", JSON.stringify(running));
+
+	const archived = await routes.status({ ...ctx, sessionArchived: true }, { body: { childSessionId: sessionId, jobId } });
+	assert.equal(archived.phase, "error", JSON.stringify(archived));
+	assert.equal(archived.code, "PRW_REVIEWER_ARCHIVED");
+});
 
 async function saveChunk(ctx: any, section_id: string, yaml: string) {
 	const result = await routes.publish(ctx, { body: { op: "submitChunk", section_id, yaml } });
@@ -140,6 +197,23 @@ test("PR walkthrough chunks are idempotent and finalized into review-scoped payl
 	assert.equal(bundle.cardsSource, "stored-final");
 	assert.equal(bundle.cardCount, undefined);
 	assert.equal(bundle.cards.length, 3);
+});
+
+test("PR walkthrough quota regression: finalize persists binding metadata after scoped review payloads exceed legacy quota", async (t) => {
+	const quotaRoot = fs.mkdtempSync(join(os.tmpdir(), "prw-route-quota-"));
+	t.after(() => { try { fs.rmSync(quotaRoot, { recursive: true, force: true }); } catch { /* best effort */ } });
+	const { ctx, store, packStore, packId } = await seedQuotaCtx(quotaRoot);
+	await saveMinimumChunks(ctx);
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
+	assert.equal(finalized.ok, true, JSON.stringify(finalized));
+	const stats = await packStore.stats(packId);
+	assert.ok(stats.bytes > 512, `scoped review payloads should exceed the legacy cap; got ${stats.bytes}`);
+
+	const errorText = store.errors.map(({ key, err }) => `${key}: ${String((err as { code?: unknown })?.code ?? "")} ${String((err as Error)?.message ?? err)}`).join("\n");
+	assert.equal(store.errors.length, 0, `unexpected store quota errors after scoped review payloads exceeded legacy cap:\n${errorText}`);
+	assert.ok(await store.get(`binding/${sessionId}`), "legacy binding metadata marker should persist after finalization");
+	const bindingPut = [...store.puts].reverse().find((put) => put.key === `binding/${sessionId}`);
+	assert.deepEqual(bindingPut?.opts, { quotaScope: { prefix: `binding/${sessionId}`, profile: "default" } }, `binding/${sessionId} should be quota scoped`);
 });
 
 test("PR walkthrough metadata chunk trusted fields are merged without duplicate pr keys", async () => {

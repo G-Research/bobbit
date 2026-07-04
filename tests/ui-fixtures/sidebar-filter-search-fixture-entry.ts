@@ -20,6 +20,13 @@ const ACTIVE_SESSION_ID = "sidebar-filter-active-session";
 const BUSY_SESSION_ID = "sidebar-filter-busy-session";
 const GOAL_ID = "sidebar-filter-goal";
 const GOAL_READ_SESSION_ID = "sidebar-filter-goal-read-session";
+const COLLAPSED_PARENT_GOAL_ID = "sidebar-filter-collapsed-parent-goal";
+const COLLAPSED_PARENT_SESSION_ID = "sidebar-filter-collapsed-parent-session";
+const CHILD_SESSION_PARENT_ID = "sidebar-filter-child-session-parent";
+const FIRST_CLASS_CHILD_SESSION_ID = "sidebar-filter-first-class-child-session";
+const DELEGATE_CHILD_SESSION_ID = "sidebar-filter-delegate-child-session";
+const ARCHIVED_DELEGATE_CHILD_SESSION_ID = "sidebar-filter-archived-delegate-child-session";
+const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
 
 const PROJECT: Project = {
@@ -42,6 +49,31 @@ const GOAL: Goal = {
 	setupStatus: "ready",
 };
 
+const COLLAPSED_PARENT_GOAL: Goal = {
+	id: COLLAPSED_PARENT_GOAL_ID,
+	title: "Collapsed Parent Goal",
+	cwd: PROJECT.rootPath,
+	projectId: PROJECT_ID,
+	state: "in-progress",
+	spec: "Parent stays collapsed outside search; search should expand it ephemerally when a descendant matches.",
+	createdAt: 11,
+	updatedAt: 11,
+	setupStatus: "ready",
+};
+
+const NESTED_MATCH_GOAL: Goal = {
+	id: NESTED_MATCH_GOAL_ID,
+	title: "NestedSearchNeedle Child Goal",
+	cwd: PROJECT.rootPath,
+	projectId: PROJECT_ID,
+	parentGoalId: COLLAPSED_PARENT_GOAL_ID,
+	state: "in-progress",
+	spec: "Matching child used to verify search reveals descendants hidden by collapsed parents.",
+	createdAt: 12,
+	updatedAt: 12,
+	setupStatus: "ready",
+};
+
 const IDS = {
 	project: `project:${PROJECT_ID}`,
 	readSession: READ_SESSION_ID,
@@ -49,6 +81,13 @@ const IDS = {
 	busySession: BUSY_SESSION_ID,
 	goal: `goal:${GOAL_ID}`,
 	goalReadSession: GOAL_READ_SESSION_ID,
+	collapsedParentGoal: `goal:${COLLAPSED_PARENT_GOAL_ID}`,
+	collapsedParentSession: COLLAPSED_PARENT_SESSION_ID,
+	childSessionParent: CHILD_SESSION_PARENT_ID,
+	firstClassChildSession: FIRST_CLASS_CHILD_SESSION_ID,
+	delegateChildSession: DELEGATE_CHILD_SESSION_ID,
+	archivedDelegateChildSession: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
+	nestedMatchGoal: `goal:${NESTED_MATCH_GOAL_ID}`,
 	archivedSession: ARCHIVED_SESSION_ID,
 };
 
@@ -148,6 +187,23 @@ function fixtureArchivedSessions(): GatewaySession[] {
 			archived: true,
 			archivedAt: 4_000,
 		},
+		{
+			id: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
+			title: "ArchivedDelegateChildNeedle",
+			role: "archived-delegate-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			teamGoalId: COLLAPSED_PARENT_GOAL_ID,
+			delegateOf: CHILD_SESSION_PARENT_ID,
+			status: "terminated",
+			createdAt: 83,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+			archived: true,
+			archivedAt: 4_000,
+		},
 	];
 }
 
@@ -198,6 +254,60 @@ function fixtureSessions(): GatewaySession[] {
 			lastReadAt: 2_000,
 			clientCount: 0,
 		},
+		{
+			id: COLLAPSED_PARENT_SESSION_ID,
+			title: "CollapsedRuntimeNeedle",
+			role: "runtime-child-role-needle",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			status: "idle",
+			createdAt: 55,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: CHILD_SESSION_PARENT_ID,
+			title: "OpaqueChildContainer",
+			role: "container-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			status: "idle",
+			createdAt: 80,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: FIRST_CLASS_CHILD_SESSION_ID,
+			title: "FirstClassChildNeedle",
+			role: "first-class-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			parentSessionId: CHILD_SESSION_PARENT_ID,
+			status: "idle",
+			createdAt: 81,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
+		{
+			id: DELEGATE_CHILD_SESSION_ID,
+			title: "DelegateChildNeedle",
+			role: "delegate-child-role",
+			cwd: PROJECT.rootPath,
+			projectId: PROJECT_ID,
+			goalId: COLLAPSED_PARENT_GOAL_ID,
+			delegateOf: CHILD_SESSION_PARENT_ID,
+			status: "idle",
+			createdAt: 82,
+			lastActivity: 1_000,
+			lastReadAt: 2_000,
+			clientCount: 0,
+		},
 	];
 }
 
@@ -209,6 +319,9 @@ async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Pro
 		localStorage.removeItem("bobbit-show-read");
 	}
 	localStorage.removeItem("bobbit-expanded-goals");
+	localStorage.removeItem("bobbit-sidebar-tree-state:v1");
+	document.documentElement.dataset.subgoalsEnabled = "true";
+	document.documentElement.dataset.maxNestingDepth = "5";
 	readFilterStorage();
 	setProjects([{ ...PROJECT }]);
 	if (!isProjectExpanded(PROJECT_ID)) toggleProjectExpanded(PROJECT_ID);
@@ -223,7 +336,7 @@ async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Pro
 		connectionStatus: "connected",
 		gatewaySessions: fixtureSessions(),
 		archivedSessions: fixtureArchivedSessions(),
-		goals: [{ ...GOAL }],
+		goals: [{ ...GOAL }, { ...COLLAPSED_PARENT_GOAL }, { ...NESTED_MATCH_GOAL }],
 		selectedSessionId: ACTIVE_SESSION_ID,
 		connectingSessionId: ACTIVE_SESSION_ID,
 		keyboardNavActiveId: null,

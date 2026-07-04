@@ -209,7 +209,11 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 		const s = sm._sessions.get(sid);
 		if (s) s.lastPromptSource = opts?.source ?? "user";
 	});
+	const retryLastPrompt = mock.fn(async (_sid: string, _opts?: any) => {});
+	const deliverLiveSteer = mock.fn(async (_sid: string, _msg: string, _opts?: any) => {});
 	sm.enqueuePrompt = enqueuePrompt;
+	sm.retryLastPrompt = retryLastPrompt;
+	sm.deliverLiveSteer = deliverLiveSteer;
 
 	const eventCallbacks: Array<(event: any) => void> = [];
 	const origCreateSession = sm.createSession.bind(sm);
@@ -256,12 +260,153 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 		for (const cb of eventCallbacks) cb({ type });
 	}
 
-	return { team, sm, tlSession, enqueuePrompt, fire };
+	return { team, sm, tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire };
 }
 
 // ---------------------------------------------------------------------------
 // Bug repro scenarios
 // ---------------------------------------------------------------------------
+
+describe("TeamManager — errored idle team lead auto-retry (regression)", () => {
+	it("retries an errored idle team lead instead of enqueueing no-workers [AUTO-NUDGE] cards", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
+			tlSession.lastPromptText = "continue coordinating the team";
+
+			fire("agent_end");
+
+			// Base no-workers delay is 5 minutes. The timer path should recover via
+			// retryLastPrompt({ auto: true }) rather than append a fresh auto-nudge.
+			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.equal(
+				retryLastPrompt.mock.callCount(),
+				1,
+				"errored idle team lead should be recovered through retryLastPrompt, not a new prompt card",
+			);
+			assert.deepEqual(
+				retryLastPrompt.mock.calls[0].arguments,
+				[tlSession.id, { auto: true }],
+				"team-manager retry should use the existing automatic retry path",
+			);
+			const autoNudgePrompts = enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			);
+			assert.equal(
+				autoNudgePrompts.length,
+				0,
+				"errored idle recovery must not enqueue duplicate [AUTO-NUDGE] transcript cards",
+			);
+			const autoNudgeSteers = deliverLiveSteer.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			);
+			assert.equal(
+				autoNudgeSteers.length,
+				0,
+				"errored idle recovery must not steer duplicate [AUTO-NUDGE] transcript cards",
+			);
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("suppresses unknown errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "model stopped with an unexplained deterministic failure";
+			tlSession.lastPromptText = "continue coordinating the team";
+
+			fire("agent_end");
+			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"unknown/unclassified errors must not be auto-retried by the team-manager nudge path");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"unknown errored idle sessions must suppress auto-nudge transcript cards");
+			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"unknown errored idle sessions must suppress auto-nudge steer cards");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("suppresses non-retryable errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "Authentication failed: invalid API key for provider";
+			tlSession.lastPromptText = "continue coordinating the team";
+
+			fire("agent_end");
+			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			await Promise.resolve();
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"non-retryable errors must leave manual Retry instead of using retryLastPrompt(auto)");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"non-retryable errored idle sessions must suppress auto-nudge transcript cards");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("does not emit duplicate [AUTO-NUDGE] cards while session auto-retry is pending", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		let pendingAutoRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+		try {
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			tlSession.status = "idle";
+			tlSession.lastTurnErrored = true;
+			tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
+			tlSession.lastPromptText = "continue coordinating the team";
+			pendingAutoRetryTimer = setTimeout(() => {}, 60 * 60 * 1000);
+			tlSession.pendingAutoRetryTimer = pendingAutoRetryTimer as any;
+
+			for (let i = 0; i < 3; i++) {
+				fire("agent_end");
+				t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+				await Promise.resolve();
+			}
+
+			assert.equal(retryLastPrompt.mock.callCount(), 0,
+				"team-manager must not start another retry while SessionManager auto-retry is pending");
+			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"repeated timer ticks while auto-retry is pending must not enqueue duplicate auto-nudge cards");
+			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
+				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+			).length, 0,
+				"repeated timer ticks while auto-retry is pending must not steer duplicate auto-nudge cards");
+		} finally {
+			if (pendingAutoRetryTimer) clearTimeout(pendingAutoRetryTimer);
+			t.mock.timers.reset();
+		}
+	});
+});
 
 describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 	it("should back off the no-workers nudge exponentially across nudge-reply cycles", async (t) => {
@@ -354,6 +499,144 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 		);
 
 		t.mock.timers.reset();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Sticky nudgePending guard — delivery that parks before agent_start
+// ---------------------------------------------------------------------------
+
+describe("TeamManager — nudgePending clears when delivery does not start a turn (regression)", () => {
+	it("does not count or log an async rejected no-workers nudge as sent before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			const log = mock.method(console, "log", () => {});
+			mock.method(console, "error", () => {});
+			let rejectDelivery: ((err: Error) => void) | undefined;
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager: provenance is recorded when delivery is attempted,
+					// but no agent_start has happened yet.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return new Promise((_resolve, reject) => { rejectDelivery = reject; });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+			t.mock.timers.tick(BASE + SLACK);
+
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first no-workers nudge delivery should be attempted at the base delay");
+
+			rejectDelivery?.(new Error("fetch failed"));
+			await Promise.resolve();
+			await Promise.resolve();
+
+			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
+				"nudgePending should clear after rejected delivery before agent_start");
+			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
+				"nudge should not be counted as sent before agent_start");
+			const sentLogs = log.mock.calls.filter((call: any) =>
+				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+			);
+			assert.equal(sentLogs.length, 0,
+				"nudge should not be logged as sent before agent_start");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("does not count or log a queued parked no-workers nudge as sent before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			const log = mock.method(console, "log", () => {});
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager's cap path: provenance is recorded but the
+					// prompt is parked/queued and no agent_start event is emitted.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return Promise.resolve({ status: "queued", queued: true, parked: true, id: "parked-auto-nudge" });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+			t.mock.timers.tick(BASE + SLACK);
+			await Promise.resolve();
+			t.mock.timers.tick(0);
+			await Promise.resolve();
+
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first parked no-workers nudge delivery should be attempted at the base delay");
+			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
+				"nudgePending should clear after queued/parked delivery before agent_start");
+			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
+				"nudge should not be counted as sent before agent_start");
+			const sentLogs = log.mock.calls.filter((call: any) =>
+				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+			);
+			assert.equal(sentLogs.length, 0,
+				"nudge should not be logged as sent before agent_start");
+		} finally {
+			t.mock.timers.reset();
+		}
+	});
+
+	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		try {
+			const { sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+				const s = sm._sessions.get(sid);
+				if (s) {
+					// Mirror SessionManager's cap path: provenance is recorded but the
+					// prompt is parked/queued and no agent_start event is emitted.
+					s.lastPromptSource = opts?.source ?? "user";
+				}
+				return Promise.resolve({ queued: true, parked: true, id: "parked-auto-nudge" });
+			});
+
+			const BASE = 5 * 60 * 1000;
+			const SLACK = 1_000;
+
+			tlSession.status = "idle";
+			fire("agent_end");
+
+			// First no-workers nudge reaches SessionManager but is parked behind the
+			// errored/capped team-lead state. No agent_start follows.
+			t.mock.timers.tick(BASE + SLACK);
+			assert.equal(enqueuePrompt.mock.callCount(), 1,
+				"first parked no-workers nudge should be enqueued at the base delay");
+			assert.equal((enqueuePrompt.mock.calls[0].arguments[2] as any)?.source, "auto-nudge",
+				"the parked delivery must still be tagged as an auto-nudge");
+
+			// The next eligible no-workers nudge should still fire after the normal
+			// backoff delay. A sticky nudgePending flag suppresses this forever today.
+			tlSession.status = "idle";
+			t.mock.timers.tick(BASE * 2 + SLACK);
+			assert.equal(
+				enqueuePrompt.mock.callCount(),
+				2,
+				"nudgePending sticky regression: expected a second no-workers auto-nudge " +
+					"after the parked delivery did not start a lead turn",
+			);
+		} finally {
+			t.mock.timers.reset();
+		}
 	});
 });
 

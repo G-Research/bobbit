@@ -2,17 +2,28 @@
 
 Detailed reference for all Bobbit features. For a quick overview, see the [README](../README.md).
 
+## Headquarters workspace
+
+Every Bobbit server has a built-in project named **Headquarters** with stable id `headquarters`. It represents the server run directory and the server/global config scope, so a fresh install can create a Quick Session or staff agent immediately without Add Project setup.
+
+Headquarters appears first in project lists by default and uses the Lucide `TowerControl` icon instead of the normal folder identity. The Settings preference `showHeadquartersInProjectLists` hides or shows it in normal lists only; hidden Headquarters remains resolvable internally and preserves its sessions, goals, staff, and config.
+
+Non-workflow config with `projectId=headquarters` aliases server config. Workflows remain project-scoped under Headquarters. See [headquarters.md](headquarters.md) for the storage, API, UI, and no-worktree goal behavior.
+
 ## Sessions
 
-Each session is either a standard `pi-coding-agent` child process or, when explicitly selected, a local Claude Code CLI runtime session.
+Each session is a running `pi-coding-agent` child process with its own conversation history.
 
-- **Runtimes**: The default session runtime remains Pi. Claude Code appears as a separate local runtime/model option backed by the user's installed `claude` CLI and existing Claude Code login, not by a normal API-backed provider. Bobbit displays mapped Claude Code structured tool events where possible, including supported Ask User Question payloads as `ask_user_choices`. If the Claude CLI marks the known `Answer questions?` placeholder result as an error, Bobbit normalizes that placeholder into the posted interactive widget while preserving real errors. Claude Code still owns its tool catalog, permissions, model catalog, and runtime limits. See [claude-code-runtime.md](claude-code-runtime.md).
-- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, Pi sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file; Claude Code sessions persist their own `claudeCodeSessionId` for `--resume`, local alias-derived model metadata, and a transcript fallback for hydration. Supported pending Claude Code ask widgets restore from that fallback, stale persisted rows for the known placeholder are repaired during hydration, and answer submission uses the same fallback so a restart should not leave the widget unanswerable.
+- **Persistence**: Session metadata (id, title, cwd, agent session file, restart re-drive marker stored in `wasStreaming`) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. Active interactive sessions are automatically re-prompted; non-interactive verification reviewers are re-driven by the verification harness.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
-- **Turn timing**: The footer stats area and stats popover show the last assistant turn duration when timing is available. Claude Code uses reported `duration_ms` / `duration_api_ms` values when the CLI provides them and a best-effort inferred elapsed duration otherwise.
 - **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).
+- **Sidebar tree**: Projects, goals, sessions, staff, delegates, team leads, and archived sections share one tree model for hierarchy, expansion persistence, and indentation. See [sidebar-tree-state.md](sidebar-tree-state.md) and [sidebar-tree-indentation.md](sidebar-tree-indentation.md).
 - **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
+
+## Maintenance
+
+Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup is the canonical surface for safe Bobbit worktree removal across archived sessions, orphaned git worktrees, pool entries, and filesystem-only diagnostics while preserving archives, transcripts, proposals, and protected live/durable references. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md).
 
 ## Goals
 
@@ -20,7 +31,7 @@ Goals are a task-tracking layer on top of sessions. A goal has a title, spec (ma
 
 - **Goal assistant**: Sessions created with `assistantType: "goal"` get a special prompt that helps users define clear goals. The assistant calls `propose_goal` (and other `propose_*` tools) to emit structured proposals as tool calls, which persist in message history and can be reopened via an "Open proposal" button. A deprecated XML fallback (`proposal-parsers.ts`) still parses legacy `<goal_proposal>` blocks for backward compatibility.
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
-- **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
+- **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager. Headquarters also supports explicit data-only goals with `worktree: false`; git/branch/PR endpoints are guarded with `GOAL_GIT_UNAVAILABLE` when no worktree exists.
 - **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. Human sign-off steps use the review pane for submitted content, inline/final comments, and approve/reject decisions. See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [review-pane-signoff.md](review-pane-signoff.md) for the full architecture.
 
 ## Teams
@@ -82,7 +93,6 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 - Hydrates dashboard cost summaries via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
 - `CostPopover` fetches `/cost/breakdown` when opened and shows the **Cache hit** row from that response; it is not directly live-updated by `cost_update` frames.
 - Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost` — all responses include `cacheHitRate: number | null`.
-- For local Claude Code runtime sessions, token/cost display is best-effort and local-runtime managed; Bobbit normalizes token display when Claude Code reports usage. Claude Code turn duration is displayed separately in the footer stats/popover when reported or inferred.
 
 See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
@@ -103,22 +113,15 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 
 ## Workflows
 
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
+Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Headquarters can own workflows through its aliased server `project.yaml`, but they are still addressed with `projectId=headquarters`. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md), [headquarters.md](headquarters.md), and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
+
+## Git status rich diff viewer
+
+The Git status widget's diff modal renders raw session/goal `git-diff` responses with `<rich-git-diff-viewer>`. Users get collapsible per-file sections, rename paths, `+/-` counts, split/inline controls, folded context expansion, truncation warnings, and accessible modal controls without changing the raw `{ diff }` endpoint contract. The parser seam is framework-neutral under `src/shared/git-diff/unified.ts`; the PR Walkthrough pack remains separate and may only share `src/shared/**` modules, not core UI. See [git-status-diff-viewer.md](git-status-diff-viewer.md) for behavior, integration, boundaries, and tests.
 
 ## PR Walkthrough Panel
 
 The PR walkthrough panel is a guided pull-request or changeset review surface. It ships as a **built-in first-party pack** (`market-packs/pr-walkthrough/`) that is auto-resolved active-by-default — there is no manual install. The pack owns the viewer surfaces and the reviewer tools under `tools/pr-walkthrough/`; `pack.yaml` advertises the `pr-walkthrough` tool group, and Market expands it into concrete tool toggles. Two pack launchers (composer-slash / session menu) do the **same** thing on click: they call the pack's `run` route, which mints a **separate, isolated, read-only reviewer child** (`host.agents.spawn`, role `pr-reviewer`, `title: "PR Walkthrough"`) — it never drives the user's current agent — and then **auto-switch the view to that child session**, opening the panel there. There is **no owner-session panel** and **no manual "Run PR walkthrough" / "Load walkthrough" buttons**. A no-PR / spawn failure surfaces through visible launcher feedback from the session menu, spawning nothing and not switching the view; every click is a fresh reviewer (no dedup). The reviewer publishes cards only through validated `submit_pr_walkthrough_yaml`, and on submit it is **not** dismissed — it stays live and selectable until the user terminates it. The run path is GitHub-PR-only. Disabling the pack from the Market built-in section makes the feature unavailable (the deep-link degrades to an empty state). See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract, [pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md) for the launch model, and [built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the pack model.
-
-## Hindsight Memory
-
-The **Hindsight** built-in first-party pack (`market-packs/hindsight/`) gives agents persistent,
-cross-session memory backed by a Hindsight instance: it recalls relevant past memories into the
-prompt and retains a compact summary of each turn. It ships with `defaultDisabled: true`, so fresh
-installs have no Hindsight tools, provider hooks, entrypoints, runtime, network calls, or prompt
-drift until the operator enables/configures it through Marketplace setup. Existing configured
-installations remain active.
-
-All configuration, setup, and re-configuration are performed directly inside the **Marketplace** (via the inline Configure form/wizard on the Marketplace page). The session actions overflow menu entry (**Hindsight Memory**) and deep link `#/ext/hindsight` now open the **live Hindsight dashboard embedded as a sandboxed iframe** (utilizing `uiUrl`) in a first-class in-app Bobbit tab/panel. This lets the user seamlessly use, view, and query the memory bank without leaving the application. When `uiUrl` is unset, the in-app tab directs the user to the Marketplace for configuration with a helpful Call-to-Action (CTA) and displays any available API/external status context. See [hindsight-memory.md](hindsight-memory.md) for the full behaviour and [managed-runtimes.md](managed-runtimes.md#p3--deployment-modes-consent--lifecycle) for the managed Docker/Postgres runtime details.
 
 ## Assistant Registry
 
@@ -147,7 +150,7 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | # | Section | Volatile? | Source |
 |---|---------|-----------|--------|
 | 1 | **Global system prompt** | No | `.bobbit/config/system-prompt.md` (user customised) or `defaults/system-prompt.md`. Resolved by `resolveSystemPromptPath()`. See [internals.md — Config cascade](internals.md#config-cascade). |
-| 2 | **AGENTS.md / project docs** | No | From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe). |
+| 2 | **AGENTS.md / project docs** | No | From the registered project root and configured `agents` files, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe). Falls back to the session working directory only when no project root/config store is available. |
 | 3 | **Working directory** | No | Injected `# Working Directory` block with the session's `cwd`. |
 | 4 | **Tool documentation** | No | Assembled from `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). |
 | 5 | **Available Skills catalog** | No | Built from the list of skills in scope for the session. |
@@ -157,6 +160,8 @@ The sections are ordered so that the **stable prefix** (sections 1–5, which ar
 | 9 | **Dynamic Context** | Yes | Provider-supplied ambient context from the `sessionSetup` lifecycle hook, fenced in `<context-block>` envelopes. Appended last (freshest, lowest-authority). Omitted unless an active provider contributes blocks. See [lifecycle-hub.md](lifecycle-hub.md#session-setup-wiring-g13). |
 
 Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order. Section 9 is appended after section 8 by the `sessionSetup` provider wiring (Extension Platform G1.3); when no provider contributes, it is absent and the prompt is byte-identical to the 1–8 layout. The same inspector section is refreshed best-effort for per-turn `beforePrompt` blocks, but those blocks reach the model through the hidden custom-message channel so provider cached system-prompt bytes stay stable across turns.
+
+Bobbit, not pi-coding-agent, owns project instruction assembly. `src/server/agent/rpc-bridge.ts::buildAgentArgs()` always launches pi with `--no-context-files` and strips caller-supplied context-file flags before appending custom args. This prevents pi's built-in upward discovery from adding parent-directory `AGENTS.md` / `CLAUDE.md` files to the runtime `systemPrompt` or `before_agent_start` hook events. The registered project's configured agent files still appear once through Bobbit's `Project AGENTS.md` section, and provider-bridge `beforePrompt` context remains unchanged: per-turn blocks are delivered as hidden `bobbit:dynamic-context` custom/user-side messages, not by mutating `systemPrompt`.
 
 ## Reconnection
 
@@ -174,7 +179,7 @@ These cues are scoped to **human attention**: standalone sessions notify on idle
 
 ## Model Authentication
 
-Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider.
+Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider. Text-session model fallback is opt-in via `allowSessionModelFallback`; see [Controlled session model fallback](session-model-fallback.md).
 
 - **Anthropic** and **OpenAI** account login work as before.
 - **Google** has two intentionally separate paths: account OAuth (`google-gemini-cli`, via the official Gemini Code Assist API) and a Google AI Studio API key (`google`, Gemini Developer API). Both are session-usable: account-backed Gemini models run in agent sessions through a generated Code Assist provider extension (per-request Bearer token + project from the gateway), while the API key remains an independent path. See [google-oauth-models.md](google-oauth-models.md) for the full split, runtime architecture, project selection, and caveats.

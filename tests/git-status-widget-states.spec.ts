@@ -45,6 +45,100 @@ async function mount(
 	await page.waitForTimeout(50);
 }
 
+async function openDropdown(page: any): Promise<void> {
+	await page.locator('git-status-widget button[data-state="ready"]').click();
+	await page.waitForSelector("#git-status-dropdown", { timeout: 2_000 });
+}
+
+const OPEN_PR_PROPS = {
+	loading: false,
+	branch: "feature/pr",
+	primaryBranch: "master",
+	isOnPrimary: false,
+	clean: true,
+	statusFiles: [],
+	prState: "OPEN",
+	prNumber: 905,
+	prTitle: "Needs review",
+	prUrl: "https://github.com/example/repo/pull/905",
+	prMergeable: "MERGEABLE",
+	reviewDecision: "REVIEW_REQUIRED",
+};
+
+test.describe("GitStatusWidget bypass merge action", () => {
+	test("renders Bypass merge when viewerCanMergeAsAdmin is true", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerCanMergeAsAdmin: true,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toBeVisible();
+		await expect(page.locator("#git-status-dropdown")).not.toContainText("Force Merge");
+	});
+
+	test("Bypass merge emits pr-merge with admin true", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerCanMergeAsAdmin: true,
+		});
+		await page.evaluate(() => {
+			(window as any).__prMergeEvents = [];
+			window.addEventListener("pr-merge", (event) => {
+				(window as any).__prMergeEvents.push((event as CustomEvent).detail);
+			});
+		});
+		await openDropdown(page);
+
+		await page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" }).click();
+
+		const events = await page.evaluate(() => (window as any).__prMergeEvents);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ method: "squash", admin: true });
+	});
+
+	test("hides Bypass merge when capability is false even for admins", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			viewerIsAdmin: true,
+			viewerCanMergeAsAdmin: false,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).not.toContainText("Force Merge");
+	});
+
+	test("conflicting PR hides Bypass merge even with bypass capability", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			prMergeable: "CONFLICTING",
+			viewerCanMergeAsAdmin: true,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).toContainText("Has conflicts");
+	});
+
+	test("non-mergeable PR shows status text when bypass is unavailable", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...OPEN_PR_PROPS,
+			prMergeable: "UNKNOWN",
+			viewerCanMergeAsAdmin: false,
+		});
+		await openDropdown(page);
+
+		await expect(page.locator("#git-status-dropdown").getByRole("button", { name: "Bypass merge" })).toHaveCount(0);
+		await expect(page.locator("#git-status-dropdown")).toContainText("Not mergeable");
+	});
+});
+
 test.describe("GitStatusWidget render states", () => {
 	test("skeleton renders when loading && !branch", async ({ page }) => {
 		await gotoAndWait(page);
@@ -247,5 +341,117 @@ test.describe("GitStatusWidget render states", () => {
 			() => (window as any).__dropdownOpenEvents,
 		);
 		expect(count).toBe(0);
+	});
+
+	test("commits modal expands files and opens commit-scoped diff", async ({
+		page,
+	}) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			loading: false,
+			branch: "feature/commit-files",
+			primaryBranch: "master",
+			primaryRef: "origin/master",
+			isOnPrimary: false,
+			clean: true,
+			aheadOfPrimary: 1,
+			sessionId: "sess-commit-files",
+		});
+
+		await page.evaluate(() => {
+			(window as any).__fetchCalls = [];
+			window.fetch = async (input: RequestInfo | URL) => {
+				const url = String(input);
+				(window as any).__fetchCalls.push(url);
+				if (url.includes("/commits")) {
+					return new Response(
+						JSON.stringify({
+							commits: [
+								{
+									sha: "abcdef1234567890",
+									shortSha: "abcdef1",
+									message: "Add commit file diff UI",
+									author: "Tester",
+									timestamp: new Date().toISOString(),
+									filesChanged: 4,
+									insertions: 12,
+									deletions: 3,
+									files: [
+										{
+											path: "src/modified.ts",
+											status: "M",
+											statusLabel: "modified",
+										},
+										{
+											path: "src/added.ts",
+											status: "A",
+											statusLabel: "added",
+										},
+										{
+											path: "src/deleted.ts",
+											status: "D",
+											statusLabel: "deleted",
+										},
+										{
+											oldPath: "src/old-name.ts",
+											path: "src/new-name.ts",
+											status: "R",
+											statusLabel: "renamed",
+										},
+									],
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/git-diff")) {
+					return new Response(
+						JSON.stringify({
+							diff: "diff --git a/src/new-name.ts b/src/new-name.ts\n+commit diff marker",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			};
+		});
+
+		await page.locator('git-status-widget button[data-state="ready"]').click();
+		await page.getByText("1 ahead").click();
+
+		const modal = page.locator("#git-commits-modal");
+		await expect(page.locator("#git-commits-modal > div").first()).toBeVisible();
+		await expect(modal).toContainText("1 Ahead of origin/master Commit");
+
+		const commitRow = modal.locator('[data-testid="commit-row"]').first();
+		await expect(commitRow).toContainText("abcdef1");
+		await expect(commitRow).toContainText("Add commit file diff UI");
+
+		const disclosure = commitRow.locator('button[aria-expanded="false"]');
+		await expect(disclosure).toHaveCount(1);
+		await disclosure.click();
+		await expect(commitRow.locator('button[aria-expanded="true"]')).toHaveCount(1);
+
+		await expect(commitRow).toContainText("modified");
+		await expect(commitRow).toContainText("added");
+		await expect(commitRow).toContainText("deleted");
+		await expect(commitRow).toContainText("renamed");
+		await expect(commitRow).toContainText("src/old-name.ts → src/new-name.ts");
+
+		await commitRow.getByText("src/old-name.ts → src/new-name.ts").click();
+		await expect(page.locator('#git-diff-modal rich-git-diff-viewer')).toHaveCount(1);
+		await expect(page.locator('#git-diff-modal [role="dialog"]')).toHaveAttribute("aria-modal", "true");
+		await expect(page.locator('#git-diff-modal [aria-label="Close diff modal"]')).toHaveCount(1);
+
+		const diffCall = await page.waitForFunction(() =>
+			((window as any).__fetchCalls as string[]).find((url) =>
+				url.includes("/git-diff"),
+			),
+		);
+		const diffUrl = String(await diffCall.jsonValue());
+		expect(diffUrl).toContain("/api/sessions/sess-commit-files/git-diff");
+		expect(diffUrl).toContain("file=src%2Fnew-name.ts");
+		expect(diffUrl).toContain("commit=abcdef1234567890");
 	});
 });

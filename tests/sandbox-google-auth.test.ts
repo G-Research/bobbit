@@ -13,6 +13,7 @@ import {
 	sandboxTokenPolicyAllowsCodexAuth,
 	sandboxTokenPolicyAllowsGoogleAuth,
 } from "../src/server/agent/host-tokens.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "./helpers/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
 let root: string;
@@ -53,12 +54,14 @@ describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 		bobbitDir = path.join(root, ".bobbit");
 		setEnv("BOBBIT_AGENT_DIR", agentDir);
 		setEnv("BOBBIT_DIR", bobbitDir);
+		pinAgentDirForTest(agentDir, { projectRoot: root });
 		setEnv("GOOGLE_CLOUD_ACCESS_TOKEN", undefined);
 		setEnv("GEMINI_API_KEY", undefined);
 	});
 
 	afterEach(() => {
 		restoreEnv();
+		resetAgentDirForTest();
 		rmSync(root, { recursive: true, force: true });
 	});
 

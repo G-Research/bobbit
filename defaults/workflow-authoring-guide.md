@@ -168,7 +168,7 @@ workflows:
 
 ### Producers vs verifiers
 
-Roles listed under a gate's `verify:` block (e.g. `role: architect`, `role: code-reviewer`, `role: spec-auditor`, `role: security-reviewer`, `role: reviewer`) are **verifiers** — the gate runner spawns them automatically after the gate is signaled, and they critique the signaled content. They are **not producers** of the gate's content.
+Roles listed under a gate's `verify:` block (e.g. `role: architect`, `role: code-reviewer`, `role: bug-hunter`, `role: spec-auditor`, `role: security-reviewer`, `role: reviewer`) are **verifiers** — the gate runner spawns them automatically after the gate is signaled, and they critique the signaled content. They are **not producers** of the gate's content.
 
 The team lead is the producer for content gates: it either drafts the markdown directly and signals, or delegates artifact-writing to a `coder` / `docs-writer`, merges the resulting branch, and signals from the merged content. Every contributor role carries `gate_signal: never` in its tool-policy; only the `team-lead` role's policy permits the call. Workflow authors should therefore not staff content-producing tasks with reviewer roles, and should expect the team lead — never the reviewer named under `verify:` — to be the one calling `gate_signal`.
 
@@ -333,7 +333,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 
 ```yaml
 - design-doc       (content; design-review + gap-analysis llm-review)
-- implementation   (build/check/unit/e2e in phase 1; gap-analysis + code-review llm-review in phase 2)  # Ralph loop
+- implementation   (build/check/unit/e2e in phase 1; gap-analysis + code-review + bug-hunt llm-review in phase 2)  # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push, fast-forward, PR exists)
 ```
@@ -342,7 +342,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 
 ```yaml
 - design-doc       (content; design-review + gap-analysis llm-review)
-- implementation   (build/check/unit/e2e, gap+code+security llm-review, optional agent-qa)             # Ralph loop
+- implementation   (build/check/unit/e2e, gap+code+bug-hunt+security llm-review, optional agent-qa)    # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push/fast-forward/PR)
 ```
@@ -352,7 +352,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ```yaml
 - issue-analysis   (content; analysis + gap-analysis llm-review)
 - reproducing-test (command with expect: failure; metadata declares test_command)
-- implementation   (build/check/unit/e2e, llm-review)                                                  # Ralph loop
+- implementation   (build/check/unit/e2e, code-review + bug-hunt + security llm-review)                # Ralph loop
 - documentation
 - ready-to-merge
 ```
@@ -360,7 +360,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.4 `quick-fix` — minimal
 
 ```yaml
-- implementation   (build/check/unit/e2e)   # Ralph loop, minimal — no gap analysis
+- implementation   (build/check/unit/e2e, code-review + bug-hunt llm-review)   # Ralph loop, minimal — no gap analysis
 - ready-to-merge
 ```
 
@@ -429,6 +429,7 @@ workflows:
           - { name: "Unit bobbit",  type: command, phase: 1, component: "bobbit", command: "unit" }
           - { name: "E2E bobbit",   type: command, phase: 1, component: "bobbit", command: "e2e", timeout: 900 }
           - { name: "Code quality review", type: llm-review, role: code-reviewer, phase: 2, prompt: "Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality." }
+          - { name: "Bug hunt", type: llm-review, role: bug-hunter, phase: 2, prompt: "Review the implementation on branch {{branch}} vs origin/{{baseBranch}} for actionable bugs. Focus on correctness, edge cases, error paths, cross-system interactions, concurrency/lifecycle, and dangerous behavior." }
 
       - id: documentation
         name: Documentation

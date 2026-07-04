@@ -458,6 +458,35 @@ describe("ModuleHost — host-API proxy (the ONLY capability over the MessagePor
 		}
 	});
 
+	it("store.put forwards quota options to the parent's LIVE host", async () => {
+		let seen: unknown;
+		const quotaOptions = { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } };
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: true, has: (n: string) => n === "store" },
+			store: {
+				put: async (_k: string, _v: unknown, opts?: unknown) => { seen = opts; },
+				get: async () => null,
+				list: async () => [],
+			},
+			session: { readTranscript: async () => ({}), readToolCall: async () => null, postMessage: async () => {} },
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "sess-opts", toolUseId: "tu-opts", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { write: async (ctx) => {` +
+				` await ctx.host.store.put("reviews/a/final/payload", { ok: true }, { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } });` +
+				` return true; } };`,
+			);
+			assert.equal(await mh.invoke(req(url, "write", ctx)), true);
+			assert.deepEqual(seen, quotaOptions, "store.put quota options should cross module-host proxy");
+		} finally {
+			mh.dispose();
+		}
+	});
+
 	it("a host call that the parent rejects surfaces as an error to the pack handler", async () => {
 		const host = {
 			version: 1,
@@ -498,7 +527,7 @@ describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			agents: {
 				spawn: async (o: { instructions: string }) => { calls.push(`spawn:${o.instructions}`); return { childSessionId: "child-1" }; },
 				prompt: async (id: string, m: string) => { calls.push(`prompt:${id}:${m}`); return { status: "dispatched" }; },
-				dismiss: async (id: string) => { calls.push(`dismiss:${id}`); return true; },
+				dismiss: async (id: string) => { calls.push(`dismiss:${id}`); return { ok: true, status: "dismissed", sessionId: id, message: `Child session ${id} dismissed.`, retryable: false }; },
 				list: async () => { calls.push("list"); return [{ childSessionId: "child-1", status: "idle", childKind: "host-agents" }]; },
 				read: async (id: string) => { calls.push(`read:${id}`); return { output: "OK" }; },
 				status: async (id: string) => { calls.push(`status:${id}`); return { status: "idle" }; },
@@ -526,7 +555,7 @@ describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			assert.equal(result.status, "idle");
 			assert.equal(result.listLen, 1);
 			assert.deepEqual(result.read, { output: "OK" });
-			assert.equal(result.dismissed, true);
+			assert.deepEqual(result.dismissed, { ok: true, status: "dismissed", sessionId: "child-1", message: "Child session child-1 dismissed.", retryable: false });
 			// No blocking `wait` is proxied (poll-based only).
 			assert.equal(result.hasWait, "undefined");
 			assert.deepEqual(calls, ["spawn:go", "prompt:child-1:more", "status:child-1", "list", "read:child-1", "dismiss:child-1"]);

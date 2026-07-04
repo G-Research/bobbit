@@ -9,8 +9,10 @@
 //     projects.
 // Keeping the picker folder-only is deliberate: it stays a fast keyboard-driven
 // jump-to-project widget. See docs/design/multi-repo-components.md §8.1.
+import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { HEADQUARTERS_HELPER_TEXT, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId, projectSearchText, sortProjectsWithHeadquartersFirst } from "../../app/headquarters.js";
 
 /**
  * Project info exposed to the picker. Callers pass the subset of their
@@ -19,6 +21,7 @@ import { customElement, property, state } from "lit/decorators.js";
 export interface ProjectPickerItem {
 	id: string;
 	name: string;
+	kind?: string;
 	colorLight?: string;
 	colorDark?: string;
 	color?: string;
@@ -165,9 +168,10 @@ export class ProjectPickerPopover extends LitElement {
 	}
 
 	private _filteredProjects(): ProjectPickerItem[] {
+		const projects = sortProjectsWithHeadquartersFirst(this.projects);
 		const q = this._query.trim().toLowerCase();
-		if (!q) return this.projects;
-		return this.projects.filter(p => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+		if (!q) return projects;
+		return projects.filter(p => projectSearchText(p).toLowerCase().includes(q));
 	}
 
 	private _pick(projectId: string) {
@@ -183,6 +187,7 @@ export class ProjectPickerPopover extends LitElement {
 	}
 
 	private _accent(p: ProjectPickerItem): string {
+		if (isHeadquartersProject(p)) return "var(--primary)";
 		const isDark = document.documentElement.classList.contains("dark");
 		return (isDark ? (p.colorDark || p.colorLight) : (p.colorLight || p.colorDark)) || p.color || "var(--muted-foreground)";
 	}
@@ -213,6 +218,7 @@ export class ProjectPickerPopover extends LitElement {
 		const row = (p: ProjectPickerItem, i: number) => {
 			const highlighted = i === this._highlightIndex;
 			const accent = this._accent(p);
+			const headquarters = isHeadquartersProject(p);
 			return html`
 				<button
 					type="button"
@@ -224,8 +230,13 @@ export class ProjectPickerPopover extends LitElement {
 					@mouseenter=${() => { this._highlightIndex = i; }}
 					@click=${() => this._pick(p.id)}
 				>
-					<span style=${`display:inline-block;width:10px;height:10px;border-radius:50%;background:${accent};flex-shrink:0;`}></span>
-					<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</span>
+					<span data-testid=${projectIconTestId(p)} data-project-icon=${projectIconKind(p)} style=${`display:inline-flex;width:14px;height:14px;align-items:center;justify-content:center;color:${accent};flex-shrink:0;`}>
+						${icon(projectIconComponent(p), "sm")}
+					</span>
+					<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;flex-direction:column;gap:1px;">
+						<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</span>
+						${headquarters ? html`<span style="font-size:11px;color:var(--muted-foreground);line-height:1.1;">${HEADQUARTERS_HELPER_TEXT}</span>` : nothing}
+					</span>
 				</button>
 			`;
 		};

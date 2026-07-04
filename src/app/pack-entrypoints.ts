@@ -35,6 +35,7 @@
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { setExtRoute } from "./routing.js";
 import { openPackPanel, getLauncherHost } from "./pack-panels.js";
+import { isSupportedEntrypointIconId, type EntrypointIconId } from "../shared/entrypoint-icons.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
 
 /** Launcher kinds (a clickable surface) PLUS the routable `route` kind (a
@@ -55,6 +56,14 @@ export interface SpawnLaunchTarget {
 	panelId: string;      // panel to open in the returned childSessionId
 }
 
+export interface ChannelPanelLaunchTarget {
+	action: "channel-panel";
+	channel: string;
+	singletonKey?: string;
+	panelId: string;
+	params?: Record<string, unknown>;
+}
+
 /** A launcher entrypoint: click → openPanel/navigate/spawn. NO auto-invoke on
  *  mount — invocation is the user gesture (design §7 C1.3, v1 §5 v). */
 export interface LauncherEntrypoint {
@@ -62,7 +71,8 @@ export interface LauncherEntrypoint {
 	packId: string;
 	kind: LauncherKind;
 	label: string;
-	target: PanelTarget | RouteTarget | SpawnLaunchTarget;
+	icon?: EntrypointIconId;
+	target: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget;
 }
 
 /** A deep-linkable client route: maps a `routeId` → the panel it opens + the
@@ -95,13 +105,14 @@ export interface PackRouteEntry {
  *  the registry is addressed by — entrypoint ids are only PACK-unique, so two
  *  packs may validly declare the same launcher id and BOTH must be addressable.
  *  Surfaces dispatch with `key` (never the bare `id`). */
-interface RegisteredLauncher {
+export interface RegisteredLauncher {
 	key: string;
 	id: string;
 	packId: string;
 	kind: LauncherKind;
 	label: string;
-	target: PanelTarget | RouteTarget | SpawnLaunchTarget;
+	icon?: EntrypointIconId;
+	target: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget;
 	projectId?: string;
 }
 
@@ -150,8 +161,14 @@ function isSpawnLaunchTarget(t: unknown): t is SpawnLaunchTarget {
 		&& typeof (t as SpawnLaunchTarget).panelId === "string";
 }
 
+function isChannelPanelLaunchTarget(t: unknown): t is ChannelPanelLaunchTarget {
+	return !!t && (t as ChannelPanelLaunchTarget).action === "channel-panel"
+		&& typeof (t as ChannelPanelLaunchTarget).channel === "string"
+		&& typeof (t as ChannelPanelLaunchTarget).panelId === "string";
+}
+
 /** A target is a PanelTarget IFF it carries a `panelId`; otherwise a RouteTarget. */
-function isPanelTarget(t: PanelTarget | RouteTarget | SpawnLaunchTarget | undefined): t is PanelTarget {
+function isPanelTarget(t: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget | undefined): t is PanelTarget {
 	return !!t && typeof (t as PanelTarget).panelId === "string";
 }
 
@@ -197,10 +214,10 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 		} else {
 			if (ep.kind !== "composer-slash" && ep.kind !== "session-menu") continue;
 			if (typeof ep.label !== "string" || !ep.label) continue;
-			// Accept a spawn launcher ({action,route,panelId}) FIRST — it carries a
-			// `panelId` like a PanelTarget but is dispatched via the pack `run` route,
-			// not `openPackPanel`. A RouteTarget carries `route` but no `panelId`.
-			if (!isSpawnLaunchTarget(ep.target) && !isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
+			// Accept action launchers FIRST — they carry a `panelId` like a PanelTarget
+			// but are dispatched through a trusted host-owned flow, not plain openPanel.
+			// A RouteTarget carries `route` but no `panelId`.
+			if (!isSpawnLaunchTarget(ep.target) && !isChannelPanelLaunchTarget(ep.target) && !isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
 			const key = launcherKey(ep.packId, ep.id);
 			nextLaunchers.set(key, {
 				key,
@@ -208,6 +225,7 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 				packId: ep.packId,
 				kind: ep.kind,
 				label: ep.label,
+				...(ep.icon ? { icon: ep.icon } : {}),
 				target: ep.target,
 				projectId,
 			});
@@ -286,9 +304,18 @@ export function runLauncherEntrypoint(
 			return;
 		}
 	}
-	// Spawn launcher FIRST (it also carries a `panelId`, so an `action`-first check
-	// keeps it from being mis-routed to `openPackPanel`; design §3.1 / R3).
+	runResolvedLauncherEntrypoint(l, onResult, options);
+}
+
+export function runResolvedLauncherEntrypoint(
+	l: RegisteredLauncher,
+	onResult?: (r: LauncherDispatchResult) => void,
+	options?: LauncherDispatchOptions,
+): void {
+	// Action launchers FIRST (they also carry a `panelId`, so an `action`-first
+	// check keeps them from being mis-routed to `openPackPanel`).
 	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult, options); return; }
+	if (isChannelPanelLaunchTarget(l.target)) { void runChannelPanelLauncher(l, l.target, onResult, options); return; }
 	if (isPanelTarget(l.target)) {
 		const target = options?.sessionId ? { ...l.target, sessionId: options.sessionId } : l.target;
 		openPackPanel(target, l.packId);
@@ -310,6 +337,44 @@ const inFlightSpawnLaunch = new Set<string>();
  *  child's panel (which selects + switches). `ok:false` / errors flow back through
  *  `onResult` so the surface renders them inline — nothing is spawned on the owner
  *  session and the view never switches on failure. */
+async function runChannelPanelLauncher(
+	l: RegisteredLauncher,
+	target: ChannelPanelLaunchTarget,
+	onResult?: (r: LauncherDispatchResult) => void,
+	options?: LauncherDispatchOptions,
+): Promise<void> {
+	const host = getLauncherHost(l.packId, l.id, options?.sessionId);
+	const launchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+	const launchParams = {
+		...(target.params ?? {}),
+		autoStart: false,
+		launcherOpening: true,
+		__channelLaunchId: launchId,
+	};
+	if (!host?.ui?.openPanel) {
+		onResult?.({ ok: false, error: "Terminal panel is unavailable." });
+		return;
+	}
+	if (!host.capabilities?.channels || !host.channels) {
+		const message = "Terminal channels are unavailable.";
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, startupError: message }, sessionId: options?.sessionId });
+		onResult?.({ ok: false, error: message });
+		return;
+	}
+	// Open/focus immediately, then create the channel from this trusted launcher
+	// surface so the server-minted activation/open permit remains entrypoint-bound.
+	host.ui.openPanel({ panelId: target.panelId, params: launchParams, sessionId: options?.sessionId });
+	try {
+		await host.channels.open(target.channel, { singletonKey: target.singletonKey, data: options?.body ?? {} });
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, __channelReadyId: launchId }, sessionId: options?.sessionId });
+		onResult?.({ ok: true });
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		host.ui.openPanel({ panelId: target.panelId, params: { ...launchParams, launcherOpening: false, startupError: message }, sessionId: options?.sessionId });
+		onResult?.({ ok: false, error: message });
+	}
+}
+
 async function runSpawnLauncher(
 	l: RegisteredLauncher,
 	target: SpawnLaunchTarget,
@@ -407,9 +472,10 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 				// OR a SpawnLaunchTarget ({action,route,panelId}). We do not validate the
 				// target internals here (registration does), so the spawn shape survives the
 				// contributions wire.
-				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | undefined;
+				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget | undefined;
 				if (!label || !target) continue;
-				out.push({ id, packId, kind, label, target });
+				const icon = isSupportedEntrypointIconId(e.icon) ? e.icon : undefined;
+				out.push({ id, packId, kind, label, ...(icon ? { icon } : {}), target });
 			}
 		}
 	}

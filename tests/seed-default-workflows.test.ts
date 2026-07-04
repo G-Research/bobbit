@@ -35,6 +35,16 @@ describe("buildDefaultWorkflows", () => {
 		assert.equal(gap!.phase, 2);
 	});
 
+	it("implementation workflows include bug-hunter review", () => {
+		for (const id of ["general", "feature", "bug-fix", "quick-fix"]) {
+			const impl = findGate(wfs[id], "implementation");
+			const bugHunt = impl.verify?.find((s) => s.name === "Bug hunt");
+			assert.ok(bugHunt, `${id}.implementation should include Bug hunt`);
+			assert.equal(bugHunt!.role, "bug-hunter");
+			assert.equal(bugHunt!.type, "llm-review");
+		}
+	});
+
 	it("quick-fix has neither gap-analysis", () => {
 		const qf = wfs["quick-fix"];
 		for (const g of qf.gates) {

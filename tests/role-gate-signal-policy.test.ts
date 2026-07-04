@@ -2,8 +2,8 @@
  * Unit test enforcing the per-role `gate_signal` tool-policy invariant.
  *
  * Design: only the team lead may signal gates; all spawnable contributor roles
- * (coder, test-engineer, reviewer family, architect, spec-auditor, qa-tester,
- * docs-writer) MUST declare `toolPolicies.gate_signal: never` so the
+ * (coder, test-engineer, reviewer family, architect, spec-auditor, bug-hunter,
+ * qa-tester, docs-writer) MUST declare `toolPolicies.gate_signal: never` so the
  * tool-guard extension hard-blocks the call at runtime. Assistant-style and
  * out-of-scope roles (general, assistant, ux-designer) are exempt.
  */
@@ -23,16 +23,17 @@ const CONTRIBUTOR_ROLES = [
 	"security-reviewer",
 	"architect",
 	"spec-auditor",
+	"bug-hunter",
 	"qa-tester",
 	"docs-writer",
 ];
 
 const EXEMPT_ROLES = ["general", "assistant", "ux-designer"];
 
-function loadRole(name: string): { toolPolicies?: Record<string, string> } {
+function loadRole(name: string): { toolPolicies?: Record<string, string>; promptTemplate?: string } {
 	const file = path.join(ROLES_DIR, `${name}.yaml`);
 	const text = fs.readFileSync(file, "utf-8");
-	return YAML.parse(text) as { toolPolicies?: Record<string, string> };
+	return YAML.parse(text) as { toolPolicies?: Record<string, string>; promptTemplate?: string };
 }
 
 describe("role gate_signal policy invariant", () => {
@@ -51,6 +52,14 @@ describe("role gate_signal policy invariant", () => {
 			);
 		});
 	}
+
+	it("security-reviewer instructs gate verifiers to submit verification_result", () => {
+		const role = loadRole("security-reviewer");
+		assert.equal(role.toolPolicies?.verification_result, "allow");
+		assert.match(role.promptTemplate ?? "", /must\*\* call `verification_result`/i);
+		assert.match(role.promptTemplate ?? "", /verdict: "pass"/);
+		assert.doesNotMatch(role.promptTemplate ?? "", /Go idle — the team lead will read your findings/i);
+	});
 
 	for (const name of EXEMPT_ROLES) {
 		it(`${name} is exempt (no gate_signal policy required)`, () => {

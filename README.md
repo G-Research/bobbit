@@ -12,7 +12,7 @@ Bobbit is a command centre for AI coding agents. Spin up teams — leads that pl
 npx bobbit
 ```
 
-That's it. Bobbit scaffolds a `.bobbit/` config directory, starts a gateway on `http://localhost:3001`, and opens your browser. Send your first prompt and watch it work.
+That's it. Bobbit scaffolds its `.bobbit/` state/config directory, creates the built-in **Headquarters** workspace for the server run directory, starts a gateway on `http://localhost:3001`, and opens your browser. Send your first prompt and watch it work.
 
 For a detailed walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
 
@@ -87,7 +87,7 @@ Most AI coding tools are either locked inside an IDE or limited to a terminal. B
 ## Features
 
 ### Multi-Project Support
-Register multiple project directories with a single Bobbit server. Each project gets its own `.bobbit/` directory for config and state. Config cascades hierarchically (global → server → project). Sessions, goals, and search are scoped per project, with cross-project search enabled by default. The sidebar always groups work under collapsible project folder rows. When only one project is registered, its row defaults to expanded.
+Every server has a built-in **Headquarters** workspace for the server run directory, so first launch can start a Quick Session immediately. Register additional project directories with the same Bobbit server when you want repo-specific work. Normal projects get their own `.bobbit/` directory for config and state; Headquarters aliases the server `.bobbit/` scope. Config cascades hierarchically (Headquarters/server → project). Sessions, goals, staff, and search are scoped per project, with cross-project search enabled by default. The sidebar groups work under collapsible project rows, with Headquarters anchored first when visible.
 
 ### Sessions
 Each session is a running agent with its own conversation and persistence. Run multiple sessions in parallel, each working on different parts of your project. Connect from multiple devices at once.
@@ -130,6 +130,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 |---|---|
 | [Getting Started](docs/getting-started.md) | First session walkthrough and key concepts |
 | [Features](docs/features.md) | Detailed feature reference |
+| [Headquarters](docs/headquarters.md) | Built-in server/default workspace |
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |

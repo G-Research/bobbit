@@ -1,0 +1,39 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+	normalizeToolResultErrorEvent,
+	normalizeToolResultErrorMessages,
+	normalizeToolResultErrorSnapshot,
+} from "../src/server/agent/tool-result-error-normalizer.js";
+
+describe("tool result error normalization", () => {
+	it("normalizes message-level is_error to isError", () => {
+		const msg = { role: "toolResult", toolName: "x", is_error: true, content: [{ type: "text", text: "boom" }] };
+		assert.equal((normalizeToolResultErrorMessages([msg]) as any[])[0].isError, true);
+	});
+
+	it("normalizes serialized returned MCP result isError in live message_end events", () => {
+		const result = { content: [{ type: "text", text: "validation failed" }], isError: true };
+		const event = {
+			type: "message_end",
+			message: { role: "toolResult", toolName: "propose_goal", isError: false, content: [{ type: "text", text: JSON.stringify(result) }] },
+		};
+		const normalized = normalizeToolResultErrorEvent(event) as any;
+		assert.equal(normalized.message.isError, true);
+		assert.equal(event.message.isError, false, "normalization should not mutate the original event");
+	});
+
+	it("normalizes serialized returned MCP result is_error in snapshots", () => {
+		const result = { content: [{ type: "text", text: "snake case failed" }], is_error: true };
+		const snapshot = { messages: [{ role: "toolResult", toolName: "x", isError: false, content: [{ type: "text", text: JSON.stringify(result) }] }] };
+		const normalized = normalizeToolResultErrorSnapshot(snapshot) as any;
+		assert.equal(normalized.messages[0].isError, true);
+	});
+
+	it("preserves successful tool results", () => {
+		const msg = { role: "toolResult", toolName: "x", isError: false, content: [{ type: "text", text: "ok" }] };
+		const normalized = normalizeToolResultErrorMessages([msg]) as any[];
+		assert.equal(normalized[0], msg);
+		assert.equal(normalized[0].isError, false);
+	});
+});

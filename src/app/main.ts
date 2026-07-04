@@ -27,12 +27,13 @@ import {
 	state,
 	setRenderApp,
 	renderApp,
+	setProjects,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
 	expandedGoals,
 } from "./state.js";
-import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
+import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
@@ -724,6 +725,11 @@ async function initApp() {
 						(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
 							? String(prefs.maxNestingDepth)
 							: "3";
+					const showHeadquarters = prefs.showHeadquartersInProjectLists !== false;
+					if (state.showHeadquartersInProjectLists !== showHeadquarters) {
+						state.showHeadquartersInProjectLists = showHeadquarters;
+						renderApp();
+					}
 				}
 			} catch {}
 
@@ -1042,6 +1048,12 @@ async function initApp() {
 				(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
 					? String(prefs.maxNestingDepth)
 					: "3";
+			const showHeadquarters = prefs.showHeadquartersInProjectLists !== false;
+			if (state.showHeadquartersInProjectLists !== showHeadquarters) {
+				state.showHeadquartersInProjectLists = showHeadquarters;
+				setProjects(await fetchProjects());
+				renderApp();
+			}
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();

@@ -14,7 +14,7 @@
 import { html, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Archive, Eye, Filter, Zap } from "lucide";
-import { renderApp, resetArchivedExpandState, state } from "../../app/state.js";
+import { renderApp, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
 // Static cycle with sidebar.ts (which statically imports renderFiltersButton).
 // Both sides only reference the imported symbols inside function bodies, so
@@ -37,7 +37,8 @@ export function toggleShowArchived(): void {
 		fetchArchivedSessions();
 		fetchArchivedGoalsPaginated();
 	} else {
-		resetArchivedExpandState();
+		// Hiding archived rows may unload fetched archive data, but must not
+		// clear explicit persisted tree expansion choices.
 		clearArchivedSessionsState();
 	}
 	renderApp();

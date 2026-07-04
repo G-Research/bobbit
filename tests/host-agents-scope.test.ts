@@ -37,10 +37,10 @@ class FakeView implements OrchestrationSessionView {
 		this.live.set(id, { id, status: "idle", cwd: `/cwd/${id}`, allowedTools: opts?.allowedTools });
 		this.persisted.set(id, { id, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind });
 	}
-	async createDelegateSession(parentSessionId: string, opts: { title?: string }): Promise<{ id: string }> {
+	async createDelegateSession(parentSessionId: string, opts: { title?: string; instructions?: string; childKind?: string }): Promise<{ id: string }> {
 		const id = `child-${++this.seq}`;
 		this.live.set(id, { id, status: "idle", title: opts.title });
-		this.persisted.set(id, { id, delegateOf: parentSessionId, title: opts.title });
+		this.persisted.set(id, { id, delegateOf: parentSessionId, title: opts.title, childKind: opts.childKind, instructions: opts.instructions });
 		return { id };
 	}
 	async createSession(cwd: string, _a: unknown, _g: unknown, _t: unknown, opts?: any): Promise<{ id: string }> {
@@ -59,7 +59,14 @@ class FakeView implements OrchestrationSessionView {
 	async getSessionOutput(sessionId: string): Promise<string> { return `output:${sessionId}`; }
 	getSession(id: string): OrchestrationSessionLike | undefined { return this.live.get(id); }
 	getPersistedSession(id: string): PersistedSessionLike | undefined { return this.persisted.get(id); }
-	async terminateSession(id: string): Promise<boolean> { this.terminated.push(id); return true; }
+	async terminateSession(id: string): Promise<boolean> {
+		this.terminated.push(id);
+		const existed = this.live.delete(id);
+		const persisted = this.persisted.get(id);
+		if (persisted) this.persisted.set(id, { ...persisted, archived: true });
+		return existed;
+	}
+	isSessionLive(id: string): boolean { return this.live.has(id); }
 	async forceAbort(): Promise<void> { /* noop */ }
 }
 
@@ -121,11 +128,17 @@ describe("host.agents — source-filtered scoping (childKind === \"host-agents\"
 		assert.deepEqual(listed.map((c) => c.childSessionId), [ha.childSessionId]);
 		assert.equal(listed[0].childKind, "host-agents");
 
-		// Verbs that take a child id reject a delegate/team child of the same session.
+		// Non-dismiss verbs reject a delegate/team child of the same session.
 		await assert.rejects(host.agents.prompt(del.sessionId, "hi"), /not a host\.agents child/);
 		await assert.rejects(host.agents.read(team.sessionId), /not a host\.agents child/);
-		await assert.rejects(host.agents.dismiss(del.sessionId), /not a host\.agents child/);
 		await assert.rejects(host.agents.status(team.sessionId), /not a host\.agents child/);
+		// Dismiss uses the structured DismissResult contract but still denies it.
+		const denied = await host.agents.dismiss(del.sessionId);
+		assert.deepEqual(
+			{ ok: denied.ok, status: denied.status, sessionId: denied.sessionId, retryable: denied.retryable },
+			{ ok: false, status: "not-owned", sessionId: del.sessionId, retryable: false },
+		);
+		assert.equal(view.terminated.includes(del.sessionId), false);
 	});
 
 	it("cannot see another session's host-agents children (own-session-only)", async () => {
@@ -138,6 +151,35 @@ describe("host.agents — source-filtered scoping (childKind === \"host-agents\"
 		const host1 = makeHost("owner-1", core, view);
 		assert.deepEqual(await host1.agents.list(), []);
 		await assert.rejects(host1.agents.read(foreign.sessionId), /not a host\.agents child/);
+		const denied = await host1.agents.dismiss(foreign.sessionId);
+		assert.deepEqual(
+			{ ok: denied.ok, status: denied.status, sessionId: denied.sessionId, retryable: denied.retryable },
+			{ ok: false, status: "not-owned", sessionId: foreign.sessionId, retryable: false },
+		);
+		assert.equal(view.terminated.includes(foreign.sessionId), false);
+	});
+
+	it("duplicate dismiss returns structured already-dismissed instead of throwing", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view);
+		const host = makeHost("owner-1", core, view);
+		const { childSessionId } = await host.agents.spawn({ instructions: "host-agents child" });
+
+		const first = await host.agents.dismiss(childSessionId);
+		assert.deepEqual(
+			{ ok: first.ok, status: first.status, sessionId: first.sessionId, retryable: first.retryable },
+			{ ok: true, status: "dismissed", sessionId: childSessionId, retryable: false },
+		);
+		assert.deepEqual(await host.agents.list(), []);
+
+		const second = await host.agents.dismiss(childSessionId);
+		assert.deepEqual(
+			{ ok: second.ok, status: second.status, sessionId: second.sessionId, retryable: second.retryable },
+			{ ok: true, status: "already-dismissed", sessionId: childSessionId, retryable: false },
+		);
+		assert.match(second.message, /already dismissed/);
+		assert.deepEqual(view.terminated, [childSessionId]);
 	});
 });
 

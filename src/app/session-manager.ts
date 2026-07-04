@@ -26,15 +26,16 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
-import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs-lazy.js";
+import { showConnectionError, confirmAction, showOAuthExpiryModal } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { showHeaderToast } from "./render.js";
 import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetProjectProposalPanel } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
-import { restorePersistedReviewDocuments } from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import { getExpiredAccountOAuthCredentials } from "./account-oauth-providers.js";
 
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -52,7 +53,7 @@ import {
 } from "./proposal-helpers.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { shouldApplyProposalUpdate } from "./proposal-update-policy.js";
-import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type GoalWorkflowValidationError, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	activePanelTabIdForSession,
@@ -239,6 +240,47 @@ function liveProposalSlotForSession(type: ProposalType, sessionId: string): Prop
 	if (!slot) return undefined;
 	if (slot.sessionId && slot.sessionId !== sessionId) return undefined;
 	return slot;
+}
+
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function workflowValidationErrorFromSlot(slot: ProposalSlot | undefined): GoalWorkflowValidationError | undefined {
+	return (slot as any)?.workflowValidationError;
+}
+
+function workflowValidationErrorFromDetail(value: unknown): GoalWorkflowValidationError | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const raw = value as Record<string, unknown>;
+	if (raw.code !== "MISSING_WORKFLOW" && raw.code !== "UNKNOWN_WORKFLOW") return undefined;
+	const message = typeof raw.message === "string" && raw.message.trim()
+		? raw.message.trim()
+		: raw.code === "MISSING_WORKFLOW"
+			? "Workflow is required for this project."
+			: "Unknown workflow for this project.";
+	const workflowId = typeof raw.workflowId === "string" ? raw.workflowId : undefined;
+	const availableWorkflows = Array.isArray(raw.availableWorkflows)
+		? raw.availableWorkflows
+			.map((workflow) => {
+				if (typeof workflow === "string" && workflow.trim()) return { id: workflow.trim() };
+				if (!workflow || typeof workflow !== "object") return null;
+				const id = typeof (workflow as any).id === "string" ? (workflow as any).id.trim() : "";
+				if (!id) return null;
+				const name = typeof (workflow as any).name === "string" && (workflow as any).name.trim()
+					? (workflow as any).name.trim()
+					: undefined;
+				return name ? { id, name } : { id };
+			})
+			.filter((workflow): workflow is { id: string; name?: string } => !!workflow)
+		: undefined;
+	return {
+		code: raw.code,
+		message,
+		...(workflowId !== undefined ? { workflowId } : {}),
+		...(availableWorkflows && availableWorkflows.length > 0 ? { availableWorkflows } : {}),
+	};
 }
 
 function hasObjectFields(value: unknown): value is Record<string, unknown> {
@@ -729,13 +771,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	if (typeof healthData.orphanedTranscripts === "number") {
 		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
 	}
-	if (!healthData.localhost && !healthData.aigw) {
-		const hasAuth = await checkOAuthStatus();
-		if (!hasAuth) {
-			const success = await openOAuthDialog();
-			if (!success) throw new Error("OAuth login required");
-		}
-	}
+	const shouldCheckOAuthExpiry = !healthData.localhost && !healthData.aigw;
 
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
@@ -743,6 +779,16 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		setHashRoute("landing");
 	}
 	renderApp();
+	if (shouldCheckOAuthExpiry) {
+		void (async () => {
+			try {
+				const expiredCredentials = await getExpiredAccountOAuthCredentials();
+				if (expiredCredentials.length > 0) void showOAuthExpiryModal(expiredCredentials);
+			} catch {
+				// OAuth status failures are indeterminate; never block gateway auth.
+			}
+		})();
+	}
 	await refreshSessions();
 	try {
 		const cwdRes = await gatewayFetch("/api/config/cwd");
@@ -1164,12 +1210,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
 
-	// Fast path: reuse cached session (instant switch-back)
+	// Fast path: reuse cached session (instant switch-back). If the cached agent's
+	// WebSocket is no longer open, drop it and fall through to a fresh connect so
+	// pack-bound Host API surfaces can re-register their trusted WS minter.
 	const cached = getCachedSession(sessionId);
-	if (cached && isExisting) {
+	if (cached && isExisting && !cached.remoteAgent.connected) {
+		sessionCache.delete(sessionId);
+		cached.remoteAgent.disconnect();
+	}
+	if (cached && isExisting && cached.remoteAgent.connected) {
 		sessionCache.delete(sessionId); // Take ownership
 		state.chatPanel = cached.chatPanel;
 		state.remoteAgent = cached.remoteAgent;
+		state.remoteAgent.registerHostApiTransports();
 		state.connectionStatus = "connected";
 		state.connectingSessionId = null;
 
@@ -1246,7 +1299,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		restorePersistedReviewDocuments(sessionId, { select: true });
+		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -1873,6 +1926,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const nextRev = hasServerRev
 				? Math.max(Math.trunc(serverRev as number), prevRev)
 				: prevRev;
+			const preservedWorkflowValidation = type === "goal" && !hasServerRev && sameProposalFields(prev?.fields, merged)
+				? workflowValidationErrorFromSlot(prev)
+				: undefined;
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
@@ -1881,6 +1937,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					? (prev?.mode ?? resolveProjectMode(sessionId))
 					: undefined,
 				rev: nextRev,
+				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),
 			};
 			state.activeProposals[type] = slot;
 			state.assistantHasProposal = true;
@@ -1939,6 +1996,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields, rev } = ce.detail || {};
 			if (!type || !isProposalType(type)) return;
+			const workflowValidationError = type === "goal"
+				? workflowValidationErrorFromDetail((ce.detail as any)?.workflowValidationError)
+				: undefined;
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
@@ -1965,6 +2025,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					remote.onProposal(type, liveFields, false, liveRev, "tool");
 				}
 			};
+			const openFailedGoalSnapshot = (failedFields: Record<string, unknown>, error: GoalWorkflowValidationError) => {
+				const failedSlot = (): ProposalSlot => ({
+					sessionId,
+					fields: { ...failedFields },
+					streaming: false,
+					rev: 0,
+					workflowValidationError: error,
+				});
+				state.activeProposals.goal = failedSlot();
+				state.assistantHasProposal = true;
+				revealActiveProposalPanel("goal", sessionId);
+				const cb = callbackMap.goal;
+				if (cb) cb(failedFields, /* streaming */ false);
+				state.activeProposals.goal = failedSlot();
+				state.assistantHasProposal = true;
+				renderApp();
+			};
+
+			if (!numericRev && type === "goal" && proposalFields && workflowValidationError) {
+				openFailedGoalSnapshot(proposalFields, workflowValidationError);
+				return;
+			}
 
 			if (numericRev) {
 				const activeSlot = state.activeProposals[type];
@@ -2056,7 +2138,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		restorePersistedReviewDocuments(sessionId, { select: true });
+		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -3261,6 +3343,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prTitle = undefined;
 				ai.prMergeable = undefined;
 				ai.viewerIsAdmin = undefined;
+				ai.viewerCanMergeAsAdmin = undefined;
 				ai.reviewDecision = undefined;
 				ai.headRefName = undefined;
 			}
@@ -3274,12 +3357,13 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = data.title;
 			ai.prMergeable = data.mergeable;
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
+			ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin ?? false;
 			ai.reviewDecision = data.reviewDecision ?? undefined;
 			ai.headRefName = data.headRefName ?? undefined;
 		}
 		// Update goal grouping cache so sidebar reflects the new PR state immediately
 		if (goalId && data.state) {
-			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable });
+			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable, viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin ?? false });
 			renderApp();
 		}
 	} catch {
@@ -3290,6 +3374,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = undefined;
 			ai.prMergeable = undefined;
 			ai.viewerIsAdmin = undefined;
+			ai.viewerCanMergeAsAdmin = undefined;
 			ai.reviewDecision = undefined;
 			ai.headRefName = undefined;
 		}

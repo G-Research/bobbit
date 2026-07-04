@@ -1,19 +1,27 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
+import { scopePaths } from "./pack-types.js";
+import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
 const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
 /** Container mount for shipped first-party market packs. */
 export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
+/** Container mounts for installed marketplace packs by activation/install scope. */
+export const SERVER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-server";
+export const GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-global-user";
+export const PROJECT_MARKET_PACKS_CONTAINER_DIR = "/market-packs-project";
 
 /**
  * Redact sensitive env vars from Docker arg arrays for logging.
@@ -56,6 +64,26 @@ export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
 export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
 
+export interface RuntimePiExtensionInfo {
+	listName: string;
+	entryPath: string;
+	entryRelativePath?: string;
+	packRoot: string;
+	origin: {
+		scope: "server" | "global-user" | "project" | "builtin";
+		packName: string;
+		packId: string;
+		sourceUrl?: string;
+	};
+}
+
+export interface RuntimePiExtensionDiagnostic {
+	status: "runtime-load-failed" | "remap-failed";
+	code: string;
+	message: string;
+	updatedAt: string;
+}
+
 export interface RpcBridgeOptions {
 	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
 	cliPath?: string;
@@ -77,6 +105,12 @@ export interface RpcBridgeOptions {
 	gatewayToken?: string;
 	/** Container ID to use with docker exec (from sandbox pool) */
 	containerId?: string;
+	/** Host project marketplace pack root mounted as /market-packs-project in named-volume sandbox mode. */
+	projectMarketPacksRoot?: string;
+	/** Enabled Marketplace pi extensions passed as --extension; used for sandbox remap and runtime diagnostics. */
+	piExtensions?: RuntimePiExtensionInfo[];
+	/** Receives runtime/remap diagnostics observed after extension handoff. */
+	onPiExtensionDiagnostic?: (diagnostic: RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
 	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
 	toolManager?: ToolManager;
 	/**
@@ -205,15 +239,23 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * depend on settings.json state. See goal: project-trust decision (no `.pi`
  * support).
  *
- * pi parses the trust flags sequentially, last-wins (see pi-coding-agent
- * dist/cli/args.js: `--approve`/`-a` set projectTrustOverride=true,
- * `--no-approve`/`-na` set it false). A caller-supplied `--approve` in
- * `options.args` would therefore re-enable project-local loading. To keep the
- * decline deterministic we STRIP every trust flag spelling from `options.args`
- * and emit exactly one leading `--no-approve` that no caller can override.
+ * `--no-context-files` is also ALWAYS present AND NON-OVERRIDABLE. Bobbit owns
+ * AGENTS.md / CLAUDE.md injection in system-prompt.ts, scoped to the registered
+ * project root and configured agent files; pi's independent upward context-file
+ * discovery must stay disabled so parent-directory context cannot leak into the
+ * runtime system prompt or extension hook events.
+ *
+ * pi parses the trust/context flags sequentially, last-wins (see
+ * pi-coding-agent dist/cli/args.js: `--approve`/`-a` set
+ * projectTrustOverride=true, `--no-approve`/`-na` set it false; context-file
+ * flags similarly enable/disable context loading). Caller-supplied flags in
+ * `options.args` would therefore override Bobbit's policy. To keep the decline
+ * deterministic we STRIP every trust/context flag spelling from `options.args`
+ * and emit exactly one leading `--no-approve` and `--no-context-files` that no
+ * caller can override.
  */
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
-	const args = ["--mode", "rpc", "--no-approve"];
+	const args = ["--mode", "rpc", "--no-approve", "--no-context-files"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
 	if (options.initialModel) {
 		const slash = options.initialModel.indexOf("/");
@@ -229,12 +271,24 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 		}
 	}
 	if (options.args) {
-		// Drop any caller-supplied project-trust flag so the single leading
-		// `--no-approve` above is non-overridable. These flags are valueless
-		// booleans, so filtering the token alone is sufficient (no paired value to
-		// also remove).
-		const TRUST_FLAGS = new Set(["--approve", "-a", "--no-approve", "-na"]);
-		args.push(...options.args.filter((a) => !TRUST_FLAGS.has(a)));
+		// Drop any caller-supplied project-trust/context-file flag so the single
+		// leading `--no-approve` and `--no-context-files` above are
+		// non-overridable. `--context-files`/`-c` may take a following value; remove
+		// that paired value when present without disturbing unrelated flags.
+		const STRIPPED_VALUELESS_FLAGS = new Set(["--approve", "-a", "--no-approve", "-na", "--no-context-files", "-nc"]);
+		const filteredArgs: string[] = [];
+		for (let i = 0; i < options.args.length; i++) {
+			const arg = options.args[i];
+			if (STRIPPED_VALUELESS_FLAGS.has(arg)) continue;
+			if (arg === "--context-files" || arg === "-c") {
+				const next = options.args[i + 1];
+				if (next !== undefined && !next.startsWith("-")) i++;
+				continue;
+			}
+			if (arg.startsWith("--context-files=") || arg.startsWith("-c=")) continue;
+			filteredArgs.push(arg);
+		}
+		args.push(...filteredArgs);
 	}
 	return args;
 }
@@ -392,11 +446,11 @@ export class RpcBridge {
 				env: {
 					...process.env,
 					BOBBIT_DIR: bobbitDir(),
+					...tlsEnv,
+					...this.options.env,
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
 					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
 					PI_CODING_AGENT_DIR: globalAgentDir(),
-					...tlsEnv,
-					...this.options.env,
 				},
 			});
 		}
@@ -415,8 +469,13 @@ export class RpcBridge {
 
 		this.process!.stderr!.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
-			// Keep last 20 lines of stderr for diagnostics on unexpected exit
+			// Keep last 20 lines of stderr for diagnostics on unexpected exit.
+			// pi currently does not expose a stable structured extension-load failure
+			// event across versions, so Marketplace pi-extension runtime diagnostics use
+			// conservative stderr matching below and only fire when the line names a
+			// known enabled extension path/list ref.
 			const lines = this.stderrDecoder.write(chunk).split("\n").filter(l => l.trim());
+			for (const line of lines) this.recordPiExtensionLoadFailureFromStderr(line);
 			this.stderrTail.push(...lines);
 			if (this.stderrTail.length > 20) {
 				this.stderrTail = this.stderrTail.slice(-20);
@@ -574,8 +633,10 @@ export class RpcBridge {
 		return this.sendCommand({ type: "compact" }, timeoutMs);
 	}
 
-	getMessages() {
-		return this.sendCommand({ type: "get_messages" });
+	async getMessages() {
+		const response = await this.sendCommand({ type: "get_messages" });
+		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+		return response;
 	}
 
 	async stop(): Promise<void> {
@@ -666,19 +727,9 @@ export class RpcBridge {
 	 * All sandbox sessions use pool containers with session-prompts/ mounted.
 	 */
 	private remapArgsForContainer(agentArgs: string[]): string[] {
-		const toolsDir = TOOLS_DIR;
-		const stateDir = bobbitStateDir();
-		const mcpExtDir = path.join(stateDir, "mcp-extensions");
-		const builtinPacksDir = resolveBuiltinPacksDir();
-		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
-		const normalizedStateDir = stateDir.replace(/\\/g, "/");
-		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
-		const normalizedBuiltinPacksDir = builtinPacksDir.replace(/\\/g, "/");
-
-		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths
+		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths.
 		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
-		const normalizedBuiltinToolsDir = builtinToolsDir?.replace(/\\/g, "/");
-
+		const remapOpts = { builtinToolsDir, projectBase: this.options.cwd, projectMarketPacksRoot: this.options.projectMarketPacksRoot };
 		const remappedArgs: string[] = [];
 
 		for (let i = 0; i < agentArgs.length; i++) {
@@ -693,31 +744,24 @@ export class RpcBridge {
 				const filename = path.basename(hostPath);
 				remappedArgs.push("--system-prompt", `/tmp/session-prompts/${filename}`);
 				i++; // skip the next arg (the host prompt path)
-			} else {
-				const normalized = arg.replace(/\\/g, "/");
-				if (normalized.startsWith(normalizedToolsDir)) {
-					// Remap tool extension paths: config TOOLS_DIR/... → /tools/...
-					const relative = normalized.substring(normalizedToolsDir.length);
-					remappedArgs.push(`/tools${relative}`);
-				} else if (normalizedBuiltinToolsDir && normalized.startsWith(normalizedBuiltinToolsDir)) {
-					// Remap builtin tool extension paths: dist/.../defaults/tools/... → /tools-builtin/...
-					const relative = normalized.substring(normalizedBuiltinToolsDir.length);
-					remappedArgs.push(`/tools-builtin${relative}`);
-				} else if (normalized.startsWith(normalizedBuiltinPacksDir)) {
-					// Remap shipped first-party pack paths: dist/.../builtin-packs/market-packs/... → /market-packs-builtin/...
-					const relative = normalized.substring(normalizedBuiltinPacksDir.length);
-					remappedArgs.push(`${BUILTIN_PACKS_CONTAINER_DIR}${relative}`);
-				} else if (normalized.startsWith(normalizedMcpExtDir)) {
-					// Remap MCP extension paths: .bobbit/state/mcp-extensions/... → /mcp-extensions/...
-					const relative = normalized.substring(normalizedMcpExtDir.length);
-					remappedArgs.push(`/mcp-extensions${relative}`);
-				} else if (normalized.startsWith(normalizedStateDir)) {
-					// Remap state dir paths (tool-guard, etc.): .bobbit/state/... → /bobbit-state/...
-					const relative = normalized.substring(normalizedStateDir.length);
-					remappedArgs.push(`/bobbit-state${relative}`);
-				} else {
-					remappedArgs.push(arg);
+			} else if (arg === "--extension" && agentArgs[i + 1]) {
+				const hostPath = agentArgs[i + 1];
+				const piExtension = this.findRuntimePiExtensionByPath(hostPath);
+				if (piExtension) {
+					const containerPath = tryHostPathToContainer(hostPath, remapOpts);
+					if (!containerPath) {
+						this.emitPiExtensionDiagnostic(piExtension, "remap-failed", "remap_failed", `Could not remap Marketplace pi extension ${piExtension.origin.packName}/${piExtension.listName} for Docker sandbox: ${hostPath}`);
+						i++;
+						continue;
+					}
+					remappedArgs.push("--extension", containerPath);
+					i++;
+					continue;
 				}
+				remappedArgs.push("--extension", hostPathToContainer(hostPath, remapOpts));
+				i++;
+			} else {
+				remappedArgs.push(hostPathToContainer(arg, remapOpts));
 			}
 		}
 
@@ -725,6 +769,37 @@ export class RpcBridge {
 	}
 
 	// --- Private ---
+
+	private findRuntimePiExtensionByPath(value: string | undefined): RuntimePiExtensionInfo | undefined {
+		if (!value) return undefined;
+		const normalized = normalizePathForPrefix(value);
+		return (this.options.piExtensions ?? []).find((extension) => normalizePathForPrefix(extension.entryPath) === normalized);
+	}
+
+	private emitPiExtensionDiagnostic(extension: RuntimePiExtensionInfo, status: RuntimePiExtensionDiagnostic["status"], code: string, message: string): void {
+		this.options.onPiExtensionDiagnostic?.({ status, code, message: sanitizePiExtensionRuntimeMessage(message), updatedAt: new Date().toISOString() }, extension);
+	}
+
+	private recordPiExtensionLoadFailureFromStderr(line: string): void {
+		const extension = matchPiExtensionRuntimeFailure(line, this.options.piExtensions ?? [], {
+			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
+			projectBase: this.options.cwd,
+			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+		});
+		if (!extension) return;
+		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${line}`);
+	}
+
+	private recordPiExtensionLoadFailureFromEvent(event: any): void {
+		const extension = matchPiExtensionStructuredRuntimeFailure(event, this.options.piExtensions ?? [], {
+			builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
+			projectBase: this.options.cwd,
+			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+		});
+		if (!extension) return;
+		const rawMessage = typeof event?.message === "string" ? event.message : typeof event?.error === "string" ? event.error : JSON.stringify(event);
+		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${rawMessage}`);
+	}
 
 	private handleData(data: string) {
 		this.lineBuffer += data;
@@ -749,13 +824,52 @@ export class RpcBridge {
 				this.pending.delete(parsed.id);
 				p.resolve(parsed);
 			} else {
+				this.recordPiExtensionLoadFailureFromEvent(parsed);
+				const normalized = normalizeToolResultErrorEvent(parsed);
 				// Agent event — forward to listeners
 				for (const listener of this.eventListeners) {
-					listener(parsed);
+					listener(normalized);
 				}
 			}
 		}
 	}
+}
+
+function sanitizePiExtensionRuntimeMessage(message: string): string {
+	return message.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 1000) || "Pi extension runtime failure.";
+}
+
+function runtimeFailureLineLooksRelevant(line: string): boolean {
+	return /(?:failed|failure|error|exception|cannot|unable)/i.test(line)
+		&& /(?:extension|plugin|import|activate|load|register)/i.test(line);
+}
+
+function extensionPathAliases(extension: RuntimePiExtensionInfo, opts: MountTableOptions): string[] {
+	const aliases = new Set<string>([
+		extension.entryPath,
+		extension.entryPath.replace(/\\/g, "/"),
+		extension.entryRelativePath ?? "",
+		`${extension.origin.packName}/${extension.listName}`,
+		extension.listName,
+	]);
+	const containerPath = tryHostPathToContainer(extension.entryPath, opts);
+	if (containerPath) aliases.add(containerPath);
+	return [...aliases].filter((value) => value.length > 0);
+}
+
+function matchPiExtensionRuntimeFailure(line: string, extensions: readonly RuntimePiExtensionInfo[], opts: MountTableOptions): RuntimePiExtensionInfo | undefined {
+	if (!runtimeFailureLineLooksRelevant(line)) return undefined;
+	const normalizedLine = normalizePathForPrefix(line).toLowerCase();
+	return extensions.find((extension) => extensionPathAliases(extension, opts).some((alias) => normalizedLine.includes(normalizePathForPrefix(alias).toLowerCase())));
+}
+
+function matchPiExtensionStructuredRuntimeFailure(event: any, extensions: readonly RuntimePiExtensionInfo[], opts: MountTableOptions): RuntimePiExtensionInfo | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const type = typeof event.type === "string" ? event.type : "";
+	if (!/(extension|plugin).*(error|failed|failure)|runtime-load-failed/i.test(type)) return undefined;
+	const pathLike = String(event.path ?? event.entryPath ?? event.extensionPath ?? event.file ?? event.sourcePath ?? event.extension ?? "");
+	const message = String(event.message ?? event.error ?? "");
+	return matchPiExtensionRuntimeFailure(`${pathLike} ${message}`, extensions, opts);
 }
 
 /**
@@ -784,6 +898,60 @@ interface MountMapping {
 	hostPath: string;
 }
 
+export interface HostPathToContainerOptions {
+	builtinToolsDir?: string;
+	projectBase?: string;
+	projectMarketPacksRoot?: string;
+}
+
+type MountTableOptions = HostPathToContainerOptions;
+
+function normalizePathForPrefix(p: string): string {
+	const normalized = p.replace(/\\/g, "/");
+	return normalized.length > 1 ? normalized.replace(/\/+$/g, "") : normalized;
+}
+
+function isSameOrChildPath(normalizedPath: string, normalizedPrefix: string): boolean {
+	return normalizedPath === normalizedPrefix || normalizedPath.startsWith(normalizedPrefix + "/");
+}
+
+function joinContainerPath(containerPrefix: string, relative: string): string {
+	const clean = relative.replace(/^\/+/, "");
+	return clean ? `${containerPrefix}/${clean}` : containerPrefix;
+}
+
+function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: string): MountMapping[] {
+	const mappings: MountMapping[] = [
+		{
+			containerPrefix: SERVER_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: scopePaths("server", getProjectRoot()).marketPacksRoot,
+		},
+		{
+			containerPrefix: GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: scopePaths("global-user", os.homedir()).marketPacksRoot,
+		},
+	];
+	const projectBaseIsContainerPath = projectBase === "/workspace" || projectBase?.startsWith("/workspace/") || projectBase === "/workspace-wt" || projectBase?.startsWith("/workspace-wt/");
+	const projectHostRoot = projectMarketPacksRoot ?? (projectBase && !projectBaseIsContainerPath ? scopePaths("project", projectBase).marketPacksRoot : undefined);
+	if (projectHostRoot) {
+		mappings.push({
+			containerPrefix: PROJECT_MARKET_PACKS_CONTAINER_DIR,
+			hostPath: projectHostRoot,
+		});
+	}
+	return mappings;
+}
+
+function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
+	const normalized = normalizePathForPrefix(hostPath);
+	const marker = "/.bobbit/config/market-packs/";
+	const idx = normalized.lastIndexOf(marker);
+	if (idx < 0) return null;
+	const relative = normalized.slice(idx + marker.length);
+	if (!relative || relative.startsWith("../") || relative.includes("/../")) return null;
+	return joinContainerPath(PROJECT_MARKET_PACKS_CONTAINER_DIR, relative);
+}
+
 /**
  * Build the mount table that describes container ↔ host path mappings.
  * This is the single source of truth — both containerPathToHost() and
@@ -791,9 +959,9 @@ interface MountMapping {
  *
  * Accepts optional builtinToolsDir to handle cascade-resolved builtin paths.
  */
-function buildMountTable(builtinToolsDir?: string): MountMapping[] {
+function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
-	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
+	const agentSessionsDir = activeAgentSessionsDir();
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
 	const builtinPacksDir = resolveBuiltinPacksDir();
@@ -805,22 +973,23 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
 		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
 		{ containerPrefix: BUILTIN_PACKS_CONTAINER_DIR, hostPath: builtinPacksDir },
+		...marketPackMountMappings(opts.projectBase, opts.projectMarketPacksRoot),
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
-		// Generated pi-coding-agent extensions — bind-mounted read-only by
-		// docker-args.ts so sandboxed sessions can load them via --extension.
+		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so
+		// sandboxed agents can load remapped --extension paths.
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
-		{ containerPrefix: "/bobbit-state/openai-orphan-tool-result", hostPath: path.join(stateDir, "openai-orphan-tool-result") },
+		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 
 	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
-	if (builtinToolsDir) {
+	if (opts.builtinToolsDir) {
 		// Insert before /tools so /tools-builtin matches first
-		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: builtinToolsDir });
+		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: opts.builtinToolsDir });
 	}
 
 	return table;
@@ -833,12 +1002,12 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
  * Returns the original path unchanged if it doesn't match any known mount.
  * On Windows, the returned path uses OS-native separators.
  */
-export function containerPathToHost(containerPath: string): string {
-	const normalized = containerPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath } of buildMountTable(BUILTIN_TOOLS_DIR)) {
+export function containerPathToHost(containerPath: string, opts: HostPathToContainerOptions = {}): string {
+	const normalized = normalizePathForPrefix(containerPath);
+	for (const { containerPrefix, hostPath } of buildMountTable({ builtinToolsDir: BUILTIN_TOOLS_DIR, ...opts })) {
 		// Match exact prefix or prefix followed by "/" to avoid collisions
 		// (e.g. "/bobbit-state/sessions" must not match "/bobbit-state/sessions.json")
-		if (normalized === containerPrefix || normalized.startsWith(containerPrefix + "/")) {
+		if (isSameOrChildPath(normalized, containerPrefix)) {
 			const relative = normalized.substring(containerPrefix.length);
 			return path.join(hostPath, ...relative.split("/").filter(Boolean));
 		}
@@ -852,16 +1021,20 @@ export function containerPathToHost(containerPath: string): string {
  *
  * Returns the original path unchanged if it doesn't match any known mount.
  */
-export function hostPathToContainer(hostPath: string): string {
-	const normalized = hostPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath: hp } of buildMountTable(BUILTIN_TOOLS_DIR)) {
-		const normalizedHost = hp.replace(/\\/g, "/");
-		if (normalized.startsWith(normalizedHost)) {
+export function tryHostPathToContainer(hostPath: string, opts: MountTableOptions = {}): string | null {
+	const normalized = normalizePathForPrefix(hostPath);
+	for (const { containerPrefix, hostPath: hp } of buildMountTable({ builtinToolsDir: BUILTIN_TOOLS_DIR, ...opts })) {
+		const normalizedHost = normalizePathForPrefix(hp);
+		if (isSameOrChildPath(normalized, normalizedHost)) {
 			const relative = normalized.substring(normalizedHost.length);
-			return containerPrefix + relative;
+			return joinContainerPath(containerPrefix, relative);
 		}
 	}
-	return hostPath;
+	return null;
+}
+
+export function hostPathToContainer(hostPath: string, opts: MountTableOptions = {}): string {
+	return tryHostPathToContainer(hostPath, opts) ?? remapUnknownProjectMarketPackPath(hostPath) ?? hostPath;
 }
 
 /**

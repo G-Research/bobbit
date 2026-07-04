@@ -2,8 +2,6 @@ import {
 	state,
 	renderApp,
 	setProjectsIfChanged,
-	expandedGoals,
-	saveExpandedGoals,
 	type GatewaySession,
 	type Goal,
 	type Project,
@@ -14,7 +12,6 @@ import {
 // import it without pulling the entire app-shell graph.
 import { gatewayFetch, GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
 export { gatewayFetch };
-import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
@@ -38,6 +35,7 @@ import {
 } from "./dialogs-lazy.js";
 import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
+import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -560,16 +558,16 @@ export async function refreshSessions(): Promise<void> {
 				// lookups whenever the goal list changes so negative entries don't stick
 				// after a branch or remote becomes available.
 				clearGoalGithubLinkCache();
-				// Auto-expand only newly discovered goals that have sessions — never
-				// re-expand a goal the user has already seen (and may have collapsed).
-				for (const g of incoming) {
-					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
-						expandedGoals.add(g.id);
-						// Also expand the parent so this goal's own row is visible in the
-						// sidebar (child rows only render when the parent is expanded).
-						const parentId = (g as { parentGoalId?: string }).parentGoalId;
-						if (parentId) expandedGoals.add(parentId);
-						saveExpandedGoals();
+				// Auto-expand only newly discovered top-level goals that have live
+				// owning sessions after the initial hydration. Automatic expansion is
+				// non-explicit so it cannot override a user's explicit collapse
+				// preference. Sub-goals never auto-open themselves or their parent just
+				// because polling discovered them.
+				if (!isInitial) {
+					for (const g of incoming) {
+						if (!prevGoalIds.has(g.id) && !g.parentGoalId && state.gatewaySessions.some((s) => s.goalId === g.id || s.teamGoalId === g.id)) {
+							expandSidebarTreeNode({ kind: "goal", goalId: g.id }, { explicit: false });
+						}
 					}
 				}
 
@@ -1046,14 +1044,31 @@ export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]>
   return repos;
 }
 
-export async function browseDirectory(dirPath?: string): Promise<{
+export async function browseDirectory(dirPath?: string, options?: { prefix?: string; limit?: number }): Promise<{
   current: string;
   parent: string | null;
   entries: Array<{ name: string; path: string }>;
+  truncated?: boolean;
 }> {
-  const params = dirPath ? `?path=${encodeURIComponent(dirPath)}` : '';
-  const res = await gatewayFetch(`/api/browse-directory${params}`);
+  const params = new URLSearchParams();
+  if (dirPath) params.set("path", dirPath);
+  const prefix = options?.prefix;
+  if (prefix) params.set("prefix", prefix);
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit > 0) {
+    params.set("limit", String(Math.floor(options.limit)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await gatewayFetch(`/api/browse-directory${suffix}`);
   if (!res.ok) throw new Error('Browse failed');
+  return res.json();
+}
+
+export async function createDirectory(dirPath: string): Promise<{ path: string }> {
+  const res = await gatewayFetch("/api/create-directory", {
+    method: "POST",
+    body: JSON.stringify({ path: dirPath }),
+  });
+  if (!res.ok) throw await errorFromResponse(res, `Failed to create directory: ${res.status}`);
   return res.json();
 }
 
@@ -1436,7 +1451,7 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string }, noPr: false };
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string; viewerCanMergeAsAdmin?: boolean }, noPr: false };
 			} catch {
 				return { goalId: g.id, pr: null, noPr: false };
 			}
@@ -1447,7 +1462,11 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	for (const { goalId, pr, noPr } of results) {
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
-			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision || prev.mergeable !== pr.mergeable) {
+			if (!prev
+				|| prev.state !== pr.state
+				|| prev.reviewDecision !== pr.reviewDecision
+				|| prev.mergeable !== pr.mergeable
+				|| prev.viewerCanMergeAsAdmin !== pr.viewerCanMergeAsAdmin) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
@@ -1491,6 +1510,7 @@ export interface GitStatusData {
 	insertionsVsPrimary: number;
 	deletionsVsPrimary: number;
 	unpushed: boolean;
+	remotePublication?: 'local-only-policy';
 	status: Array<{ file: string; status: string }>;
 }
 
@@ -1611,10 +1631,16 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
-		const goal = await res.json();
+		const goal = await res.json() as Goal;
 		await refreshSessions();
-		expandedGoals.add(goal.id);
-		saveExpandedGoals();
+		const goalsById = new Map(state.goals.map(g => [g.id, g]));
+		let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+		const seenGoalIds = new Set<string>();
+		while (cursor && !seenGoalIds.has(cursor.id)) {
+			seenGoalIds.add(cursor.id);
+			expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+			cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
+		}
 		return goal;
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
@@ -1706,7 +1732,6 @@ export async function deleteGoal(id: string): Promise<void> {
 				const allIds = collectGoalIdsFor(id);
 				eagerMarkArchived(allIds);
 			}
-			setHashRoute("landing");
 			await refreshSessions();
 		}
 		return;
@@ -1733,7 +1758,6 @@ export async function deleteGoal(id: string): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		eagerMarkArchived([id]);
-		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
@@ -2361,34 +2385,6 @@ export async function enqueueInboxManual(
 // ROLE API
 // ============================================================================
 
-/**
- * Where a role's `model` / `thinkingLevel` field resolved from in the config
- * cascade, relative to the currently-editable scope. Emitted by the server on
- * `/api/roles` + `/api/roles/:name` so the Roles list/detail can render an
- * accurate source badge and decide inline editability without re-deriving the
- * cascade order. See `RoleFieldSource` in `src/server/agent/config-cascade.ts`.
- */
-export type RoleFieldSourceKind = "role" | "inherited-role" | "default";
-
-export interface RoleFieldSource {
-	/** Resolved field value when a role layer supplies it; omitted for `default`. */
-	value?: string;
-	source: RoleFieldSourceKind;
-	/** Cascade layer the value came from (omitted for `default`). */
-	origin?: "builtin" | "server" | "user" | "project";
-	/** Market-pack name when the value comes from a pack-defined role; null otherwise. */
-	originPackName?: string | null;
-	/** False only for pack-managed (read-only) roles; true otherwise. */
-	editable: boolean;
-	/** Short human label for the source ("Project", "Server", "Built-in", pack name…). */
-	sourceLabel: string;
-}
-
-export interface RoleModelResolution {
-	model: RoleFieldSource;
-	thinkingLevel: RoleFieldSource;
-}
-
 export interface RoleData {
 	name: string;
 	label: string;
@@ -2401,12 +2397,6 @@ export interface RoleData {
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
-	/**
-	 * Per-field source hierarchy for model/thinkingLevel (cascade origin +
-	 * editability). Present on cascade-resolved role payloads from `/api/roles`
-	 * and `/api/roles/:name`; absent on locally-constructed role drafts.
-	 */
-	modelResolution?: RoleModelResolution;
 }
 
 // ============================================================================
@@ -2466,6 +2456,12 @@ export interface McpOperationInfo {
 	name: string;
 	/** Description shown in the UI. */
 	description: string;
+	/** Public policy keys returned by /api/mcp-servers for Tools controls. */
+	policyKey?: string;
+	serverPolicyKey?: string;
+	packagePolicyKey?: string;
+	subNamespacePolicyKey?: string;
+	operationPolicyKey?: string;
 	/**
 	 * Sub-namespace for gateway-style servers (e.g. "ai-adoption" in
 	 * `mcp__gr__ai-adoption__list-articles`). undefined ⇒ flat server.
@@ -2482,13 +2478,24 @@ export interface McpServerInfo {
 	status: "connected" | "disconnected" | "error";
 	toolCount: number;
 	error?: string;
+	/** Public server policy key (for gateway runtimes this differs from name). */
+	serverPolicyKey?: string;
+	policyKey?: string;
+	mcpPolicyKey?: string;
+	/** Active provider sub-namespaces for grouped gateway-backed MCP servers. */
+	activeSubNamespaces?: string[];
 	tools: McpOperationInfo[];
 }
 
 /** GET /api/mcp-servers — returns one entry per registered MCP server with its operations. */
-export async function fetchMcpServers(): Promise<McpServerInfo[]> {
+export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
-		const res = await gatewayFetch("/api/mcp-servers");
+		const params = new URLSearchParams();
+		if (opts?.projectId) params.set("projectId", opts.projectId);
+		if (opts?.cwd) params.set("cwd", opts.cwd);
+		if (opts?.ensure) params.set("ensure", "true");
+		const qs = params.toString();
+		const res = await gatewayFetch(`/api/mcp-servers${qs ? `?${qs}` : ""}`);
 		if (!res.ok) return [];
 		const data = await res.json();
 		if (!Array.isArray(data)) return [];
@@ -2496,6 +2503,40 @@ export async function fetchMcpServers(): Promise<McpServerInfo[]> {
 	} catch {
 		return [];
 	}
+}
+
+export interface ToolProviderProvenance {
+	providerKey: string;
+	packName: string;
+	listName: string;
+	scope: string;
+	sourcePath?: string;
+}
+
+export interface ToolDiagnostic {
+	severity?: "error" | "warning" | "info" | string;
+	level?: "error" | "warning" | "info" | string;
+	code?: string;
+	message?: string;
+	reason?: string;
+	tool?: string;
+	toolName?: string;
+	name?: string;
+	group?: string;
+	groupDir?: string;
+	sourcePath?: string;
+	path?: string;
+	providerKey?: string;
+	origin?: string;
+	fallback?: string;
+	fallbackTool?: string;
+	skipped?: boolean;
+	[key: string]: unknown;
+}
+
+export interface ToolsResponse {
+	tools: ToolInfo[];
+	diagnostics: ToolDiagnostic[];
 }
 
 export interface ToolInfo {
@@ -2520,6 +2561,63 @@ export interface ToolInfo {
 	 *  would collide when another installed pack shares the panel id. */
 	packId?: string;
 	grantPolicy?: string;
+	providerType?: "pi-extension" | string;
+	origin?: "marketplace-pi-extension" | "builtin" | "server" | "user" | "project" | string;
+	originPackName?: string | null;
+	originPackId?: string | null;
+	sourcePath?: string;
+	providers?: ToolProviderProvenance[];
+	/** Optional backend diagnostics for invalid/skipped config-level tool overrides. */
+	diagnostics?: Array<ToolDiagnostic | string> | ToolDiagnostic | string;
+	invalidReason?: ToolDiagnostic | string | Record<string, unknown>;
+	invalid?: boolean;
+	valid?: boolean;
+}
+
+function isToolApiRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeToolDiagnostics(raw: unknown): ToolDiagnostic[] {
+	if (!raw) return [];
+	if (typeof raw === "string") return raw.trim() ? [{ message: raw }] : [];
+	if (Array.isArray(raw)) return raw.flatMap((item) => normalizeToolDiagnostics(item));
+	if (isToolApiRecord(raw)) return [raw as ToolDiagnostic];
+	return [];
+}
+
+function normalizeToolInfo(raw: unknown): ToolInfo | null {
+	if (typeof raw === "string") return { name: raw, description: "", group: "Other" };
+	if (!isToolApiRecord(raw)) return null;
+	const name = typeof raw.name === "string" ? raw.name : undefined;
+	if (!name) return null;
+	return raw as unknown as ToolInfo;
+}
+
+function dedupeToolDiagnostics(diagnostics: ToolDiagnostic[]): ToolDiagnostic[] {
+	const seen = new Set<string>();
+	return diagnostics.filter((diagnostic) => {
+		const key = [diagnostic.toolName, diagnostic.tool, diagnostic.name, diagnostic.extensionPath, diagnostic.path, diagnostic.sourcePath, diagnostic.code, diagnostic.reason, diagnostic.message]
+			.map((value) => typeof value === "string" ? value : "")
+			.join("\0");
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+export function normalizeToolsResponse(data: unknown): ToolsResponse {
+	const root = isToolApiRecord(data) ? data : undefined;
+	const rawTools = Array.isArray(root?.tools) ? root.tools : Array.isArray(data) ? data : [];
+	return {
+		tools: rawTools.map(normalizeToolInfo).filter((tool): tool is ToolInfo => Boolean(tool)),
+		diagnostics: dedupeToolDiagnostics([
+			...normalizeToolDiagnostics(root?.diagnostics),
+			...normalizeToolDiagnostics(root?.toolDiagnostics),
+			...normalizeToolDiagnostics(root?.invalidTools),
+			...normalizeToolDiagnostics(root?.invalidToolDiagnostics),
+		]),
+	};
 }
 
 // ============================================================================
@@ -2548,8 +2646,9 @@ export interface PackEntrypointWire {
 	id: string;
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
+	icon?: string;
 	routeId?: string;
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	listName: string;
 }
@@ -2560,6 +2659,8 @@ export interface PackContributionsWire {
 	packName: string;
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
+	/** Pack-local channel names only; module/handler paths stay server-side. */
+	channelNames?: string[];
 	routeNames: string[];
 }
 
@@ -2580,22 +2681,20 @@ export async function fetchContributions(projectId?: string): Promise<PackContri
 	}
 }
 
-export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
+export async function fetchToolsResponse(projectId?: string): Promise<ToolsResponse> {
 	try {
 		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
-		const data = await res.json();
-		const tools = data.tools || data || [];
-		// Handle legacy string[] format
-		if (tools.length > 0 && typeof tools[0] === "string") {
-			return tools.map((name: string) => ({ name, description: "", group: "Other" }));
-		}
-		return tools;
+		return normalizeToolsResponse(await res.json());
 	} catch (err) {
 		console.error("[role-api] fetchTools failed:", err);
-		return [];
+		return { tools: [], diagnostics: [] };
 	}
+}
+
+export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
+	return (await fetchToolsResponse(projectId)).tools;
 }
 
 export async function fetchToolDetail(name: string, projectId?: string): Promise<ToolInfo | null> {
@@ -2938,6 +3037,11 @@ export interface PackManifest {
 		/** Entrypoint `listName` basenames (pack-schema-v1 §1.2). Optional on the
 		 *  client wire — present on browse/installed payloads that declare them. */
 		entrypoints?: string[];
+		/** MCP contribution `listName` basenames (schema 2). Optional so older
+		 *  pack/source responses keep parsing while MCP-aware catalogues render chips. */
+		mcp?: string[];
+		/** Pi runtime extension basenames (schema 2 `contents.pi-extensions`). */
+		piExtensions?: string[];
 	};
 }
 
@@ -2952,13 +3056,30 @@ export interface PackMeta {
 	scope: MarketScope;
 }
 
+export type MarketplaceSourceType = "pack" | "mcp-gateway";
+export type StoredMarketplaceSourceType = MarketplaceSourceType | "mcp-registry";
+
 export interface MarketplaceSource {
 	id: string;
 	url: string;
 	ref?: string;
+	/** Server-persisted readable label for MCP gateway sources. Render verbatim. */
+	displayName?: string;
+	/** Gateway URL authority/path before duplicate suffixing. */
+	normalizedName?: string;
+	/** Source backend type. Omitted means the original pack git/local source. Legacy mcp-registry rows may still appear as unsupported. */
+	type?: StoredMarketplaceSourceType;
 	addedAt: string;
 	lastSyncedAt?: string;
 	lastCommit?: string;
+	/** Optional summary metadata for MCP gateway/legacy registry sources. */
+	mcpProviderCount?: number;
+	discoveredMcpProviders?: number;
+	gatewayProviderCount?: number;
+	mcpServerCount?: number;
+	discoveredMcpServers?: number;
+	/** Response-only migration note for unsupported legacy source rows. */
+	unsupportedReason?: string;
 	/** Response-only: marks the synthetic, non-removable built-in source (§4.4). */
 	builtin?: boolean;
 }
@@ -2973,29 +3094,151 @@ export interface PackEntityDescriptions {
 	tools?: Record<string, string>;
 	skills?: Record<string, string>;
 	entrypoints?: Record<string, string>;
+	mcp?: Record<string, string>;
+	piExtensions?: Record<string, string>;
+}
+
+export interface PackMcpContributionWire {
+	ref?: string;
+	listName?: string;
+	serverName?: string;
+	subNamespace?: string;
+	label?: string;
+	description?: string;
+	transport?: "stdio" | "http";
+	command?: string;
+	args?: string[];
+	cwd?: string;
+	env?: string[] | Record<string, unknown>;
+	url?: string;
+	headers?: string[] | Record<string, unknown>;
+	status?: string;
+	ownerStatus?: string;
+	overriddenBy?: string;
+	winningPack?: string;
+	error?: string;
+	toolCount?: number;
+	operations?: PackActivationMcpOperationEntry[];
+	disabledOperations?: string[];
+	staleDisabledOperations?: string[];
+}
+
+export interface PackActivationMcpOperationEntry {
+	name: string;
+	label?: string;
+	description?: string;
+	toolName?: string;
+	selected?: boolean;
+	disabledByActivation?: boolean;
+	policyKey?: string;
+	policy?: "allow" | "ask" | "never";
+	stale?: boolean;
+	shadowed?: boolean;
+}
+
+export interface PackActivationMcpEntry extends PackMcpContributionWire {
+	/** Stable DisabledRefs.mcp key; gateway backends prefer contributionId. */
+	ref: string;
+	/** Stable installed MCP contribution id used for DisabledRefs.mcp/mcpOperations ownership. */
+	contributionId?: string;
+	/** Runtime MCP server name. Older servers may omit it; the UI falls back to ref. */
+	serverName?: string;
+	sourceId?: string;
+	installedPackName?: string;
+	gatewayProviderId?: string;
+	runtimeServerKey?: string;
+	selectedOperationCount?: number;
+	totalOperationCount?: number;
+	operations?: PackActivationMcpOperationEntry[];
+	disabledOperations?: string[];
+	staleDisabledOperations?: string[];
+}
+
+export interface PiExtensionDiagnostic {
+	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
+	code: string;
+	message: string;
+	updatedAt: string;
+	stale?: boolean;
+}
+
+export interface PiExtensionToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: Record<string, unknown>;
+}
+
+export interface PackActivationPiExtensionEntry {
+	/** Stable DisabledRefs.piExtensions key, usually the contents.pi-extensions basename. */
+	ref: string;
+	listName?: string;
+	label?: string;
+	entryRelativePath?: string;
+	diagnostic?: PiExtensionDiagnostic;
+	tools?: PiExtensionToolInfo[];
+}
+
+export type MarketplaceBrowseSourceType = "builtin" | StoredMarketplaceSourceType;
+
+export interface MarketplaceBrowseSourceState {
+	sourceId: string;
+	sourceName: string;
+	sourceType: MarketplaceBrowseSourceType;
+	builtin?: boolean;
+	status: "ok" | "loading" | "error" | "unsupported";
+	error?: string;
+	lastSyncedAt?: string;
+}
+
+export interface BrowsePackSource {
+	id: string;
+	name: string;
+	type: "builtin" | MarketplaceSourceType;
+	builtin?: boolean;
+}
+
+export interface McpGatewaySkippedEntryDiagnostic {
+	id?: string;
+	name?: string;
+	reason?: string;
+	message?: string;
+	[key: string]: unknown;
+}
+
+export interface McpGatewayDiagnosticsWire {
+	skippedEntries?: McpGatewaySkippedEntryDiagnostic[];
+	[key: string]: unknown;
 }
 
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	/** Stable union-browse row key, usually `${source.id}:${dirName}`. */
+	browseKey?: string;
+	/** Source provenance for union Browse rows. */
+	source?: BrowsePackSource;
 	/** Response-only: shipped first-party pack (built-in source). */
 	builtin?: boolean;
 	/** Response-only: resolved in place (not copy-installed). */
 	provided?: boolean;
 	descriptions?: PackEntityDescriptions;
+	/** Optional MCP details for gateway virtual packs or authored schema-2 packs. */
+	mcp?: PackMcpContributionWire[];
+	mcpServers?: PackMcpContributionWire[];
+	/** Response-only metadata for virtual MCP gateway provider packs. */
+	sourceType?: StoredMarketplaceSourceType;
+	gatewayProviderId?: string;
+	mcpGatewayDiagnostics?: McpGatewayDiagnosticsWire | string[];
+}
+
+export interface MarketplaceBrowseResponse {
+	sources: MarketplaceBrowseSourceState[];
+	packs: BrowsePackWire[];
 }
 
 export interface InstalledPackWire {
 	scope: MarketScope;
 	packName: string;
-	/** Structural pack id (the `market-packs/<dir>` segment) the extension-host
-	 *  APIs key packs/runtimes by — NOT the manifest `name`. Equals `packName` for
-	 *  installed packs (installed into `market-packs/<name>/`) but can DIVERGE for
-	 *  built-in packs whose shipped directory differs from their manifest name. Use
-	 *  this (not `packName`) when addressing `/api/pack-runtimes/:id/*`. Optional so
-	 *  the client still works against an older server that omits it (falls back to
-	 *  `packName`). MUST stay in sync with the server `InstalledPackWire`. */
-	packId?: string;
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
@@ -3066,8 +3309,13 @@ export function listMarketplaceSources(): Promise<MarketResult<{ sources: Market
 	return marketFetch("/api/marketplace/sources");
 }
 
-export function addMarketplaceSource(url: string, ref?: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
-	return marketFetch("/api/marketplace/sources", jsonInit("POST", ref ? { url, ref } : { url }));
+export function addMarketplaceSource(url: string, ref?: string, type?: MarketplaceSourceType): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	const body: { url: string; ref?: string; type?: MarketplaceSourceType } = { url };
+	if (ref) body.ref = ref;
+	// Preserve legacy pack-source behavior against older servers by omitting the
+	// default type; MCP gateway sources need the explicit discriminator.
+	if (type && type !== "pack") body.type = type;
+	return marketFetch("/api/marketplace/sources", jsonInit("POST", body));
 }
 
 export function removeMarketplaceSource(id: string): Promise<MarketResult<void>> {
@@ -3080,6 +3328,11 @@ export function syncMarketplaceSource(id: string): Promise<MarketResult<{ source
 
 export function browseMarketplacePacks(id: string): Promise<MarketResult<{ packs: BrowsePackWire[] }>> {
 	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/packs`);
+}
+
+export function browseMarketplace(projectId?: string): Promise<MarketResult<MarketplaceBrowseResponse>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/marketplace/browse${qs}`);
 }
 
 export function installMarketplacePack(opts: { sourceId: string; dirName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
@@ -3125,24 +3378,19 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 // /api/ext/contributions — so a disabled entity stays visible + re-enableable.
 // ============================================================================
 
-/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`.
- *  The schema-v2 arrays (`providers`/`hooks`/`mcp`/`piExtensions`/`runtimes`/
- *  `workflows`) are present only for schema≥2 packs; absent = all enabled. */
+/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`. */
 export interface DisabledRefs {
 	roles?: string[];
 	tools?: string[];
 	skills?: string[];
 	entrypoints?: string[];
-	providers?: string[];
-	hooks?: string[];
 	mcp?: string[];
 	piExtensions?: string[];
-	runtimes?: string[];
-	workflows?: string[];
+	/** contributionId -> disabled operation names. */
+	mcpOperations?: Record<string, string[]>;
 }
 
-/** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). The
- *  schema-v2 arrays are emitted only for schema≥2 packs (P3 runtimes etc.). */
+/** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
 export interface PackActivationCatalogue {
 	roles: string[];
 	/** Concrete tool names, not manifest tool-group directory names. */
@@ -3154,14 +3402,12 @@ export interface PackActivationCatalogue {
 		kind?: PackEntrypointWire["kind"];
 		routeId?: string;
 	}>;
-	/** Schema-v2 contribution basenames (loader-resolved listNames). */
-	providers?: string[];
-	hooks?: string[];
-	mcp?: string[];
-	piExtensions?: string[];
-	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
-	runtimes?: string[];
-	workflows?: string[];
+	/** MCP activation refs. Rich entries are preferred, but older backends may
+	 *  return string refs; the UI normalizes both. */
+	mcp?: Array<string | PackActivationMcpEntry>;
+	/** Pi extension activation refs. Rich entries are preferred, but older backends may
+	 *  return string refs; the UI normalizes both. */
+	piExtensions?: Array<string | PackActivationPiExtensionEntry>;
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }
@@ -3172,6 +3418,7 @@ export interface PackActivationResponse {
 	packName: string;
 	catalogue: PackActivationCatalogue;
 	disabled: DisabledRefs;
+	revision?: string;
 }
 
 export function getPackActivation(scope: MarketScope, packName: string, projectId?: string): Promise<MarketResult<PackActivationResponse>> {
@@ -3184,194 +3431,13 @@ export function setPackActivation(opts: { scope: MarketScope; projectId?: string
 	return marketFetch("/api/marketplace/pack-activation", jsonInit("PUT", opts));
 }
 
-// ============================================================================
-// PACK MANAGED RUNTIMES (P3 — modes/consent design §8)
-//
-// Docker-backed runtimes a pack ships are consent-gated: the enable card must
-// disclose images/services, host ports, the data/volume path and the
-// memory/trust copy BEFORE the runtime starts. `startPolicy: on-enable` runtimes
-// start ONLY from the explicit pack-activation enable action — never on
-// boot/install/update. The capability summary is derived from the validated
-// manifest + selected mode (no Docker required), so the disclosure renders even
-// when Docker is unavailable or the runtime is stopped. External mode is a
-// non-Docker setup path and reports `dockerRequired: false`.
-// ============================================================================
-
-/** One exposed host port for the enable-card disclosure. Mirrors the server's
- *  `PackRuntimeCapabilityPort` shape (pack-runtime-supervisor.ts) — there is no
- *  human `label`; the env var name / manifest key serve as the label. */
-export interface PackRuntimePortInfo {
-	/** Manifest persistence/env key (e.g. `HINDSIGHT_API_PORT`). */
-	key: string;
-	/** Env var name the chosen host port is exposed under, when declared. */
-	env?: string;
-	/** Informational container-side port the service listens on. */
-	container?: number;
-	/** Allocated/persisted host port when one is already known (loopback-bound). */
-	host?: number;
-}
-
-/** Capability disclosure for a managed runtime, derived from the manifest +
- *  selected mode (design §8). Used to render the consent enable-card. */
-export interface PackRuntimeCapabilitySummary {
-	packId: string;
-	runtimeId: string;
-	/** Resolved deployment mode the summary describes (e.g. `managed-postgres`). */
-	mode?: string;
-	/** Service/image names that will run for the selected mode (post-omit). */
-	services: string[];
-	/** Exposed host ports (loopback) the runtime will bind. */
-	ports: PackRuntimePortInfo[];
-	/** Effective host data/volume path for managed modes (e.g. `~/.hindsight`). */
-	volumePath?: string;
-	/** True for Docker-managed modes; false for the external (no-Docker) path. */
-	dockerRequired?: boolean;
-	/** First-party memory/trust disclosure copy. */
-	trust?: string;
-}
-
-/** Build the URL-safe runtime API id (`<packId>:<runtimeId>`) the
- *  `/api/pack-runtimes/:id/*` routes expect (mirrors the server's
- *  encodePackRuntimeId). `packId` is the pack's structural id (== packName for
- *  first-party built-ins). */
-export function encodeRuntimeApiId(packId: string, runtimeId: string): string {
-	return `${encodeURIComponent(packId)}:${encodeURIComponent(runtimeId)}`;
-}
-
-/** GET capability disclosure for the consent enable-card. Best-effort: returns a
- *  MarketResult so the UI degrades gracefully (static copy) when the route is
- *  unavailable. `mode` selects the deployment mode to summarise. */
-export function getPackRuntimeCapabilities(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeCapabilitySummary>> {
-	const params = new URLSearchParams();
-	if (opts.projectId) params.set("projectId", opts.projectId);
-	if (opts.mode) params.set("mode", opts.mode);
-	const qs = params.toString();
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/capabilities${qs ? `?${qs}` : ""}`);
-}
-
-/** POST `docker compose down` for a managed runtime. `volumes`+`removeState`
- *  effect an explicit PURGE (down -v + runtime-state removal); without them this
- *  is the uninstall-grade down that preserves bind-mounted data. */
-export function downPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<MarketResult<{ status: string }>> {
-	// `projectId` goes on the query string (the server's down route reads it from
-	// the query, not the JSON body); only `volumes`/`removeState` ride the body.
-	const params = new URLSearchParams();
-	if (opts.projectId) params.set("projectId", opts.projectId);
-	const qs = params.toString();
-	const body: Record<string, unknown> = {};
-	if (opts.volumes) body.volumes = true;
-	if (opts.removeState) body.removeState = true;
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/down${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
-}
-
-/** POST explicit purge for a pack runtime: `down -v` + runtime-state removal
- *  (removes Docker volumes and supervisor-owned state). Destructive. */
-export function purgePackRuntime(opts: { scope: MarketScope; packName: string; runtimeId: string; projectId?: string }): Promise<MarketResult<{ status?: string }>> {
-	return marketFetch("/api/marketplace/purge-runtime", jsonInit("POST", opts));
-}
-
-// ── Live runtime status + explicit start/stop (Hindsight UX polish, design §5.1) ──
-// These mirror the server `PackRuntimeStatus` shape served by `GET /api/pack-runtimes`
-// (runtimes/pack-runtime-supervisor.ts) — do NOT invent fields. Reading status is a
-// PURE read (the supervisor `list`/`status` never starts Docker); the ONLY Docker
-// start path is the explicit {@link startPackRuntime} call wired to a user click.
-
-/** One compose service's reported state in a {@link PackRuntimeStatus}. Mirrors the
- *  server `PackRuntimeServiceStatus`. */
-export interface PackRuntimeServiceStatus {
-	name: string;
-	state?: string;
-	health?: string;
-}
-
-/** Live status of a managed pack runtime, mirroring the server `PackRuntimeStatus`
- *  (runtimes/pack-runtime-supervisor.ts). `status` is the supervisor's literal state;
- *  `docker-unavailable` means Docker is not installed/running (the runtime is
- *  effectively stopped). `id` is the URL-safe `encodePackRuntimeId(packId,runtimeId)`. */
-export interface PackRuntimeStatus {
-	id: string;
-	packId: string;
-	packName?: string;
-	runtimeId: string;
-	title?: string;
-	description?: string;
-	status: "docker-unavailable" | "stopped" | "starting" | "running" | "unhealthy";
-	mode?: string;
-	composeProject?: string;
-	services?: PackRuntimeServiceStatus[];
-	message?: string;
-}
-
-/** GET the live status of every managed pack runtime. PURE read — never starts
- *  Docker (the supervisor `list` only inspects). Best-effort MarketResult so the
- *  marketplace degrades gracefully (no status strip) when the supervisor is
- *  unavailable (503) or Docker is absent. */
-export function listPackRuntimes(projectId?: string): Promise<MarketResult<{ runtimes: PackRuntimeStatus[] }>> {
-	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-	return marketFetch(`/api/pack-runtimes${qs}`);
-}
-
-/** POST an EXPLICIT start for a managed pack runtime (`/api/pack-runtimes/:id/start`).
- *  This is the ONLY Docker-starting path from the marketplace — it must be wired to a
- *  user click behind the consent disclosure, never to a status/capability read or page
- *  load. An external (non-managed) deployment answers 409 (no Docker to start) →
- *  surfaced as `ok:false`. `mode` overrides the deployment-derived runtime mode. */
-export function startPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string; mode?: string }): Promise<MarketResult<PackRuntimeStatus>> {
-	const params = new URLSearchParams();
-	if (opts.projectId) params.set("projectId", opts.projectId);
-	const qs = params.toString();
-	const body: Record<string, unknown> = {};
-	if (opts.mode) body.mode = opts.mode;
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/start${qs ? `?${qs}` : ""}`, jsonInit("POST", body));
-}
-
-/** POST stop for a managed pack runtime (`/api/pack-runtimes/:id/stop`). Brings the
- *  Docker containers down (preserving data); never destructive. */
-export function stopPackRuntime(opts: { packId: string; runtimeId: string; projectId?: string }): Promise<MarketResult<PackRuntimeStatus>> {
-	const params = new URLSearchParams();
-	if (opts.projectId) params.set("projectId", opts.projectId);
-	const qs = params.toString();
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/stop${qs ? `?${qs}` : ""}`, jsonInit("POST", {}));
-}
-
-/** GET recent logs for a managed pack runtime (`/api/pack-runtimes/:id/logs`). PURE
- *  read — never starts Docker. `tail` bounds the line count. A missing-Docker install
- *  answers 200 with `{ logs:"", status:"docker-unavailable" }`. */
-export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; projectId?: string; tail?: number }): Promise<MarketResult<{ logs: string; status?: string; message?: string }>> {
-	const params = new URLSearchParams();
-	if (opts.projectId) params.set("projectId", opts.projectId);
-	if (typeof opts.tail === "number") params.set("tail", String(opts.tail));
-	const qs = params.toString();
-	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
-}
-
-/** GET a BUILT-IN pack's read-only route output as a PURE, SESSIONLESS read
- *  (`GET /api/ext/pack-route/:packId/:routeName`). The Marketplace uses this to read
- *  built-in Hindsight `status`/`config` after `#/market` navigation has cleared the
- *  active chat session — the surface-token path (`getLauncherHost` → `host.callRoute`)
- *  would 403 there because minting a surface token requires an active session.
- *  Admin-bearer + GET-only + built-in-pack-only on the server; it NEVER mutates and
- *  NEVER starts Docker (status/capability reads only; the only Docker start path stays
- *  the explicit {@link startPackRuntime} click). `packId` is the pack's STRUCTURAL id
- *  (use the installed row's `packId`, which equals `packName` for first-party packs). */
-export function readBuiltinPackRoute<T = unknown>(opts: { packId: string; routeName: string; projectId?: string }): Promise<MarketResult<T>> {
-	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
-	return marketFetch<T>(`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`);
-}
-
-/** POST a BUILT-IN pack's `config` route as a PURE, SESSIONLESS write
- *  (`POST /api/ext/pack-route/:packId/config`), mirroring {@link readBuiltinPackRoute}
- *  but carrying a JSON body. The Marketplace uses this to SAVE built-in Hindsight
- *  config inline after `#/market` navigation has cleared the active chat session (the
- *  surface-token path would 403 there). Admin-bearer + POST + built-in-pack-only on
- *  the server, ALLOWLISTED to the `config` route name only; it persists config to the
- *  pack store and NEVER starts Docker. The `config` route validates the body and
- *  returns the redacted effective config (or a `CONFIG_INVALID` structured error).
- *  `routeName` is "config" (the only writable route). */
-export function writeBuiltinPackRoute<T = unknown>(opts: { packId: string; routeName: string; body: unknown; projectId?: string }): Promise<MarketResult<T>> {
-	const qs = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : "";
-	return marketFetch<T>(
-		`/api/ext/pack-route/${encodeURIComponent(opts.packId)}/${encodeURIComponent(opts.routeName)}${qs}`,
-		jsonInit("POST", opts.body),
-	);
+export function setMcpOperationActivation(opts: {
+	scope: MarketScope;
+	projectId?: string;
+	contributionId: string;
+	operationName: string;
+	disabled: boolean;
+	expectedRevision?: string;
+}): Promise<MarketResult<PackActivationResponse>> {
+	return marketFetch("/api/marketplace/pack-activation/mcp-operation", jsonInit("PATCH", opts));
 }

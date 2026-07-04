@@ -33,6 +33,7 @@ const { initPromptDirs } = await import("../src/server/agent/system-prompt.ts");
 initPromptDirs(stateDir);
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
+const PINNED_OPENROUTER_MODEL = { provider: "openrouter", id: "anthropic/claude-3.5-sonnet" };
 const AUTH_ERROR_SECRET = "sk-or-secret-never-log";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_ERROR_SECRET}`;
 
@@ -89,9 +90,12 @@ function makeBridge(overrides: Record<string, any> = {}): any {
 	};
 }
 
+const FAKE_OPENAI_KEY = "sk-openai-unrelated-never-inject";
+
 function preferencesWithOpenRouterKey(): any {
 	const prefs = new PreferencesStore(stateDir);
 	prefs.set("providerKey.openrouter", FAKE_OPENROUTER_KEY);
+	prefs.set("providerKey.openai", FAKE_OPENAI_KEY);
 	return prefs;
 }
 
@@ -126,7 +130,10 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			return makeBridge({
 				getState: mock.fn(async () => ({
 					success: true,
-					data: { sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl") },
+					data: {
+						model: PINNED_OPENROUTER_MODEL,
+						sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl"),
+					},
 				})),
 			});
 		});
@@ -143,7 +150,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
 			sessionId: "s-openrouter-initial-direct",
 			sandboxed: false,
-			skipAutoModel: true,
+			initialModel: "openrouter/anthropic/claude-3.5-sonnet",
 			skipAutoThinking: true,
 		});
 		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
@@ -153,6 +160,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			FAKE_OPENROUTER_KEY,
 			"OPENROUTER_INITIAL_KEY_BRIDGE_MISSING: initial direct/non-sandbox session setup must inject providerKey.openrouter as OPENROUTER_API_KEY",
 		);
+		assert.equal(capturedOptions?.env?.OPENAI_API_KEY, undefined, "unrelated saved provider keys must not be injected into an OpenRouter session env");
 		assert.equal(capturedOptions?.env?.BOBBIT_SESSION_ID, "s-openrouter-initial-direct");
 		assert.equal(typeof capturedOptions?.env?.BOBBIT_SESSION_SECRET, "string");
 		assert.notEqual(capturedOptions?.env?.BOBBIT_SESSION_SECRET, "");
@@ -175,7 +183,12 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		let capturedOptions: any | undefined;
 		registerRpcBridgeFactory((options: any) => {
 			capturedOptions = options;
-			return makeBridge();
+			return makeBridge({
+				getState: mock.fn(async () => ({
+					success: true,
+					data: { model: PINNED_OPENROUTER_MODEL },
+				})),
+			});
 		});
 
 		const manager: any = new SessionManager({ preferencesStore: prefs });
@@ -200,6 +213,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			FAKE_OPENROUTER_KEY,
 			"OPENROUTER_KEY_BRIDGE_MISSING: providerKey.openrouter from Settings must be injected into direct/non-sandbox RpcBridgeOptions.env as OPENROUTER_API_KEY",
 		);
+		assert.equal(capturedOptions?.env?.OPENAI_API_KEY, undefined, "restored OpenRouter sessions must not receive unrelated saved provider keys");
 	});
 
 	it("provider-auth prompt failures clear wasStreaming/streamingStartedAt and surface a credential fix or retry action", async (t) => {
@@ -421,6 +435,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		manager.sessions.set(session.id, session);
 		const event = {
 			type: "message_end",
+			error: AUTH_ERROR,
 			message: {
 				id: "m-auth-error",
 				role: "assistant",

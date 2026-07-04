@@ -64,7 +64,7 @@ import {
 	nestingDepthOf,
 	resolveDepthControl,
 } from "./subgoal-eligibility.js";
-import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
+import { PROPOSAL_TYPES, type GoalWorkflowValidationError, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
@@ -154,26 +154,39 @@ let _staffProposalRolesLoaded = false;
 let _creatingStaff = false;
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal).
- *  Normalizes against the loaded workflow cache: a proposed id that isn't a configured
- *  workflow falls back to the first available id so the dropdown's displayed option and
- *  the underlying state always agree. The post-load `normalizeWorkflowSelections()` is the
- *  safety net for the case where the cache hadn't loaded yet when this was called. */
+ *  Normalizes ordinary goal forms against the loaded workflow cache, but preserves
+ *  missing/unknown selections for failed workflow-validation proposals so the UI
+ *  doesn't hide the server rejection by silently selecting the first workflow. */
 export function setSelectedWorkflowId(id: string): void {
-	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !_cachedWorkflows.some(w => w.id === id))
+	const inlineWorkflow = selectedInlineWorkflowDraft();
+	if (inlineWorkflow) {
+		_selectedWorkflowId = inlineWorkflow.id;
+		return;
+	}
+	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !isKnownWorkflowId(id) && !shouldPreserveFailedWorkflowSelection())
 		? (_cachedWorkflows[0]?.id ?? "")
 		: id;
 }
 
 /** Normalize the workflow form selections against the loaded workflow cache.
- *  Whenever the list is available, any empty or phantom (not-in-list) selection is
- *  reset to the first available id so the rendered <select> option and the form state
- *  always agree. A value already present in the list is never clobbered. */
+ *  Ordinary empty/phantom selections fall back to the first available id. Failed
+ *  workflow-validation proposals keep the exact missing/unknown value so the
+ *  selector remains visibly invalid until corrected. */
 function normalizeWorkflowSelections(): void {
+	const inlineWorkflow = selectedInlineWorkflowDraft();
+	if (inlineWorkflow) {
+		_selectedWorkflowId = inlineWorkflow.id;
+		_proposalWorkflowId = inlineWorkflow.id;
+		return;
+	}
 	if (_cachedWorkflows.length === 0) return;
 	const ids = new Set(_cachedWorkflows.map(w => w.id));
 	const first = _cachedWorkflows[0].id;
-	if (!ids.has(_selectedWorkflowId)) _selectedWorkflowId = first;
-	if (!ids.has(_proposalWorkflowId)) _proposalWorkflowId = first;
+	const preserveInvalid = shouldPreserveFailedWorkflowSelection();
+	if (!ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;
+	if (!ids.has(_proposalWorkflowId) && !preserveInvalid) {
+		_proposalWorkflowId = first;
+	}
 }
 
 // Test affordance (mirrors main.ts's `__bobbitState` / `__bobbitRenderApp`):
@@ -227,6 +240,86 @@ function workflowStateFor(projectId: string | undefined): "no-project" | "loadin
 		return (_workflowCacheByProject.get(projectId) || []).length === 0 ? "empty" : "ready";
 	}
 	return "loading";
+}
+
+function activeGoalWorkflowValidationError(): GoalWorkflowValidationError | undefined {
+	return (state.activeProposals.goal as any)?.workflowValidationError;
+}
+
+function shouldPreserveFailedWorkflowSelection(): boolean {
+	return !!activeGoalWorkflowValidationError();
+}
+
+function isKnownWorkflowId(id: string): boolean {
+	return _cachedWorkflows.some(w => w.id === id);
+}
+
+function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null): boolean {
+	return _cachedWorkflows.length > 0 && !hasValidInlineWorkflowDraft(inlineWorkflow) && !isKnownWorkflowId(id);
+}
+
+function hasValidInlineWorkflowDraft(inlineWorkflow?: Workflow | null): inlineWorkflow is Workflow {
+	return !!inlineWorkflow
+		&& typeof inlineWorkflow.id === "string"
+		&& inlineWorkflow.id.length > 0
+		&& Array.isArray(inlineWorkflow.gates);
+}
+
+function selectedInlineWorkflowDraft(): Workflow | null {
+	return hasValidInlineWorkflowDraft(_proposalInlineWorkflow) ? _proposalInlineWorkflow : null;
+}
+
+type WorkflowSelectOption = {
+	id: string;
+	label: string;
+	kind: "project" | "bespoke";
+};
+
+function projectWorkflowOptionLabel(workflow: Workflow): string {
+	return `${workflow.name} (${workflow.gates.length} gates)`;
+}
+
+function bespokeWorkflowOptionLabel(workflow: Workflow): string {
+	return `Bespoke (${workflow.gates.length} Gates)`;
+}
+
+function goalWorkflowSelectOptions(inlineWorkflow?: Workflow | null): WorkflowSelectOption[] {
+	const options: WorkflowSelectOption[] = [];
+	const selectedInline = hasValidInlineWorkflowDraft(inlineWorkflow) ? inlineWorkflow : null;
+	if (selectedInline) {
+		options.push({ id: selectedInline.id, label: bespokeWorkflowOptionLabel(selectedInline), kind: "bespoke" });
+	}
+	for (const workflow of _cachedWorkflows) {
+		if (workflow.id === selectedInline?.id) continue;
+		options.push({ id: workflow.id, label: projectWorkflowOptionLabel(workflow), kind: "project" });
+	}
+	return options;
+}
+
+function workflowErrorMessageWithAvailable(error: GoalWorkflowValidationError | undefined): string {
+	if (!error) return "";
+	const ids = error.availableWorkflows?.map(w => w.id).filter(Boolean) ?? [];
+	if (ids.length === 0 || ids.some(id => error.message.includes(id))) return error.message;
+	return `${error.message} Available workflows: ${ids.join(", ")}.`;
+}
+
+function failedGoalWorkflowId(error: GoalWorkflowValidationError | undefined): string | null {
+	if (!error) return null;
+	const fields = state.activeProposals.goal?.fields as { workflow?: unknown } | undefined;
+	if (typeof fields?.workflow === "string") return fields.workflow;
+	return error.workflowId ?? "";
+}
+
+function clearActiveGoalWorkflowValidationError(): void {
+	const slot = state.activeProposals.goal as any;
+	if (!slot?.workflowValidationError) return;
+	delete slot.workflowValidationError;
+	// Clearing a failed workflow-validation error should mark the current form
+	// snapshot as already initialized. Otherwise syncProposalFormState sees the
+	// identity key change, re-seeds from the original failed fields, and can
+	// overwrite the user's corrected workflow with the first cached workflow.
+	const key = activeGoalProposalFormIdentityKey();
+	if (_proposalInitializedFrom && key) _proposalInitializedFrom = key;
 }
 
 let _sandboxStatusFetching = false;
@@ -463,6 +556,10 @@ interface GoalFormConfig {
 	 *  workflows banner. */
 	onOpenProjectAssistant?: () => void;
 
+	/** Draft-scoped workflow validation failure returned by propose_goal seed. */
+	workflowErrorMessage?: string;
+	workflowValidationFailed?: boolean;
+
 	// Field change callbacks
 	onTitleChange: (e: Event) => void;
 	onSpecChange: (e: Event) => void;
@@ -546,11 +643,9 @@ interface GoalFormConfig {
 	/** Invoked when the user changes the concurrency cap. */
 	onMaxConcurrentChildrenChange?: (value: number) => void;
 
-	// ---- Proposal-modal tabs (Goal / Workflow / Roles) ----
-	/** When true, wrap the form body in a tabbed surface with Workflow + Roles
-	 *  tabs alongside Goal. The footer stays outside the panels so submit/dismiss
-	 *  remain visible on every tab. */
-	tabbed?: boolean;
+	// ---- Goal proposal tabs (Goal / Workflow / Roles / Metadata) ----
+	/** Active tab for the always-tabbed goal proposal form. The footer stays
+	 *  outside the panels so submit/dismiss remain visible on every tab. */
 	activeTab?: ProposalTab;
 	onTabChange?: (tab: ProposalTab) => void;
 
@@ -663,8 +758,7 @@ function proposalSubgoalSubmission(opts: {
 }
 
 // ── Shared sub-goal UI fragments ────────────────────────────────────────────
-// Rendered inline on the non-tabbed +New Goal preview, and collated into the
-// dedicated "Sub-goals" tab of the tabbed goal-proposal panel.
+// Collated into the dedicated "Sub-goals" tab when the Subgoals setting is on.
 
 /** Parent-goal picker row. */
 function renderParentPickerRow(config: GoalFormConfig, lblCls: string): TemplateResult {
@@ -921,12 +1015,19 @@ function renderGoalForm(config: GoalFormConfig) {
 	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
 	const wfState = config.workflowState ?? "ready";
-	const noWorkflows = wfState === "empty";
-	const workflowsLoading = wfState === "loading";
+	const inlineWorkflow = hasValidInlineWorkflowDraft(config.inlineWorkflow) ? config.inlineWorkflow : null;
+	const selectedWorkflowId = inlineWorkflow?.id ?? config.workflowId;
+	const workflowOptions = goalWorkflowSelectOptions(inlineWorkflow);
+	const noWorkflows = wfState === "empty" && workflowOptions.length === 0;
+	const workflowsLoading = wfState === "loading" && workflowOptions.length === 0;
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
 		: worktreePreviewPath(config.cwd, config.title);
-	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
+	const selectedLibraryWorkflow = _cachedWorkflows.find(w => w.id === selectedWorkflowId) ?? null;
+	const wf = inlineWorkflow ?? selectedLibraryWorkflow;
+	const workflowInvalid = isWorkflowSelectionInvalid(selectedWorkflowId, inlineWorkflow);
+	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
+	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
 	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
 	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
@@ -959,15 +1060,15 @@ function renderGoalForm(config: GoalFormConfig) {
 	// When viewing a historical Goal (vN) tab, show that revision's number
 	// in the panel header instead of the live slot's latest rev.
 	const goalRev = (_proposalOverride?.type === "goal" ? _proposalOverride.rev : state.activeProposals.goal?.rev) ?? 0;
-	const tabbed = !!config.tabbed;
-	const activeTab: ProposalTab = config.activeTab ?? "goal";
+	const subgoalsTab = showSubgoalsTab(config);
+	const requestedActiveTab: ProposalTab = config.activeTab ?? "goal";
+	const activeTab: ProposalTab = requestedActiveTab === "subgoals" && !subgoalsTab ? "goal" : requestedActiveTab;
 	const goalBody = html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5"
-			role=${tabbed ? "tabpanel" : nothing}
-			id=${tabbed ? "goal-proposal-panel-goal" : nothing}
-			aria-labelledby=${tabbed ? "goal-proposal-tab-goal" : nothing}
-			data-testid=${tabbed ? "goal-proposal-panel-goal" : nothing}>
-			${!tabbed && goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
+			role="tabpanel"
+			id="goal-proposal-panel-goal"
+			aria-labelledby="goal-proposal-tab-goal"
+			data-testid="goal-proposal-panel-goal">
 			${noWorkflows ? html`
 				<div
 					class="rounded-md border p-3 flex flex-col gap-2"
@@ -1001,23 +1102,27 @@ function renderGoalForm(config: GoalFormConfig) {
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
 					</div>
-				` : _cachedWorkflows.length > 0 ? html`
+				` : workflowOptions.length > 0 ? html`
 					<div class="flex items-center gap-2 md:shrink-0">
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
-							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
-							.value=${config.workflowId}
+							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
+							.value=${selectedWorkflowId}
+							aria-invalid=${workflowProblem ? "true" : "false"}
 							@change=${config.onWorkflowChange}
 						>
-							${_cachedWorkflows.map((w) => html`
-								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							${workflowProblem ? html`
+								<option value=${selectedWorkflowId} ?selected=${true} disabled>
+									${selectedWorkflowId ? `Unknown workflow: ${selectedWorkflowId}` : "Select workflow"}
+								</option>
+							` : ""}
+							${workflowOptions.map((option) => html`
+								<option value=${option.id} ?selected=${selectedWorkflowId === option.id}>${option.label}</option>
 							`)}
 						</select>
 					</div>
 				` : ""}
 			</div>
-			${!tabbed && config.subgoalsEnabled ? renderParentPickerRow(config, lblCls) : ""}
-			${!tabbed ? renderSubgoalBreadcrumb(config) : ""}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
 					<span class="${lblCls} w-20 md:w-16">Worktree</span>
@@ -1096,9 +1201,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						` : ''}
 					</label>
 				`;})}
-				${!tabbed ? renderSubgoalsToggle(config) : ""}
 			</div>
-			${!tabbed ? renderGoalMetadataEditor(config) : ""}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<div class="flex items-center gap-1">
@@ -1156,7 +1259,18 @@ function renderGoalForm(config: GoalFormConfig) {
 	`;
 	const footer = html`
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-			<div class="flex items-center justify-end gap-2">
+			<div class="flex items-center justify-between gap-3">
+				<div class="min-w-0 flex-1">
+					${workflowErrorMessage ? html`
+						<div
+							class="text-xs leading-snug truncate"
+							style="color: var(--negative);"
+							data-testid="goal-proposal-workflow-error"
+							title=${workflowErrorMessage}
+						>${workflowErrorMessage}</div>
+					` : ""}
+				</div>
+				<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
 				${config.commentable && _goalAnnCount > 0 && !config.streaming ? Button({
 					variant: "secondary",
@@ -1175,20 +1289,17 @@ function renderGoalForm(config: GoalFormConfig) {
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
 				<span
 					data-testid="proposal-primary-submit"
-					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : ""}
+					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : workflowErrorMessage ? workflowErrorMessage : ""}
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || workflowProblem,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
+				</div>
 			</div>
 		</div>
 	`;
-	if (!tabbed) {
-		return html`${goalBody}${footer}`;
-	}
-	const subgoalsTab = showSubgoalsTab(config);
 	const onTabChange = (t: ProposalTab) => config.onTabChange?.(t);
 	const onTabKey = (e: KeyboardEvent) => {
 		const order: ProposalTab[] = subgoalsTab ? ["goal", "workflow", "roles", "metadata", "subgoals"] : ["goal", "workflow", "roles", "metadata"];
@@ -1276,7 +1387,7 @@ function renderGoalForm(config: GoalFormConfig) {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — WORKFLOW TAB
+// GOAL PROPOSAL — WORKFLOW TAB
 //
 // A workflow <select> (synced to the Goal tab's picker via the shared
 // config.workflowId / config.onWorkflowChange) with a Customise/Revert toggle
@@ -1287,30 +1398,40 @@ function renderGoalForm(config: GoalFormConfig) {
 // `config.onInlineWorkflowChange` and NEVER mutates the project workflow store.
 // ============================================================================
 function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
-	const selectedId = config.workflowId;
 	const workflows = _cachedWorkflows;
-	const inline = config.inlineWorkflow ?? null;
+	const inline = hasValidInlineWorkflowDraft(config.inlineWorkflow) ? config.inlineWorkflow : null;
+	const selectedId = inline?.id ?? config.workflowId;
+	const workflowOptions = goalWorkflowSelectOptions(inline);
 	const customizing = !!config.customizingWorkflow && !!inline;
-	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
+	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? null;
 	const displayWf = inline ?? selectedLibrary;
+	const workflowInvalid = isWorkflowSelectionInvalid(selectedId, inline);
+	const workflowProblem = workflowInvalid || !!config.workflowValidationFailed;
+	const workflowErrorMessage = config.workflowErrorMessage && workflowProblem ? config.workflowErrorMessage : "";
 	return html`
 		<div class="flex-1 overflow-hidden flex flex-col min-h-0 min-w-0"
 			role="tabpanel"
 			id="goal-proposal-panel-workflow"
 			aria-labelledby="goal-proposal-tab-workflow"
 			data-testid="goal-proposal-panel-workflow">
-			${workflows.length === 0
+			${workflowOptions.length === 0
 				? html`<p class="text-xs text-muted-foreground px-5 pt-3">No workflows available for this project.</p>`
 				: html`
 					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
 						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
 						<select
-							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
 							data-testid="goal-proposal-workflow-select"
 							.value=${selectedId}
+							aria-invalid=${workflowProblem ? "true" : "false"}
 							@change=${config.onWorkflowChange}>
-							${workflows.map((w) => html`
-								<option value=${w.id} ?selected=${selectedId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							${workflowProblem ? html`
+								<option value=${selectedId} ?selected=${true} disabled>
+									${selectedId ? `Unknown workflow: ${selectedId}` : "Select workflow"}
+								</option>
+							` : ""}
+							${workflowOptions.map((option) => html`
+								<option value=${option.id} ?selected=${selectedId === option.id}>${option.label}</option>
 							`)}
 						</select>
 						${customizing
@@ -1324,13 +1445,17 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 									variant: "secondary",
 									size: "sm",
 									onClick: () => config.onCustomizeWorkflow?.(),
-									disabled: !selectedLibrary,
+									disabled: !selectedLibrary || !config.onCustomizeWorkflow,
 									children: html`<span data-testid="goal-proposal-workflow-customize">Customise for this goal</span>`,
 							  })}
 					</div>
 					<hr class="shrink-0 border-t border-border" />
 					<div class="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-3">
-						${customizing && inline
+						${workflowProblem ? html`
+							<div class="rounded-md border p-3 text-sm" style="border-color: color-mix(in oklch, var(--negative) 45%, transparent); background: color-mix(in oklch, var(--negative) 8%, transparent); color: var(--negative);">
+								${workflowErrorMessage || (selectedId ? `Unknown workflow: ${selectedId}` : "Select a workflow before creating this goal.")}
+							</div>
+						` : customizing && inline
 							? renderWorkflowEditor({
 								workflow: inline,
 								onChange: (wf) => config.onInlineWorkflowChange?.(wf),
@@ -1344,7 +1469,7 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — ROLES TAB
+// GOAL PROPOSAL — ROLES TAB
 //
 // Reuses renderRoleList / renderRoleInspector / renderRoleEditor exported
 // from src/app/role-manager-page.ts. Customisations are kept in a
@@ -1403,6 +1528,7 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 								variant: "secondary",
 								size: "sm",
 								onClick: () => config.onCustomizeRole?.(),
+								disabled: !config.onCustomizeRole,
 								children: html`<span data-testid="goal-proposal-role-customize">Customize for this goal</span>`,
 						  })) : nothing}
 				</div>
@@ -1434,10 +1560,10 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — METADATA TAB
+// GOAL PROPOSAL — METADATA TAB
 //
-// Reuses the goal metadata editor so tabbed proposals share the same draft rows
-// and submit semantics as the non-tabbed Goal form.
+// Reuses the goal metadata editor so every goal proposal surface shares the
+// same draft rows and submit semantics.
 // ============================================================================
 function renderProposalMetadataTab(config: GoalFormConfig): TemplateResult {
 	return html`
@@ -1452,7 +1578,7 @@ function renderProposalMetadataTab(config: GoalFormConfig): TemplateResult {
 }
 
 // ============================================================================
-// PROPOSAL MODAL — SUB-GOALS TAB
+// GOAL PROPOSAL — SUB-GOALS TAB
 //
 // Collates the per-goal nesting controls: parent picker, breadcrumb, and the
 // allow-subgoals toggle + max-depth control.
@@ -1508,8 +1634,8 @@ function goalPreviewPanel() {
 	// 1. Active session's projectId (server inherits this for re-attempts).
 	// 2. Original goal's projectId via reattemptGoalId.
 	// 3. Match proposal cwd against a registered project's rootPath.
-	if (!state.previewProjectId) {
-		const sid = activeSessionId();
+	{
+		const sid = state.activeProposals.goal?.sessionId || activeSessionId();
 		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
 		let candidate = sess?.projectId;
 		if (!candidate && sess?.reattemptGoalId) {
@@ -1523,12 +1649,34 @@ function goalPreviewPanel() {
 				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
 			}
 		}
-		if (candidate && state.projects.some(p => p.id === candidate)) {
+		if (candidate && state.projects.some(p => p.id === candidate) && state.previewProjectId !== candidate) {
 			state.previewProjectId = candidate;
 		}
 	}
+	useGoalProposalTabsContext(goalProposalTabsContextKey("preview"));
+	// The assistant preview renders from state.preview* mirrors, but Workflow /
+	// Roles tab drafts live in the shared proposal-tab state. Hydrate proposal-
+	// supplied inline workflow/role snapshots here too so assistant, +New Goal,
+	// re-attempt, and project-scoped goal creation stay behaviorally equivalent
+	// to the non-assistant proposal panel.
+	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	ensureProposalRolesLoaded();
+	ensureProposalGroupPoliciesLoaded();
+	ensureToolsLoaded();
+	const subgoalsEnabled = isSubgoalsEnabled();
+	const maxNestingDepth = getSystemMaxNestingDepth();
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	const workflowValidationError = inlineWorkflowDraft ? undefined : activeGoalWorkflowValidationError();
+	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
+	const failedWorkflowId = failedGoalWorkflowId(workflowValidationError);
+	const assistantWorkflowId = inlineWorkflowDraft?.id ?? failedWorkflowId ?? _selectedWorkflowId;
+	const assistantWorkflowBlocked = !!workflowValidationError || isWorkflowSelectionInvalid(assistantWorkflowId, inlineWorkflowDraft);
+	const setAssistantWorkflowId = (id: string) => {
+		_selectedWorkflowId = id;
+		if (isKnownWorkflowId(_selectedWorkflowId)) clearActiveGoalWorkflowValidationError();
+	};
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1537,13 +1685,21 @@ function goalPreviewPanel() {
 			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
 			return;
 		}
-		// Guard: refuse to accept while the linked project has no workflows.
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
+		// Guard: refuse to accept while the linked project has no workflows unless
+		// the proposal carries its own inline workflow body.
 		// The form's banner handles the affordance; this is the defensive backstop.
-		if (workflowStateFor(state.previewProjectId) === "empty") {
+		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
 			showConnectionError(
 				"This project has no workflows yet",
 				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
 			);
+			return;
+		}
+
+		if (assistantWorkflowBlocked) {
+			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
 			return;
 		}
 
@@ -1552,12 +1708,31 @@ function goalPreviewPanel() {
 		// title between attempts).
 		const sessionId = activeSessionId();
 		const projectId = state.previewProjectId || undefined;
-		const workflowId = _selectedWorkflowId || undefined;
+		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
+			? _proposalInlineRoles as Record<string, unknown>
+			: undefined;
+		const workflowId = inlineWorkflowField ? undefined : (assistantWorkflowId || undefined);
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
+		const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
+		const subgoalSubmission = proposalSubgoalSubmission({
+			subgoalsEnabled,
+			parentGoalId: parentGoalIdField,
+			systemCap: maxNestingDepth,
+			allowedValue: _proposalSubgoalsAllowed,
+			configuredValue: _proposalMaxNestingDepth,
+		});
+		const isRootProposal = !parentGoalIdField;
+		const allowsChildren = subgoalSubmission.allowsChildren;
+		const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
+			? _proposalDivergencePolicy
+			: undefined;
+		const maxConcurrentChildrenField = isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
+			? _proposalMaxConcurrentChildren
+			: undefined;
 
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
@@ -1567,11 +1742,18 @@ function goalPreviewPanel() {
 			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
 				spec: state.previewSpec,
 				workflowId,
+				workflow: inlineWorkflowField,
+				inlineRoles: inlineRolesField,
 				reattemptOf: reattemptGoalId || undefined,
 				sandboxed,
 				projectId,
 				enabledOptionalSteps,
 				autoStartTeam,
+				parentGoalId: parentGoalIdField,
+				subgoalsAllowed: subgoalSubmission.subgoalsAllowed,
+				maxNestingDepth: subgoalSubmission.maxNestingDepth,
+				divergencePolicy: divergencePolicyField,
+				maxConcurrentChildren: maxConcurrentChildrenField,
 				metadata: metadataRowsToObject(state.previewMetadataRows),
 			});
 		} catch (err) {
@@ -1603,8 +1785,14 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
+		_proposalParentGoalId = "";
+		_proposalSubgoalsAllowed = null;
+		_proposalMaxNestingDepth = null;
+		_proposalDivergencePolicy = null;
+		_proposalMaxConcurrentChildren = null;
 		state.previewMetadataRows = [];
 		state.previewMetadataEdited = false;
+		resetProposalTabsState();
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1649,12 +1837,14 @@ function goalPreviewPanel() {
 				title: state.previewTitle,
 				spec: state.previewSpec,
 				cwd: state.previewCwd,
-				workflowId: _selectedWorkflowId,
+				workflowId: assistantWorkflowId,
 				sandboxed: _goalSandboxed,
 				specEditMode: state.previewSpecEditMode,
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
 				linkedProjectId: state.previewProjectId || undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
+				workflowErrorMessage,
+				workflowValidationFailed: !!workflowValidationError,
 				onOpenProjectAssistant: handleOpenProjectAssistant,
 				onTitleChange: (e: Event) => {
 					state.previewTitle = (e.target as HTMLInputElement).value;
@@ -1694,7 +1884,14 @@ function goalPreviewPanel() {
 					if (sid) saveGoalDraft(sid);
 					renderApp();
 				},
-				onWorkflowChange: (e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+				onWorkflowChange: (e: Event) => {
+					setAssistantWorkflowId((e.target as HTMLSelectElement).value);
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					clearWorkflowEditorController();
+					commitGoalProposalTabsState();
+					renderApp();
+				},
 				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
@@ -1719,6 +1916,32 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+				createDisabled: (() => {
+					if (assistantWorkflowBlocked) return true;
+					if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
+						const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
+						if (pDepth + 1 > maxNestingDepth) return true;
+					}
+					return false;
+				})(),
+				parentGoalId: _proposalParentGoalId || undefined,
+				onParentGoalChange: (id) => {
+					_proposalParentGoalId = id || "";
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+					renderApp();
+				},
+				subgoalsEnabled,
+				maxNestingDepth,
+				subgoalsAllowedValue: _proposalSubgoalsAllowed,
+				maxNestingDepthValue: _proposalMaxNestingDepth,
+				onSubgoalsAllowedChange: (value: boolean) => { _proposalSubgoalsAllowed = value; renderApp(); },
+				onMaxNestingDepthChange: (value: number | null) => { _proposalMaxNestingDepth = value; renderApp(); },
+				divergencePolicyValue: _proposalDivergencePolicy,
+				maxConcurrentChildrenValue: _proposalMaxConcurrentChildren,
+				onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
+				onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
+				...goalProposalTabsConfig(assistantWorkflowId, setAssistantWorkflowId),
 			})}
 		</div>
 	`;
@@ -2753,10 +2976,11 @@ function proposalPanelForType(type: ProposalType) {
 }
 
 // Dispatcher used by both the live current-proposal path and the
-// historical-override path. Goal proposals from the assistant flow render
-// via `goalPreviewPanel()`; everything else (including project, role, tool,
-// staff, and non-assistant goal proposals) goes through `proposalPanelForType`.
+// historical-override path. Historical goal revisions must render through the
+// override-backed proposal panel; live goal proposals from the assistant flow
+// render via `goalPreviewPanel()`.
 function proposalPanelForWorkspaceType(type: ProposalType, currentAssistantProposalType: () => ProposalType | null) {
+	if (type === "goal" && _proposalOverride?.type === "goal") return proposalPanelForType(type);
 	if (type === "goal" && currentAssistantProposalType() === "goal") return goalPreviewPanel();
 	return proposalPanelForType(type);
 }
@@ -2807,7 +3031,7 @@ let _proposalDivergencePolicy: "strict" | "balanced" | "autonomous" | null = nul
 let _proposalMaxConcurrentChildren: number | null = null;
 
 // ----------------------------------------------------------------------------
-// Proposal-modal tabs state (Goal / Workflow / Roles).
+// Goal proposal tab state (Goal / Workflow / Roles / Metadata / Sub-goals).
 //
 // `_proposalInlineWorkflow` is the draft-scoped customised workflow — when
 // non-null, the submit path forwards it as `workflow` instead of
@@ -2821,6 +3045,35 @@ let _proposalMaxConcurrentChildren: number | null = null;
 // tests/source-pin-merge-invariants.test.ts.
 // ----------------------------------------------------------------------------
 type ProposalTab = "goal" | "workflow" | "roles" | "metadata" | "subgoals";
+
+interface GoalProposalTabsState {
+	activeTab: ProposalTab;
+	inlineWorkflow: Workflow | null;
+	inlineRoles: Record<string, RoleData>;
+	selectedRoleName: string | null;
+	customizingWorkflow: boolean;
+	customizingRole: boolean;
+	roleEditTab: "prompt" | "tools" | "model";
+	roleCollapsedGroups: Set<string>;
+	tabsInitializedFrom: string | null;
+}
+
+function freshGoalProposalTabsState(): GoalProposalTabsState {
+	return {
+		activeTab: "goal",
+		inlineWorkflow: null,
+		inlineRoles: {},
+		selectedRoleName: null,
+		customizingWorkflow: false,
+		customizingRole: false,
+		roleEditTab: "prompt",
+		roleCollapsedGroups: new Set<string>(),
+		tabsInitializedFrom: null,
+	};
+}
+
+const _proposalTabsStateByContext = new Map<string, GoalProposalTabsState>();
+let _proposalTabsContextKey = "goal:default";
 let _proposalActiveTab: ProposalTab = "goal";
 let _proposalInlineWorkflow: Workflow | null = null;
 let _proposalInlineRoles: Record<string, RoleData> = {};
@@ -2838,6 +3091,61 @@ const _proposalRolesLoadingByProject = new Set<string>();
 let _proposalGroupPoliciesCache: Record<string, string> | null = null;
 let _proposalGroupPoliciesLoading = false;
 
+function activeGoalProposalTabsState(): GoalProposalTabsState {
+	let st = _proposalTabsStateByContext.get(_proposalTabsContextKey);
+	if (!st) {
+		st = freshGoalProposalTabsState();
+		_proposalTabsStateByContext.set(_proposalTabsContextKey, st);
+	}
+	return st;
+}
+
+function syncGlobalsFromGoalProposalTabsState(st: GoalProposalTabsState): void {
+	_proposalActiveTab = st.activeTab;
+	_proposalInlineWorkflow = st.inlineWorkflow;
+	_proposalInlineRoles = st.inlineRoles;
+	_proposalSelectedRoleName = st.selectedRoleName;
+	_proposalCustomizingWorkflow = st.customizingWorkflow;
+	_proposalCustomizingRole = st.customizingRole;
+	_proposalRoleEditTab = st.roleEditTab;
+	_proposalRoleCollapsedGroups = st.roleCollapsedGroups;
+	_proposalTabsInitializedFrom = st.tabsInitializedFrom;
+}
+
+function commitGoalProposalTabsState(): void {
+	const st = activeGoalProposalTabsState();
+	st.activeTab = _proposalActiveTab;
+	st.inlineWorkflow = _proposalInlineWorkflow;
+	st.inlineRoles = _proposalInlineRoles;
+	st.selectedRoleName = _proposalSelectedRoleName;
+	st.customizingWorkflow = _proposalCustomizingWorkflow;
+	st.customizingRole = _proposalCustomizingRole;
+	st.roleEditTab = _proposalRoleEditTab;
+	st.roleCollapsedGroups = _proposalRoleCollapsedGroups;
+	st.tabsInitializedFrom = _proposalTabsInitializedFrom;
+}
+
+function useGoalProposalTabsContext(key: string): GoalProposalTabsState {
+	_proposalTabsContextKey = key;
+	const st = activeGoalProposalTabsState();
+	syncGlobalsFromGoalProposalTabsState(st);
+	return st;
+}
+
+function goalProposalTabsContextKey(surface: "preview" | "proposal"): string {
+	if (_proposalOverride?.type === "goal") {
+		const sessionPart = _proposalOverrideSessionId || "no-session";
+		return `goal:historical:${sessionPart}:${_proposalOverride.rev}`;
+	}
+	const slot = state.activeProposals.goal;
+	const sid = slot?.sessionId ?? activeSessionId() ?? "no-session";
+	const sess = state.gatewaySessions.find(s => s.id === sid);
+	const projectId = state.previewProjectId || sess?.projectId || "no-project";
+	const reattempt = sess?.reattemptGoalId || "";
+	const rev = slot?.rev ?? "no-rev";
+	return `goal:${surface}:${sid}:${projectId}:${reattempt}:${rev}`;
+}
+
 function proposalRolesProjectKey(): string {
 	return state.previewProjectId || "";
 }
@@ -2853,7 +3161,15 @@ function proposalRolesLoading(): boolean {
 
 function ensureProposalRolesLoaded(): void {
 	const key = proposalRolesProjectKey();
-	if (_proposalRolesCacheByProject.has(key) || _proposalRolesLoadingByProject.has(key)) return;
+	const cached = _proposalRolesCacheByProject.get(key);
+	if (cached) {
+		if (!_proposalSelectedRoleName && cached.length > 0) {
+			_proposalSelectedRoleName = cached[0].name;
+			commitGoalProposalTabsState();
+		}
+		return;
+	}
+	if (_proposalRolesLoadingByProject.has(key)) return;
 	_proposalRolesLoadingByProject.add(key);
 	fetchRolesForProject(key || undefined)
 		.then((list) => {
@@ -2861,6 +3177,7 @@ function ensureProposalRolesLoaded(): void {
 			_proposalRolesLoadingByProject.delete(key);
 			if (proposalRolesProjectKey() === key && !_proposalSelectedRoleName && list.length > 0) {
 				_proposalSelectedRoleName = list[0].name;
+				commitGoalProposalTabsState();
 			}
 			renderApp();
 		})
@@ -2906,18 +3223,110 @@ function cloneRole(r: RoleData): RoleData {
 	};
 }
 
+function goalProposalTabsConfig(
+	workflowId: string,
+	setWorkflowId: (id: string) => void,
+): Pick<GoalFormConfig,
+	"activeTab" | "onTabChange" |
+	"inlineWorkflow" | "customizingWorkflow" | "onInlineWorkflowChange" | "onCustomizeWorkflow" | "onResetWorkflow" |
+	"inlineRoles" | "selectedRoleName" | "onSelectRole" | "customizingRole" | "onCustomizeRole" | "onResetRole" |
+	"onRoleDraftChange" | "onRoleEditorTabChange" | "onRoleToggleToolGroup" | "roleEditTab" | "roleCollapsedGroups" |
+	"roleList" | "roleListLoading" | "availableTools" | "groupPolicies"
+> {
+	return {
+		activeTab: _proposalActiveTab,
+		onTabChange: (tab) => { _proposalActiveTab = tab; commitGoalProposalTabsState(); renderApp(); },
+
+		inlineWorkflow: _proposalInlineWorkflow,
+		customizingWorkflow: _proposalCustomizingWorkflow,
+		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; commitGoalProposalTabsState(); renderApp(); },
+		onCustomizeWorkflow: () => {
+			const src = _cachedWorkflows.find((w) => w.id === workflowId) ?? _cachedWorkflows[0];
+			if (!src) return;
+			_proposalInlineWorkflow = cloneWorkflow(src);
+			_proposalCustomizingWorkflow = true;
+			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onResetWorkflow: () => {
+			_proposalInlineWorkflow = null;
+			_proposalCustomizingWorkflow = false;
+			if (!_cachedWorkflows.some((w) => w.id === workflowId)) {
+				setWorkflowId(_cachedWorkflows[0]?.id ?? "");
+			}
+			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+
+		inlineRoles: _proposalInlineRoles,
+		selectedRoleName: _proposalSelectedRoleName || proposalRolesList()[0]?.name || null,
+		onSelectRole: (name) => {
+			_proposalSelectedRoleName = name;
+			_proposalCustomizingRole = !!_proposalInlineRoles[name];
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
+		onCustomizeRole: () => {
+			const name = _proposalSelectedRoleName || proposalRolesList()[0]?.name || null;
+			if (!name) return;
+			if (!_proposalSelectedRoleName) _proposalSelectedRoleName = name;
+			const src = proposalRolesList().find((r) => r.name === name);
+			if (!src) return;
+			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
+			_proposalCustomizingRole = true;
+			_proposalRoleEditTab = "prompt";
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onResetRole: () => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			delete _proposalInlineRoles[name];
+			_proposalCustomizingRole = false;
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onRoleDraftChange: (patch) => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			const current = _proposalInlineRoles[name];
+			if (!current) return;
+			const next: RoleData = { ...current };
+			if (patch.label !== undefined) next.label = patch.label;
+			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
+			if (patch.accessory !== undefined) next.accessory = patch.accessory;
+			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
+			if (patch.model !== undefined) next.model = patch.model;
+			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
+			_proposalInlineRoles[name] = next;
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; commitGoalProposalTabsState(); renderApp(); },
+		onRoleToggleToolGroup: (group) => {
+			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
+			else _proposalRoleCollapsedGroups.add(group);
+			commitGoalProposalTabsState();
+			renderApp();
+		},
+		roleEditTab: _proposalRoleEditTab,
+		roleCollapsedGroups: _proposalRoleCollapsedGroups,
+		roleList: proposalRolesList(),
+		roleListLoading: proposalRolesLoading(),
+		availableTools: _availableTools,
+		groupPolicies: _proposalGroupPoliciesCache ?? {},
+	};
+}
+
 /** Reset all proposal-tab module state. Called when the proposal is dismissed
  *  or successfully accepted, and when syncing from a new proposal payload. */
 function resetProposalTabsState(): void {
-	_proposalActiveTab = "goal";
-	_proposalInlineWorkflow = null;
-	_proposalInlineRoles = {};
-	_proposalSelectedRoleName = null;
-	_proposalCustomizingWorkflow = false;
-	_proposalCustomizingRole = false;
-	_proposalRoleEditTab = "prompt";
-	_proposalRoleCollapsedGroups = new Set<string>();
-	_proposalTabsInitializedFrom = null;
+	const st = freshGoalProposalTabsState();
+	_proposalTabsStateByContext.set(_proposalTabsContextKey, st);
+	syncGlobalsFromGoalProposalTabsState(st);
 	clearWorkflowEditorController();
 }
 
@@ -2928,6 +3337,7 @@ function resetProposalTabsState(): void {
 // `state.activeProposals[type]`, so the live current-proposal slot is never
 // clobbered when the user views an older snapshot.
 let _proposalOverride: { type: ProposalType; fields: Record<string, unknown>; rev: number } | null = null;
+let _proposalOverrideSessionId: string | null = null;
 // Tracks the raw source `fields` reference that the current `_proposalOverride`
 // was derived from, so the identity short-circuit in `proposalPanelContent`
 // still works when we project legacy top-level commands into a synthetic
@@ -2976,18 +3386,34 @@ function projectLegacyToComponents(fields: Record<string, unknown>): Record<stri
 	return { ...fields, components: [component] };
 }
 
-/** Sync module-level form state from the active goal proposal when it changes. */
-function syncProposalFormState(): void {
+type GoalProposalFormSnapshot = {
+	title: string; spec: string; cwd?: string; workflow?: string; options?: string;
+	parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
+	subgoalsAllowed?: boolean; maxNestingDepth?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
+	metadata?: Record<string, unknown>;
+};
+
+function activeGoalProposalFormSnapshot(): GoalProposalFormSnapshot | undefined {
 	const raw = _proposalOverride?.type === "goal"
 		? _proposalOverride.fields
 		: state.activeProposals.goal?.fields;
-	const proposal = raw as undefined | {
-		title: string; spec: string; cwd?: string; workflow?: string; options?: string;
-		parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
-		subgoalsAllowed?: boolean; maxNestingDepth?: number;
-		divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
-		metadata?: Record<string, unknown>;
-	};
+	return raw as GoalProposalFormSnapshot | undefined;
+}
+
+function goalProposalFormIdentityKey(proposal: GoalProposalFormSnapshot, workflowValidationKey: string): string {
+	return `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
+}
+
+function activeGoalProposalFormIdentityKey(): string | null {
+	const proposal = activeGoalProposalFormSnapshot();
+	if (!proposal) return null;
+	return goalProposalFormIdentityKey(proposal, workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError()));
+}
+
+/** Sync module-level form state from the active goal proposal when it changes. */
+function syncProposalFormState(): void {
+	const proposal = activeGoalProposalFormSnapshot();
 	if (!proposal) return;
 
 	// --- Tab + inline-customisation reset identity ---------------------------
@@ -3014,10 +3440,18 @@ function syncProposalFormState(): void {
 			const firstCustomized = Object.keys(_proposalInlineRoles)[0];
 			if (firstCustomized) _proposalSelectedRoleName = firstCustomized;
 		}
+		commitGoalProposalTabsState();
+	}
+
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	if (inlineWorkflowDraft) {
+		_proposalWorkflowId = inlineWorkflowDraft.id;
+		_selectedWorkflowId = inlineWorkflowDraft.id;
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}`;
+	const workflowValidationKey = workflowErrorMessageWithAvailable(activeGoalWorkflowValidationError());
+	const key = goalProposalFormIdentityKey(proposal, workflowValidationKey);
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -3026,10 +3460,9 @@ function syncProposalFormState(): void {
 	// Preserve project rootPath when proposal doesn't specify cwd
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
-	_proposalWorkflowId = proposal.workflow || "";
-	if (!_proposalWorkflowId && _proposalInlineWorkflow) {
-		_proposalWorkflowId = _proposalInlineWorkflow.id;
-	}
+	const selectedInlineWorkflow = selectedInlineWorkflowDraft();
+	_proposalWorkflowId = selectedInlineWorkflow?.id || proposal.workflow || "";
+	if (selectedInlineWorkflow) _selectedWorkflowId = selectedInlineWorkflow.id;
 	// Correct a phantom/empty proposed workflow immediately when the cache is already
 	// loaded, so the rendered option and form state agree on the same render.
 	normalizeWorkflowSelections();
@@ -3056,28 +3489,37 @@ function syncProposalFormState(): void {
 function goalProposalPanel() {
 	// Populate previewProjectId for re-attempt / assistant sessions where it
 	// wasn't seeded by the +New Goal picker. Resolution order:
-	// 1. Active session's projectId (server inherits this for re-attempts).
+	// 1. Source session's projectId (server inherits this for re-attempts).
 	// 2. Original goal's projectId via reattemptGoalId.
 	// 3. Match proposal cwd against a registered project's rootPath.
-	if (!state.previewProjectId) {
-		const sid = activeSessionId();
+	//
+	// Always replace a stale previewProjectId when the current proposal resolves
+	// to a concrete project. Historical and project-scoped goal proposals may be
+	// opened after another project left state.previewProjectId populated; keeping
+	// that stale id would load and submit Workflow/Roles customisations against
+	// the wrong project.
+	{
+		const sid = _proposalOverride?.type === "goal"
+			? (_proposalOverrideSessionId || activeSessionId() || state.activeProposals.goal?.sessionId || null)
+			: (state.activeProposals.goal?.sessionId || activeSessionId());
 		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
 		let candidate = sess?.projectId;
 		if (!candidate && sess?.reattemptGoalId) {
 			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
 		}
 		if (!candidate) {
-			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			const cwd = ((_proposalOverride?.type === "goal" ? _proposalOverride.fields : state.activeProposals.goal?.fields) as any)?.cwd as string | undefined;
 			if (cwd) {
 				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 				const target = norm(cwd);
 				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
 			}
 		}
-		if (candidate && state.projects.some(p => p.id === candidate)) {
+		if (candidate && state.projects.some(p => p.id === candidate) && state.previewProjectId !== candidate) {
 			state.previewProjectId = candidate;
 		}
 	}
+	useGoalProposalTabsContext(goalProposalTabsContextKey("proposal"));
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
@@ -3086,6 +3528,10 @@ function goalProposalPanel() {
 	ensureToolsLoaded();
 	const subgoalsEnabled = isSubgoalsEnabled();
 	const maxNestingDepth = getSystemMaxNestingDepth();
+	const inlineWorkflowDraft = selectedInlineWorkflowDraft();
+	const workflowValidationError = inlineWorkflowDraft ? undefined : activeGoalWorkflowValidationError();
+	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
+	const workflowInvalid = isWorkflowSelectionInvalid(_proposalWorkflowId, inlineWorkflowDraft);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
@@ -3094,11 +3540,17 @@ function goalProposalPanel() {
 			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
 			return;
 		}
-		if (workflowStateFor(state.previewProjectId) === "empty") {
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
+		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
 			showConnectionError(
 				"This project has no workflows yet",
 				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
 			);
+			return;
+		}
+		if (workflowInvalid || !!workflowValidationError) {
+			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
 			return;
 		}
 
@@ -3153,7 +3605,6 @@ function goalProposalPanel() {
 					: undefined;
 				// Customised inline workflow takes precedence over the library
 				// workflowId. inlineRoles is only forwarded when non-empty.
-				const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
 				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 					? _proposalInlineRoles as Record<string, unknown>
 					: undefined;
@@ -3264,6 +3715,8 @@ function goalProposalPanel() {
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
 		linkedProjectId: state.previewProjectId || undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
+		workflowErrorMessage,
+		workflowValidationFailed: !!workflowValidationError,
 		onOpenProjectAssistant: handleOpenProjectAssistant,
 		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
@@ -3271,6 +3724,7 @@ function goalProposalPanel() {
 		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
 		onWorkflowChange: (e: Event) => {
 			_proposalWorkflowId = (e.target as HTMLSelectElement).value;
+			if (isKnownWorkflowId(_proposalWorkflowId)) clearActiveGoalWorkflowValidationError();
 			// Changing the picker selects a different library workflow; any prior
 			// goal-draft inline workflow customisation is for the old selection and
 			// must be cleared so submit doesn't ship stale inline content alongside
@@ -3278,6 +3732,7 @@ function goalProposalPanel() {
 			_proposalInlineWorkflow = null;
 			_proposalCustomizingWorkflow = false;
 			clearWorkflowEditorController();
+			commitGoalProposalTabsState();
 			renderApp();
 		},
 		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
@@ -3298,7 +3753,7 @@ function goalProposalPanel() {
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
 		createDisabled: (() => {
-			if (!_proposalTitle.trim() || _proposalSaving) return true;
+			if (!_proposalTitle.trim() || _proposalSaving || workflowInvalid || !!workflowValidationError) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
 			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 				const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
@@ -3321,86 +3776,8 @@ function goalProposalPanel() {
 		onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
 		onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
 
-		// ---- Proposal-modal tabs wiring ----
-		tabbed: true,
-		activeTab: _proposalActiveTab,
-		onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
-
-		inlineWorkflow: _proposalInlineWorkflow,
-		customizingWorkflow: _proposalCustomizingWorkflow,
-		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
-		onCustomizeWorkflow: () => {
-			const src = _cachedWorkflows.find((w) => w.id === _proposalWorkflowId) ?? _cachedWorkflows[0];
-			if (!src) return;
-			_proposalInlineWorkflow = cloneWorkflow(src);
-			_proposalCustomizingWorkflow = true;
-			clearWorkflowEditorController();
-			renderApp();
-		},
-		onResetWorkflow: () => {
-			_proposalInlineWorkflow = null;
-			_proposalCustomizingWorkflow = false;
-			// Normalize a stale inline-only id back to a real library workflow so
-			// submit doesn't forward a discarded inline workflow's id as `workflowId`.
-			if (!_cachedWorkflows.some((w) => w.id === _proposalWorkflowId)) {
-				_proposalWorkflowId = _cachedWorkflows[0]?.id ?? "";
-			}
-			clearWorkflowEditorController();
-			renderApp();
-		},
-
-		inlineRoles: _proposalInlineRoles,
-		selectedRoleName: _proposalSelectedRoleName,
-		onSelectRole: (name) => {
-			_proposalSelectedRoleName = name;
-			_proposalCustomizingRole = !!_proposalInlineRoles[name];
-			renderApp();
-		},
-		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
-		onCustomizeRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const src = proposalRolesList().find((r) => r.name === name);
-			if (!src) return;
-			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
-			_proposalCustomizingRole = true;
-			_proposalRoleEditTab = "prompt";
-			renderApp();
-		},
-		onResetRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			delete _proposalInlineRoles[name];
-			_proposalCustomizingRole = false;
-			renderApp();
-		},
-		onRoleDraftChange: (patch) => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const current = _proposalInlineRoles[name];
-			if (!current) return;
-			const next: RoleData = { ...current };
-			if (patch.label !== undefined) next.label = patch.label;
-			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
-			if (patch.accessory !== undefined) next.accessory = patch.accessory;
-			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
-			if (patch.model !== undefined) next.model = patch.model;
-			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
-			_proposalInlineRoles[name] = next;
-			renderApp();
-		},
-		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
-		onRoleToggleToolGroup: (group) => {
-			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
-			else _proposalRoleCollapsedGroups.add(group);
-			renderApp();
-		},
-		roleEditTab: _proposalRoleEditTab,
-		roleCollapsedGroups: _proposalRoleCollapsedGroups,
-		roleList: proposalRolesList(),
-		roleListLoading: proposalRolesLoading(),
-		availableTools: _availableTools,
-		groupPolicies: _proposalGroupPoliciesCache ?? {},
+		// ---- Goal proposal tabs wiring ----
+		...goalProposalTabsConfig(_proposalWorkflowId, (id) => { _proposalWorkflowId = id; }),
 	});
 }
 
@@ -3440,6 +3817,7 @@ export function proposalPanelContent(
 		if (!_proposalOverride || _proposalOverride.type !== type || _proposalOverrideSource !== fields || _proposalOverride.rev !== rev) {
 			const projected = type === "project" ? projectLegacyToComponents(fields) : fields;
 			_proposalOverride = { type, fields: projected, rev };
+			_proposalOverrideSessionId = typeof tab.source.sessionId === "string" ? tab.source.sessionId : null;
 			_proposalOverrideSource = fields;
 			_proposalInitializedFrom = null;
 		}
@@ -3449,6 +3827,7 @@ export function proposalPanelContent(
 		// Returning to the current tab: drop the override and force a
 		// re-hydration of the form from the live activeProposals slot.
 		_proposalOverride = null;
+		_proposalOverrideSessionId = null;
 		_proposalOverrideSource = null;
 		_proposalInitializedFrom = null;
 	}

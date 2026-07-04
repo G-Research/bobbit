@@ -92,10 +92,14 @@ const draftStatusKey = (jobId) => `${draftPrefix(jobId)}status`;
 const draftCheckpointKey = (jobId) => `${draftPrefix(jobId)}checkpoint`;
 const finalPayloadKey = (jobId) => `${finalPrefix(jobId)}payload`;
 
+const DEFAULT_KEY_QUOTA = (key) => ({ quotaScope: { prefix: key, profile: "default" } });
 const DRAFT_QUOTA = (jobId) => ({ quotaScope: { prefix: draftPrefix(jobId), profile: "review-draft" } });
 const FINAL_QUOTA = (jobId) => ({ quotaScope: { prefix: finalPrefix(jobId), profile: "review-final" } });
 const REVIEW_BINDING_QUOTA = (jobId) => ({ quotaScope: { prefix: reviewPrefix(jobId), profile: "default" } });
-const REVIEWER_INDEX_QUOTA = (sessionId) => ({ quotaScope: { prefix: reviewerIndexKey(sessionId), profile: "default" } });
+const REVIEWER_INDEX_QUOTA = (sessionId) => DEFAULT_KEY_QUOTA(reviewerIndexKey(sessionId));
+const LEGACY_BINDING_QUOTA = (sessionId) => DEFAULT_KEY_QUOTA(bindingKey(sessionId));
+const LEGACY_CARDS_QUOTA = (changesetId) => DEFAULT_KEY_QUOTA(cardsKey(changesetId));
+const LEGACY_JOB_QUOTA = (jobId) => DEFAULT_KEY_QUOTA(jobKey(jobId));
 const CHUNK_ID_PATTERN = /^(?:metadata|context|merge_assessment|omissions_and_followups|audit|display|document|decision:[A-Za-z0-9_.-]+|chunk:[A-Za-z0-9_.-]+)$/;
 const DEFAULT_PHASE_ORDER = ["orientation", "design", "significant", "other", "audit"];
 
@@ -179,12 +183,13 @@ export const routes = {
 		// title/metadata from the production YAML) over the bare local changeset.
 		const stored = await ctx.host.store.get(cardsKey(live.changesetId));
 		const hasStored = stored && Array.isArray(stored.cards) && stored.cards.length > 0;
+		const liveChangeset = decorateChangesetWithTarget(live.changeset, finalAccess.binding && finalAccess.binding.target);
 		return {
 			found: true,
 			live: true,
 			jobId,
 			changesetId: live.changesetId,
-			changeset: hasStored && stored.changeset ? stored.changeset : live.changeset,
+			changeset: hasStored && stored.changeset ? stored.changeset : liveChangeset,
 			cards: hasStored ? stored.cards : live.cards,
 			warnings: live.warnings,
 			cardsSource: hasStored ? "stored-synthesis" : "fallback",
@@ -309,6 +314,9 @@ export const routes = {
 		const isChild = childSessionId === ctx.sessionId;
 		if (!binding || binding.jobId !== requestedJobId || !(isOwner || isChild)) {
 			return { phase: "error", error: "unknown or mismatched binding", code: "PRW_MISSING_BINDING" };
+		}
+		if (ctx?.sessionArchived === true) {
+			return { phase: "error", code: "PRW_REVIEWER_ARCHIVED", error: "The reviewer session is archived.", jobId: binding.jobId };
 		}
 
 		const finalPayload = await store.get(finalPayloadKey(binding.jobId));
@@ -570,7 +578,7 @@ async function finalizePrWalkthroughSubmission(ctx, body = {}) {
 	await ctx.host.store.put(finalPayloadKey(binding.jobId), finalPayload, FINAL_QUOTA(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, stagingPrefix(binding.jobId));
 	await bestEffortDeletePrefix(ctx.host.store, draftPrefix(binding.jobId));
-	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }); } catch { /* legacy marker best-effort */ }
+	try { await ctx.host.store.put(bindingKey(ctx.sessionId), { ...binding, status: "submitted" }, LEGACY_BINDING_QUOTA(ctx.sessionId)); } catch { /* legacy marker best-effort */ }
 	return { ok: true, status: "submitted", jobId: binding.jobId, changesetId: finalPayload.changesetId, finalizedAt: finalPayload.finalizedAt, cardCount: finalPayload.cardCount };
 }
 
@@ -614,7 +622,7 @@ async function writeLegacyPublishArtifacts(store, jobId, payload) {
 		cards: payload.cards,
 		warnings: payload.warnings || [],
 		persistedAt: payload.persistedAt,
-	});
+	}, LEGACY_CARDS_QUOTA(payload.changesetId));
 	await store.put(jobKey(jobId), {
 		schemaVersion: STORE_SCHEMA_VERSION,
 		jobId,
@@ -622,7 +630,7 @@ async function writeLegacyPublishArtifacts(store, jobId, payload) {
 		baseSha: payload.baseSha,
 		headSha: payload.headSha,
 		persistedAt: payload.persistedAt,
-	});
+	}, LEGACY_JOB_QUOTA(jobId));
 }
 
 async function readChunkRecords(store, jobId) {
@@ -720,6 +728,14 @@ function trustedPrFields(binding) {
 	if (target.repo) out.repo = target.repo;
 	if (target.number !== undefined) out.number = target.number;
 	if (target.prUrl) out.url = target.prUrl;
+	if (target.prTitle || target.title) out.title = target.prTitle || target.title;
+	if (typeof target.prBody === "string") {
+		out.original_description = {
+			body: target.prBody,
+			source: target.prBodySource || "gh_cli",
+			fetched_at: target.prBodyFetchedAt || new Date(0).toISOString(),
+		};
+	}
 	if (binding.baseSha) out.base_sha = binding.baseSha;
 	if (binding.headSha) out.head_sha = binding.headSha;
 	return out;
@@ -824,6 +840,24 @@ function changesetIdFromDocument(document, baseSha, headSha) {
 
 function isFinalPayload(value) {
 	return value && typeof value === "object" && typeof value.yaml === "string" && Array.isArray(value.cards);
+}
+
+function decorateChangesetWithTarget(changeset, target) {
+	if (!target || typeof target !== "object" || target.provider !== "github") return changeset;
+	const prTitle = strOf(target.prTitle) || strOf(target.title);
+	const prBody = typeof target.prBody === "string" ? target.prBody : strOf(target.body);
+	const prUrl = strOf(target.prUrl) || strOf(target.url);
+	return {
+		...changeset,
+		provider: "github",
+		owner: strOf(target.owner) || changeset.owner,
+		repo: strOf(target.repo) || changeset.repo,
+		prNumber: target.number ?? target.prNumber ?? changeset.prNumber,
+		number: target.number ?? target.prNumber ?? changeset.number,
+		...(prUrl ? { prUrl, externalUrl: prUrl, url: prUrl } : {}),
+		...(prTitle ? { prTitle, title: prTitle } : {}),
+		...(prBody !== undefined ? { prBody, body: prBody, description: prBody } : {}),
+	};
 }
 
 function finalBundleResult(payload, jobId) {
@@ -1274,7 +1308,7 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 
 	let pr;
 	try {
-		const out = await io.gh(cwd, ["pr", "view", "--json", "number,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
+		const out = await io.gh(cwd, ["pr", "view", "--json", "number,title,body,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
 		pr = JSON.parse(String(out).trim());
 	} catch {
 		return noPr; // gh non-zero / no PR for branch / gh unavailable
@@ -1323,6 +1357,10 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 			owner,
 			repo,
 			prNumber: pr.number,
+			prTitle: strOf(pr.title),
+			prBody: typeof pr.body === "string" ? pr.body : undefined,
+			prBodySource: "gh_cli",
+			prBodyFetchedAt: new Date().toISOString(),
 			prUrl: strOf(pr.url),
 			baseSha,
 			headSha,
@@ -1354,15 +1392,19 @@ async function canonicalizeTarget(input, cwd) {
 		}
 	}
 
+	const prTitle = strOf(input.prTitle) || strOf(input.title);
+	const prBody = typeof input.prBody === "string" ? input.prBody : undefined;
+	const prBodySource = strOf(input.prBodySource);
+	const prBodyFetchedAt = strOf(input.prBodyFetchedAt);
 	if (owner && repo && number !== undefined) {
 		const url = prUrl || `https://${host}/${owner}/${repo}/pull/${number}`;
 		const canonicalKey = host === "github.com"
 			? `github:${owner}/${repo}#${number}`
 			: `github:${host}/${owner}/${repo}#${number}`;
-		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, host, canonicalKey };
+		return { provider: "github", prUrl: url, prTitle, prBody, prBodySource, prBodyFetchedAt, owner, repo, number, baseSha, headSha, host, canonicalKey };
 	}
 	if (number !== undefined) {
-		return { provider: "github", prUrl, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
+		return { provider: "github", prUrl, prTitle, prBody, prBodySource, prBodyFetchedAt, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
 	}
 	if (baseSha && headSha) {
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };

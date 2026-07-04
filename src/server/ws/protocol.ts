@@ -66,9 +66,33 @@ export interface SessionCostSnapshot {
 	cacheHitRate?: number | null;
 }
 
+export type HostChannelFrame =
+	| { kind: "text"; data: string }
+	| { kind: "json"; data: unknown };
+
+export interface HostChannelOpenInit {
+	data?: unknown;
+	singletonKey?: string;
+}
+
+export interface ChannelInfo {
+	id: string;
+	name: string;
+	packId: string;
+	sessionId: string;
+	state: "opening" | "open" | "closing" | "closed";
+	createdAt: number;
+	lastActiveAt: number;
+	attached: boolean;
+	closeReason?: string;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
-	| { type: "auth"; token: string }
+	// `clientKind` is routing/product metadata for connection setup. It is not an
+	// unspoofable browser authority signal; endpoint auth still comes from the bearer
+	// token plus server-side session/surface/capability checks.
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[] }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
@@ -94,6 +118,14 @@ export type ClientMessage =
 	| { type: "restart_agent" }
 	| { type: "resume"; fromSeq: number }
 	| { type: "status_resync" }
+	| { type: "ext_surface_token"; requestId: string; surfaceTokenKey?: string; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string }
+	| { type: "ext_channel_open_grant"; requestId: string; surfaceToken: string; name: string; singletonKey?: string }
+	| { type: "ext_channel_open"; requestId: string; surfaceToken: string; name: string; init?: HostChannelOpenInit; openGrant: string }
+	| { type: "ext_channel_attach"; requestId: string; surfaceToken: string; channelId: string }
+	| { type: "ext_channel_list"; requestId: string; surfaceToken: string; opts?: { name?: string; includeClosed?: boolean } }
+	| { type: "ext_channel_send"; requestId: string; channelId: string; frame: HostChannelFrame }
+	| { type: "ext_channel_close"; requestId: string; channelId: string; reason?: string }
+	| { type: "ext_channel_detach"; requestId: string; channelId: string }
 	/**
 	 * C2 session-WRITE permit MINT (`host.session.postMessage` step 1) — design
 	 * extension-host-phase2.md §8 C2.1. The client requests a server-minted, one-time,
@@ -107,15 +139,16 @@ export type ClientMessage =
 	| { type: "ext_session_write_permit"; requestId: string; surfaceToken: string; contentHash: string }
 	/**
 	 * C2 session WRITE (`host.session.postMessage`) — design extension-host-phase2.md
-	 * §8 C2.1. Routed over the TRUSTED WebSocket (NOT a fetch) so no capturable
-	 * session secret ever rides a `fetch` pack code can monkey-patch, and pack code
-	 * — which has no handle to the WS — cannot send it. The TARGET session is ALWAYS
-	 * this connection's OWN authenticated session (never a frame field), so
-	 * cross-session posting is structurally impossible. `requestId` correlates the
-	 * async `ext_session_post_result` reply. `nonce` is the SERVER-MINTED, one-time,
-	 * content-bound write permit from the preceding mint — REQUIRED: a replayed or
-	 * forged frame fails permit consumption and is rejected with no post. `surfaceToken`
-	 * is the SERVER-MINTED surface binding token the server DERIVES {packId, tool} from
+	 * §8 C2.1. The sanctioned client path uses the session WebSocket (NOT a pack-
+	 * callable fetch) so the target session is this connection's OWN authenticated
+	 * session (never a frame field). Authorization/provenance comes from server-side
+	 * session binding, surface-token identity, the user-gesture-gated client mint path,
+	 * and a one-time content-bound permit — not from treating the browser transport as
+	 * an unspoofable same-origin security boundary. `requestId` correlates the async
+	 * `ext_session_post_result` reply. `nonce` is the SERVER-MINTED, one-time,
+	 * content-bound write permit from the preceding mint; replayed or forged frames
+	 * fail permit consumption and are rejected with no post. `surfaceToken` is the
+	 * SERVER-MINTED surface binding token the server DERIVES {packId, tool} from
 	 * (never a caller-supplied `tool`/`packId`; surface-binding.ts).
 	 */
 	| { type: "ext_session_post"; requestId: string; surfaceToken: string; role: "user" | "system"; text: string; resumeTurn?: boolean; nonce: string };
@@ -138,7 +171,12 @@ export interface SnapshotServerTiming {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok" }
+	| { type: "auth_ok"; surfaceTokenKey?: string }
+	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
+	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
+	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
+	| { type: "ext_channel_frame"; channelId: string; frame: HostChannelFrame }
+	| { type: "ext_channel_close"; channelId: string; reason?: string; error?: string }
 	/** Async reply to an `ext_session_write_permit` mint (C2 session write, step 1).
 	 *  On success carries the opaque one-time `nonce` to attach to `ext_session_post`;
 	 *  on failure carries the server-side reason. */

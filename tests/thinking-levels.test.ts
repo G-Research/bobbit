@@ -56,6 +56,10 @@ const matrix: MatrixRow[] = [
 	{ label: "gpt-4o (non-reasoning)", model: { id: "gpt-4o", provider: "openai", reasoning: false }, expected: ["off"] },
 	// Google / other.
 	{ label: "Gemini 3.1 Pro", model: { id: "gemini-3.1-pro", provider: "google", reasoning: true }, expected: ALL_BASE },
+	{ label: "OpenRouter z-ai/glm-5.2", model: { id: "z-ai/glm-5.2", provider: "openrouter", reasoning: true }, expected: ALL_BASE },
+	{ label: "AIGW z-ai/glm-5.2", model: { id: "z-ai/glm-5.2", provider: "aigw", reasoning: true }, expected: ALL_BASE },
+	{ label: "OpenRouter older GLM (non-reasoning)", model: { id: "z-ai/glm-4.5", provider: "openrouter", reasoning: false }, expected: ["off"] },
+	{ label: "AIGW older GLM (non-reasoning)", model: { id: "z-ai/glm-4.5", provider: "aigw", reasoning: false }, expected: ["off"] },
 	// aigw-routed Opus 4.8 / 4-7 — provider is "aigw" but id carries the canonical family.
 	{ label: "aigw/claude-opus-4-8", model: { id: "claude-opus-4-8-20260528", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "aigw/claude-opus-4.8", model: { id: "claude-opus-4.8-20260528", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
@@ -162,6 +166,14 @@ test("clampThinkingLevel: non-reasoning model collapses everything to off", () =
 test("clampThinkingLevel: medium on gpt-5.2 stays medium", () => {
 	const gpt52: ModelLike = { id: "gpt-5.2", provider: "openai", reasoning: true };
 	assert.equal(clampThinkingLevel("medium", gpt52), "medium");
+});
+
+test("clampThinkingLevel: high on OpenRouter/AIGW GLM 5.2 stays high but xhigh clamps to high", () => {
+	for (const provider of ["openrouter", "aigw"]) {
+		const glm52: ModelLike = { id: "z-ai/glm-5.2", provider, reasoning: true };
+		assert.equal(clampThinkingLevel("high", glm52), "high");
+		assert.equal(clampThinkingLevel("xhigh", glm52), "high");
+	}
 });
 
 test("clampThinkingLevel: unknown token clamps to off on any model", () => {

@@ -8,7 +8,8 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-archived-active-to
 const stateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(stateDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
-process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
+const agentDir = path.join(tmpRoot, "agent");
+process.env.BOBBIT_AGENT_DIR = agentDir;
 
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 type PersistedSession = import("../src/server/agent/session-store.ts").PersistedSession;
@@ -33,7 +34,8 @@ describe("SessionManager archived transcript reader", () => {
 	});
 
 	it("ignores Pi active_tools_change JSONL entries when loading archived messages", async () => {
-		const transcript = path.join(tmpRoot, "session.jsonl");
+		const transcript = path.join(agentDir, "sessions", "archived-active-tools", "session.jsonl");
+		fs.mkdirSync(path.dirname(transcript), { recursive: true });
 		fs.writeFileSync(transcript, [
 			{ type: "message", message: { role: "user", content: "first archived message" } },
 			{ type: "active_tools_change", activeToolNames: ["read", "bash"], reason: "pi 0.77 tool selection" },

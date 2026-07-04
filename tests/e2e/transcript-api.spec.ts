@@ -4,8 +4,8 @@
  * Backs the `read_session` tool. Tests the HTTP surface end-to-end:
  *   - happy path (slice, tail, pattern+window)
  *   - error mapping (session_not_found, transcript_unavailable, invalid_regex,
- *     invalid_params, permission_denied)
- *   - cross-project authorization via x-bobbit-session-id header
+ *     invalid_params)
+ *   - cross-project transcript access via x-bobbit-session-id header
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base } from "./e2e-setup.js";
@@ -140,6 +140,33 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect(m.content[1].type).toBe("tool_use");
 	});
 
+	test("include_tool_results query controls redaction while omitted preserves API compatibility", async ({ gateway }) => {
+		const secret = "E2E_UNIQUE_TOOL_RESULT_BODY";
+		const jsonl = makeJsonl([
+			{ role: "assistant", content: [{ type: "tool_use", id: "tu-e2e", name: "bash", input: { cmd: "echo secret" } }] },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-e2e", content: secret }] },
+		]);
+		const { id } = seedSession(gateway, {}, jsonl);
+
+		const defaultResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1`, { headers: authHeaders() });
+		expect(defaultResp.status).toBe(200);
+		const defaultBody = await defaultResp.json();
+		expect(defaultBody.messages[0].toolResults[0].preview).toBe(secret);
+
+		const redactedResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1&include_tool_results=false`, { headers: authHeaders() });
+		expect(redactedResp.status).toBe(200);
+		const redactedBody = await redactedResp.json();
+		expect(JSON.stringify(redactedBody)).not.toContain(secret);
+		expect(redactedBody.messages[0].toolResults[0].omitted).toBe(true);
+		expect(redactedBody.messages[0].toolResults[0].name).toBe("bash");
+		expect(redactedBody.messages[0].toolResults[0].size.lines).toBe(1);
+
+		const optInResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1&includeToolResults=true`, { headers: authHeaders() });
+		expect(optInResp.status).toBe(200);
+		const optInBody = await optInResp.json();
+		expect(optInBody.messages[0].toolResults[0].preview).toBe(secret);
+	});
+
 	test("session_not_found", async () => {
 		const resp = await fetch(`${base()}/api/sessions/does-not-exist/transcript`, { headers: authHeaders() });
 		expect(resp.status).toBe(404);
@@ -204,7 +231,7 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect((await resp.json()).error).toBe("invalid_params");
 	});
 
-	test("permission_denied for cross-project caller", async ({ gateway }) => {
+	test("cross-project caller can read target transcript", async ({ gateway }) => {
 		const sm = gateway.sessionManager as any;
 		const pcm = sm.getProjectContextManager?.() ?? sm.projectContextManager;
 		const reg = pcm?.registry ?? pcm?.projectRegistry ?? sm.projectRegistry;
@@ -226,14 +253,18 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect(otherProjectId).not.toBe(reg?.list?.()?.[0]?.id);
 
 		// Target session in default project, caller session in other project.
-		const jsonl = makeJsonl([{ role: "user", content: "secret" }]);
+		const jsonl = makeJsonl([{ role: "user", content: "cross-project readable transcript" }]);
 		const { id: targetId } = seedSession(gateway, {}, jsonl);
 		const { id: callerId } = seedSession(gateway, { projectId: otherProjectId }, "");
 
 		const resp = await fetch(`${base()}/api/sessions/${targetId}/transcript`, {
 			headers: authHeaders({ "x-bobbit-session-id": callerId }),
 		});
-		expect(resp.status).toBe(403);
-		expect((await resp.json()).error).toBe("permission_denied");
+		expect(resp.status).toBe(200);
+		const body = await resp.json();
+		expect(body.total).toBe(1);
+		expect(body.returned).toBe(1);
+		expect(body.messages[0].role).toBe("user");
+		expect(body.messages[0].text).toBe("cross-project readable transcript");
 	});
 });

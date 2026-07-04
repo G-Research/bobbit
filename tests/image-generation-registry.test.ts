@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, parseImageModelPref } from "../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "./helpers/agent-dir.js";
 
 function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-models-"));
@@ -54,6 +55,7 @@ test("image model registry marks OpenAI auth from Codex auth.json API key", () =
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
 	try {
 		process.env.BOBBIT_AGENT_DIR = dir;
+		pinAgentDirForTest(dir);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
 			"openai-codex": {
@@ -71,6 +73,7 @@ test("image model registry marks OpenAI auth from Codex auth.json API key", () =
 		} else {
 			process.env.BOBBIT_AGENT_DIR = previousAgentDir;
 		}
+		resetAgentDirForTest();
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
@@ -90,6 +93,7 @@ test("image model registry marks OpenAI auth from Codex OAuth", () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
 	try {
 		process.env.BOBBIT_AGENT_DIR = dir;
+		pinAgentDirForTest(dir);
 		delete process.env.OPENAI_API_KEY;
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
@@ -113,6 +117,7 @@ test("image model registry marks OpenAI auth from Codex OAuth", () => {
 		} else {
 			process.env.OPENAI_API_KEY = previousOpenAiKey;
 		}
+		resetAgentDirForTest();
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
@@ -124,6 +129,7 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
 	try {
 		process.env.BOBBIT_AGENT_DIR = dir;
+		pinAgentDirForTest(dir);
 		delete process.env.OPENAI_API_KEY;
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
@@ -165,6 +171,7 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 		} else {
 			process.env.OPENAI_API_KEY = previousOpenAiKey;
 		}
+		resetAgentDirForTest();
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

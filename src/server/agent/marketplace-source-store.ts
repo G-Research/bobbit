@@ -28,16 +28,29 @@ export function isValidSourceId(id: unknown): id is string {
 	);
 }
 
+export type MarketplaceSourceType = "pack" | "mcp-gateway";
+type StoredMarketplaceSourceType = MarketplaceSourceType | "mcp-registry";
+
 export interface MarketplaceSource {
 	/** Stable id ([a-z0-9-]+, unique). Also the cache subdir name. */
 	id: string;
-	/** Git remote URL OR absolute local directory path. */
+	/** Source kind. Absent means the legacy/default pack source type. */
+	type?: StoredMarketplaceSourceType;
+	/** Git remote URL OR absolute local directory path; MCP endpoint URL for MCP gateway sources. */
 	url: string;
-	/** Branch/tag. Optional (defaults to the remote HEAD on clone). */
+	/** Persisted readable label for MCP gateway sources. */
+	displayName?: string;
+	/** Unsuffixed normalized readable label for MCP gateway sources. */
+	normalizedName?: string;
+	/** Branch/tag. Optional for pack sources only (defaults to the remote HEAD on clone). */
 	ref?: string;
 	addedAt: string; // ISO-8601
+	/** ISO timestamp recording source-level marketplace trust acceptance. */
+	trustedAt?: string;
 	lastSyncedAt?: string; // ISO-8601
 	lastCommit?: string;
+	/** Response-only migration note for tolerated legacy source rows. */
+	unsupportedReason?: string;
 	/**
 	 * Response-only flag marking the synthetic, non-persisted built-in source
 	 * (built-in-first-party-packs §4.4). NEVER written to disk by
@@ -55,11 +68,71 @@ function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
 
+export const LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON = "mcp-registry sources are no longer supported; remove and re-add this source as an MCP Gateway source";
+
+export interface NormalizedMcpGatewaySourceName {
+	baseName: string;
+	slugBase: string;
+}
+
+function slugifySourceName(value: string): string {
+	let slug = value
+		.toLowerCase()
+		.replace(/[^a-z0-9-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.replace(/-{2,}/g, "-");
+	if (!slug || !/^[a-z0-9]/.test(slug)) slug = `source${slug ? `-${slug}` : ""}`;
+	return slug.replace(/^[^a-z0-9]+/, "") || "source";
+}
+
+export function normalizeMcpGatewaySourceName(url: string): NormalizedMcpGatewaySourceName {
+	let parsed: URL;
+	try {
+		parsed = new URL(url.trim());
+	} catch {
+		throw new Error(`invalid mcp-gateway source url: ${url}`);
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("mcp-gateway source url must use http or https");
+	let baseName = `${parsed.host}${parsed.pathname}`.replace(/\/+$/g, "");
+	if (!baseName || baseName === parsed.host) baseName = parsed.host;
+	return { baseName, slugBase: slugifySourceName(baseName) };
+}
+
+function uniqueSourceIdFromSlug(slugBase: string, taken: ReadonlySet<string>): string {
+	let slug = slugBase || "source";
+	if (!/^[a-z0-9]/.test(slug)) slug = `source-${slug}`;
+	if (!taken.has(slug)) return slug;
+	let n = 2;
+	while (taken.has(`${slug}-${n}`)) n++;
+	return `${slug}-${n}`;
+}
+
+function normalizeStoredSourceType(v: unknown): StoredMarketplaceSourceType | null {
+	if (v === undefined || v === "pack") return "pack";
+	if (v === "mcp-gateway") return "mcp-gateway";
+	if (v === "mcp-registry") return "mcp-registry";
+	return null;
+}
+
+function normalizeNewSourceType(v: unknown): MarketplaceSourceType | null {
+	if (v === undefined || v === "pack") return "pack";
+	if (v === "mcp-gateway") return "mcp-gateway";
+	return null;
+}
+
+function publicSource(s: MarketplaceSource): MarketplaceSource {
+	const out = { ...s };
+	if (out.type === "mcp-registry") out.unsupportedReason = LEGACY_MCP_REGISTRY_UNSUPPORTED_REASON;
+	return out;
+}
+
 function parseSource(raw: unknown): MarketplaceSource | null {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
 	const r = raw as Record<string, unknown>;
 	if (!isValidSourceId(r.id)) return null;
 	if (!nonEmptyString(r.url)) return null;
+	const type = normalizeStoredSourceType(r.type);
+	if (!type) return null;
 	// §4.1/§4.4 — the built-in source is synthetic and composed only at the API
 	// layer. Reject any disk-authored row that would duplicate or shadow it so a
 	// hand-edited/legacy `marketplace-sources.yaml` can never collide with it.
@@ -69,7 +142,21 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 		url: (r.url as string).trim(),
 		addedAt: nonEmptyString(r.addedAt) ? (r.addedAt as string) : new Date().toISOString(),
 	};
-	if (nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
+	if (type !== "pack") s.type = type;
+	// Non-pack sources do not support refs. Ignore malformed on-disk refs rather
+	// than preserving them across the next save.
+	if (type === "mcp-gateway") {
+		try {
+			const normalized = normalizeMcpGatewaySourceName(s.url);
+			s.normalizedName = nonEmptyString(r.normalizedName) ? (r.normalizedName as string).trim() : normalized.baseName;
+			s.displayName = nonEmptyString(r.displayName) ? (r.displayName as string).trim() : s.normalizedName;
+		} catch {
+			if (nonEmptyString(r.normalizedName)) s.normalizedName = (r.normalizedName as string).trim();
+			if (nonEmptyString(r.displayName)) s.displayName = (r.displayName as string).trim();
+		}
+	}
+	if (type === "pack" && nonEmptyString(r.ref)) s.ref = (r.ref as string).trim();
+	if (nonEmptyString(r.trustedAt)) s.trustedAt = r.trustedAt as string;
 	if (nonEmptyString(r.lastSyncedAt)) s.lastSyncedAt = r.lastSyncedAt as string;
 	if (typeof r.lastCommit === "string") s.lastCommit = r.lastCommit;
 	return s;
@@ -77,8 +164,14 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 
 function serializeSource(s: MarketplaceSource): Record<string, unknown> {
 	const out: Record<string, unknown> = { id: s.id, url: s.url };
-	if (s.ref) out.ref = s.ref;
+	if (s.type && s.type !== "pack") out.type = s.type;
+	if (s.type === "mcp-gateway") {
+		if (s.displayName) out.displayName = s.displayName;
+		if (s.normalizedName) out.normalizedName = s.normalizedName;
+	}
+	if ((!s.type || s.type === "pack") && s.ref) out.ref = s.ref;
 	out.addedAt = s.addedAt;
+	if (s.trustedAt) out.trustedAt = s.trustedAt;
 	if (s.lastSyncedAt) out.lastSyncedAt = s.lastSyncedAt;
 	if (s.lastCommit) out.lastCommit = s.lastCommit;
 	return out;
@@ -156,18 +249,18 @@ export class MarketplaceSourceStore {
 
 	/** All registered sources (defensive copies), in registration order. */
 	list(): MarketplaceSource[] {
-		return this.sources.map((s) => ({ ...s }));
+		return this.sources.map(publicSource);
 	}
 
 	get(id: string): MarketplaceSource | undefined {
 		const s = this.sources.find((x) => x.id === id);
-		return s ? { ...s } : undefined;
+		return s ? publicSource(s) : undefined;
 	}
 
 	getByUrl(url: string): MarketplaceSource | undefined {
 		const norm = url.trim();
 		const s = this.sources.find((x) => x.url === norm);
-		return s ? { ...s } : undefined;
+		return s ? publicSource(s) : undefined;
 	}
 
 	/**
@@ -175,38 +268,72 @@ export class MarketplaceSourceStore {
 	 * url. Returns the created record (sync metadata is filled in later by the
 	 * install engine after a successful git sync).
 	 */
-	add(input: { url: string; ref?: string }): MarketplaceSource {
+	add(input: { url: string; ref?: string; type?: MarketplaceSourceType | "mcp-registry" }): MarketplaceSource {
 		const url = input.url.trim();
 		if (!nonEmptyString(url)) throw new Error("source url is required");
+		if (input.type === "mcp-registry") throw new Error("mcp-registry sources are no longer supported; use type mcp-gateway");
+		const type = normalizeNewSourceType(input.type);
+		if (!type) throw new Error(`invalid source type: ${String(input.type)}`);
+		if (type === "mcp-gateway" && nonEmptyString(input.ref)) throw new Error("mcp-gateway sources do not support ref");
 		// Reject the reserved built-in url scheme (§4.4): the built-in source is
 		// synthetic and must never be user-registered/persisted.
 		if (url === BUILTIN_SOURCE_URL || url.toLowerCase().startsWith("builtin:")) {
 			throw new Error(`the built-in source cannot be added`);
 		}
 		if (this.getByUrl(url)) throw new Error(`source already registered: ${url}`);
-		const id = deriveSourceId(url, new Set(this.sources.map((s) => s.id)));
+		let displayName: string | undefined;
+		let normalizedName: string | undefined;
+		let idBase: string | undefined;
+		if (type === "mcp-gateway") {
+			const normalized = normalizeMcpGatewaySourceName(url);
+			normalizedName = normalized.baseName;
+			displayName = this.uniqueGatewayDisplayName(normalized.baseName);
+			idBase = slugifySourceName(displayName);
+		}
+		const takenIds = new Set(this.sources.map((s) => s.id));
+		const id = idBase ? uniqueSourceIdFromSlug(idBase, takenIds) : deriveSourceId(url, takenIds);
 		// Reject the reserved built-in id (§4.4) even if a url happens to slug to it.
 		if (id === BUILTIN_SOURCE_ID) throw new Error(`the built-in source cannot be added`);
+		const now = new Date().toISOString();
 		const source: MarketplaceSource = {
 			id,
 			url,
-			addedAt: new Date().toISOString(),
+			addedAt: now,
+			trustedAt: now,
 		};
-		if (nonEmptyString(input.ref)) source.ref = input.ref!.trim();
+		if (type !== "pack") source.type = type;
+		if (displayName) source.displayName = displayName;
+		if (normalizedName) source.normalizedName = normalizedName;
+		if (type === "pack" && nonEmptyString(input.ref)) source.ref = input.ref!.trim();
 		this.sources.push(source);
 		this.save();
-		return { ...source };
+		return publicSource(source);
 	}
 
-	/** Patch sync metadata after a git sync. No-op if id unknown. */
-	update(id: string, patch: Partial<Pick<MarketplaceSource, "ref" | "lastSyncedAt" | "lastCommit">>): MarketplaceSource | undefined {
+	private uniqueGatewayDisplayName(baseName: string): string {
+		const used = new Set(this.sources
+			.filter((s) => s.type === "mcp-gateway")
+			.map((s) => s.displayName)
+			.filter((s): s is string => typeof s === "string" && s.length > 0));
+		if (!used.has(baseName)) return baseName;
+		let n = 2;
+		while (used.has(`${baseName} (${n})`)) n++;
+		return `${baseName} (${n})`;
+	}
+
+	/** Patch sync metadata after a sync. No-op if id unknown. */
+	update(id: string, patch: Partial<Pick<MarketplaceSource, "ref" | "trustedAt" | "lastSyncedAt" | "lastCommit">>): MarketplaceSource | undefined {
 		const s = this.sources.find((x) => x.id === id);
 		if (!s) return undefined;
-		if (patch.ref !== undefined) s.ref = patch.ref || undefined;
+		if (patch.ref !== undefined) {
+			if (s.type && s.type !== "pack" && patch.ref) throw new Error(`${s.type} sources do not support ref`);
+			s.ref = patch.ref || undefined;
+		}
+		if (patch.trustedAt !== undefined) s.trustedAt = patch.trustedAt || undefined;
 		if (patch.lastSyncedAt !== undefined) s.lastSyncedAt = patch.lastSyncedAt;
 		if (patch.lastCommit !== undefined) s.lastCommit = patch.lastCommit;
 		this.save();
-		return { ...s };
+		return publicSource(s);
 	}
 
 	/** Remove a source. Returns true if it existed. */

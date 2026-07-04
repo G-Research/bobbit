@@ -8,15 +8,17 @@ import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
-import type { ClientMessage, ServerMessage } from "./protocol.js";
+import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
+import { normalizeToolResultErrorSnapshot } from "../agent/tool-result-error-normalizer.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
@@ -29,12 +31,13 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
-import { resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
+import { mintSurfaceToken, resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
+import type { PreferencesStore } from "../agent/preferences-store.js";
+import { applyRuntimeSessionModelSelection } from "./runtime-model-selection.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
-import { assertRuntimeSwitchAllowed, isRuntimeSwitchError } from "../agent/session-runtime.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -84,8 +87,6 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
 	const data: Record<string, unknown> = {};
-	if (persisted?.runtime) data.runtime = persisted.runtime;
-	if (persisted?.claudeCodeSessionId) data.claudeCodeSessionId = persisted.claudeCodeSessionId;
 	if (persisted?.modelProvider && persisted?.modelId) {
 		const meta = inferMeta(persisted.modelId);
 		data.model = {
@@ -128,7 +129,7 @@ function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, se
  * `getState()` push.
  */
 function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string; runtime?: string; claudeCodeSessionId?: string },
+	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string },
 	sessionManager: SessionManager,
 	sessionId: string,
 ): Record<string, unknown> {
@@ -139,8 +140,6 @@ function buildArchivedStateData(
 		status: "archived",
 		statusVersion: 0,
 	};
-	if (archived.runtime) data.runtime = archived.runtime;
-	if (archived.claudeCodeSessionId) data.claudeCodeSessionId = archived.claudeCodeSessionId;
 	if (archived.modelProvider && archived.modelId) {
 		const meta = inferMeta(archived.modelId);
 		data.model = {
@@ -200,6 +199,16 @@ function send(ws: WebSocket, msg: ServerMessage): void {
 	}
 }
 
+function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
+	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	return new Promise((resolve, reject) => {
+		ws.send(JSON.stringify(msg), (err) => {
+			if (err) reject(err);
+			else resolve();
+		});
+	});
+}
+
 function getViewerGoalIds(ws: WebSocket): Set<string> {
 	const existing = (ws as any).viewerGoalIds;
 	if (existing instanceof Set) return existing;
@@ -233,6 +242,71 @@ function getClientIp(req: IncomingMessage): string {
 	return req.socket.remoteAddress || "unknown";
 }
 
+type ChannelOpenPermitBinding = {
+	sessionId: string;
+	packId: string;
+	contributionId: string;
+	channelName: string;
+	singletonKey?: string;
+};
+
+type ChannelOpenPermitService = {
+	mint(binding: ChannelOpenPermitBinding): string;
+	consume?(openPermit: string | undefined, binding: ChannelOpenPermitBinding): unknown;
+};
+
+type ExtensionChannelClient = {
+	onFrame(frame: HostChannelFrame): void | Promise<void>;
+	onClose(ev: { reason?: string; error?: string }): void;
+};
+
+type ChannelContributionLike = { name: string; protocol?: string; module?: string; handler?: string; quotas?: unknown; capabilities?: unknown };
+
+type ExtensionChannelRegistry = {
+	open(input: { sessionId: string; projectId?: string; packId: string; contribution: ChannelContributionLike & { contributionId: string }; init?: { data?: unknown; singletonKey?: string }; openPermit: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
+	attach(input: { sessionId: string; packId: string; channelId: string; clientId: string; client: ExtensionChannelClient }): Promise<ChannelInfo> | ChannelInfo;
+	list(input: { sessionId: string; packId: string; clientId?: string; name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]> | ChannelInfo[];
+	send(input: { sessionId: string; packId: string; channelId: string; clientId: string; frame: HostChannelFrame }): Promise<void> | void;
+	close(input: { sessionId: string; packId: string; channelId: string; clientId?: string; reason?: string }): Promise<void> | void;
+	detach(input: { sessionId: string; packId: string; channelId: string; clientId?: string }): Promise<void> | void;
+};
+
+const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
+const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
+const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
+
+type ExtensionChannelClientMessageType = Extract<ClientMessage, { type: `ext_channel_${string}` }>['type'];
+
+const EXTENSION_CHANNEL_CLIENT_MESSAGE_TYPES: ReadonlySet<ExtensionChannelClientMessageType> = new Set([
+	"ext_channel_open_grant",
+	"ext_channel_open",
+	"ext_channel_attach",
+	"ext_channel_list",
+	"ext_channel_send",
+	"ext_channel_close",
+	"ext_channel_detach",
+]);
+
+function rawWsMessageBytes(data: unknown): number {
+	if (Array.isArray(data)) return data.reduce((sum, part) => sum + rawWsMessageBytes(part), 0);
+	if (typeof data === "string") return Buffer.byteLength(data);
+	if (Buffer.isBuffer(data)) return data.byteLength;
+	if (data instanceof ArrayBuffer) return data.byteLength;
+	if (ArrayBuffer.isView(data)) return data.byteLength;
+	return Buffer.byteLength(String(data));
+}
+
+function isExtensionChannelClientMessageType(type: unknown): type is ExtensionChannelClientMessageType {
+	return typeof type === "string" && EXTENSION_CHANNEL_CLIENT_MESSAGE_TYPES.has(type as ExtensionChannelClientMessageType);
+}
+
+function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
+	if (!frame || typeof frame !== "object") return false;
+	const f = frame as { kind?: unknown; data?: unknown };
+	return (f.kind === "text" && typeof f.data === "string")
+		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
+}
+
 export function handleWebSocketConnection(
 	ws: WebSocket,
 	sessionId: string,
@@ -246,10 +320,42 @@ export function handleWebSocketConnection(
 	projectContextManager?: ProjectContextManager,
 	toolManager?: ToolManager,
 	packContributionRegistry?: PackContributionResolver,
+	preferencesStore?: PreferencesStore,
+	channelRegistry?: ExtensionChannelRegistry,
+	channelOpenPermits?: ChannelOpenPermitService,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
 	const clientId = randomUUID();
+	let surfaceTokenAuthorityKey: string | undefined;
+	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
+
+	const sendExtChannelFailure = (requestId: string, err: unknown, fallback = "channel operation failed"): void => {
+		const record = err as { code?: unknown; status?: unknown; message?: unknown };
+		const message = typeof record?.message === "string" && record.message.length > 0 ? record.message : fallback;
+		const error = typeof record?.code === "string" && record.code.length > 0 ? record.code : message;
+		const status = typeof record?.status === "number" ? record.status : undefined;
+		send(ws, { type: "ext_channel_result", requestId, ok: false, error, message, status });
+	};
+	const sendExtChannelEnvelopeTooLarge = (msg: Extract<ClientMessage, { type: `ext_channel_${string}` }>): void => {
+		const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+		if (!requestId) {
+			send(ws, { type: "error", message: EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE, code: "FRAME_TOO_LARGE" });
+			return;
+		}
+		if (msg.type === "ext_channel_open_grant") {
+			send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "FRAME_TOO_LARGE" });
+			return;
+		}
+		send(ws, {
+			type: "ext_channel_result",
+			requestId,
+			ok: false,
+			error: "FRAME_TOO_LARGE",
+			message: EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE,
+			status: 413,
+		});
+	};
 
 	// 5-second window to authenticate before disconnection
 	const authTimeout = setTimeout(() => {
@@ -259,6 +365,11 @@ export function handleWebSocketConnection(
 	}, 5000);
 
 	ws.on("message", async (data) => {
+		const frameBytes = rawWsMessageBytes(data);
+		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
+			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
+			return;
+		}
 		let msg: ClientMessage;
 		try {
 			msg = JSON.parse(data.toString());
@@ -348,11 +459,23 @@ export function handleWebSocketConnection(
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
-			// The C2 session WRITE (`host.session.postMessage`) is driven over THIS trusted,
-			// authenticated connection (see the `ext_session_post` command below) — pack code
-			// has no handle to the WS and cannot send on it, so no session secret needs to be
-			// delivered to (and capturable from) the client at all.
-			send(ws, { type: "auth_ok" });
+			// Pack-bound surface-token minting uses an app-connection protocol key so
+			// sanctioned Host API calls bind to this authenticated session and an active
+			// pack contribution. `clientKind` is routing/product metadata, not a browser
+			// security boundary against same-origin code that already has the bearer token.
+			// Authority is per app connection, not singleton per session, so multiple tabs
+			// can each mint scoped pack surface tokens without stealing lifecycle state.
+			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
+			if (authMsg.clientKind === "app") {
+				surfaceTokenAuthorityKey = randomUUID();
+			}
+
+			// The sanctioned C2 session WRITE (`host.session.postMessage`) path is driven
+			// over this authenticated connection (see `ext_session_post` below). Server-side
+			// session binding, surface-token resolution, and one-time content-bound permits
+			// are the authorization/provenance checks; the WS client kind is not a durable
+			// same-origin security boundary.
+			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -409,23 +532,6 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 
-			// Claude Code sessions do not always have a Pi agentSessionFile. Push an
-			// initial live snapshot on attach so a freshly opened local-runtime session
-			// hydrates from the bridge's in-memory transcript without changing Pi attach behavior.
-			const persistedForAttach = sessionManager.getPersistedSession(sessionId);
-			if (persistedForAttach?.runtime === "claude-code" || persistedForAttach?.modelProvider === "claude-code") {
-				session.rpcClient.getMessages?.()
-					.then(async (msgs: any) => {
-						if (!msgs?.success) return;
-						const raw = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgs.data ?? msgs) as any;
-						let data: any = raw;
-						if (Array.isArray(raw)) data = truncateLargeToolContentInMessages(raw);
-						else if (raw && Array.isArray(raw.messages)) data = { ...raw, messages: truncateLargeToolContentInMessages(raw.messages) };
-						send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
-					})
-					.catch(() => {});
-			}
-
 			// Rehydrate any on-disk proposal drafts for this session so the
 			// client can rebuild its activeProposals slot after a server restart
 			// or fresh attach. Fire-and-forget; never blocks auth.
@@ -463,6 +569,11 @@ export function handleWebSocketConnection(
 			if (pendingPerm) {
 				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
+			return;
+		}
+
+		if (isExtensionChannelClientMessageType(msg.type) && frameBytes > MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES) {
+			sendExtChannelEnvelopeTooLarge(msg as Extract<ClientMessage, { type: `ext_channel_${string}` }>);
 			return;
 		}
 
@@ -525,6 +636,14 @@ export function handleWebSocketConnection(
 				case "prompt":
 					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
 					break;
+				case "ext_surface_token":
+					// Pack-bound Host API calls (session-menu launchers, panels) may be clicked
+					// while a newly-created session is still preparing. Surface-token minting is
+					// authorization-only and does not touch the agent turn, so let it proceed;
+					// the subsequent scoped REST/route call carries the minted token and remains
+					// server-authorized. Blocking this frame makes launchers hang waiting for an
+					// ext_surface_token_result that never arrives.
+					break;
 				default:
 					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
 					return;
@@ -532,7 +651,51 @@ export function handleWebSocketConnection(
 		}
 
 		try {
+			const mintPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
+				if (!surfaceTokenAuthorityKey || tokenMsg.surfaceTokenKey !== surfaceTokenAuthorityKey) {
+					return { ok: false, error: "pack-bound surface-token mint requires app surface-token key" };
+				}
+				const packId = typeof tokenMsg.packId === "string" ? tokenMsg.packId : "";
+				const contributionKind = typeof tokenMsg.contributionKind === "string" ? tokenMsg.contributionKind : "";
+				const contributionRef = typeof tokenMsg.contributionId === "string" ? tokenMsg.contributionId : "";
+				if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") return { ok: false, error: "invalid contributionKind" };
+				if (!packId || !contributionRef) return { ok: false, error: "packId and contributionId are required" };
+				if (!packContributionRegistry) return { ok: false, error: "surface tokens are available only to installed, active pack contributions" };
+				const pack = packContributionRegistry.getPack(session.projectId, packId);
+				let exists = false;
+				if (pack) {
+					if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(session.projectId, packId, contributionRef);
+					else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(session.projectId, packId, contributionRef);
+					else exists = packContributionRegistry.hasRoute(session.projectId, packId, contributionRef);
+				}
+				if (!pack || !exists) return { ok: false, error: "surface tokens are available only to installed, active pack contributions" };
+				return { ok: true, token: mintSurfaceToken({ sessionId, packId, contributionId: `${contributionKind}:${contributionRef}` }) };
+			};
+			const resolveExtChannelSurface = (surfaceToken: unknown): ReturnType<typeof resolveSurfaceIdentity> => {
+				const projectTm = session.projectId && projectContextManager
+					? projectContextManager.getOrCreate(session.projectId)?.toolManager
+					: undefined;
+				const extToolManager = toolManager
+					? resolveActionToolManager(toolManager, projectTm)
+					: projectTm;
+				return extToolManager
+					? resolveSurfaceIdentity({ token: surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
+					: ({ ok: false, status: 403, error: "channels are available only to market-pack contributions" } as const);
+			};
+			const hasChannelContribution = (packId: string, name: string): boolean => {
+				const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => unknown }) | undefined;
+				if (!resolver?.getChannel) return true; // Core schema branch supplies this; until then registry.open remains authoritative.
+				return !!resolver.getChannel(session.projectId, packId, name);
+			};
 			switch (msg.type) {
+				case "ext_surface_token": {
+					const tokenMsg = msg as Extract<ClientMessage, { type: "ext_surface_token" }>;
+					const requestId = typeof tokenMsg.requestId === "string" ? tokenMsg.requestId : "";
+					const minted = mintPackSurfaceToken(tokenMsg);
+					if (minted.ok) send(ws, { type: "ext_surface_token_result", requestId, ok: true, token: minted.token });
+					else send(ws, { type: "ext_surface_token_result", requestId, ok: false, error: minted.error });
+					break;
+				}
 				case "prompt": {
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
@@ -687,22 +850,14 @@ export function handleWebSocketConnection(
 					break;
 				case "set_model":
 					try {
-						const persisted = sessionManager.getPersistedSession(session.id);
-						assertRuntimeSwitchAllowed(persisted?.runtime, msg.provider);
-						const result = await session.rpcClient.setModel(msg.provider, msg.modelId);
-						if (result && result.success === false) {
-							throw new Error(result.error || "model switch rejected by runtime");
-						}
-						sessionManager.updateModelNameFile(session.id, msg.modelId);
-						sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
+						await applyRuntimeSessionModelSelection(sessionManager, session, msg.provider, msg.modelId, preferencesStore, broadcast);
 					} catch (err: any) {
 						// Surface set_model failures to the UI instead of silently swallowing
 						// them — otherwise the client keeps showing the new model while the
 						// agent stays bound to the previous one and subsequent prompts go
 						// to the wrong model.
-						const code = isRuntimeSwitchError(err) ? "RUNTIME_SWITCH_REQUIRES_NEW_SESSION" : "SET_MODEL_FAILED";
 						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
-						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code });
+						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
 				case "set_image_model": {
@@ -731,12 +886,7 @@ export function handleWebSocketConnection(
 					let level: string = known;
 					const persisted = sessionManager.getPersistedSession(session.id);
 					if (persisted?.modelId) {
-						const meta = inferMeta(persisted.modelId);
-						const clamped = clampThinkingLevel(level, {
-							id: persisted.modelId,
-							provider: persisted.modelProvider,
-							reasoning: meta.reasoning,
-						});
+						const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
 						if (clamped) level = clamped;
 					}
 					await session.rpcClient.setThinkingLevel(level);
@@ -892,7 +1042,7 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgsResp.data as any) as any;
+						const raw = normalizeToolResultErrorSnapshot(msgsResp.data as any);
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
@@ -1013,7 +1163,7 @@ export function handleWebSocketConnection(
 							restored.rpcClient.getMessages?.()
 								.then((msgs: any) => {
 									if (!msgs) return;
-									const raw = msgs.data ?? msgs;
+									const raw = normalizeToolResultErrorSnapshot(msgs.data ?? msgs);
 									let data: any = raw;
 									if (Array.isArray(raw)) {
 										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);
@@ -1070,14 +1220,237 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
+				case "ext_channel_open_grant": {
+					const grantMsg = msg as Extract<ClientMessage, { type: "ext_channel_open_grant" }>;
+					const requestId = typeof grantMsg.requestId === "string" ? grantMsg.requestId : "";
+					const name = typeof grantMsg.name === "string" ? grantMsg.name.trim() : "";
+					const singletonKey = typeof grantMsg.singletonKey === "string" ? grantMsg.singletonKey : undefined;
+					if (!channelOpenPermits) {
+						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel open grants are not configured" });
+						break;
+					}
+					const surf = resolveExtChannelSurface(grantMsg.surfaceToken);
+					if (!surf.ok || !name) {
+						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: surf.ok ? "missing channel name" : surf.error });
+						break;
+					}
+					if (!hasChannelContribution(surf.packId, name)) {
+						send(ws, { type: "ext_channel_open_grant_result", requestId, ok: false, error: "channel is not declared by this pack" });
+						break;
+					}
+					const openGrant = channelOpenPermits.mint({ sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, singletonKey });
+					send(ws, { type: "ext_channel_open_grant_result", requestId, ok: true, openGrant });
+					break;
+				}
+				case "ext_channel_open": {
+					const openMsg = msg as Extract<ClientMessage, { type: "ext_channel_open" }>;
+					const requestId = typeof openMsg.requestId === "string" ? openMsg.requestId : "";
+					try {
+						const name = typeof openMsg.name === "string" ? openMsg.name.trim() : "";
+						if (!channelRegistry || !channelOpenPermits) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry/open grants are not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(openMsg.surfaceToken);
+						if (!surf.ok || !name) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel name" : surf.error });
+							break;
+						}
+						const resolver = packContributionRegistry as (PackContributionResolver & { getChannel?: (projectId: string | undefined, packId: string, name: string) => ChannelContributionLike | undefined }) | undefined;
+						const contribution = resolver?.getChannel?.(session.projectId, surf.packId, name);
+						if (!contribution) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not declared by this pack" });
+							break;
+						}
+						let openedChannelId = "";
+						const pendingChannelEvents: Array<{ type: "frame"; frame: HostChannelFrame } | { type: "close"; ev: { reason?: string; error?: string } }> = [];
+						const flushPendingChannelEvents = () => {
+							for (const event of pendingChannelEvents.splice(0)) {
+								if (event.type === "frame") send(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame: event.frame });
+								else {
+									attachedExtChannels.delete(openedChannelId);
+									send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: event.ev.reason, error: event.ev.error });
+								}
+							}
+						};
+						const channel = await channelRegistry.open({
+							sessionId,
+							projectId: session.projectId,
+							packId: surf.packId,
+							contribution: { ...contribution, contributionId: surf.contributionId },
+							init: openMsg.init,
+							openPermit: openMsg.openGrant,
+							clientId,
+							client: {
+								onFrame: (frame) => {
+									if (!openedChannelId) {
+										pendingChannelEvents.push({ type: "frame", frame });
+										return;
+									}
+									return sendAsync(ws, { type: "ext_channel_frame", channelId: openedChannelId, frame });
+								},
+								onClose: (ev) => {
+									if (!openedChannelId) pendingChannelEvents.push({ type: "close", ev });
+									else {
+										attachedExtChannels.delete(openedChannelId);
+										send(ws, { type: "ext_channel_close", channelId: openedChannelId, reason: ev.reason, error: ev.error });
+									}
+								},
+							},
+						});
+						openedChannelId = channel.id;
+						attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+						flushPendingChannelEvents();
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
+				case "ext_channel_attach": {
+					const attachMsg = msg as Extract<ClientMessage, { type: "ext_channel_attach" }>;
+					const requestId = typeof attachMsg.requestId === "string" ? attachMsg.requestId : "";
+					try {
+						const channelId = typeof attachMsg.channelId === "string" ? attachMsg.channelId : "";
+						if (!channelRegistry) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(attachMsg.surfaceToken);
+						if (!surf.ok || !channelId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.ok ? "missing channel id" : surf.error });
+							break;
+						}
+						let attachedChannelId = "";
+						const pendingChannelEvents: Array<{ type: "frame"; frame: HostChannelFrame } | { type: "close"; ev: { reason?: string; error?: string } }> = [];
+						const flushPendingChannelEvents = () => {
+							for (const event of pendingChannelEvents.splice(0)) {
+								if (event.type === "frame") send(ws, { type: "ext_channel_frame", channelId: attachedChannelId, frame: event.frame });
+								else {
+									attachedExtChannels.delete(attachedChannelId);
+									send(ws, { type: "ext_channel_close", channelId: attachedChannelId, reason: event.ev.reason, error: event.ev.error });
+								}
+							}
+						};
+						const channel = await channelRegistry.attach({
+							sessionId,
+							packId: surf.packId,
+							channelId,
+							clientId,
+							client: {
+								onFrame: (frame) => {
+									if (!attachedChannelId) {
+										pendingChannelEvents.push({ type: "frame", frame });
+										return;
+									}
+									return sendAsync(ws, { type: "ext_channel_frame", channelId: attachedChannelId, frame });
+								},
+								onClose: (ev) => {
+									if (!attachedChannelId) pendingChannelEvents.push({ type: "close", ev });
+									else {
+										attachedExtChannels.delete(attachedChannelId);
+										send(ws, { type: "ext_channel_close", channelId: attachedChannelId, reason: ev.reason, error: ev.error });
+									}
+								},
+							},
+						});
+						attachedChannelId = channel.id;
+						attachedExtChannels.set(channel.id, { sessionId, packId: surf.packId });
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channel });
+						flushPendingChannelEvents();
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
+				case "ext_channel_list": {
+					const listMsg = msg as Extract<ClientMessage, { type: "ext_channel_list" }>;
+					const requestId = typeof listMsg.requestId === "string" ? listMsg.requestId : "";
+					try {
+						if (!channelRegistry) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel registry is not configured" });
+							break;
+						}
+						const surf = resolveExtChannelSurface(listMsg.surfaceToken);
+						if (!surf.ok) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: surf.error });
+							break;
+						}
+						const channels = await channelRegistry.list({
+							sessionId,
+							packId: surf.packId,
+							clientId,
+							name: typeof listMsg.opts?.name === "string" ? listMsg.opts.name : undefined,
+							includeClosed: listMsg.opts?.includeClosed === true,
+						});
+						send(ws, { type: "ext_channel_result", requestId, ok: true, channels });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
+				case "ext_channel_send": {
+					const sendMsg = msg as Extract<ClientMessage, { type: "ext_channel_send" }>;
+					const requestId = typeof sendMsg.requestId === "string" ? sendMsg.requestId : "";
+					try {
+						const attached = attachedExtChannels.get(sendMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						if (!isHostChannelFrame(sendMsg.frame)) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "invalid channel frame" });
+							break;
+						}
+						await channelRegistry.send({ sessionId, packId: attached.packId, channelId: sendMsg.channelId, clientId, frame: sendMsg.frame });
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
+				case "ext_channel_close": {
+					const closeMsg = msg as Extract<ClientMessage, { type: "ext_channel_close" }>;
+					const requestId = typeof closeMsg.requestId === "string" ? closeMsg.requestId : "";
+					try {
+						const attached = attachedExtChannels.get(closeMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						await channelRegistry.close({ sessionId, packId: attached.packId, channelId: closeMsg.channelId, clientId, reason: closeMsg.reason });
+						attachedExtChannels.delete(closeMsg.channelId);
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
+				case "ext_channel_detach": {
+					const detachMsg = msg as Extract<ClientMessage, { type: "ext_channel_detach" }>;
+					const requestId = typeof detachMsg.requestId === "string" ? detachMsg.requestId : "";
+					try {
+						const attached = attachedExtChannels.get(detachMsg.channelId);
+						if (!channelRegistry || !attached || attached.sessionId !== sessionId) {
+							send(ws, { type: "ext_channel_result", requestId, ok: false, error: "channel is not attached to this connection" });
+							break;
+						}
+						await channelRegistry.detach({ sessionId, packId: attached.packId, channelId: detachMsg.channelId, clientId });
+						attachedExtChannels.delete(detachMsg.channelId);
+						send(ws, { type: "ext_channel_result", requestId, ok: true });
+					} catch (err) {
+						sendExtChannelFailure(requestId, err);
+					}
+					break;
+				}
 				case "ext_session_write_permit": {
 					// C2 session-WRITE permit MINT (design extension-host-phase2.md §8 C2.1).
-					// Mints a server-minted, one-time, content-bound nonce over THIS trusted,
-					// authenticated WS. The binding's sessionId is ALWAYS this connection's OWN
-					// authenticated session; the packId is SERVER-derived from `tool` (never a
-					// frame field). The client requests this only after its synchronous
-					// transient-activation assertion passes; the matching `ext_session_post`
-					// must then carry the returned nonce. See session-write-permit.ts.
+					// Mints a server-minted, one-time, content-bound nonce over this authenticated
+					// WS. The binding's sessionId is ALWAYS this connection's OWN authenticated
+					// session; the packId is SERVER-derived from `tool` (never a frame field). The
+					// sanctioned client requests this only after its synchronous transient-
+					// activation assertion passes; the matching `ext_session_post` must then carry
+					// the returned nonce. See session-write-permit.ts.
 					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
 					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
 					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
@@ -1098,21 +1471,21 @@ export function handleWebSocketConnection(
 						break;
 					}
 					// Pack-bound surfaces (no tool) bind the permit with an empty tool
-					// surrogate — packId is the trusted scope key either way.
+					// surrogate — packId is the server-derived scope key either way.
 					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash });
 					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
 					break;
 				}
 				case "ext_session_post": {
 					// C2 session WRITE (`host.session.postMessage`) — design
-					// extension-host-phase2.md §8 C2.1. Routed over THIS trusted WS instead of a
-					// fetch precisely so no capturable session secret rides a pack-monkey-
-					// patchable `fetch`, and so pack code (no WS handle) cannot send it. The
-					// TARGET session is ALWAYS this connection's OWN authenticated `sessionId`,
-					// never a frame field — cross-session posting is structurally impossible.
-					// REQUIRES the server-minted, one-time, content-bound `nonce` from the
-					// preceding `ext_session_write_permit` mint: a replayed/forged/tampered
-					// frame fails permit consumption and is rejected with NO post.
+					// extension-host-phase2.md §8 C2.1. The sanctioned client path routes over this
+					// authenticated WS instead of a pack-callable fetch, but transport shape is not
+					// the security boundary. The TARGET session is ALWAYS this connection's OWN
+					// authenticated `sessionId`, never a frame field, and the server derives pack
+					// identity from the surface token. REQUIRES the server-minted, one-time,
+					// content-bound `nonce` from the preceding `ext_session_write_permit` mint: a
+					// replayed/forged/tampered frame fails permit consumption and is rejected with
+					// NO post.
 					const postMsg = msg as Extract<ClientMessage, { type: "ext_session_post" }>;
 					const requestId = typeof postMsg.requestId === "string" ? postMsg.requestId : "";
 					const projectTm = session.projectId && projectContextManager
@@ -1128,9 +1501,9 @@ export function handleWebSocketConnection(
 						if (persisted) return { allowedTools: persisted.allowedTools };
 						return undefined;
 					};
-					// DERIVE the trusted `tool` from the SERVER-MINTED surface token (never a
-					// caller-supplied `tool`), session-bound to THIS connection. A
-					// missing/invalid/wrong-session token is rejected with NO post.
+					// DERIVE the `tool` from the SERVER-MINTED surface token (never a caller-
+					// supplied `tool`), session-bound to THIS connection. A missing/invalid/
+					// wrong-session token is rejected with NO post.
 					const surf = extToolManager
 						? resolveSurfaceIdentity({ token: postMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
 						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
@@ -1141,7 +1514,7 @@ export function handleWebSocketConnection(
 					const result = await handleSessionPost({
 						tool: surf.tool,
 						packId: surf.packId,
-						// The TRUSTED, server-authenticated bound session of THIS connection.
+						// The server-authenticated bound session of THIS connection.
 						sessionId,
 						role: postMsg.role,
 						text: postMsg.text,
@@ -1186,6 +1559,14 @@ export function handleWebSocketConnection(
 
 	ws.on("close", () => {
 		clearTimeout(authTimeout);
+		if (channelRegistry && attachedExtChannels.size > 0) {
+			for (const [channelId, attached] of attachedExtChannels) {
+				void Promise.resolve(channelRegistry.detach({ sessionId: attached.sessionId, packId: attached.packId, channelId, clientId })).catch((err) => {
+					console.warn(`[ext-channel] detach failed for ${channelId}:`, err);
+				});
+			}
+			attachedExtChannels.clear();
+		}
 		if (authenticated) {
 			sessionManager.removeClient(sessionId, ws);
 

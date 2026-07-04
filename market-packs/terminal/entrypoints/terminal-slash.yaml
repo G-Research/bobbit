@@ -1,0 +1,10 @@
+id: terminal
+kind: composer-slash
+label: /terminal
+target:
+  action: channel-panel
+  channel: terminal
+  singletonKey: session-terminal
+  panelId: terminal.panel
+  params:
+    autoStart: true

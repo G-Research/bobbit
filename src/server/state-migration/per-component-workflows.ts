@@ -20,6 +20,7 @@ import {
 	GAP_ANALYSIS_DESIGN_PROMPT,
 	GAP_ANALYSIS_IMPL_PROMPT,
 	CODE_REVIEW_PROMPT,
+	BUG_HUNT_PROMPT,
 	DOC_PROMPT,
 	RALPH_LOOP_DESCRIPTION,
 	type SeededWorkflow,
@@ -56,7 +57,7 @@ export function buildPerComponentWorkflow(
  * Phases:
  *   - phase 0: build (one step per component)
  *   - phase 1: check + unit + e2e (one step per (component, command))
- *   - phase 2: gap-analysis (post-impl), code-quality review
+ *   - phase 2: gap-analysis (post-impl), code-quality review, bug hunt
  *
  * Workflow id: `all-components`.
  */
@@ -121,6 +122,13 @@ export function buildAllComponentsWorkflow(components: Component[]): SeededWorkf
 		role: "code-reviewer",
 		phase: 2,
 		prompt: CODE_REVIEW_PROMPT,
+	});
+	verify.push({
+		name: "Bug hunt",
+		type: "llm-review",
+		role: "bug-hunter",
+		phase: 2,
+		prompt: BUG_HUNT_PROMPT,
 	});
 
 	return {

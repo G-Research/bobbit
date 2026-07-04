@@ -198,6 +198,34 @@ export function killTreeByPid(pid: number, signal: NodeJS.Signals = "SIGKILL"): 
 				windowsHide: true,
 			});
 			tk.on("error", () => { /* best-effort */ });
+			tk.unref?.();
+		} catch { /* ignore */ }
+		// If the shell/root process has already exited but a descendant kept an
+		// inherited stdio handle open, taskkill by the root pid can miss it. Walk
+		// ParentProcessId as a second best-effort pass so exit-close fallback paths
+		// can reap those descendants instead of leaving them as orphaned test/verify
+		// processes. The pid is numeric and passed as an argv element (no shell).
+		try {
+			const root = Math.trunc(pid);
+			const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$seen = @{}
+function Stop-BobbitTree([int]$Id) {
+  if ($seen.ContainsKey($Id)) { return }
+  $seen[$Id] = $true
+  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id")
+  if (-not $children -and (Get-Command Get-WmiObject -ErrorAction SilentlyContinue)) { $children = @(Get-WmiObject Win32_Process -Filter "ParentProcessId=$Id") }
+  foreach ($child in $children) { Stop-BobbitTree ([int]$child.ProcessId) }
+  Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+}
+Stop-BobbitTree ${root}
+`;
+			const ps = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			ps.on("error", () => { /* best-effort */ });
+			ps.unref?.();
 		} catch { /* ignore */ }
 		return;
 	}

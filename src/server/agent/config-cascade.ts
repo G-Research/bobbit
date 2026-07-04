@@ -18,6 +18,7 @@ import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./builtin-packs.js";
+import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 
 /**
  * `user` corresponds to the global-user scope. It is additive: global-user is
@@ -79,50 +80,11 @@ export interface ResolvedPolicy {
 }
 
 /**
- * Where a single role field (`model` / `thinkingLevel`) resolved from, relative
- * to the currently-editable scope, plus enough metadata for the Roles UI to
- * render an accurate source badge and decide whether the field can be edited
- * inline.
- *
- * - `role` — the value comes from the current editable role layer (the project
- *   layer when a `projectId` is supplied, otherwise the server layer); the user
- *   can edit/clear it directly.
- * - `inherited-role` — the value comes from a lower/ancestor role layer (an
- *   ancestor project, the server layer, a built-in role, or a market pack). The
- *   row can still be customized-then-edited unless `editable` is false.
- * - `default` — no role layer supplies the field; the effective value falls back
- *   to the global session/review model + thinking defaults (the client formats
- *   the default label and may further distinguish `auto`).
+ * Headquarters is the user-facing alias for server/global config. Non-workflow
+ * config must therefore omit the project layer when callers pass its project id.
  */
-export type RoleFieldSourceKind = "role" | "inherited-role" | "default";
-
-export interface RoleFieldSource {
-	/** Resolved field value when a role layer supplies it; omitted for `default`. */
-	value?: string;
-	source: RoleFieldSourceKind;
-	/** Cascade layer the value came from (omitted for `default`). */
-	origin?: ConfigOrigin;
-	/** Market-pack name when the value comes from a pack-defined role; null otherwise. */
-	originPackName?: string | null;
-	/** False only for pack-managed (read-only) roles; true otherwise. */
-	editable: boolean;
-	/** Short human label for the source ("Project", "Server", "Built-in", pack name…). */
-	sourceLabel: string;
-}
-
-export interface RoleModelResolution {
-	model: RoleFieldSource;
-	thinkingLevel: RoleFieldSource;
-}
-
-/** Short human label for a cascade origin (used in role source badges). */
-function originSourceLabel(o: ConfigOrigin): string {
-	switch (o) {
-		case "builtin": return "Built-in";
-		case "server": return "Server";
-		case "user": return "User";
-		case "project": return "Project";
-	}
+export function normalizeConfigProjectId(projectId?: string): string | undefined {
+	return projectId === HEADQUARTERS_PROJECT_ID ? undefined : projectId;
 }
 
 /**
@@ -237,12 +199,15 @@ export class ConfigCascade {
 		field: "model" | "thinkingLevel" | "promptTemplate",
 		projectId?: string,
 	): string | undefined {
-		if (projectId) {
-			const v = this.localRoleField(projectId, roleName, field);
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
+		if (normalizedProjectId) {
+			const v = this.localRoleField(normalizedProjectId, roleName, field);
 			if (v !== undefined) return v;
 			if (this.projectRegistry) {
-				for (const anc of this.projectRegistry.getAncestors(projectId)) {
-					const av = this.localRoleField(anc.id, roleName, field);
+				for (const anc of this.projectRegistry.getAncestors(normalizedProjectId)) {
+					const normalizedAncestorId = normalizeConfigProjectId(anc.id);
+					if (!normalizedAncestorId) continue;
+					const av = this.localRoleField(normalizedAncestorId, roleName, field);
 					if (av !== undefined) return av;
 				}
 			}
@@ -266,133 +231,6 @@ export class ConfigCascade {
 		return this.resolveRoleField(roleName, "promptTemplate", projectId);
 	}
 
-	/**
-	 * Resolve the source hierarchy for a role's `model` and `thinkingLevel`
-	 * fields so the Roles UI can render accurate source badges and decide inline
-	 * editability without re-deriving the cascade order itself.
-	 *
-	 * The per-field walk follows the same layers as {@link resolveRoleField}
-	 * (current project local → ancestor projects → server → builtin), then falls
-	 * back to the resolved whole-role winner for values that only exist in a
-	 * market pack. Editability is gated solely by pack-managed status (market
-	 * packs are read-only), matching the whole-role customize/revert rules.
-	 */
-	resolveRoleModelResolution(roleName: string, projectId?: string): RoleModelResolution {
-		const entry = this.resolveRolesEntries(projectId).find(e => e.name === roleName);
-		const packName = entry && entry.origin.kind === "market"
-			? (entry.origin.manifest?.name ?? null)
-			: null;
-		const packManaged = packName != null;
-		return {
-			model: this.resolveRoleFieldSource(roleName, "model", projectId, entry, packManaged, packName),
-			thinkingLevel: this.resolveRoleFieldSource(roleName, "thinkingLevel", projectId, entry, packManaged, packName),
-		};
-	}
-
-	private resolveRoleFieldSource(
-		roleName: string,
-		field: "model" | "thinkingLevel",
-		projectId: string | undefined,
-		entry: ResolvedEntity<Role> | undefined,
-		packManaged: boolean,
-		packName: string | null,
-	): RoleFieldSource {
-		const editable = !packManaged;
-
-		// Rank a cascade band to mirror PackResolver precedence (low→high):
-		//   builtin < server-market < server < global-user-market < global-user
-		//   < project-market < project. Market packs sit just below their scope's
-		//   user pack (design §3.2).
-		const bandRank = (scope: PackScope, isMarket: boolean): number => {
-			const base = { builtin: 0, server: 2, "global-user": 4, project: 6 }[scope];
-			return base - (isMarket ? 1 : 0);
-		};
-		// The directly-editable band for this view: the project's own local layer
-		// when scoped to a project, otherwise the server-level store.
-		const editableRank = projectId ? bandRank("project", false) : bandRank("server", false);
-
-		// The whole-role PackResolver winner is the effective role at this scope.
-		// Whenever it *supplies* the field, that value/source IS the effective
-		// metadata and must outrank the plain server/builtin field walk below —
-		// even for market / global-user / ancestor-project winners that sit BELOW
-		// the current editable band but ABOVE server/builtin. The previous
-		// `winnerRank >= editableRank` guard let those lower-but-still-winning
-		// bands fall through and report a shadowed server/builtin field instead
-		// of the real winner (finding #1).
-		if (entry) {
-			const wv = (entry.item as any)[field];
-			if (typeof wv === "string" && wv.trim().length > 0) {
-				const origin = scopeToOrigin(entry.origin.scope);
-				const winnerRank = bandRank(entry.origin.scope, entry.origin.kind === "market");
-				// Equal rank with a non-market winner ⇒ the winner IS the directly
-				// editable layer (a user-authored override at this scope). Anything
-				// else (higher, lower, or a market pack at the same rank) is an
-				// effective value inherited from another band the user cannot edit
-				// in place at this scope.
-				const isEditableLayer = winnerRank === editableRank && entry.origin.kind !== "market";
-				// A winner ABOVE the editable band shadows any write to the editable
-				// layer: e.g. a `global-user` override while editing the server layer.
-				// `PUT /api/roles/:name` writes the server (or project) layer, which
-				// cannot override a higher-precedence winner, so the field is NOT
-				// editable in place at this scope — reporting it editable would make
-				// the inline control appear to no-op (review finding #3). Lower
-				// winners (builtin under server, server under project) remain editable
-				// because the editable-layer write DOES shadow them.
-				const shadowsEditableLayer = winnerRank > editableRank;
-				return {
-					value: wv,
-					source: isEditableLayer ? "role" : "inherited-role",
-					origin,
-					originPackName: packName,
-					editable: editable && !shadowsEditableLayer,
-					sourceLabel: packName ?? originSourceLabel(origin),
-				};
-			}
-			// Winner role does not define the field ⇒ the runtime field-merge
-			// (resolveRoleField) pulls it from a lower plain layer. Fall through to
-			// the field-level walk below, which mirrors that field-merge order.
-		}
-
-		if (projectId) {
-			// Current editable layer: the project's own local override.
-			const local = this.localRoleField(projectId, roleName, field);
-			if (local !== undefined) {
-				return { value: local, source: "role", origin: "project", editable, sourceLabel: "Project" };
-			}
-			// Inherited from an ancestor project layer.
-			if (this.projectRegistry) {
-				for (const anc of this.projectRegistry.getAncestors(projectId)) {
-					const av = this.localRoleField(anc.id, roleName, field);
-					if (av !== undefined) {
-						return { value: av, source: "inherited-role", origin: "project", editable, sourceLabel: "Inherited project" };
-					}
-				}
-			}
-			// Inherited from the server / builtin role layers.
-			const sv = this.readRoleField(this.serverStores.getRoles(), roleName, field);
-			if (sv !== undefined) {
-				return { value: sv, source: "inherited-role", origin: "server", editable, sourceLabel: "Server" };
-			}
-			const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
-			if (bv !== undefined) {
-				return { value: bv, source: "inherited-role", origin: "builtin", editable, sourceLabel: "Built-in" };
-			}
-		} else {
-			// Current editable layer: the server-level role store.
-			const sv = this.readRoleField(this.serverStores.getRoles(), roleName, field);
-			if (sv !== undefined) {
-				return { value: sv, source: "role", origin: "server", editable, sourceLabel: "Server" };
-			}
-			const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
-			if (bv !== undefined) {
-				return { value: bv, source: "inherited-role", origin: "builtin", editable, sourceLabel: "Built-in" };
-			}
-		}
-		// No role layer supplies the field — the client renders the session/review
-		// (or auto) default for this label.
-		return { source: "default", editable, sourceLabel: "Default" };
-	}
-
 	// ── Roles ────────────────────────────────────────────────────
 
 	resolveRoles(projectId?: string): ResolvedItem<Role>[] {
@@ -401,12 +239,13 @@ export class ConfigCascade {
 
 	/** Raw resolved role entries (with origin pack + shadows) — for conflicts. */
 	resolveRolesEntries(projectId?: string): ResolvedEntity<Role>[] {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		return this.resolveEntities<Role>(
 			"roles",
 			[new RoleLoader()],
 			this.builtins.getRoles(),
 			r => r.name,
-			projectId,
+			normalizedProjectId,
 			this.serverStores.getRoles(),
 			ctx => ctx.roleStore.getAllLocal(),
 		);
@@ -436,12 +275,13 @@ export class ConfigCascade {
 
 	/** Raw resolved tool entries (with origin pack + shadows) — for conflicts. */
 	resolveToolsEntries(projectId?: string): ResolvedEntity<ToolInfo>[] {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		return this.resolveEntities<ToolInfo>(
 			"tools",
 			[new ToolLoader()],
 			this.builtins.getTools(),
 			t => t.name,
-			projectId,
+			normalizedProjectId,
 			this.serverStores.getTools(),
 			ctx => ctx.toolManager.getLocalTools(),
 		);
@@ -450,6 +290,7 @@ export class ConfigCascade {
 	// ── Tool Group Policies ──────────────────────────────────────
 
 	resolveToolGroupPolicies(projectId?: string): Record<string, ResolvedPolicy> {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
 		const merged = new Map<string, ResolvedPolicy>();
 
 		// Layer 1: builtins
@@ -468,9 +309,10 @@ export class ConfigCascade {
 		}
 
 		// Layer 3: project-level (when a projectId is specified).
+		// Headquarters normalizes to server scope for non-workflow config.
 		// Without projectId, only builtins + server stores are used (system scope).
-		if (projectId) {
-			const projectCtx = this.projectContextManager.getOrCreate(projectId);
+		if (normalizedProjectId) {
+			const projectCtx = this.projectContextManager.getOrCreate(normalizedProjectId);
 			if (projectCtx) {
 				for (const [group, policy] of Object.entries(projectCtx.toolGroupPolicyStore.getAll())) {
 					const existing = merged.get(group);

@@ -31,6 +31,8 @@ interface MockGoal {
 	worktreePath?: string;
 	branch?: string;
 	repoPath?: string;
+	projectId?: string;
+	sandboxed?: boolean;
 	team?: boolean;
 	teamLeadSessionId?: string;
 }
@@ -79,6 +81,7 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 				status: "idle" as const,
 				titleGenerated: false,
 				goalId,
+				createOpts: opts,
 				rpcClient: {
 					prompt: mock.fn(async () => {}),
 					onEvent: mock.fn(() => {}),
@@ -103,6 +106,8 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			sessions.delete(id);
 			return true;
 		}),
+		isSandboxEnabled: false,
+		getSandboxManager: () => undefined,
 		// Goal-metadata: team-manager dispatches the goalProvisioned lifecycle hook
 		// for each member worktree it creates directly (finding 1). Mocked here so
 		// the spawn path can invoke it and tests can assert it was called.
@@ -423,15 +428,18 @@ describe("TeamManager", () => {
 	// ---------------------------------------------------------------------------
 
 	describe("dismissRole", () => {
-		it("should return false for an unknown session", async () => {
+		it("should return not-found for an unknown session", async () => {
 			const sm = createMockSessionManager(new Map());
 			const team = createTeamManager(sm);
 
 			const result = await team.dismissRole("nonexistent");
-			assert.equal(result, false);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-found", sessionId: "nonexistent", retryable: false },
+			);
 		});
 
-		it("should throw when trying to dismiss the team lead", async () => {
+		it("should return not-owned when trying to dismiss the team lead", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
@@ -440,12 +448,14 @@ describe("TeamManager", () => {
 
 			const session = await team.startTeam("goal-1");
 
-			await assert.rejects(() => team.dismissRole(session.id), {
-				message: /Cannot dismiss the team lead/,
-			});
+			const result = await team.dismissRole(session.id);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-owned", sessionId: session.id, retryable: false },
+			);
 		});
 
-		it("should return false if agent not found in team entry", async () => {
+		it("should return not-found if agent not found in team entry", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
@@ -458,7 +468,61 @@ describe("TeamManager", () => {
 			(team as any).sessionToGoal.set("orphan-session", "goal-1");
 
 			const result = await team.dismissRole("orphan-session");
-			assert.equal(result, false);
+			assert.deepEqual(
+				{ ok: result.ok, status: result.status, sessionId: result.sessionId, retryable: result.retryable },
+				{ ok: false, status: "not-found", sessionId: "orphan-session", retryable: false },
+			);
+		});
+
+		it("should keep other agents tracked during overlapping duplicate dismisses", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+			const entry = (team as any).teams.get("goal-1")!;
+			const now = Date.now();
+			entry.agents.push(
+				{ sessionId: "agent-a", role: "coder", kind: "worker", task: "A", createdAt: now },
+				{ sessionId: "agent-b", role: "tester", kind: "worker", task: "B", createdAt: now },
+			);
+			(team as any).sessionToGoal.set("agent-a", "goal-1");
+			(team as any).sessionToGoal.set("agent-b", "goal-1");
+			sm._sessions.set("agent-a", { id: "agent-a", title: "Agent A", status: "idle" });
+			sm._sessions.set("agent-b", { id: "agent-b", title: "Agent B", status: "idle" });
+
+			let releaseTerminate!: () => void;
+			let terminateStarted!: () => void;
+			const terminateStartedPromise = new Promise<void>((resolve) => { terminateStarted = resolve; });
+			sm.terminateSession = mock.fn(async (id: string) => {
+				assert.equal(id, "agent-a");
+				terminateStarted();
+				await new Promise<void>((resolve) => { releaseTerminate = resolve; });
+				sm._sessions.delete(id);
+				return true;
+			});
+
+			const first = team.dismissRoleForGoal("goal-1", "agent-a");
+			await terminateStartedPromise;
+			const duplicate = team.dismissRoleForGoal("goal-1", "agent-a");
+
+			assert.deepEqual(team.listAgents("goal-1").map((a) => a.sessionId), ["agent-a", "agent-b"]);
+			releaseTerminate();
+
+			const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+			assert.equal(sm.terminateSession.mock.callCount(), 1, "duplicate dismiss should not terminate twice");
+			assert.deepEqual(
+				{ ok: firstResult.ok, status: firstResult.status, sessionId: firstResult.sessionId, retryable: firstResult.retryable },
+				{ ok: true, status: "dismissed", sessionId: "agent-a", retryable: false },
+			);
+			assert.deepEqual(
+				{ ok: duplicateResult.ok, status: duplicateResult.status, sessionId: duplicateResult.sessionId, retryable: duplicateResult.retryable },
+				{ ok: true, status: "already-dismissed", sessionId: "agent-a", retryable: false },
+			);
+			assert.deepEqual(team.listAgents("goal-1").map((a) => a.sessionId), ["agent-b"]);
+			assert.equal(sm.getSession("agent-b")?.status, "idle", "agent-b should remain live");
 		});
 	});
 
@@ -1103,52 +1167,44 @@ describe("TeamManager", () => {
 	});
 
 	// ---------------------------------------------------------------------------
-	// Tests: notifyTeamLead no longer suppressed when team lead errored
-	// (part of "Unstick sessions on new input" goal)
+	// Tests: notifyTeamLead retries errored idle team leads instead of nudging
 	// ---------------------------------------------------------------------------
 
-	describe("notifyTeamLead (errored-suppression removed)", () => {
-		it("delivers worker agent_end nudge even when team lead lastTurnErrored", async () => {
+	describe("notifyTeamLead errored idle recovery", () => {
+		it("retries worker agent_end nudge when team lead lastTurnErrored without enqueueing auto-nudge", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
 			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
 			const deliverLiveSteer = mock.fn(async (_id: string, _msg: string) => {});
+			const retryLastPrompt = mock.fn((_id: string, _opts?: any) => ({ status: "queued" }));
 			sm.enqueuePrompt = enqueuePrompt;
 			sm.deliverLiveSteer = deliverLiveSteer;
+			sm.retryLastPrompt = retryLastPrompt;
 
 			const team = createTeamManager(sm);
 			const teamLead = await team.startTeam("goal-1");
-			// Put the team lead into errored+idle state.
 			(teamLead as any).status = "idle";
 			(teamLead as any).lastTurnErrored = true;
+			(teamLead as any).lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
 
-			// Register a worker in the team so notifyTeamLead has a target.
 			const entry = (team as any).teams.get("goal-1")!;
-			const workerSession = {
+			sm._sessions.set("worker-1", {
 				id: "worker-1",
 				status: "idle",
 				cwd: "/tmp/worker",
 				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
 				clients: new Set(),
-			};
-			sm._sessions.set("worker-1", workerSession);
+			});
 			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
 
-			// Directly invoke the private notifyTeamLead.
 			await (team as any).notifyTeamLead("goal-1", "worker-1", "coder", "coder-xyz");
 
-			// Team lead is idle — should use enqueuePrompt. Pre-fix, this was
-			// suppressed entirely and callCount would be 0.
-			assert.equal(
-				enqueuePrompt.mock.callCount(), 1,
-				"notifyTeamLead should deliver the nudge even when team lead lastTurnErrored",
-			);
-			const [sessionId, message, opts] = enqueuePrompt.mock.calls[0].arguments as any[];
-			assert.equal(sessionId, teamLead.id);
-			assert.ok(String(message).includes("coder-xyz"), "nudge message should reference the worker");
-			assert.equal(opts?.isSteered, true);
+			assert.equal(retryLastPrompt.mock.callCount(), 1);
+			assert.deepEqual(retryLastPrompt.mock.calls[0].arguments, [teamLead.id, { auto: true }]);
+			assert.equal(enqueuePrompt.mock.callCount(), 0, "errored idle team lead should not receive an auto-nudge prompt");
+			assert.equal(deliverLiveSteer.mock.callCount(), 0, "errored idle team lead should not receive a live auto-nudge steer");
 		});
 
 		it("formats worker completion nudges as compact markdown with task_list next step", async () => {
@@ -1305,7 +1361,8 @@ describe("TeamManager", () => {
 		let repoPath: string;
 		let cleanup: () => void;
 
-		function createTempGitRepo(): { repoPath: string; cleanup: () => void } {
+		function createTempGitRepo(opts: { publishGoalBranch?: boolean } = {}): { repoPath: string; originPath: string; cleanup: () => void } {
+			const publishGoalBranch = opts.publishGoalBranch ?? true;
 			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "team-test-"));
 			execSync("git init", { cwd: tmp, stdio: "pipe" });
 			execSync('git config user.email "test@test.com"', { cwd: tmp, stdio: "pipe" });
@@ -1313,18 +1370,22 @@ describe("TeamManager", () => {
 			fs.writeFileSync(path.join(tmp, "README.md"), "# test");
 			execSync("git add . && git commit -m init", { cwd: tmp, stdio: "pipe" });
 
-			// Create a bare clone to act as "origin" so that `origin/feat/test` exists
+			// Create a bare clone to act as "origin".
 			const bare = `${tmp}-bare`;
 			execSync(`git clone --bare "${tmp}" "${bare}"`, { stdio: "pipe" });
 			execSync(`git remote add origin "${bare}"`, { cwd: tmp, stdio: "pipe" });
-			// Create the feat/test branch and push it to origin
+			// Create the feat/test branch locally. Most tests publish it so origin/feat/test
+			// exists; local-only branch tests leave it unpublished on purpose.
 			execSync("git checkout -b feat/test", { cwd: tmp, stdio: "pipe" });
-			execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
+			if (publishGoalBranch) {
+				execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
+			}
 			// Return to default branch so worktree creation doesn't conflict
 			execSync("git checkout -", { cwd: tmp, stdio: "pipe" });
 
 			return {
 				repoPath: tmp,
+				originPath: bare,
 				cleanup: () => {
 					// Also remove any sibling worktrees and the bare clone
 					const parent = path.dirname(tmp);
@@ -1396,6 +1457,101 @@ describe("TeamManager", () => {
 			assert.equal(typeof agent!.branch, "string");
 		});
 
+		it("spawns from an unpublished local goal branch without publishing the member branch", async () => {
+			cleanup();
+			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
+			repoPath = unpublishedRepo.repoPath;
+			cleanup = unpublishedRepo.cleanup;
+
+			assert.throws(
+				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"origin must not have the goal branch before spawn",
+			);
+
+			const goalId = "12345678-abcd-4000-8000-000000000001";
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				id: goalId,
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
+			assert.match(
+				source,
+				/const worktreeOptions = \{ startPoint: memberStartPoint, pushPolicy: "local-only" as const \};\s*worktreeResult = await createWorktree\(goal\.repoPath!, branchName, worktreeOptions\);/,
+				"team member worktree creation must request local-only push policy",
+			);
+
+			await team.startTeam(goalId);
+			const previousNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+			process.env.BOBBIT_TEST_NO_PUSH = "1";
+			let result: Awaited<ReturnType<typeof team.spawnRole>>;
+			try {
+				result = await team.spawnRole(goalId, "coder", "Implement from local branch");
+			} finally {
+				if (previousNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+				else process.env.BOBBIT_TEST_NO_PUSH = previousNoPush;
+			}
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent?.branch, "agent branch should be recorded");
+			assert.match(agent.branch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
+			assert.ok(fs.existsSync(result.worktreePath), "member worktree should be created from the local goal branch");
+			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
+			assert.throws(
+				() => execSync(`git show-ref --verify --quiet refs/heads/${agent.branch}`, { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"local-only team member branch must not be published to origin",
+			);
+		});
+
+		it("passes a local sandbox base branch for unpublished sandboxed goal branches", async () => {
+			cleanup();
+			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
+			repoPath = unpublishedRepo.repoPath;
+			cleanup = unpublishedRepo.cleanup;
+
+			assert.throws(
+				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				undefined,
+				"origin must not have the goal branch before sandboxed member spawn",
+			);
+
+			const goalId = "12345678-abcd-4000-8000-000000000001";
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				id: goalId,
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+				projectId: "project-1",
+				sandboxed: true,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			sm.getSandboxManager = () => ({
+				get: () => ({
+					exec: mock.fn(async () => "0123456789abcdef0123456789abcdef01234567\n"),
+				}),
+			});
+			const team = createTeamManager(sm);
+
+			await team.startTeam(goalId);
+			const result = await team.spawnRole(goalId, "coder", "Implement in sandbox from local branch");
+			const session = sm.getSession(result.sessionId);
+			assert.ok(session, "member session should exist");
+			assert.equal(session.createOpts.sandboxBaseBranch, "feat/test");
+			assert.notEqual(session.createOpts.sandboxBaseBranch, "origin/feat/test");
+			assert.match(session.createOpts.sandboxBranch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
+			assert.equal(session.worktreePushPolicy, "local-only");
+		});
+
+
 		it("should create a worktree and session for a coder role", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal({
@@ -1434,6 +1590,12 @@ describe("TeamManager", () => {
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "session should exist");
 			assert.equal(session.rpcClient.prompt.mock.callCount(), 1);
+		});
+
+		it("team recovery scans configured and historical sessions roots instead of the legacy home default", () => {
+			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
+			assert.match(source, /trustedAgentSessionsRoots\(\)/, "team recovery must use active, historical, and legacy agent session roots");
+			assert.doesNotMatch(source, /homedir\(\).*\.bobbit.*agent.*sessions/s, "team recovery must not hard-code ~/.bobbit/agent/sessions");
 		});
 
 		it("dispatches the goalProvisioned hook for the member worktree (finding 1)", async () => {
@@ -1501,7 +1663,10 @@ describe("TeamManager", () => {
 
 			// Dismiss
 			const dismissed = await team.dismissRole(result.sessionId);
-			assert.equal(dismissed, true);
+			assert.deepEqual(
+				{ ok: dismissed.ok, status: dismissed.status, sessionId: dismissed.sessionId, retryable: dismissed.retryable },
+				{ ok: true, status: "dismissed", sessionId: result.sessionId, retryable: false },
+			);
 
 			// Worktree is preserved for archived session review (cleanup at purge time)
 			assert.ok(

@@ -4,7 +4,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for title input. */
 async function openGoalAssistantProposal(page: import("@playwright/test").Page) {
@@ -15,34 +15,9 @@ async function openGoalAssistantProposal(page: import("@playwright/test").Page) 
 	// remainder of the test. 90s is well above observed worst-case wall time.
 	test.setTimeout(90_000);
 	await openApp(page);
-	// The button title flips to "Add a project first" until state.projects is
-	// populated — waiting for the enabled "New goal (Alt+G)" title also
-	// guarantees the click handler will call startNewGoalFlow() rather than
-	// showProjectDialog(). Without this, a cold first run can click too early
-	// and silently no-op (or open the wrong dialog), leaving the textarea
-	// never to appear within 15s.
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	// Arm the response listener *before* clicking so a fast session-create
-	// response can't slip past; then wait for the hash route to flip to
-	// #/session/<id> which only happens after connectToSession() resolves.
-	//
-	// 60s timeout absorbs goal-assistant cold-start under 3-worker browser
-	// parallelism. Server-side session creation does sync FS work (config dir
-	// scan, prompt assembly, mock-agent registry warm-up) which contends
-	// across concurrent goal-assistant creations. 30s was empirically too
-	// tight on Windows under Defender + concurrent worktree setup; doubling
-	// the budget eliminates the cold-start flake without masking real bugs
-	// (the surrounding Playwright test timeout is 30s by default but is
-	// configured higher per the e2e config).
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	// Starts the goal assistant and handles the Headquarters/default project
+	// picker shown by the multi-project toolbar flow.
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 10_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");

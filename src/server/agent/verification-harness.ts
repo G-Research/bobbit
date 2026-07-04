@@ -12,6 +12,102 @@ function isPidAlive(pid: number): boolean {
 		return err?.code === "EPERM";
 	}
 }
+
+const COMMAND_IDENTITY_HEARTBEAT_STALE_MS = 10_000;
+const COMMAND_IDENTITY_PIDFILE_RETRY_MS = 2_000;
+const COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS = 100;
+const COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES = Math.min(MAX_RETAINED_LOG_BYTES, 1024 * 1024);
+const COMMAND_EXIT_CLOSE_GRACE_MS = Math.max(
+	500,
+	Number.parseInt(process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS || "2000", 10) || 2_000,
+);
+
+class PendingCommandCleanupError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PendingCommandCleanupError";
+	}
+}
+
+function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanupError {
+	return err instanceof PendingCommandCleanupError || (err as any)?.name === "PendingCommandCleanupError";
+}
+
+function readProcessStartToken(pid: number): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const end = raw.lastIndexOf(")");
+		if (end < 0) return undefined;
+		const rest = raw.slice(end + 2).trim().split(/\s+/);
+		// /proc/<pid>/stat field 22 is starttime. `rest[0]` is field 3.
+		return rest[19] || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function shellSingleQuote(value: string): string {
+	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function readCommandLogTail(filePath: string | undefined, maxBytes = COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES): string {
+	if (!filePath || maxBytes <= 0) return "";
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return "";
+		const len = Math.min(stat.size, maxBytes);
+		const start = Math.max(0, stat.size - len);
+		fd = fs.openSync(filePath, "r");
+		const buf = Buffer.allocUnsafe(len);
+		const bytesRead = fs.readSync(fd, buf, 0, len, start);
+		return buf.subarray(0, bytesRead).toString("utf8");
+	} catch {
+		return "";
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+	}
+}
+
+function tailRetainCommandLogFile(filePath: string | undefined, keepBytes = MAX_RETAINED_LOG_BYTES): { truncated: boolean; bytes: number } {
+	if (!filePath || keepBytes <= 0) return { truncated: false, bytes: 0 };
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile()) return { truncated: false, bytes: 0 };
+		if (stat.size <= keepBytes) return { truncated: false, bytes: stat.size };
+		const start = Math.max(0, stat.size - keepBytes);
+		const len = stat.size - start;
+		fd = fs.openSync(filePath, "r+");
+		const buf = Buffer.allocUnsafe(len);
+		const bytesRead = fs.readSync(fd, buf, 0, len, start);
+		const retained = buf.subarray(0, bytesRead);
+		fs.ftruncateSync(fd, 0);
+		if (retained.length > 0) fs.writeSync(fd, retained, 0, retained.length, 0);
+		fs.ftruncateSync(fd, retained.length);
+		return { truncated: true, bytes: retained.length };
+	} catch {
+		return { truncated: false, bytes: 0 };
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+	}
+}
+
+function tailRetainCommandLogs(outFile?: string, errFile?: string): void {
+	tailRetainCommandLogFile(outFile);
+	tailRetainCommandLogFile(errFile);
+}
+
+function retainedCommandOutputTail(outFile?: string, errFile?: string): string {
+	const out = readCommandLogTail(outFile);
+	const err = readCommandLogTail(errFile);
+	return (out + "\n" + err).trim().slice(-5000);
+}
 import fs from "node:fs";
 import path from "node:path";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
@@ -58,9 +154,10 @@ import {
 	describeProviderBackoff,
 	isPreImplementationGate,
 	isProviderBackoffError,
+	isRetryableGenericAgentError,
 	shouldRetryVerificationStep,
-	shouldSuppressRestartInterrupt,
 	isRestartInterruptError,
+	isRestartInterruptedStep,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
@@ -69,13 +166,15 @@ import { applyReviewModelOverrides, applyModelString } from "./review-model-over
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
-import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
-import { mergeHostAgentProviderEnv } from "./host-tokens.js";
-import { inferMeta } from "./aigw-manager.js";
+import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
 	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
+	MAX_RETAINED_LOG_BYTES,
 	prepareGateStepDiagnosticsPaths,
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
@@ -94,37 +193,15 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	if (slash <= 0) return level;
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
-	const meta = inferMeta(modelId);
-	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+	return clampThinkingLevelForModel(level, provider, modelId);
 }
 
-export function isClaudeCodeReviewModel(modelStr: string | undefined): boolean {
-	if (!modelStr) return false;
-	const slash = modelStr.indexOf("/");
-	return slash > 0 && modelStr.slice(0, slash) === "claude-code";
-}
-
-function isCanonicalModelString(modelStr: string | undefined): boolean {
-	if (!modelStr) return false;
-	const slash = modelStr.indexOf("/");
-	return slash > 0 && slash < modelStr.length - 1;
-}
-
-/**
- * Verification/direct review sessions are always Pi-backed. Ignore local
- * Claude Code runtime model selections here so a review preference or role
- * override cannot silently spawn Claude Code or send Pi an unsupported
- * `set_model claude-code/*`; fall through to the next Pi-compatible choice.
- */
-export function resolvePiBackedReviewInitialModel(roleModel: string | undefined, reviewModelPref: string | undefined): string | undefined {
-	for (const model of [roleModel, reviewModelPref]) {
-		if (isCanonicalModelString(model) && !isClaudeCodeReviewModel(model)) return model;
-	}
-	return undefined;
-}
-
-export function filterPiBackedReviewModelForSetModel(modelStr: string | undefined): string | undefined {
-	return isClaudeCodeReviewModel(modelStr) ? undefined : modelStr;
+function controlledSessionModelFallback(prefs: PreferencesStore | undefined): { enabled: boolean; model?: string } | undefined {
+	if (!prefs) return undefined;
+	return {
+		enabled: prefs.get("allowSessionModelFallback") === true,
+		model: prefs.get("default.sessionModel") as string | undefined,
+	};
 }
 
 export interface VerificationToolActivationDeps {
@@ -272,6 +349,31 @@ export function resolveStep(
 
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
+
+function execOutputToString(value: unknown): string {
+	if (Buffer.isBuffer(value)) return value.toString("utf8");
+	return typeof value === "string" ? value : "";
+}
+
+function execErrorCode(err: unknown): number | string | undefined {
+	return (err as { code?: number | string } | null | undefined)?.code;
+}
+
+function isMissingRemoteHeadLsRemoteError(err: unknown): boolean {
+	const code = execErrorCode(err);
+	if (code !== 2 && code !== "2") return false;
+	const stdout = execOutputToString((err as { stdout?: unknown } | null | undefined)?.stdout).trim();
+	const stderr = execOutputToString((err as { stderr?: unknown } | null | undefined)?.stderr);
+	if (stdout) return false;
+	return !/\bfatal:|could not|unable|authentication|permission denied/i.test(stderr);
+}
+
+function lsRemoteOutputHasHead(stdout: unknown, branch: string): boolean {
+	const headRef = `refs/heads/${branch}`;
+	return execOutputToString(stdout)
+		.split(/\r?\n/)
+		.some(line => line.trimEnd().endsWith(`\t${headRef}`));
+}
 
 /**
  * Frozen workflows may omit `timeout:` for component command steps. The full
@@ -706,6 +808,24 @@ export interface ActiveVerification {
 		errFile?: string;
 		/** Absolute path to detached child's exit-code file (Layer 1). */
 		exitFile?: string;
+		/** Absolute path to durable process-identity file written by the detached wrapper. */
+		pidFile?: string;
+		/** Random nonce expected in the durable process-identity and heartbeat files. */
+		pidNonce?: string;
+		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
+		nonce?: string;
+		/** Container id for attached docker exec command paths (not restart-recoverable). */
+		containerId?: string;
+		/** Absolute path to the detached wrapper's periodically-refreshed heartbeat file. */
+		heartbeatFile?: string;
+		/** OS-specific process start token captured after spawn, used to reject PID reuse. */
+		processStartToken?: string;
+		/** Original command deadline in epoch milliseconds. */
+		deadlineMs?: number;
+		/** Restart recovery support mode for this command execution path. */
+		restartRecoveryMode?: "detached" | "unsupported";
+		/** Clear diagnostic when the command path cannot be recovered after restart. */
+		restartRecoveryUnsupportedReason?: string;
 		/** bootEpoch of the harness that started this step (Layer 2). */
 		bootEpoch?: string;
 		/** Step timeout in seconds. */
@@ -716,19 +836,60 @@ export interface ActiveVerification {
 		errorPattern?: string;
 		/** Host cwd used for targeted artifact retention after a command finishes. */
 		commandCwd?: string;
+		/** Durable kill/cancel intent for restart-safe cleanup of detached command trees. */
+		killRequestedAt?: number;
+		killReason?: "cancelled" | "timeout";
+		killSignal?: NodeJS.Signals;
+		killAttempts?: number;
+		killLastAttemptAt?: number;
+		killCompletedAt?: number;
+		killUnsafeReason?: string;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
 	cancelled?: boolean;
+	cancelRequestedAt?: number;
+	cancelReason?: string;
 }
 
 type TerminalGateSignalStepStatus = "passed" | "failed" | "skipped";
+
+type ResumedVerificationStep = {
+	name: string;
+	type: string;
+	passed: boolean;
+	skipped?: boolean;
+	status?: GateSignalStep["status"];
+	phase?: number;
+	output: string;
+	duration_ms: number;
+	diagnostics?: GateStepDiagnostics;
+};
 
 function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): TerminalGateSignalStepStatus {
 	if (step.skipped || step.status === "skipped") return "skipped";
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
+}
+
+function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): GateSignalStep["status"] {
+	if (step.skipped || step.status === "skipped") return "skipped";
+	if (step.status === "waiting" || step.status === "running") return step.status;
+	if (step.status === "passed" || step.status === "failed") return step.status;
+	return step.passed ? "passed" : "failed";
+}
+
+function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }): boolean {
+	if (step.passed || step.skipped) return false;
+	if (step.type === "command") return step.status === "waiting";
+	return isRestartInterruptedStep(step);
+}
+
+function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }>): boolean {
+	const failedSteps = steps.filter(s => !s.passed && !s.skipped);
+	if (failedSteps.length === 0) return false;
+	return failedSteps.every(isExplicitRestartInterruptedStep);
 }
 
 /**
@@ -924,6 +1085,48 @@ function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
 		: nextBackoffDelay(attempt, { baseMs: 2000 });
 }
 
+const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
+const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+
+function isRetryableLlmReviewRecovery(output: string): boolean {
+	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
+}
+
+function classifyLlmReviewRecoveryError(output: string): string {
+	if (isProviderBackoffError(output)) return "provider-backoff";
+	if (isTransientReviewError(output)) return "transient";
+	if (isRetryableGenericAgentError(output)) return "generic-runtime";
+	if (output.includes("Agent did not call verification_result")) return "missing-verification-result";
+	return "deterministic";
+}
+
+function reviewerIgnoredReminder(output: string): boolean {
+	return output.includes("Agent did not call verification_result after reminder")
+		|| output.includes("Agent did not call verification_result after server restart and reminder");
+}
+
+function appendLlmReviewRecoveryDiagnostics(
+	output: string,
+	args: { attempts: number; maxBoundedAttempts: number },
+): string {
+	if (!output || output.includes("## Recovery diagnostics")) return output;
+	const retryable = isRetryableLlmReviewRecovery(output);
+	const ignoredReminder = reviewerIgnoredReminder(output);
+	const exhaustedBoundedRecovery = retryable
+		&& !isProviderBackoffError(output)
+		&& args.attempts >= args.maxBoundedAttempts;
+	if (!exhaustedBoundedRecovery && !ignoredReminder) return output;
+	const attemptedRetries = Math.max(0, args.attempts - 1);
+	return [
+		output,
+		"",
+		"## Recovery diagnostics",
+		`- Attempted retries: ${attemptedRetries}`,
+		`- Final error class: ${classifyLlmReviewRecoveryError(output)}`,
+		`- Reviewer ignored reminder: ${ignoredReminder ? "yes" : "no"}`,
+	].join("\n");
+}
+
 export class VerificationHarness {
 	private static _warnedCmdExeDetached = false;
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
@@ -932,6 +1135,7 @@ export class VerificationHarness {
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
+	private surfacedOrphanedNonInteractiveSessionIds = new Set<string>();
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
@@ -998,7 +1202,7 @@ export class VerificationHarness {
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
-		const all = [...this.activeVerifications.values()];
+		const all = [...this.activeVerifications.values()].filter(v => !v.cancelled && v.overallStatus !== "cancelled");
 		return goalId ? all.filter(v => v.goalId === goalId) : all;
 	}
 
@@ -1010,7 +1214,8 @@ export class VerificationHarness {
 	 * "Fix WS event ordering: signal_received must precede verification_started".
 	 */
 	getActiveVerification(signalId: string): ActiveVerification | undefined {
-		return this.activeVerifications.get(signalId);
+		const active = this.activeVerifications.get(signalId);
+		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
 	}
 
 	/**
@@ -1103,7 +1308,7 @@ export class VerificationHarness {
 	 */
 	areVerificationSessionsAlive(signalId: string): boolean {
 		const active = this.activeVerifications.get(signalId);
-		if (!active) return false;
+		if (!active || active.cancelled || active.overallStatus === "cancelled") return false;
 		// If any step is still waiting to start, the verification is not a zombie
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
@@ -1154,7 +1359,13 @@ export class VerificationHarness {
 			// AV quirks). Recreating on demand keeps persistence robust.
 			const dir = path.dirname(this._persistPath);
 			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(this._persistPath, JSON.stringify(data, null, 2));
+			const tmp = path.join(dir, `${path.basename(this._persistPath)}.${process.pid}.${Date.now()}.tmp`);
+			fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+			try {
+				const fd = fs.openSync(tmp, "r");
+				try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+			} catch { /* best-effort durability; rename still prevents torn JSON */ }
+			fs.renameSync(tmp, this._persistPath);
 		} catch (err) {
 			console.error("[verification] Failed to persist active verifications:", err);
 		}
@@ -1180,23 +1391,51 @@ export class VerificationHarness {
 	 */
 	async resumeInterruptedVerifications(): Promise<void> {
 		const persisted = this._loadActive();
-		if (persisted.length === 0) return;
-
-		const running = persisted.filter(v => v.overallStatus === "running");
-		if (running.length === 0) {
-			// Clean up stale file
-			try { fs.unlinkSync(this._persistPath); } catch {}
+		// Surface orphaned reviewers before resuming unrelated active verifications.
+		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
+		// absent from active verification context should not be hidden behind that
+		// sequential recovery path.
+		await this._surfaceOrphanedNonInteractiveReviewers();
+		if (persisted.length === 0) {
 			return;
 		}
 
-		console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
+		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
+		for (const v of cancelled) {
+			const active = this.activeVerifications.get(v.signalId) ?? v;
+			active.cancelled = true;
+			active.overallStatus = "cancelled";
+			this.activeVerifications.set(active.signalId, active);
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
+			if (settled) {
+				if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
+			} else {
+				this._scheduleCommandKillCleanupRetry(active.signalId);
+			}
+			this._persistActive();
+		}
+
+		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
+		if (running.length === 0) {
+			// Clean up stale file only after cancelled kill intents are settled.
+			if (this.activeVerifications.size === 0) {
+				try { fs.unlinkSync(this._persistPath); } catch {}
+			} else {
+				this._persistActive();
+			}
+			return;
+		}
+
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
 
 		for (const v of running) {
+			this.activeVerifications.set(v.signalId, v);
+			this._persistActive();
 			try {
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-					console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
+					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
 					this.activeVerifications.delete(v.signalId);
 					this._persistActive();
 					continue;
@@ -1204,7 +1443,14 @@ export class VerificationHarness {
 				await this._resumeOneVerification(v);
 			} catch (err) {
 				const errMsg = (err as Error).message;
-				if (isRestartInterruptError(errMsg)) {
+				if (!this._isResumeStillActive(v)) {
+					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume of ${v.signalId} stopped after cancellation/supersession: ${errMsg}`);
+					continue;
+				}
+				if (isPendingCommandCleanupError(err)) {
+					console.warn(`[verification] Resume of ${v.signalId} is waiting for command cleanup before finalizing: ${errMsg}`);
+					this._scheduleCommandKillCleanupRetry(v.signalId);
+				} else if (isRestartInterruptError(errMsg)) {
 					// A restart-induced resume error (cold-agent RPC timeout, agent
 					// process not yet up) must NEVER surface as a hard gate failure.
 					// Leave the gate `pending` so the team-lead re-signals, and send
@@ -1262,15 +1508,53 @@ export class VerificationHarness {
 					}
 				}
 			} finally {
-				// Drop the in-memory entry so subsequent gate_signal calls aren't
-				// rejected by a leftover "running" step from a previous lifetime.
-				this.activeVerifications.delete(v.signalId);
+				// Drop only the entry this resume owns. If a cancellation/re-signal
+				// already removed it (or a future path replaced it), do not clobber
+				// that newer active state. A timeout/cancel kill intent that has not
+				// been verified complete must remain durable for retry after restart.
+				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
+					this.activeVerifications.delete(v.signalId);
+				}
+				this._persistActive();
 			}
 		}
 
-		// Clear persisted file after all verifications finalized
-		try { fs.unlinkSync(this._persistPath); } catch {}
-		console.log("[verification] Finished resuming interrupted verifications.");
+		if (this.activeVerifications.size === 0) {
+			try { fs.unlinkSync(this._persistPath); } catch {}
+		} else {
+			this._persistActive();
+		}
+		await this._surfaceOrphanedNonInteractiveReviewers();
+		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
+	}
+
+	/**
+	 * Surface live nonInteractive reviewer sessions that are not covered by any
+	 * active verification context. They cannot accept user prompts, and any late
+	 * `verification_result` would be ignored because no pending result resolver
+	 * exists, so boot must make them visible deterministically instead of leaving
+	 * them to a long timeout path.
+	 */
+	private async _surfaceOrphanedNonInteractiveReviewers(): Promise<void> {
+		const sm = this.sessionManager as any;
+		if (!sm?.listOrphanedNonInteractiveSessions) return;
+		let orphans: Array<{ id: string; title: string; createdAt: number }> = [];
+		try {
+			orphans = await sm.listOrphanedNonInteractiveSessions();
+		} catch (err) {
+			console.warn("[verification] Failed to inspect orphaned nonInteractive reviewer sessions:", err);
+			return;
+		}
+		orphans = orphans.filter(o => !this.surfacedOrphanedNonInteractiveSessionIds.has(o.id));
+		if (orphans.length === 0) return;
+		for (const orphan of orphans) this.surfacedOrphanedNonInteractiveSessionIds.add(orphan.id);
+		const summary = orphans
+			.map(o => `${o.title || "Untitled"} (${o.id}, created ${new Date(o.createdAt).toISOString()})`)
+			.join("; ");
+		console.warn(
+			`[verification] Found ${orphans.length} live nonInteractive reviewer session(s) without active verification context: ${summary}. ` +
+			"They are not harness-resumable; use maintenance orphan cleanup to terminate them if they are stale.",
+		);
 	}
 
 	/**
@@ -1294,6 +1578,7 @@ export class VerificationHarness {
 		cwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
+		goalBranch?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
 		gate?: WorkflowGate;
 	} | null> {
@@ -1335,13 +1620,51 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, builtinVars, goalSpec: goal.spec, allGateStates, gate: rerunGate };
+		return { signal, cwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+	}
+
+	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
+		const stepIndex = v.steps.indexOf(step);
+		if (stepIndex < 0) return;
+		const status = persistedStatusForStep(result);
+		Object.assign(v.steps[stepIndex], {
+			status,
+			phase: result.phase ?? step.phase ?? 0,
+			durationMs: result.duration_ms,
+			output: result.output,
+			sessionId: step.sessionId,
+		});
+		if (status === "skipped") v.steps[stepIndex].output = result.output || "Skipped — earlier phase failed";
+		this._persistActive();
+		if (status === "waiting" || status === "running") return;
+		this.broadcastFn(v.goalId, {
+			type: "gate_verification_step_complete",
+			goalId: v.goalId,
+			gateId: v.gateId,
+			signalId: v.signalId,
+			stepIndex,
+			stepName: result.name,
+			status,
+			durationMs: result.duration_ms,
+			output: result.output,
+			phase: result.phase ?? step.phase ?? 0,
+		});
+	}
+
+	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
+		const ctx = await this._gatherRerunContext(v.goalId, v.gateId, v.signalId);
+		if (!ctx?.signal || !ctx.gate) return false;
+		if (!this._isResumeStillActive(v)) return true;
+		await this.verifyGateSignal(ctx.signal, ctx.gate, ctx.cwd, ctx.goalBranch, undefined, ctx.allGateStates, ctx.goalSpec);
+		return true;
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
-		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; phase?: number; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }> = [];
+		if (!this._isResumeStillActive(v)) return;
+		const resolvedSteps: ResumedVerificationStep[] = [];
 
 		for (const step of v.steps) {
+			if (!this._isResumeStillActive(v)) return;
 			if (step.status !== "running") {
 				// Already completed before restart — keep result
 				// Skipped steps (optional or phase-skipped) count as passed for overall verdict
@@ -1378,6 +1701,7 @@ export class VerificationHarness {
 				this.pendingSignoffs.set(key, resolver);
 				const outcome = await promise;
 				this.pendingSignoffs.delete(key);
+				if (!this._isResumeStillActive(v)) return;
 				let passed: boolean;
 				let output: string;
 				if ("decision" in outcome) {
@@ -1394,14 +1718,16 @@ export class VerificationHarness {
 					av.steps[stepIndex].awaitingHuman = false;
 					this._persistActive();
 				}
-				resolvedSteps.push({
+				const signedOffStep: ResumedVerificationStep = {
 					name: step.name, type: step.type,
 					passed,
 					status: passed ? "passed" : "failed",
 					phase: step.phase ?? 0,
 					output,
 					duration_ms: Date.now() - step.startedAt,
-				});
+				};
+				resolvedSteps.push(signedOffStep);
+				this._updateActiveStepFromResumedResult(v, step, signedOffStep);
 				continue;
 			}
 
@@ -1411,12 +1737,13 @@ export class VerificationHarness {
 			let resumeResult = step.type === "command"
 				? await this._resumeCommandStep(v, step)
 				: await this._tryResumeFromSession(v, step);
+			if (!this._isResumeStillActive(v)) return;
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
 			// re-run from scratch rather than giving up
 			const isTransient = step.type === "agent-qa"
 					? isTransientQaError(resumeResult?.output || "")
-					: isTransientReviewError(resumeResult?.output || "");
+					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransient) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
@@ -1425,6 +1752,7 @@ export class VerificationHarness {
 				} else {
 					rerunResult = await this._rerunLlmReviewStep(v.goalId, v.gateId, v.signalId, step.name);
 				}
+				if (!this._isResumeStillActive(v)) return;
 				if (rerunResult) {
 					resumeResult = rerunResult;
 				}
@@ -1432,7 +1760,9 @@ export class VerificationHarness {
 			}
 
 			if (resumeResult) {
-				resolvedSteps.push({ ...resumeResult, status: terminalStatusForStep(resumeResult), phase: step.phase ?? 0 });
+				const resumedStep = { ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 };
+				resolvedSteps.push(resumedStep);
+				this._updateActiveStepFromResumedResult(v, step, resumedStep);
 			} else {
 				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({
@@ -1447,27 +1777,72 @@ export class VerificationHarness {
 			}
 		}
 
+		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
+			if (step.passed || step.skipped) return earliest;
+			if (persistedStatusForStep(step) !== "failed") return earliest;
+			if (isExplicitRestartInterruptedStep(step)) return earliest;
+			const phase = step.phase ?? 0;
+			return earliest === undefined || phase < earliest ? phase : earliest;
+		}, undefined);
+		const firstRestartInterruptedPhase = firstRealFailedPhase === undefined
+			? resolvedSteps.reduce<number | undefined>((earliest, step) => {
+				// Empty waiting rows are never-run downstream placeholders. They are
+				// not themselves restart interruptions; after recovered success they
+				// must execute via normal phase semantics.
+				if (step.status === "waiting" && !step.output.trim()) return earliest;
+				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
+				const phase = step.phase ?? 0;
+				return earliest === undefined || phase < earliest ? phase : earliest;
+			}, undefined)
+			: undefined;
+
+		if (firstRealFailedPhase !== undefined) {
+			for (const step of resolvedSteps) {
+				const phase = step.phase ?? 0;
+				if (step.status === "waiting" && phase > firstRealFailedPhase) {
+					step.passed = true;
+					step.skipped = true;
+					step.status = "skipped";
+					step.output = "Skipped — earlier phase failed";
+					step.duration_ms = 0;
+				}
+			}
+		} else if (firstRestartInterruptedPhase !== undefined) {
+			for (const step of resolvedSteps) {
+				const phase = step.phase ?? 0;
+				if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
+					step.output = "Step was interrupted by server restart before this phase could run.";
+				}
+			}
+		} else if (resolvedSteps.some(step => step.status === "waiting")) {
+			if (await this._continueResumeWithRemainingPhases(v)) return;
+		}
+
+		if (!this._isResumeStillActive(v)) return;
+
 		// Compute overall result
 		const allPassed = computeAllPassed(resolvedSteps as GateSignalStep[]);
 
-		// restart-interrupt suppression — Restart-interrupt suppression. If every failed step is a
-		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
-		// review/QA), don't mark the gate failed — the work being verified
-		// hasn't actually been judged. Persist the verification record honestly
+		// Restart-interrupt suppression. If every failed step is an explicit
+		// command no-verdict row or a reviewer/QA restart interruption, don't mark
+		// the gate failed — the work being verified hasn't actually been judged.
+		// Persist the verification record honestly
 		// (so `gate_status` reflects what really happened) but leave the gate
 		// `pending` so a re-signal will run a fresh verification.
 		//
 		// Predicate is conjunctive: a single real failure poisons the gate
 		// (real failures should still surface as failed even if some sibling
 		// steps got restart-interrupted).
-		const suppressedByRestart = !allPassed && shouldSuppressRestartInterrupt(resolvedSteps);
+		const suppressedByRestart = !allPassed && shouldSuppressExplicitRestartInterrupt(resolvedSteps);
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
 		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
+
+		if (!this._isResumeStillActive(v)) return;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
 			steps: resolvedSteps.map(r => {
-				const status = terminalStatusForStep(r);
+				const status = persistedStatusForStep(r);
 				const stepResult: GateSignalStep = {
 					name: r.name,
 					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
@@ -1502,11 +1877,11 @@ export class VerificationHarness {
 					`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
 				);
 			}
-			console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
 		} else {
 			const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
 			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
-			console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
 		}
 	}
 
@@ -1549,11 +1924,16 @@ export class VerificationHarness {
 		});
 
 		try {
-			// Wait for the agent to finish if it was mid-turn
-			const idleResult = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
-			]).catch(() => ({ type: "idle" as const }));
+			// If restoreSession already revived the reviewer to idle, remind it
+			// immediately. Otherwise wait for the active turn to finish before sending
+			// a reminder, so the harness remains the only driver for nonInteractive
+			// reviewers and never races the generic restoreSession boot prompt.
+			const idleResult = session.status === "idle"
+				? ({ type: "idle" as const })
+				: await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
+				]).catch(() => ({ type: "idle" as const }));
 
 			if (idleResult.type === "result") {
 				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
@@ -1561,6 +1941,25 @@ export class VerificationHarness {
 					name: step.name, type: step.type,
 					passed: idleResult.verdict,
 					output: idleResult.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+
+			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 180_000, step.name);
+			if (recoveryResult.type === "result") {
+				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
+				return {
+					name: step.name, type: step.type,
+					passed: recoveryResult.verdict,
+					output: recoveryResult.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+			if (recoveryResult.type === "errored") {
+				return {
+					name: step.name, type: step.type,
+					passed: false,
+					output: recoveryResult.output,
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
@@ -1581,8 +1980,8 @@ export class VerificationHarness {
 			// timeout), DO NOT throw: a restart-interrupt must never surface as a
 			// hard gate failure. Return a step whose output is BOTH transient (so
 			// `_resumeOneVerification` routes it into `_rerunLlmReviewStep`) AND a
-			// restart-interrupt marker (so `shouldSuppressRestartInterrupt` leaves
-			// the gate `pending` when the rerun context is unavailable).
+			// restart-interrupt marker (so resume suppression leaves the gate
+			// `pending` when the rerun context is unavailable).
 			try {
 				await session.rpcClient.promptWhenReady(reminderPrompt, undefined);
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
@@ -1610,6 +2009,24 @@ export class VerificationHarness {
 					name: step.name, type: step.type,
 					passed: result2.verdict,
 					output: result2.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+
+			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 120_000, step.name);
+			if (postReminderRecovery.type === "result") {
+				return {
+					name: step.name, type: step.type,
+					passed: postReminderRecovery.verdict,
+					output: postReminderRecovery.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+			if (postReminderRecovery.type === "errored") {
+				return {
+					name: step.name, type: step.type,
+					passed: false,
+					output: postReminderRecovery.output,
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
@@ -1660,6 +2077,7 @@ export class VerificationHarness {
 		// transient errors, unbounded retry for provider rate-limit / overload.
 		const maxBoundedAttempts = 3;
 		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
+		let finalAttempt = 0;
 
 		// Resolve project vars and substitute the prompt template
 		const projectConfigStore = this.resolveProjectConfigStore(goalId);
@@ -1670,6 +2088,7 @@ export class VerificationHarness {
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
 		for (let attempt = 1; ; attempt++) {
+			finalAttempt = attempt;
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
@@ -1702,7 +2121,7 @@ export class VerificationHarness {
 		return {
 			name: stepName, type: "llm-review",
 			passed: result.passed,
-			output: result.output,
+			output: result.passed ? result.output : appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }),
 			duration_ms: Date.now() - startedAt,
 		};
 	}
@@ -1969,6 +2388,320 @@ export class VerificationHarness {
 		}
 	}
 
+	private _isResumeStillActive(v: ActiveVerification): boolean {
+		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
+	}
+
+	private _commandIdentityNonce(step: ActiveVerification["steps"][number]): string | undefined {
+		return step.pidNonce ?? step.nonce;
+	}
+
+	private _readCommandIdentityFile(step: ActiveVerification["steps"][number]): { pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number } {
+		const expectedNonce = this._commandIdentityNonce(step);
+		if (!step.pidFile || !expectedNonce) {
+			return { ok: false, reason: "no durable command identity was recorded", retryable: false };
+		}
+		let parsed: any;
+		let mtimeMs: number | undefined;
+		try {
+			const stat = fs.statSync(step.pidFile);
+			mtimeMs = stat.mtimeMs;
+			const raw = fs.readFileSync(step.pidFile, "utf8").trim();
+			try {
+				parsed = JSON.parse(raw);
+			} catch {
+				const [pidLine, nonceLine] = raw.split(/\r?\n/);
+				parsed = { pid: pidLine, nonce: nonceLine };
+			}
+		} catch (err) {
+			return { ok: false, reason: `command identity file is unavailable or unreadable: ${(err as Error).message}`, retryable: true };
+		}
+		const fileNonce = typeof parsed?.nonce === "string" ? parsed.nonce : undefined;
+		if (fileNonce !== expectedNonce) {
+			return { ok: false, reason: "command identity nonce did not match persisted metadata", retryable: false, mtimeMs };
+		}
+		const filePid = Number(parsed?.pid);
+		const validFilePid = Number.isFinite(filePid) && filePid > 0 ? filePid : undefined;
+		const pid = process.platform === "win32" && typeof step.pid === "number"
+			? step.pid
+			: (validFilePid ?? step.pid);
+		if (!pid || !Number.isFinite(pid) || pid <= 0) {
+			return { ok: false, reason: "command identity file did not contain a valid process id", retryable: true, mtimeMs };
+		}
+		if (process.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
+			return { pid, ok: false, reason: "command identity process id did not match persisted metadata", retryable: false, mtimeMs };
+		}
+		return { pid, ok: true, reason: "verified", retryable: false, mtimeMs };
+	}
+
+	private async _waitForCommandIdentityFile(step: ActiveVerification["steps"][number], isStillActive: () => boolean): Promise<{ pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number }> {
+		let identity = this._readCommandIdentityFile(step);
+		if (identity.ok || !identity.retryable) return identity;
+		const deadline = Date.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
+		while (Date.now() < deadline && isStillActive()) {
+			await new Promise(r => setTimeout(r, COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS));
+			identity = this._readCommandIdentityFile(step);
+			if (identity.ok || !identity.retryable) return identity;
+		}
+		return identity;
+	}
+
+	private _heartbeatMatchesCommandIdentity(step: ActiveVerification["steps"][number], pid: number): boolean {
+		const expectedNonce = this._commandIdentityNonce(step);
+		if (!step.heartbeatFile || !expectedNonce) return false;
+		try {
+			const stat = fs.statSync(step.heartbeatFile);
+			if (Date.now() - stat.mtimeMs > COMMAND_IDENTITY_HEARTBEAT_STALE_MS) return false;
+			const parsed = JSON.parse(fs.readFileSync(step.heartbeatFile, "utf8"));
+			return parsed?.nonce === expectedNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
+		} catch {
+			return false;
+		}
+	}
+
+	private _verifyPersistedCommandIdentity(
+		step: ActiveVerification["steps"][number],
+		preReadIdentity?: { pid?: number; ok: boolean; reason: string; mtimeMs?: number },
+	): { verified: boolean; pid?: number; reason: string } {
+		const identity = preReadIdentity ?? this._readCommandIdentityFile(step);
+		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
+		const pid = identity.pid;
+		if (!isPidAlive(pid)) return { verified: false, pid, reason: "command process is no longer alive" };
+
+		const currentStartToken = readProcessStartToken(pid);
+		if (step.processStartToken && currentStartToken) {
+			if (step.processStartToken !== currentStartToken) {
+				return { verified: false, pid, reason: "command process start token did not match; PID may have been reused" };
+			}
+			return { verified: true, pid, reason: "pidfile nonce and process start token matched" };
+		}
+
+		if (this._heartbeatMatchesCommandIdentity(step, pid)) {
+			return { verified: true, pid, reason: "pidfile nonce and live heartbeat matched" };
+		}
+
+		// Bounded create-window proof: immediately after restart the wrapper may
+		// have published the pidfile before its first heartbeat. Treat only a
+		// freshly-written pidfile as current identity evidence; stale nonce-only
+		// records remain unverified to avoid PID-reuse kills.
+		if (identity.mtimeMs !== undefined && Date.now() - identity.mtimeMs <= COMMAND_IDENTITY_HEARTBEAT_STALE_MS) {
+			return { verified: true, pid, reason: "pidfile nonce matched and identity file was freshly written" };
+		}
+
+		return {
+			verified: false,
+			pid,
+			reason: "pidfile nonce matched, but no process start token or fresh heartbeat was available; refusing to trust a possibly reused PID",
+		};
+	}
+
+	private _mergePersistedActiveVerifications(predicate: (v: ActiveVerification) => boolean): void {
+		for (const persisted of this._loadActive()) {
+			if (!predicate(persisted)) continue;
+			if (!this.activeVerifications.has(persisted.signalId)) {
+				this.activeVerifications.set(persisted.signalId, persisted);
+			}
+		}
+	}
+
+	private _hasPendingCommandKillCleanup(active: ActiveVerification): boolean {
+		return active.steps.some(step =>
+			step.type === "command" &&
+			!!step.killRequestedAt &&
+			!step.killCompletedAt,
+		);
+	}
+
+	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
+		return step.type === "command" && (step.status === "running" || (!!step.killRequestedAt && !step.killCompletedAt));
+	}
+
+	private _markPersistedCommandKillIntent(active: ActiveVerification, signal: NodeJS.Signals, reason: "cancelled" | "timeout"): void {
+		const now = Date.now();
+		active.cancelRequestedAt ??= now;
+		active.cancelReason ??= reason;
+		for (const step of active.steps) {
+			if (step.type !== "command") continue;
+			if (step.status !== "running" && !step.killRequestedAt) continue;
+			step.killRequestedAt ??= now;
+			step.killReason = reason;
+			step.killSignal = signal;
+		}
+	}
+
+	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (!isPidAlive(pid)) return true;
+			await new Promise(r => setTimeout(r, 50));
+		}
+		return !isPidAlive(pid);
+	}
+
+	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+
+	private _scheduleCommandKillCleanupRetry(signalId: string): void {
+		if (this._commandKillRetryTimers.has(signalId)) return;
+		const timer = setTimeout(async () => {
+			this._commandKillRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (!active || !this._hasPendingCommandKillCleanup(active)) return;
+			try {
+				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
+				const signal = pendingStep?.killSignal ?? "SIGKILL";
+				const settled = await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
+				if (!settled) {
+					this._persistActive();
+					this._scheduleCommandKillCleanupRetry(signalId);
+					return;
+				}
+
+				if (active.cancelled || active.overallStatus === "cancelled") {
+					if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
+					this._persistActive();
+					return;
+				}
+
+				if (this.activeVerifications.get(signalId) === active) {
+					await this._resumeOneVerification(active);
+					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
+						this.activeVerifications.delete(signalId);
+					}
+					this._persistActive();
+				}
+			} catch (err) {
+				console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
+				this._persistActive();
+				if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
+			}
+		}, 1_000);
+		timer.unref?.();
+		this._commandKillRetryTimers.set(signalId, timer);
+	}
+
+	private async _killPersistedCommandSteps(
+		active: ActiveVerification,
+		signal: NodeJS.Signals = "SIGKILL",
+		options: { waitForIdentity?: boolean; markIntent?: boolean; reason?: "cancelled" | "timeout" } = {},
+	): Promise<boolean> {
+		if (options.markIntent !== false) {
+			this._markPersistedCommandKillIntent(active, signal, options.reason ?? "cancelled");
+			this._persistActive();
+		}
+
+		let allSettled = true;
+		for (const step of active.steps) {
+			if (!this._commandStepRequiresKillCleanup(step)) continue;
+			if (step.exitFile && fs.existsSync(step.exitFile)) {
+				step.killCompletedAt ??= Date.now();
+				continue;
+			}
+			if (step.restartRecoveryMode === "unsupported" || step.containerId || (!step.pidFile && !step.pid)) {
+				step.killUnsafeReason = step.restartRecoveryUnsupportedReason ?? "command path has no restart-safe persisted process identity";
+				allSettled = false;
+				continue;
+			}
+
+			const identityFile = options.waitForIdentity
+				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && this._hasPendingCommandKillCleanup(active))
+				: this._readCommandIdentityFile(step);
+			let identity = this._verifyPersistedCommandIdentity(step, identityFile);
+			if (!identity.verified || !identity.pid) {
+				step.killUnsafeReason = identity.reason;
+				if (identity.reason === "command process is no longer alive") {
+					if (step.killReason === "timeout" && (step.killAttempts ?? 0) === 0 && !step.killLastAttemptAt) {
+						step.killUnsafeReason = "command process exited before Bobbit could verify a timeout kill; no command verdict was obtained";
+						delete step.killRequestedAt;
+						delete step.killReason;
+						delete step.killSignal;
+					} else {
+						step.killCompletedAt ??= Date.now();
+					}
+					continue;
+				}
+				allSettled = false;
+				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
+					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
+				}
+				continue;
+			}
+
+			step.killAttempts = (step.killAttempts ?? 0) + 1;
+			step.killLastAttemptAt = Date.now();
+			try { killTreeByPid(identity.pid, signal); } catch { /* best-effort */ }
+			const exited = await this._waitForPidToExit(identity.pid);
+			if (exited) {
+				step.killCompletedAt = Date.now();
+				continue;
+			}
+
+			identity = this._verifyPersistedCommandIdentity(step);
+			if (identity.reason === "command process is no longer alive") {
+				step.killCompletedAt = Date.now();
+			} else {
+				allSettled = false;
+				step.killUnsafeReason = identity.verified && identity.pid
+					? "verified command process was still alive after kill attempt; will retry"
+					: `command cleanup could not be verified after kill attempt: ${identity.reason}`;
+			}
+		}
+		this._persistActive();
+		return allSettled;
+	}
+
+	private async _killVerifiedCommandStepForTimeout(
+		active: ActiveVerification,
+		step: ActiveVerification["steps"][number],
+	): Promise<{ status: "settled" | "pending" | "unverifiable"; reason?: string }> {
+		const hadPriorKillAttempt = (step.killAttempts ?? 0) > 0 || !!step.killLastAttemptAt || !!step.killCompletedAt;
+		let identity = this._verifyPersistedCommandIdentity(step);
+
+		if (!identity.verified || !identity.pid) {
+			step.killUnsafeReason = identity.reason;
+			if (identity.reason === "command process is no longer alive") {
+				step.killCompletedAt ??= Date.now();
+				this._persistActive();
+				return hadPriorKillAttempt
+					? { status: "settled" }
+					: {
+						status: "unverifiable",
+						reason: "The command process was no longer alive at its timeout deadline before Bobbit could verify cleanup, and no durable exit status was recorded.",
+					};
+			}
+
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			step.killUnsafeReason = `timeout cleanup is pending until command identity can be verified safely: ${identity.reason}`;
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
+		}
+
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+		step.killAttempts = (step.killAttempts ?? 0) + 1;
+		step.killLastAttemptAt = Date.now();
+		try { killTreeByPid(identity.pid, "SIGKILL"); } catch { /* best-effort */ }
+		const exited = await this._waitForPidToExit(identity.pid);
+		if (exited) {
+			step.killCompletedAt = Date.now();
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return { status: "settled" };
+		}
+
+		identity = this._verifyPersistedCommandIdentity(step);
+		if (identity.reason === "command process is no longer alive") {
+			step.killCompletedAt = Date.now();
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return { status: "settled" };
+		}
+
+		step.killUnsafeReason = identity.verified && identity.pid
+			? "verified command process was still alive after timeout kill attempt; will retry before finalizing the timeout"
+			: `timeout cleanup could not be verified after kill attempt: ${identity.reason}`;
+		this._persistActive();
+		return { status: "pending", reason: step.killUnsafeReason };
+	}
+
 	/**
 	 * Tree-kill any tracked command-step subprocess registered under the given
 	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
@@ -2018,12 +2751,17 @@ export class VerificationHarness {
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
 	async cancelAllVerifications(goalId: string): Promise<void> {
-		for (const [signalId, active] of this.activeVerifications) {
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
+		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+			active.cancelRequestedAt ??= Date.now();
 
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+			this._persistActive();
 			this._killTrackedForSignal(signalId);
+			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -2035,7 +2773,11 @@ export class VerificationHarness {
 				}
 			}
 
-			this.activeVerifications.delete(signalId);
+			if (commandKillsSettled) {
+				this.activeVerifications.delete(signalId);
+			} else {
+				this._scheduleCommandKillCleanupRetry(signalId);
+			}
 			this._persistActive();
 
 			this.broadcastFn(goalId, {
@@ -2064,17 +2806,26 @@ export class VerificationHarness {
 	 */
 	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
 		const gateIdSet = new Set(gateIds);
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
 		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
 
-		for (const [signalId, active] of this.activeVerifications) {
+		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
 
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+			active.cancelRequestedAt ??= Date.now();
 
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+			this._persistActive();
 			this._killTrackedForSignal(signalId);
+			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
-			this.activeVerifications.delete(signalId);
+			if (commandKillsSettled) {
+				this.activeVerifications.delete(signalId);
+			} else {
+				this._scheduleCommandKillCleanupRetry(signalId);
+			}
 
 			cancellations.push({
 				signalId,
@@ -2308,9 +3059,34 @@ export class VerificationHarness {
 				});
 			}
 
-			// If ALL active steps can be served from cache, skip spawning agents entirely
-			if (canSkipAllSteps(cachedSteps, activeSteps)) {
-				console.log(`[verification] All ${activeSteps.length} active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
+			// A restart-resumed verification can re-enter this normal execution path
+			// with earlier phases already recovered as terminal rows. Preserve those
+			// results and execute only the still-waiting downstream phases.
+			for (let i = 0; i < steps.length; i++) {
+				if (allResults[i]) continue;
+				const activeStep = active.steps[i];
+				if (!activeStep || (activeStep.status !== "passed" && activeStep.status !== "failed" && activeStep.status !== "skipped")) continue;
+				const status = activeStep.status;
+				allResults[i] = {
+					name: steps[i].name,
+					type: steps[i].type as GateSignalStep["type"],
+					passed: status === "passed" || status === "skipped",
+					...(status === "skipped" ? { skipped: true } : {}),
+					status,
+					phase: activeStep.phase ?? steps[i].phase ?? 0,
+					output: activeStep.output || "",
+					duration_ms: activeStep.durationMs || 0,
+					expect: steps[i].expect,
+				};
+			}
+			const remainingActiveSteps = activeSteps.filter(step => {
+				const index = steps.indexOf(step);
+				return index < 0 || !allResults[index];
+			});
+
+			// If ALL remaining active steps can be served from cache, skip spawning agents entirely
+			if (canSkipAllSteps(cachedSteps, remainingActiveSteps)) {
+				console.log(`[verification] All ${remainingActiveSteps.length} remaining active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
 				const results: GateSignalStep[] = steps.map((s, i) => {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
 					const cached = cachedSteps.get(s.name)!;
@@ -2350,7 +3126,7 @@ export class VerificationHarness {
 			// Active steps are grouped by phase (default 0), and phases execute sequentially.
 			// All steps within a phase run concurrently by default. Skipped optional steps
 			// are excluded.
-			const phaseGroups = groupStepsByPhase(activeSteps, steps);
+			const phaseGroups = groupStepsByPhase(remainingActiveSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
 			// Sync the goal worktree with the latest commits before running verification.
@@ -2368,12 +3144,24 @@ export class VerificationHarness {
 				}
 
 				if (hasOriginRemote) {
+					let hasRemoteGoalBranch = false;
 					try {
-						await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-						await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-						console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						const { stdout } = await execFileAsync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
+						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout, goalBranch);
 					} catch (err) {
-						console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						if (!isMissingRemoteHeadLsRemoteError(err)) {
+							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
+						}
+					}
+
+					if (hasRemoteGoalBranch) {
+						try {
+							await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+							await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						}
 					}
 
 					// Also fetch the review baseline branch so origin/<base> is up-to-date for
@@ -2390,9 +3178,15 @@ export class VerificationHarness {
 			}
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
+			const earliestPreResolvedFailedPhase = allResults.reduce<number | undefined>((earliest, result) => {
+				if (!result || result.passed || result.skipped) return earliest;
+				const phase = result.phase ?? 0;
+				return earliest === undefined || phase < earliest ? phase : earliest;
+			}, undefined);
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
+				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
 				if (phaseFailed) {
@@ -2735,7 +3529,9 @@ export class VerificationHarness {
 								// retry rationale — kept symmetric so both review paths
 								// survive a long provider rate-limit / overload window.
 								const maxBoundedAttempts = 3;
+								let finalAttempt = 0;
 								for (let attempt = 1; ; attempt++) {
+									finalAttempt = attempt;
 									if (active.cancelled) break;
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
@@ -2755,6 +3551,9 @@ export class VerificationHarness {
 									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
 									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
 									await this._sleepCancellable(delayMs, () => !!active.cancelled);
+								}
+								if (!result.passed && !active.cancelled) {
+									result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
 								}
 							}
 						}
@@ -2952,6 +3751,69 @@ export class VerificationHarness {
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
 	// import it directly without going through a class instance.
 
+	private async waitForReviewerErroredTurnRecovery(
+		sessionId: string,
+		resultPromise: Promise<VerificationResult>,
+		timeoutMs: number,
+		stepName: string,
+	): Promise<
+		| ({ type: "result" } & VerificationResult)
+		| { type: "idle" }
+		| { type: "errored"; output: string }
+	> {
+		for (;;) {
+			const session = this.sessionManager?.getSession(sessionId);
+			const errMsg = session?.lastTurnErrored ? (session.lastTurnErrorMessage || "") : "";
+			if (!errMsg) return { type: "idle" };
+
+			const backoffSuffix = describeProviderBackoff(session);
+			if (!isRetryableLlmReviewRecovery(errMsg)) {
+				return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+			}
+
+			if (!session?.pendingAutoRetryTimer) {
+				return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+			}
+
+			const graceMs = Math.min(
+				Math.max(timeoutMs, 1_000),
+				isProviderBackoffError(errMsg) ? REVIEWER_PROVIDER_BACKOFF_GRACE_MS : REVIEWER_ERRORED_TURN_GRACE_MS,
+			);
+			console.log(`[verification] Reviewer ${sessionId} for "${stepName}" ended with retryable runtime error; waiting up to ${Math.round(graceMs / 1000)}s for session auto-retry to start...`);
+
+			const started = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForStreaming(sessionId, graceMs)
+					.then(() => ({ type: "streaming" as const }))
+					.catch(() => ({ type: "no-stream" as const })),
+			]);
+			if (started.type === "result") return started;
+			if (started.type === "no-stream") {
+				const latest = this.sessionManager?.getSession(sessionId);
+				if (latest && !latest.lastTurnErrored) return { type: "idle" };
+				const latestErr = latest?.lastTurnErrored ? (latest.lastTurnErrorMessage || errMsg) : errMsg;
+				if (latest?.pendingAutoRetryTimer && isRetryableLlmReviewRecovery(latestErr)) continue;
+				return { type: "errored", output: `LLM review failed: ${latestErr}${describeProviderBackoff(latest)}` };
+			}
+
+			try {
+				const finished = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+				if (finished.type === "result") return finished;
+			} catch (err: any) {
+				const latest = this.sessionManager?.getSession(sessionId);
+				return {
+					type: "errored",
+					output: `LLM review timed out after ${(timeoutMs / 1000)}s.${describeProviderBackoff(latest)}`,
+				};
+			}
+			// The auto-retry turn ended idle. Loop once more: if it errored, wait for
+			// the next scheduled auto-retry; if it ended cleanly without the tool,
+			// the caller will send the normal reminder.
+		}
+	}
 
 	/**
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
@@ -2999,7 +3861,9 @@ export class VerificationHarness {
 			const _preRoleOverrides = this.resolveRoleForGoal(roleName, goalId);
 			const _preRoleModel = _preRoleOverrides?.model;
 			const _preReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-			const _preInitialModel = resolvePiBackedReviewInitialModel(_preRoleModel, _preReviewPref);
+			const _preInitialModel = (_preRoleModel && /^[^/]+\/.+$/.test(_preRoleModel))
+				? _preRoleModel
+				: ((_preReviewPref && /^[^/]+\/.+$/.test(_preReviewPref)) ? _preReviewPref : undefined);
 			const _preRoleThinking = _preRoleOverrides?.thinkingLevel;
 			const _preReviewThinkingPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 			const _validLevels = THINKING_LEVELS as readonly string[];
@@ -3007,10 +3871,18 @@ export class VerificationHarness {
 				? _preRoleThinking
 				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
 			const _preInitialThinking = clampReviewThinking(_preInitialThinkingRaw, _preInitialModel) ?? _preInitialThinkingRaw;
+			const reviewerMeta = buildVerificationReviewerMeta({
+				kind: "llm-review",
+				roleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			});
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
+				...reviewerMeta,
 				sandboxed: isSandboxed,
 				sessionId,
 				skipAutoModel: true,
@@ -3032,13 +3904,7 @@ export class VerificationHarness {
 			// and the archived render path lumps them under "unmapped" — they
 			// only surface under the LAST archived team-lead. Pure-helper
 			// contract pinned by tests/verification-reviewer-meta.test.ts.
-			this.sessionManager!.updateSessionMeta(sessionId, buildVerificationReviewerMeta({
-				kind: "llm-review",
-				roleName,
-				goalId,
-				roleAccessory: role.accessory,
-				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
-			}));
+			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
 
 			// Register in team store (if team manager available)
 			if (this.teamManager) {
@@ -3054,42 +3920,41 @@ export class VerificationHarness {
 			const roleOverrides_r = this.resolveRoleForGoal(roleName, goalId);
 			const roleModel_r = roleOverrides_r?.model;
 			const roleThinking_r = roleOverrides_r?.thinkingLevel;
-			const piRoleModel_r = filterPiBackedReviewModelForSetModel(roleModel_r);
 
-			// Override model: role wins, else default.reviewModel preference. Claude
-			// Code models are local-runtime selections, so verification ignores them
-			// and remains Pi-backed instead of spawning/switching runtimes.
+			// Override model: role wins, else default.reviewModel preference.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
 			// `skipSetModel` is true when the spawn already pinned the same model;
 			// the read-back verification still runs and still hard-fails on mismatch.
-			if (piRoleModel_r) {
+			if (roleModel_r) {
 				try {
-					await applyModelString(session.rpcClient, piRoleModel_r, {
+					await applyModelString(session.rpcClient, roleModel_r, {
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						contextLabel: `role.${roleName}.model`,
-						skipSetModel: _preInitialModel === piRoleModel_r,
+						skipSetModel: _preInitialModel === roleModel_r,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${piRoleModel_r}" for reviewer ${sessionId} (role=${roleName})`);
+					console.log(`[verification] Applied role model policy for reviewer ${sessionId} (selected="${roleModel_r}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${piRoleModel_r}" failed for reviewer ${sessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_r, 500)}" failed for reviewer ${sessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : (this.preferencesStore!.get(k) as string | undefined) },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						role: "reviewer",
 						skipSetModel: !!reviewModelPref && _preInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
+						console.log(`[verification] Applied review model policy for ${sessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3108,7 +3973,7 @@ export class VerificationHarness {
 				}
 				// Clamp against the reviewer's resolved model so xhigh on a model
 				// that doesn't support it degrades to high before the RPC.
-				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_r, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
+				level = clampReviewThinking(level, roleModel_r ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
 				} else {
@@ -3144,6 +4009,15 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId };
 			}
 
+			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
+			if (recoveryResult.type === "result") {
+				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+				return { passed: recoveryResult.verdict, output: recoveryResult.summary, sessionId };
+			}
+			if (recoveryResult.type === "errored") {
+				return { passed: false, output: recoveryResult.output, sessionId };
+			}
+
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
 			// fall back to the context-rich reminder for live reviewers. The legacy
@@ -3168,6 +4042,15 @@ export class VerificationHarness {
 
 			if (result2.type === "result") {
 				return { passed: result2.verdict, output: result2.summary, sessionId };
+			}
+
+			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
+			if (postReminderRecovery.type === "result") {
+				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+				return { passed: postReminderRecovery.verdict, output: postReminderRecovery.summary, sessionId };
+			}
+			if (postReminderRecovery.type === "errored") {
+				return { passed: false, output: postReminderRecovery.output, sessionId };
 			}
 
 			// Hard failure
@@ -3343,7 +4226,9 @@ export class VerificationHarness {
 			const _preQaRoleOverrides = this.resolveRoleForGoal(qaRoleName, goalId);
 			const _preQaRoleModel = _preQaRoleOverrides?.model;
 			const _preQaReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-			const _preQaInitialModel = resolvePiBackedReviewInitialModel(_preQaRoleModel, _preQaReviewPref);
+			const _preQaInitialModel = (_preQaRoleModel && /^[^/]+\/.+$/.test(_preQaRoleModel))
+				? _preQaRoleModel
+				: ((_preQaReviewPref && /^[^/]+\/.+$/.test(_preQaReviewPref)) ? _preQaReviewPref : undefined);
 			const _preQaRoleThinking = _preQaRoleOverrides?.thinkingLevel;
 			const _preQaReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 			const _qaValidLevels = THINKING_LEVELS as readonly string[];
@@ -3351,10 +4236,18 @@ export class VerificationHarness {
 				? _preQaRoleThinking
 				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
 			const _preQaInitialThinking = clampReviewThinking(_preQaInitialThinkingRaw, _preQaInitialModel) ?? _preQaInitialThinkingRaw;
+			const qaReviewerMeta = buildVerificationReviewerMeta({
+				kind: "agent-qa",
+				roleName: qaRoleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			});
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
+				...qaReviewerMeta,
 				sandboxed: qaIsSandboxed,
 				sessionId: qaSessionId,
 				skipAutoModel: true,
@@ -3373,13 +4266,7 @@ export class VerificationHarness {
 			const qaTitlePrefix = step.name?.trim()
 				|| (step.role ? `QA (${step.role})` : "QA");
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
-			this.sessionManager!.updateSessionMeta(qaSessionId, buildVerificationReviewerMeta({
-				kind: "agent-qa",
-				roleName: qaRoleName,
-				goalId,
-				roleAccessory: role.accessory,
-				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
-			}));
+			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
 
 			// Register in team store
 			if (this.teamManager) {
@@ -3394,39 +4281,39 @@ export class VerificationHarness {
 			const roleOverrides_q = this.resolveRoleForGoal(qaRoleName, goalId);
 			const roleModel_q = roleOverrides_q?.model;
 			const roleThinking_q = roleOverrides_q?.thinkingLevel;
-			const piRoleModel_q = filterPiBackedReviewModelForSetModel(roleModel_q);
 
-			// Override model: role wins, else default.reviewModel preference. Claude
-			// Code models are ignored here so agent QA remains on the Pi runtime.
+			// Override model: role wins, else default.reviewModel preference.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (piRoleModel_q) {
+			if (roleModel_q) {
 				try {
-					await applyModelString(session.rpcClient, piRoleModel_q, {
+					await applyModelString(session.rpcClient, roleModel_q, {
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						contextLabel: `role.${qaRoleName}.model`,
-						skipSetModel: _preQaInitialModel === piRoleModel_q,
+						skipSetModel: _preQaInitialModel === roleModel_q,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${piRoleModel_q}" for QA ${qaSessionId} (role=${qaRoleName})`);
+					console.log(`[verification] Applied role model policy for QA ${qaSessionId} (selected="${roleModel_q}", role=${qaRoleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${piRoleModel_q}" failed for QA ${qaSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_q, 500)}" failed for QA ${qaSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : (this.preferencesStore!.get(k) as string | undefined) },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						role: "qa",
 						skipSetModel: !!reviewModelPref && _preQaInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
+						console.log(`[verification] Applied QA model policy for ${qaSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3441,7 +4328,7 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_q, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
+				level = clampReviewThinking(level, roleModel_q ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preQaInitialThinking === level) {
 					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
 				} else {
@@ -3572,7 +4459,7 @@ export class VerificationHarness {
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
 			args: toolActivation.args,
-			env: mergeHostAgentProviderEnv(toolActivation.env, this.preferencesStore),
+			env: toolActivation.env,
 			toolManager: toolActivation.toolManager,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
@@ -3581,8 +4468,14 @@ export class VerificationHarness {
 		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName) : undefined;
 		const _preLegacyRoleModel = _preLegacyRoleOverrides?.model;
 		const _preLegacyReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		const _preLegacyInitialModel = resolvePiBackedReviewInitialModel(_preLegacyRoleModel, _preLegacyReviewPref);
+		const _preLegacyInitialModel = (_preLegacyRoleModel && /^[^/]+\/.+$/.test(_preLegacyRoleModel))
+			? _preLegacyRoleModel
+			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
+			model: bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
+		});
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 		const _legacyValidLevels = THINKING_LEVELS as readonly string[];
@@ -3626,41 +4519,40 @@ export class VerificationHarness {
 			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName) : undefined;
 			const roleModel_s = roleOverrides_s?.model;
 			const roleThinking_s = roleOverrides_s?.thinkingLevel;
-			const piRoleModel_s = filterPiBackedReviewModelForSetModel(roleModel_s);
 
-			// Override model: role wins, else default.reviewModel preference. The
-			// legacy direct path is an explicit RpcBridge/Pi sub-session; ignore
-			// claude-code/* so it never sends unsupported set_model commands.
+			// Override model: role wins, else default.reviewModel preference.
 			// Sub-session path: no UI session, no persistence (sessionManager=null).
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (piRoleModel_s) {
+			if (roleModel_s) {
 				try {
-					await applyModelString(rpc, piRoleModel_s, {
+					await applyModelString(rpc, roleModel_s, {
 						sessionManager: null,
 						sessionId: null,
 						contextLabel: `role.${roleName}.model`,
-						skipSetModel: _preLegacyInitialModel === piRoleModel_s,
+						skipSetModel: _preLegacyInitialModel === roleModel_s,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Set role-override model "${piRoleModel_s}" for sub-session ${subSessionId} (role=${roleName})`);
+					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${roleModel_s}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${piRoleModel_s}" failed for sub-session ${subSessionId}:`, err);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(rpc, {
-						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : (this.preferencesStore!.get(k) as string | undefined) },
+						prefs: { get: (k) => this.preferencesStore!.get(k) },
 						sessionManager: null,
 						sessionId: null,
 						role: "subsession",
 						skipSetModel: !!reviewModelPref && _preLegacyInitialModel === reviewModelPref,
+						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
 					if (reviewModelPref) {
-						console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
+						console.log(`[verification] Applied review model policy for ${subSessionId} (selected="${reviewModelPref}")`);
 					}
 				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			}
@@ -3675,7 +4567,7 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_s, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
+				level = clampReviewThinking(level, roleModel_s ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preLegacyInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${subSessionId}`);
 				} else {
@@ -3826,23 +4718,29 @@ export class VerificationHarness {
 
 			// Decide execution mode.
 			let useDetached = !containerId && !!streamCtx;
+			let restartRecoveryUnsupportedReason: string | undefined = containerId
+				? "Container command steps currently run through attached docker exec; durable restart recovery is not available for this path."
+				: undefined;
 
 			// On Windows without Git Bash, the resolved shell is cmd.exe which
-			// cannot execute the bash exit-file wrapper. Silently degrade to
-			// attached mode so the verification still runs, and warn once so
-			// the missing restart-survival capability is visible in the logs.
+			// cannot execute the bash exit-file wrapper. Explicitly mark the step
+			// non-restart-recoverable so a restart becomes a pending/retryable
+			// interruption, not a fabricated command verdict.
 			if (useDetached && process.platform === "win32" && !GIT_BASH) {
 				if (!VerificationHarness._warnedCmdExeDetached) {
 					VerificationHarness._warnedCmdExeDetached = true;
 					console.warn("[verification] Git Bash not found on Windows — detached command mode disabled (cmd.exe cannot run the bash exit-file wrapper). Verification command steps will not survive a gateway restart.");
 				}
+				restartRecoveryUnsupportedReason = "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path cannot be recovered after gateway restart.";
 				useDetached = false;
 			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;
 			let exitFile: string | undefined;
-			let outFd: number | undefined;
-			let errFd: number | undefined;
+			let pidFile: string | undefined;
+			let pidNonce: string | undefined;
+			let heartbeatFile: string | undefined;
+			let processStartToken: string | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
 
 			if (streamCtx) {
@@ -3871,30 +4769,72 @@ export class VerificationHarness {
 						errFile = path.join(stepDir, `${streamCtx.stepIndex}.err`);
 					}
 					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
-					try { fs.unlinkSync(exitFile); } catch { /* not present */ }
-					try { fs.unlinkSync(exitFile + ".tmp"); } catch { /* not present */ }
-					outFd = fs.openSync(outFile, "w");
-					errFd = fs.openSync(errFile, "w");
+					pidFile = path.join(stepDir, `${streamCtx.stepIndex}.pid.json`);
+					heartbeatFile = path.join(stepDir, `${streamCtx.stepIndex}.heartbeat.json`);
+					pidNonce = randomUUID();
+					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
+						try { fs.unlinkSync(file); } catch { /* not present */ }
+					}
+					fs.writeFileSync(outFile, "");
+					fs.writeFileSync(errFile, "");
 				} catch (err) {
 					console.warn(`[verification] Failed to set up survival files — falling back to attached mode: ${(err as Error).message}`);
-					if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
-					if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 					useDetached = false;
+					restartRecoveryUnsupportedReason = `Detached command recovery setup failed before spawn: ${(err as Error).message}`;
 					outFile = diagnosticsPaths?.stdoutPath;
 					errFile = diagnosticsPaths?.stderrPath;
 					exitFile = undefined;
+					pidFile = undefined;
+					pidNonce = undefined;
+					heartbeatFile = undefined;
 				}
+			}
+
+			const stampActiveCommandStep = (patch: Partial<ActiveVerification["steps"][number]>) => {
+				if (!streamCtx) return;
+				const av = this.activeVerifications.get(streamCtx.signalId);
+				if (!av || !av.steps[streamCtx.stepIndex]) return;
+				Object.assign(av.steps[streamCtx.stepIndex], patch);
+				this._persistActive();
+			};
+
+			if (streamCtx) {
+				stampActiveCommandStep({
+					outFile,
+					errFile,
+					exitFile,
+					pidFile,
+					pidNonce,
+					heartbeatFile,
+					containerId,
+					bootEpoch: useDetached ? this.bootEpoch : undefined,
+					timeoutSec,
+					expectFailure,
+					errorPattern,
+					commandCwd: normalizedCwd,
+					restartRecoveryMode: useDetached ? "detached" : "unsupported",
+					restartRecoveryUnsupportedReason: useDetached ? undefined : (restartRecoveryUnsupportedReason ?? "Attached command execution cannot be recovered after gateway restart."),
+				});
 			}
 
 			// Build the command to actually run. In detached mode we wrap so
 			// the wrapper, not the gateway, owns writing the exit code atomically.
 			let cmdToRun = command;
-			if (useDetached && exitFile) {
+			if (useDetached && exitFile && pidFile && pidNonce && heartbeatFile && outFile && errFile) {
 				const exitTmp = exitFile + ".tmp";
-				const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+				const pidTmp = pidFile + ".tmp";
+				const heartbeatTmp = heartbeatFile + ".tmp";
+				const nonceJson = JSON.stringify(pidNonce);
+				const qOut = shellSingleQuote(outFile);
+				const qErr = shellSingleQuote(errFile);
+				const writeIdentity = `printf '{"pid":%s,"nonce":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} > ${shellSingleQuote(pidTmp)} && mv ${shellSingleQuote(pidTmp)} ${shellSingleQuote(pidFile)}`;
+				const writeHeartbeat = `printf '{"pid":%s,"nonce":%s,"ts":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} "$(date +%s 2>/dev/null || printf 0)" > ${shellSingleQuote(heartbeatTmp)} && mv ${shellSingleQuote(heartbeatTmp)} ${shellSingleQuote(heartbeatFile)}`;
+				const trimLogs = `for __bobbit_f in ${qOut} ${qErr}; do if [ -f "$__bobbit_f" ] && [ "$(wc -c < "$__bobbit_f" 2>/dev/null || echo 0)" -gt ${MAX_RETAINED_LOG_BYTES} ]; then tail -c ${MAX_RETAINED_LOG_BYTES} "$__bobbit_f" > "$__bobbit_f.trim" 2>/dev/null && cat "$__bobbit_f.trim" > "$__bobbit_f" && rm -f "$__bobbit_f.trim"; fi; done`;
 				// Run command in a subshell so its `exit` does not short-circuit our
-				// exit-file write; capture $?, write atomically, then propagate.
-				cmdToRun = `( ${command}\n); __ec=$?; printf %s "$__ec" > ${sq(exitTmp)} && mv ${sq(exitTmp)} ${sq(exitFile)}; exit $__ec`;
+				// exit-file write; capture $?, write atomically, then propagate. The
+				// wrapper appends stdout/stderr to restart-surviving files and keeps
+				// those files tail-bounded while the gateway is down.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -3904,6 +4844,7 @@ export class VerificationHarness {
 			const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 				if (!diagnosticsPaths) return undefined;
 				try {
+					tailRetainCommandLogs(diagnosticsPaths.stdoutPath, diagnosticsPaths.stderrPath);
 					return finalizeGateStepDiagnostics({ paths: diagnosticsPaths, commandCwd: normalizedCwd, containerId });
 				} catch (err) {
 					console.warn(`[verification] Failed to finalize retained command diagnostics: ${(err as Error).message}`);
@@ -3972,7 +4913,7 @@ export class VerificationHarness {
 				} else if (useDetached) {
 					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
 						cwd: normalizedCwd,
-						stdio: ["ignore", outFd!, errFd!],
+						stdio: ["ignore", "ignore", "ignore"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 					});
@@ -3987,12 +4928,6 @@ export class VerificationHarness {
 				child = tracked.child;
 			} catch (err) {
 				spawnError = err as Error;
-			} finally {
-				// Once spawn has dup'd the FDs into the child, parent's copies are
-				// no longer needed. Closing them avoids leaks even if we don't
-				// reach the resolve path.
-				if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
-				if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 			}
 
 			if (spawnError || !child || !tracked) {
@@ -4006,29 +4941,36 @@ export class VerificationHarness {
 
 			// Stamp the persisted step with everything needed for cross-restart
 			// recovery before doing anything else — if the gateway dies right
-			// now, the next boot must be able to find the child.
+			// now, the next boot must be able to verify the child identity before
+			// reattaching or killing it.
 			if (useDetached && streamCtx && child.pid != null) {
-				const av = this.activeVerifications.get(streamCtx.signalId);
-				if (av && av.steps[streamCtx.stepIndex]) {
-					const s = av.steps[streamCtx.stepIndex];
-					s.pid = child.pid;
-					s.startTimeMs = Date.now();
-					s.outFile = outFile;
-					s.errFile = errFile;
-					s.exitFile = exitFile;
-					s.bootEpoch = this.bootEpoch;
-					s.timeoutSec = timeoutSec;
-					s.expectFailure = expectFailure;
-					s.errorPattern = errorPattern;
-					s.commandCwd = normalizedCwd;
-					this._persistActive();
-				}
+				const startTimeMs = Date.now();
+				processStartToken = readProcessStartToken(child.pid);
+				stampActiveCommandStep({
+					pid: child.pid,
+					startTimeMs,
+					deadlineMs: startTimeMs + timeoutSec * 1000,
+					processStartToken,
+					outFile,
+					errFile,
+					exitFile,
+					pidFile,
+					pidNonce,
+					heartbeatFile,
+					bootEpoch: this.bootEpoch,
+					timeoutSec,
+					expectFailure,
+					errorPattern,
+					commandCwd: normalizedCwd,
+					restartRecoveryMode: "detached",
+					restartRecoveryUnsupportedReason: undefined,
+				});
 				// unref so the child does not keep the gateway alive during a
 				// graceful shutdown — we want it to survive past our exit.
 				try { child.unref(); } catch { /* ignore */ }
 				// Mark for restart-survival so killAllTracked (called from
 				// shutdown()) skips this entry. The next boot resumes via
-				// _resumeCommandStep using the persisted pid + exit file.
+				// _resumeCommandStep using durable identity + exit files.
 				tracked!.markSurvival();
 			}
 
@@ -4074,15 +5016,24 @@ export class VerificationHarness {
 				child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
 			}
 
-			child.on("close", (code: number | null) => {
+			let settled = false;
+			let exitCode: number | null = null;
+			let exitSignal: NodeJS.Signals | null = null;
+			let closeGraceTimer: NodeJS.Timeout | undefined;
+
+			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
+				if (settled) return;
+				settled = true;
+				if (closeGraceTimer) clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
 				let outText = stdout;
 				let errText = stderr;
 				if (useDetached && outFile && errFile) {
-					try { outText = fs.readFileSync(outFile, "utf8"); } catch { outText = stdout; }
-					try { errText = fs.readFileSync(errFile, "utf8"); } catch { errText = stderr; }
+					tailRetainCommandLogs(outFile, errFile);
+					outText = readCommandLogTail(outFile);
+					errText = readCommandLogTail(errFile);
 				}
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
 				const didTimeOut = tracked!.timedOut();
@@ -4109,9 +5060,31 @@ export class VerificationHarness {
 					resolve(withDiagnostics(matchExpectFailure(code, tail, errorPattern)));
 					return;
 				}
-				resolve(withDiagnostics({ passed: code === 0, output: tail || `exit code ${code}` }));
+				resolve(withDiagnostics({ passed: code === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${code}`) }));
+			};
+
+			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+				exitCode = code;
+				exitSignal = signal;
+				closeGraceTimer = setTimeout(() => {
+					if (settled) return;
+					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
+					stderr += `${stderr ? "\n" : ""}${warning}`;
+					appendRetainedLogChunk(errFile, `${warning}\n`);
+					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					try { child.stdout?.destroy(); } catch { /* ignore */ }
+					try { child.stderr?.destroy(); } catch { /* ignore */ }
+					settleFromProcess(exitCode, exitSignal);
+				}, COMMAND_EXIT_CLOSE_GRACE_MS);
+				closeGraceTimer.unref?.();
+			});
+			child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+				settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
+				if (settled) return;
+				settled = true;
+				if (closeGraceTimer) clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
@@ -4136,14 +5109,21 @@ export class VerificationHarness {
 
 		const readNew = (filePath: string, pos: number, stream: "stdout" | "stderr"): number => {
 			try {
-				const stat = fs.statSync(filePath);
+				let stat = fs.statSync(filePath);
+				if (stat.size > MAX_RETAINED_LOG_BYTES) {
+					const retained = tailRetainCommandLogFile(filePath);
+					stat = fs.statSync(filePath);
+					pos = retained.truncated || pos > stat.size ? 0 : pos;
+				}
+				if (stat.size < pos) pos = 0;
 				if (stat.size <= pos) return pos;
 				const fd = fs.openSync(filePath, "r");
 				try {
 					const len = Math.min(stat.size - pos, 64 * 1024);
 					const buf = Buffer.allocUnsafe(len);
-					fs.readSync(fd, buf, 0, len, pos);
-					const text = buf.toString("utf8");
+					const bytesRead = fs.readSync(fd, buf, 0, len, pos);
+					if (bytesRead <= 0) return pos;
+					const text = buf.subarray(0, bytesRead).toString("utf8");
 					this.broadcastFn(ctx.goalId, {
 						type: "gate_verification_step_output",
 						goalId: ctx.goalId,
@@ -4160,7 +5140,7 @@ export class VerificationHarness {
 						s.output = (s.output || "") + text;
 						if (s.output.length > 512 * 1024) s.output = s.output.slice(-512 * 1024);
 					}
-					return pos + len;
+					return pos + bytesRead;
 				} finally {
 					try { fs.closeSync(fd); } catch { /* ignore */ }
 				}
@@ -4194,29 +5174,21 @@ export class VerificationHarness {
 	 * 1. If `exitFile` already exists — the wrapper completed before we got
 	 *    back — read it plus the stdout/stderr tails and finalize via the
 	 *    same `matchExpectFailure` / pass-fail logic the live path uses.
-	 * 2. Else if `pid` is still alive — the detached child outlived the
-	 *    gateway and is still chugging away. Poll for the exit file with
-	 *    the remaining timeout budget computed from `startedAt`.
-	 * 3. Else — process is gone and there's no exit file. The child was
-	 *    killed (OOM, manual kill, antivirus). Finalize as failed.
+	 * 2. Else if the persisted pidfile nonce plus process-start token or live
+	 *    heartbeat verifies identity — poll for the exit file until the original
+	 *    deadline, killing only that verified process tree on timeout.
+	 * 3. Else — there is no durable command verdict or safe process identity,
+	 *    so leave the gate pending/retryable instead of fabricating a failed
+	 *    command result.
 	 *
-	 * Returns null when there's nothing to resume (no exit file recorded,
-	 * e.g. the step pre-dates Layer 1 or used the attached-mode fallback)
-	 * so the caller can fall through to the legacy "no session id" failure.
+	 * Returns null only when a future command subtype has no restart recovery
+	 * path at all; ordinary no-status command interruptions return an explicit
+	 * restart-interrupted row.
 	 */
 	private async _resumeCommandStep(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics } | null> {
-		if (!step.exitFile && !step.pid) return null;
-
-		const readFiles = (): { out: string; err: string } => {
-			let out = "";
-			let err = "";
-			try { if (step.outFile) out = fs.readFileSync(step.outFile, "utf8"); } catch { /* ignore */ }
-			try { if (step.errFile) err = fs.readFileSync(step.errFile, "utf8"); } catch { /* ignore */ }
-			return { out, err };
-		};
+	): Promise<ResumedVerificationStep | null> {
 		const readExitFile = (): number | null => {
 			if (!step.exitFile) return null;
 			try {
@@ -4227,10 +5199,12 @@ export class VerificationHarness {
 				return null;
 			}
 		};
+		const retainedTail = (): string => retainedCommandOutputTail(step.outFile, step.errFile);
 		const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 			if (!step.outFile && !step.errFile) return undefined;
 			const baseDir = path.dirname(step.outFile ?? step.errFile!);
 			try {
+				tailRetainCommandLogs(step.outFile, step.errFile);
 				return finalizeGateStepDiagnostics({
 					paths: {
 						baseDir,
@@ -4245,14 +5219,29 @@ export class VerificationHarness {
 				return undefined;
 			}
 		};
-		const withDiagnostics = (result: { name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }) => {
+		const withDiagnostics = (result: ResumedVerificationStep) => {
 			const diagnostics = finalizeDiagnostics();
 			if (diagnostics) result.diagnostics = diagnostics;
 			return result;
 		};
+		const restartInterrupted = (reason?: string) => {
+			const tail = retainedTail();
+			const parts = [
+				"Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained; please re-signal the gate to run a fresh verification.",
+			];
+			if (reason) parts.push(reason);
+			if (tail) parts.push(`Last retained output:\n${truncateForOutput(tail)}`);
+			return withDiagnostics({
+				name: step.name,
+				type: step.type,
+				passed: false,
+				status: "waiting",
+				output: parts.join("\n\n"),
+				duration_ms: Date.now() - step.startedAt,
+			});
+		};
 		const finalize = (code: number | null) => {
-			const { out, err } = readFiles();
-			const output = (out + "\n" + err).trim().slice(-5000);
+			const output = retainedTail();
 			let passed: boolean;
 			let displayOutput: string;
 			if (step.expectFailure) {
@@ -4271,86 +5260,126 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			});
 		};
-
-		// Case A: child already finished before we restarted.
-		if (step.exitFile && fs.existsSync(step.exitFile)) {
-			console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
-			return finalize(readExitFile());
-		}
-
-		// Cross-platform PID-reuse safeguard: Node doesn't expose a per-PID OS
-		// start time, so we can't directly tie a live pid back to the same
-		// process we spawned. As a pragmatic floor: if the recorded
-		// startTimeMs is older than the step's own timeout, the original
-		// child must already have exited (timeout would have killed it),
-		// so a live `step.pid` here is almost certainly a reused/recycled
-		// pid belonging to an unrelated process. Skip Case B and fall
-		// through to Case C (finalize as failed).
-		const timeoutSec = step.timeoutSec ?? 300;
-		const pidLooksReused = typeof step.startTimeMs === "number"
-			&& (Date.now() - step.startTimeMs) > timeoutSec * 1000;
-
-		// Case B: child still running on the host.
-		if (!pidLooksReused && typeof step.pid === "number" && isPidAlive(step.pid)) {
-			const timeoutMs = timeoutSec * 1000;
-			const deadline = step.startedAt + timeoutMs;
-			console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
-
-			// Tail the surviving child's stdout/stderr files so UI clients see
-			// live output during the resume wait (and so subsequent gate_status
-			// calls show the streamed tail). Mirrors the live-spawn path.
-			let stopTail: (() => void) | undefined;
-			if (step.outFile && step.errFile) {
-				const stepIndex = v.steps.indexOf(step);
-				if (stepIndex >= 0) {
-					stopTail = this._startFileTailers(step.outFile, step.errFile, {
-						goalId: v.goalId,
-						gateId: v.gateId,
-						signalId: v.signalId,
-						stepIndex,
-					});
-				}
-			}
-
-			try {
-				while (Date.now() < deadline) {
-					await new Promise(r => setTimeout(r, 500));
-					if (step.exitFile && fs.existsSync(step.exitFile)) {
-						return finalize(readExitFile());
-					}
-					if (!isPidAlive(step.pid)) break;
-				}
-				// One last check after the loop
-				if (step.exitFile && fs.existsSync(step.exitFile)) {
-					return finalize(readExitFile());
-				}
-				// Timed out or process died without writing the exit file
-				// The original spawn used detached:true, so the persisted pid is
-				// also the pgid. killTreeByPid handles negative-pid kill (POSIX)
-				// and taskkill /T /F (Windows) so we reap descendants too.
-				if (step.pid) try { killTreeByPid(step.pid, "SIGKILL"); } catch { /* already dead */ }
+		const timeoutResult = () => {
+			const timeoutSec = step.timeoutSec ?? 300;
+			const marker = `[step timed out after ${timeoutSec}s — killed verified subprocess tree after restart]`;
+			const tail = retainedTail();
+			const combined = tail ? `${tail}\n${marker}` : marker;
+			if (step.expectFailure) {
+				const matched = matchExpectFailure(null, combined, step.errorPattern);
 				return withDiagnostics({
 					name: step.name,
 					type: step.type,
-					passed: false,
-					output: "Verification command did not produce an exit code (timeout or process died after restart).",
+					passed: matched.passed,
+					output: matched.output,
 					duration_ms: Date.now() - step.startedAt,
 				});
-			} finally {
-				if (stopTail) stopTail();
+			}
+			return withDiagnostics({
+				name: step.name,
+				type: step.type,
+				passed: false,
+				status: "failed",
+				output: combined,
+				duration_ms: Date.now() - step.startedAt,
+			});
+		};
+
+		// Case A: child already finished before we restarted. A durable exit file
+		// is a real command verdict and keeps the existing expectFailure/errorPattern
+		// semantics.
+		if (step.exitFile && fs.existsSync(step.exitFile)) {
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
+			return finalize(readExitFile());
+		}
+		if (step.killReason === "timeout" && step.killCompletedAt) {
+			return timeoutResult();
+		}
+
+		const unsupportedRecoveryReason = (): string | undefined => {
+			if (step.restartRecoveryUnsupportedReason) return step.restartRecoveryUnsupportedReason;
+			if (step.containerId) return `Container command step for docker container "${step.containerId}" used attached docker exec; durable restart recovery is unsupported for this path.`;
+			if (step.restartRecoveryMode === "unsupported") return "This command execution path was attached to the gateway and is not restart-recoverable.";
+			return undefined;
+		};
+
+		if (step.restartRecoveryMode === "unsupported" || step.containerId) {
+			return restartInterrupted(unsupportedRecoveryReason());
+		}
+
+		if (!step.exitFile) {
+			return restartInterrupted(unsupportedRecoveryReason() ?? "No durable command exit file path was recorded before restart.");
+		}
+
+		const identityFile = await this._waitForCommandIdentityFile(step, () => this._isResumeStillActive(v));
+		if (!this._isResumeStillActive(v)) return null;
+		if (step.exitFile && fs.existsSync(step.exitFile)) {
+			return finalize(readExitFile());
+		}
+		const identity = this._verifyPersistedCommandIdentity(step, identityFile);
+		if (!identity.verified || !identity.pid) {
+			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
+		}
+
+		const timeoutSec = step.timeoutSec ?? 300;
+		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + timeoutSec * 1000);
+
+		const finalizeTimeoutAfterVerifiedCleanup = async (unsafeReason: string): Promise<ResumedVerificationStep> => {
+			if (step.killReason === "timeout" && step.killCompletedAt) return timeoutResult();
+			const cleanup = await this._killVerifiedCommandStepForTimeout(v, step);
+			if (cleanup.status === "settled") return timeoutResult();
+			if (cleanup.status === "pending") {
+				this._scheduleCommandKillCleanupRetry(v.signalId);
+				throw new PendingCommandCleanupError(cleanup.reason ?? "Timeout cleanup is still pending for a verified command process.");
+			}
+			return restartInterrupted(cleanup.reason ?? unsafeReason);
+		};
+
+		if (Date.now() >= deadline) {
+			return await finalizeTimeoutAfterVerifiedCleanup("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
+		}
+
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+
+		let stopTail: (() => void) | undefined;
+		if (step.outFile && step.errFile) {
+			const stepIndex = v.steps.indexOf(step);
+			if (stepIndex >= 0) {
+				stopTail = this._startFileTailers(step.outFile, step.errFile, {
+					goalId: v.goalId,
+					gateId: v.gateId,
+					signalId: v.signalId,
+					stepIndex,
+				});
 			}
 		}
 
-		// Case C: process gone, no exit file — killed by something between our
-		// last persist and now.
-		console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
-		return withDiagnostics({
-			name: step.name,
-			type: step.type,
-			passed: false,
-			output: "Verification command process died during gateway restart before producing an exit code.",
-			duration_ms: Date.now() - step.startedAt,
-		});
+		try {
+			while (Date.now() < deadline) {
+				if (!this._isResumeStillActive(v)) return null;
+				await new Promise(r => setTimeout(r, 500));
+				if (step.exitFile && fs.existsSync(step.exitFile)) {
+					return finalize(readExitFile());
+				}
+				const current = this._verifyPersistedCommandIdentity(step);
+				if (!current.verified) break;
+			}
+
+			if (!this._isResumeStillActive(v)) return null;
+			if (step.exitFile && fs.existsSync(step.exitFile)) {
+				return finalize(readExitFile());
+			}
+			if (Date.now() >= deadline) {
+				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
+			}
+
+			// The process was alive and verified when resume started, but it exited or
+			// lost its durable heartbeat without writing an exit file. That is not a
+			// command verdict, so keep the gate pending/retryable.
+			return restartInterrupted("The command process stopped after restart without writing a durable exit status.");
+		} finally {
+			if (stopTail) stopTail();
+		}
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,

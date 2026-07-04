@@ -11,14 +11,15 @@ import assert from "node:assert/strict";
  */
 
 const TEST_AGENT_DIR = process.platform === "win32"
-	? "C:\\Users\\test\\.bobbit\\agent"
-	: "/home/test/.bobbit/agent";
+	? "C:\\Users\\test\\project\\.bobbit\\agent"
+	: "/home/test/project/.bobbit/agent";
 const TEST_BOBBIT_DIR = process.platform === "win32"
 	? "C:\\Users\\test\\project\\.bobbit"
 	: "/home/test/project/.bobbit";
 
-// Set env vars before importing the module so globalAgentDir() picks them up
-process.env.PI_CODING_AGENT_DIR = TEST_AGENT_DIR;
+// Set env vars before importing the module so the startup-resolved active
+// agent dir is configurable via BOBBIT_AGENT_DIR.
+process.env.BOBBIT_AGENT_DIR = TEST_AGENT_DIR;
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
 const { containerPathToHost, hostPathToContainer } = await import("../src/server/agent/rpc-bridge.ts");
@@ -28,9 +29,10 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		const containerPath = "/home/node/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
 		const hostPath = containerPathToHost(containerPath);
 		const expected = process.platform === "win32"
-			? "C:\\Users\\test\\.bobbit\\agent\\sessions\\--workspace--\\2026-01-01.jsonl"
-			: "/home/test/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
+			? "C:\\Users\\test\\project\\.bobbit\\agent\\sessions\\--workspace--\\2026-01-01.jsonl"
+			: "/home/test/project/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
 		assert.equal(hostPath, expected);
+		assert.ok(hostPath.includes(".bobbit"), "must use the configured active Bobbit agent dir");
 	});
 
 	it("translates /bobbit-state subdirectory paths", () => {
@@ -77,8 +79,8 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 describe("hostPathToContainer (bind-mount fallback)", () => {
 	it("translates host agent sessions path to container path", () => {
 		const hostPath = process.platform === "win32"
-			? "C:\\Users\\test\\.bobbit\\agent\\sessions\\--workspace--\\2026-01-01.jsonl"
-			: "/home/test/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
+			? "C:\\Users\\test\\project\\.bobbit\\agent\\sessions\\--workspace--\\2026-01-01.jsonl"
+			: "/home/test/project/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl";
 		const containerPath = hostPathToContainer(hostPath);
 		assert.equal(containerPath, "/home/node/.bobbit/agent/sessions/--workspace--/2026-01-01.jsonl");
 	});

@@ -20,9 +20,9 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
@@ -67,7 +67,13 @@ function readHarnessToken(info: GatewayInfo): string {
 	throw new Error(`missing token for ${info.bobbitDir}`);
 }
 
-async function seedHarnessDefaultWorkflows(info: GatewayInfo, headers: Record<string, string>, projectId: string): Promise<void> {
+function harnessDefaultProjectRoot(bobbitDir: string): string {
+	const root = join(dirname(bobbitDir), `${basename(bobbitDir)}-default-project`);
+	mkdirSync(root, { recursive: true });
+	try { return realpathSync(root); } catch { return root; }
+}
+
+async function seedHarnessDefaultWorkflows(info: { baseURL: string }, headers: Record<string, string>, projectId: string): Promise<void> {
 	const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
 	let current: Record<string, any> = {};
 	try {
@@ -112,7 +118,7 @@ async function restoreHarnessDefaultProject(info: GatewayInfo): Promise<void> {
 	const registerResp = await fetch(`${info.baseURL}/api/projects`, {
 		method: "POST",
 		headers,
-		body: JSON.stringify({ name: "default", rootPath: info.bobbitDir, upsert: true, acceptCanonical: true }),
+		body: JSON.stringify({ name: "default", rootPath: harnessDefaultProjectRoot(info.bobbitDir), upsert: true, acceptCanonical: true }),
 	});
 	const registerText = await registerResp.text().catch(() => "<failed to read body>");
 	if (!registerResp.ok) {
@@ -159,9 +165,12 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);
 		} catch { /* not all platforms / first-call edge cases — fall back */ }
+		const defaultProjectRoot = harnessDefaultProjectRoot(bobbitDir);
+		rmSync(defaultProjectRoot, { recursive: true, force: true });
+		mkdirSync(defaultProjectRoot, { recursive: true });
 		// Seed projects.json. The server no longer auto-registers a default project,
 		// so we register one explicitly via the API after startup (see below) to
-		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
+		// preserve the pre-existing test harness contract with a normal project.
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		// Default the system-scope Subgoals (Experimental) flag ON for E2E tests so
@@ -181,7 +190,6 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
 		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
 		process.env.BOBBIT_AGENT_DIR = agentDir;
-		process.env.PI_CODING_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -251,8 +259,8 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			const serverConfigDir = join(bobbitDir, "config");
 			mkSync(serverConfigDir, { recursive: true });
 			wrSync(join(serverConfigDir, "project.yaml"), yamlContent);
-			// Per-project config (project-context): <bobbitDir>/.bobbit/config/project.yaml
-			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			// Harness default project config: <defaultProjectRoot>/.bobbit/config/project.yaml
+			const projectConfigDir = join(defaultProjectRoot, ".bobbit", "config");
 			mkSync(projectConfigDir, { recursive: true });
 			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
@@ -275,10 +283,8 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		process.env.BOBBIT_GATEWAY_URL = gatewayUrl;
 		process.env.BOBBIT_TOKEN = token;
 
-		// Register the server CWD as a project via REST so existing tests that
-		// rely on a pre-existing "default" project at projects[0] keep working.
-		// The server no longer auto-registers one — see server.ts startup block.
-		// Workflows already seeded above via direct project.yaml write.
+		// Register a normal harness default project beside Headquarters. The server
+		// workspace itself is now the immutable Headquarters project.
 		const defaultProjectRegister = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 			method: "POST",
 			headers: {
@@ -291,7 +297,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			// SymlinkProjectRootError 400 and the harness must fail loudly;
 			// otherwise every POST /api/sessions or /api/goals then 400s with
 			// "projectId required".
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+			body: JSON.stringify({ name: "default", rootPath: defaultProjectRoot, upsert: true, acceptCanonical: true }),
 		});
 		if (!defaultProjectRegister.ok) {
 			const body = await defaultProjectRegister.text().catch(() => "<failed to read body>");
@@ -300,6 +306,14 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 				`${defaultProjectRegister.status} ${defaultProjectRegister.statusText} body=${body || "<empty>"}`,
 			);
 		}
+		const defaultProject = await defaultProjectRegister.json().catch(() => undefined) as { id?: string } | undefined;
+		if (!defaultProject?.id) {
+			throw new Error(`[in-process-harness] default project registration returned no id`);
+		}
+		await seedHarnessDefaultWorkflows({ baseURL: `http://127.0.0.1:${port}` }, {
+			"Content-Type": "application/json",
+			"Authorization": `Bearer ${token}`,
+		}, defaultProject.id);
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.
@@ -348,6 +362,12 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			onFinalFailure: (err) => {
 				const msg = (err as Error)?.message ?? String(err);
 				console.warn(`[in-process-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
+			},
+		});
+		await awaitableRm(defaultProjectRoot, {
+			onFinalFailure: (err) => {
+				const msg = (err as Error)?.message ?? String(err);
+				console.warn(`[in-process-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
 			},
 		});
 	}, { scope: "worker", auto: true, timeout: 30_000 }],

@@ -9,6 +9,10 @@ process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../src/server/agent/event-buffer.ts");
+
+const AUTH_SECRET = "sk-or-retry-secret-never-leak";
+const AUTH_ERROR = `No API key found for openrouter: ${AUTH_SECRET}`;
 
 type TestClient = {
 	readyState: number;
@@ -52,6 +56,9 @@ function cleanupManager(manager: any): void {
 		clearInterval(manager._statusHeartbeatTimer);
 		manager._statusHeartbeatTimer = null;
 	}
+	for (const session of manager.sessions?.values?.() ?? []) {
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+	}
 	manager.sessionsWithConnectedClients?.clear();
 	manager.sessions?.clear();
 }
@@ -69,12 +76,35 @@ function putSession(manager: any, overrides: Record<string, any> = {}): any {
 		lastActivity: Date.now(),
 		clients: new Set([client]),
 		promptQueue: new PromptQueue(),
+		eventBuffer: new EventBuffer(),
 		streamingStartedAt: undefined,
+		modelProvider: "openrouter",
 		rpcClient: { prompt: mock.fn(async () => ({ success: true })) },
 		...overrides,
 	};
 	manager.sessions.set(session.id, session);
 	return { session, client };
+}
+
+function autoRetryPendingEvents(session: any): any[] {
+	return session.eventBuffer
+		.getAll()
+		.map((entry: any) => entry.event)
+		.filter((event: any) => event?.type === "auto_retry_pending");
+}
+
+function autoRetryCancelledEvents(session: any): any[] {
+	return session.eventBuffer
+		.getAll()
+		.map((entry: any) => entry.event)
+		.filter((event: any) => event?.type === "auto_retry_cancelled");
+}
+
+async function flushAutoRetryMicrotasks(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
 }
 
 afterEach(() => {
@@ -123,6 +153,272 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-1).type, "queue_update");
 		assert.equal(client.sent.at(-2).type, "session_status");
 		assert.equal(client.sent.at(-2).status, "idle");
+	});
+
+	it("schedules visible auto retry when direct prompt delivery rejects with fetch failed before message_end", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry transport prompt"),
+			/fetch failed/,
+		);
+
+		assert.equal(prompt.mock.callCount(), 1, "expected one failed prompt delivery before auto retry timer fires");
+		assert.equal(session.status, "idle", "expected dispatch failure recovery to restore idle status");
+		assert.equal(session.promptQueue.length, 1, "expected recovered prompt queue after fetch failed");
+		assert.equal(session.promptQueue.peek()?.text, "retry transport prompt", "expected recovered prompt text after fetch failed");
+		assert.ok(
+			session.pendingAutoRetryTimer,
+			"expected pendingAutoRetryTimer for dispatch-time fetch failed",
+		);
+		const pending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(pending, "expected auto_retry_pending for dispatch-time fetch failed");
+		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for dispatch-time fetch failed");
+		assert.equal(pending.attempt, 1, "expected first bounded retry attempt for dispatch-time fetch failed");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"),
+			true,
+			"expected client-visible auto_retry_pending event for dispatch-time fetch failed",
+		);
+	});
+
+	it("schedules visible auto retry when queued drain dispatch rejects with fetch failed before message_end", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+		session.promptQueue.enqueue("queued transport prompt");
+
+		manager.drainQueue(session);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 1, "expected one failed queued dispatch before auto retry timer fires");
+		assert.equal(session.status, "idle", "expected queued dispatch failure recovery to restore idle status");
+		assert.equal(session.promptQueue.length, 1, "expected recovered queued prompt after fetch failed");
+		assert.equal(session.promptQueue.peek()?.text, "queued transport prompt", "expected queued prompt text recovered after fetch failed");
+		assert.ok(session.pendingAutoRetryTimer, "expected pendingAutoRetryTimer for queued fetch failed");
+		const pending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(pending, "expected auto_retry_pending for queued fetch failed");
+		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for queued fetch failed");
+		assert.equal(client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"), true);
+	});
+
+	it("auto retry consumes the recovered direct prompt row before redispatch", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry once without duplicate queue replay"),
+			/fetch failed/,
+		);
+		assert.equal(session.promptQueue.length, 1, "expected recovered row before auto retry fires");
+
+		t.mock.timers.tick(1000);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 2, "expected only the initial failure plus one auto retry dispatch");
+		assert.equal(prompt.mock.calls[1].arguments[0], "retry once without duplicate queue replay");
+		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered row before redispatching");
+		assert.equal(session.status, "streaming");
+	});
+
+	it("fresh prompt before dispatch auto retry drops the recovered failed prompt", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "stale prompt A"),
+			/fetch failed/,
+		);
+		assert.equal(session.promptQueue.length, 1, "expected recovered prompt A before fresh user prompt");
+		assert.ok(session.pendingAutoRetryTimer, "expected pending auto retry before fresh user prompt");
+
+		await manager.enqueuePrompt(session.id, "fresh prompt B");
+
+		assert.equal(prompt.mock.callCount(), 2, "fresh prompt should dispatch immediately without retrying prompt A");
+		assert.match(prompt.mock.calls[1].arguments[0], /fresh prompt B/);
+		assert.doesNotMatch(prompt.mock.calls[1].arguments[0], /stale prompt A/);
+		assert.equal(session.pendingAutoRetryTimer, undefined, "fresh prompt should cancel pending auto retry");
+		assert.equal(session.promptQueue.length, 0, "fresh prompt should drop the recovered stale prompt A row");
+		assert.equal(autoRetryCancelledEvents(session).length, 1, "fresh prompt should emit auto_retry_cancelled");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			true,
+			"expected client-visible auto_retry_cancelled event for superseding prompt",
+		);
+
+		session.status = "idle";
+		manager.drainQueue(session);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(prompt.mock.callCount(), 2, "later queue drain must not replay stale prompt A");
+		assert.equal(session.promptQueue.length, 0, "queue should remain empty after later drain");
+	});
+
+	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = mock.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			turnHadToolCalls: true,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry the newly failed prompt, not old tool work"),
+			/fetch failed/,
+		);
+		assert.equal(session.turnHadToolCalls, false, "pre-agent_start delivery failure should clear stale tool-call state");
+
+		t.mock.timers.tick(1000);
+		await flushAutoRetryMicrotasks();
+
+		assert.equal(prompt.mock.callCount(), 2, "expected initial failed delivery plus one auto retry");
+		assert.equal(
+			prompt.mock.calls[1].arguments[0],
+			"retry the newly failed prompt, not old tool work",
+			"auto retry should re-send the recovered failed prompt",
+		);
+		assert.doesNotMatch(
+			prompt.mock.calls[1].arguments[0],
+			/continue where you left off/i,
+			"auto retry must not use stale mid-work continuation text",
+		);
+		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered failed prompt row");
+		assert.equal(session.status, "streaming");
+	});
+
+	it("emits auto_retry_cancelled when dispatch-time auto retries exhaust before agent_start", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const prompt = mock.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "retry until transport budget exhausts"),
+			/fetch failed/,
+		);
+		assert.equal(autoRetryPendingEvents(session).length, 1, "initial dispatch failure should schedule attempt 1");
+
+		for (const expectedAttempt of [2, 3]) {
+			const pending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(pending, `expected pending retry before attempt ${expectedAttempt}`);
+			t.mock.timers.tick(pending.retryDelayMs);
+			await flushAutoRetryMicrotasks();
+
+			const latestPending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(latestPending, `expected pending retry event for attempt ${expectedAttempt}`);
+			assert.equal(latestPending.attempt, expectedAttempt);
+			assert.ok(session.pendingAutoRetryTimer, `expected timer after scheduling attempt ${expectedAttempt}`);
+		}
+
+		const finalPending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(finalPending, "expected third pending retry before exhaustion");
+		t.mock.timers.tick(finalPending.retryDelayMs);
+		await flushAutoRetryMicrotasks();
+
+		assert.equal(prompt.mock.callCount(), 4, "expected initial delivery plus three bounded auto-retry attempts");
+		assert.equal(autoRetryPendingEvents(session).length, 3, "exhaustion must not emit another pending countdown");
+		assert.equal(session.pendingAutoRetryTimer, undefined, "exhausted retries should leave no active timer");
+		assert.equal(autoRetryCancelledEvents(session).length, 1, "exhaustion should clear the last visible pending banner");
+		assert.equal(
+			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			true,
+			"expected client-visible auto_retry_cancelled event on exhausted dispatch retries",
+		);
+		assert.equal(session.promptQueue.length, 1, "failed prompt should remain queued for manual Retry after exhaustion");
+		assert.equal(session.promptQueue.peek()?.text, "retry until transport budget exhausts");
+	});
+
+	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			turnHadToolCalls: true,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), (err: any) => {
+			assert.match(err?.message ?? "", /OpenRouter provider authentication failure \(missing-api-key\)/);
+			assert.doesNotMatch(err?.message ?? "", new RegExp(AUTH_SECRET));
+			return true;
+		});
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /Please continue where you left off/);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
+		assert.match(JSON.stringify(client.sent), /provider_auth_required|Fix API key/i);
+	});
+
+	it("retryLastPrompt routes fallback provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastPromptText: undefined,
+			lastPromptImages: undefined,
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /OpenRouter provider authentication failure \(missing-api-key\)/);
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /retry what you were doing/);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
+	});
+
+	it("retryLastPrompt routes blank-text recovery provider-auth prompt failures through recovery", async () => {
+		const manager = makeManager();
+		const prompt = mock.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "The text field in the ContentBlock is blank",
+			lastPromptText: "",
+			lastPromptImages: [{ type: "image", data: "abc", mimeType: "image/png" }],
+			rpcClient: { prompt },
+		});
+		manager._recoverBlankTextPoison = mock.fn(async () => session);
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /OpenRouter provider authentication failure \(missing-api-key\)/);
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.match(session.promptQueue.peek()?.text ?? "", /Attachments:/i);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
 	});
 
 	it("dispatches a promoted queued steer immediately like a fresh live steer", async () => {
@@ -329,5 +625,22 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			["streaming", "terminated"],
 		);
 		assert.equal(client.sent.some((msg) => msg.type === "queue_update"), false);
+	});
+
+	it("closes extension channels when process_exit terminates a session", () => {
+		const manager = makeManager();
+		const closeSession = mock.fn(() => {});
+		manager.setExtensionChannelServices({ registry: { closeSession } });
+		const { session, client } = putSession(manager, { status: "streaming" });
+
+		manager.handleAgentLifecycle(session, { type: "process_exit", code: 17, signal: null });
+
+		assert.equal(closeSession.mock.callCount(), 1);
+		assert.deepEqual(closeSession.mock.calls[0].arguments, [session.id, "session-process-exit"]);
+		assert.equal(session.status, "terminated");
+		assert.deepEqual(
+			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			["terminated"],
+		);
 	});
 });

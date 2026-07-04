@@ -280,13 +280,13 @@ See [AGENTS.md](../AGENTS.md#testing) for harness selection guidance and test re
 
 When you list `git branch` in a Bobbit-managed repo you'll see several namespaces:
 
-| Prefix | Owner | Purpose |
-|---|---|---|
-| `pool/_pool-<id>` | Worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. (Pre-Phase 3 these used `session/_pool-*`; both prefixes are recognised on startup for back-compat.) |
-| `session/<id8>` | Live regular session | A session worktree, named immediately on pool claim (no first-prompt rename). Cleaned up on session archive. See [internals.md — Session worktrees](internals.md#session-worktrees) and [design/remove-session-worktree-rename.md](design/remove-session-worktree-rename.md). |
-| `goal/<slug>-<id>` | Live goal | Spans every component repo in multi-repo projects. |
-| `goal/<goalId8>/<role>-<short4>` | Team-member agent | Per-role worktree under a live goal. Created on `team_spawn`, cleaned up on goal archive (alongside the goal branch) or agent dismiss. Legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename is recognised by the same cleanup path. |
-| `staff-<name>-<id>` | Staff agent worktree | Long-lived when the staff uses a worktree; rebased onto the primary branch/base ref on each wake. No-worktree staff have no staff branch. |
+| Prefix | Owner | Purpose | Publication policy |
+|---|---|---|---|
+| `pool/_pool-<id>` | Worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. (Pre-Phase 3 these used `session/_pool-*`; both prefixes are recognised on startup for back-compat.) | Local-only implementation detail. |
+| `session/<id8>` | Live regular session | A session worktree, named immediately on pool claim (no first-prompt rename). Cleaned up on session archive. See [internals.md — Session worktrees](internals.md#session-worktrees) and [design/remove-session-worktree-rename.md](design/remove-session-worktree-rename.md). | Regular sessions keep legacy/explicit publication behavior. |
+| `goal/<slug>-<id>` | Live goal/integration branch | Spans every component repo in multi-repo projects. | Published intentionally for PR and Ready-to-Merge flows. |
+| `goal/<goalId8>/<role>-<short4>` | Team-member agent | Per-role worktree under a live goal. Created on `team_spawn`, cleaned up on goal archive (alongside the goal branch) or agent dismiss. Legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename is recognised by the same cleanup path. | Local-only by default. |
+| `staff-<name>-<id>` | Staff agent worktree | Long-lived when the staff uses a worktree; rebased onto the primary branch/base ref on each wake. No-worktree staff have no staff branch. | Long-lived staff branches keep legacy/explicit publication behavior. |
 
 The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted state on every server start — orphaned pool entries and renamed-but-unpersisted worktrees are cleaned up automatically. See [internals.md — Session worktrees](internals.md#session-worktrees) for the full lifecycle.
 
@@ -294,7 +294,21 @@ The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted stat
 
 For **goal-scoped** variation (one goal differing from another — enable a feature, seed an index, disable a tool/provider), use **hierarchical goal metadata** and the `goalProvisioned` extension hook rather than a per-goal command. Metadata is inherited down the goal tree and the hook fires at every worktree provisioning in the subtree, so treatments apply symmetrically to every agent and sub-goal. See [goals-workflows-tasks.md — Per-goal worktree provisioning](goals-workflows-tasks.md#per-goal-worktree-provisioning) and [design/goal-metadata.md](design/goal-metadata.md). (The earlier bespoke per-goal `worktreeSetupCommand` field from PR #816 has been removed and is ignored if posted.)
 
-**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`) or, for local-only repos with commits, local `HEAD`. Fresh `git init` repos with unborn `HEAD` fall back to no-worktree until an initial commit is made; pool prefill skips them with the same actionable warning. A configured `base_ref` is still honored in unborn repos, while a stale configured ref fails loudly rather than silently falling back. The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: it pushes explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`) or, for local-only repos with commits, local `HEAD`. Fresh `git init` repos with unborn `HEAD` fall back to no-worktree until an initial commit is made; pool prefill skips them with the same actionable warning. A configured `base_ref` is still honored in unborn repos, while a stale configured ref fails loudly rather than silently falling back. The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: when a branch is intentionally published, it uses explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+
+### Short-lived sub-agent branch publication
+
+Team-member branches and delegated helper/session sub-agent branches are **local-only by default**. Bobbit creates the local branch and persistent worktree, but does not publish the branch on creation, after commit, or during git-status polling. The persistent host worktree (or persistent sandbox worktree volume) is the durability mechanism; Bobbit no longer performs default safety-net remote pushes for these scoped short-lived branches.
+
+This policy also applies in sandbox mode. Sandboxed sub-agent worktrees do not install post-commit auto-push hooks, so commits inside the container follow the same local-by-default behavior as host commits.
+
+Team leads merge or cherry-pick from local refs/worktrees when available. Publish only when there is an intentional need:
+
+- the user clicks or invokes an explicit push action;
+- a workflow, cross-machine handoff, or container handoff requires a remote branch;
+- the final Ready-to-Merge / PR flow publishes the goal integration branch.
+
+Cleanup and status treat missing remote branches for scoped sub-agent branches as expected. The git-status widget may show `Local-only by policy` to distinguish an intentional local-only branch from a failed push. Gate verification uses the same distinction for goal worktrees: an unpublished goal branch skips remote goal-branch sync quietly and verifies the local worktree, while published goal branches still fetch/reset from `origin/<branch>`; see [Gate verification baselines](goals-workflows-tasks.md#gate-verification-baselines).
 
 ### Worktree-stash hazard — never `git stash` inside a session worktree
 

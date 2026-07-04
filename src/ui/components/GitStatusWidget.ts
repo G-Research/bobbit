@@ -1,6 +1,25 @@
 import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import './DiffBlock.js';
+import './RichGitDiffViewer.js';
+
+type CommitChangedFile = {
+    path: string;
+    oldPath?: string;
+    status: string;
+    statusLabel?: string;
+};
+
+type CommitInfo = {
+    sha: string;
+    shortSha: string;
+    message: string;
+    author: string;
+    timestamp: string;
+    filesChanged: number;
+    insertions: number;
+    deletions: number;
+    files?: CommitChangedFile[];
+};
 
 @customElement('git-status-widget')
 export class GitStatusWidget extends LitElement {
@@ -27,6 +46,7 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Number }) deletionsVsPrimary = 0;
     @property({ type: Boolean }) mergedIntoPrimary = false;
     @property({ type: Boolean }) unpushed = false;
+    @property() remotePublication?: 'local-only-policy';
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
     @property({ type: Boolean }) partial = false;
@@ -42,16 +62,19 @@ export class GitStatusWidget extends LitElement {
     @property() prTitle?: string;
     @property() prMergeable?: string;
     @property({ type: Boolean }) viewerIsAdmin = false;
+    @property({ type: Boolean }) viewerCanMergeAsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
     @property() headRefName?: string; // The actual branch name the PR targets
 
     @state() private _modalFile: string | null = null;
     @state() private _loadingDiff: string | null = null;
+    @state() private _diffRequestKey: string | null = null;
     @state() private _diffContent: string | null = null;
     @state() private _diffError: string | null = null;
 
     @state() private _commitsLoading = false;
-    @state() private _commits: Array<{sha:string;shortSha:string;message:string;author:string;timestamp:string;filesChanged:number;insertions:number;deletions:number}> = [];
+    @state() private _commits: CommitInfo[] = [];
+    @state() private _expandedCommits = new Set<string>();
     @state() private _commitsError: string | null = null;
     @state() private _commitsDirection: 'ahead' | 'behind' = 'ahead';
     @state() private _commitsVs?: 'primary';
@@ -61,8 +84,8 @@ export class GitStatusWidget extends LitElement {
 
     private _onEscapeKey = (e: KeyboardEvent) => {
         if (e.key === 'Escape') {
-            if (this._commitsModalEl) this._closeCommitsModal();
-            else if (this._modalEl) this._closeModal();
+            if (this._modalEl) this._closeModal();
+            else if (this._commitsModalEl) this._closeCommitsModal();
         }
     };
 
@@ -314,6 +337,13 @@ export class GitStatusWidget extends LitElement {
         return segments;
     }
 
+    private _renderLocalOnlyPolicyStatus() {
+        if (this.remotePublication !== 'local-only-policy') return nothing;
+        return html`<div class="text-muted-foreground" data-testid="git-local-only-policy">
+            Local-only by policy — this branch is not published automatically.
+        </div>`;
+    }
+
     private _renderRemoteStatus() {
         // Feature branches: remote is auto-pushed, no UI needed
         if (!this.isOnPrimary) return nothing;
@@ -421,10 +451,15 @@ export class GitStatusWidget extends LitElement {
         return html`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:${c.color};background:${c.bg}">${c.label}</span>`;
     }
 
+    private _canBypassMerge(): boolean {
+        return this.viewerCanMergeAsAdmin && this.prMergeable !== "CONFLICTING";
+    }
+
     /** PR section for the expanded dropdown */
     private _renderPrSection() {
         if (!this.prState) return nothing;
 
+        const canBypassMerge = this._canBypassMerge();
         const badgeColor = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145)'
             : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300)'
             : 'oklch(0.62 0.14 25)';
@@ -468,14 +503,14 @@ export class GitStatusWidget extends LitElement {
                         >
                             Merge PR
                         </button>
-                        ${this.viewerIsAdmin ? html`<button
+                        ${canBypassMerge ? html`<button
                             style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
                             @click=${() => this._handleForceMerge()}
-                            title="Merge with --admin to bypass branch protection rules"
+                            title="Merge with GitHub's bypass branch protections permission"
                         >
-                            Force Merge
+                            Bypass merge
                         </button>` : nothing}
-                        ${this.prMergeable !== "MERGEABLE" && !this.viewerIsAdmin ? html`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
+                        ${this.prMergeable !== "MERGEABLE" && !canBypassMerge ? html`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
                         `}
                     </div>
                     ${this.mergeError ? html`<div style="font-size:12px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
@@ -632,9 +667,15 @@ export class GitStatusWidget extends LitElement {
         }));
     }
 
-    private async _openDiffModal(file: string, repo?: string) {
+    private _diffKey(file: string, repo?: string, commit?: string): string {
+        return `${commit || 'worktree'}\u0000${repo || '.'}\u0000${file}`;
+    }
+
+    private async _openDiffModal(file: string, repo?: string, options: { commit?: string } = {}) {
+        const requestKey = this._diffKey(file, repo, options.commit);
         this._modalFile = file;
-        this._loadingDiff = file;
+        this._diffRequestKey = requestKey;
+        this._loadingDiff = requestKey;
         this._diffContent = null;
         this._diffError = null;
         this._showModal();
@@ -643,12 +684,13 @@ export class GitStatusWidget extends LitElement {
             ? `/api/sessions/${this.sessionId}/git-diff`
             : `/api/goals/${this.goalId}/git-diff`;
         let url = `${base}?file=${encodeURIComponent(file)}`;
+        if (options.commit) url += `&commit=${encodeURIComponent(options.commit)}`;
         if (repo && repo !== '.') url += `&repo=${encodeURIComponent(repo)}`;
         try {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
             const resp = await fetch(url, { headers });
-            if (this._modalFile !== file) return;
+            if (this._diffRequestKey !== requestKey) return;
             if (!resp.ok) {
                 const body = await resp.json().catch(() => ({}));
                 this._diffError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
@@ -657,11 +699,13 @@ export class GitStatusWidget extends LitElement {
                 this._diffContent = (body as Record<string, string>).diff;
             }
         } catch (err) {
-            if (this._modalFile !== file) return;
+            if (this._diffRequestKey !== requestKey) return;
             this._diffError = String(err);
         }
-        this._loadingDiff = null;
-        this._renderModal();
+        if (this._diffRequestKey === requestKey) {
+            this._loadingDiff = null;
+            this._renderModal();
+        }
     }
 
     private _showModal() {
@@ -677,7 +721,7 @@ export class GitStatusWidget extends LitElement {
         if (!this._modalEl || !this._modalFile) return;
 
         let body;
-        if (this._loadingDiff === this._modalFile) {
+        if (this._loadingDiff && this._loadingDiff === this._diffRequestKey) {
             body = html`<div class="flex items-center gap-2 text-muted-foreground p-8">
                 <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>
                 Loading diff\u2026
@@ -685,7 +729,12 @@ export class GitStatusWidget extends LitElement {
         } else if (this._diffError) {
             body = html`<div class="p-8" style="color:var(--destructive)">${this._diffError}</div>`;
         } else if (this._diffContent) {
-            body = html`<diff-block .content=${this._diffContent}></diff-block>`;
+            body = html`<rich-git-diff-viewer
+                .content=${this._diffContent}
+                .filePath=${this._modalFile}
+                .title=${this._modalFile ?? 'Diff'}
+                default-mode="auto"
+            ></rich-git-diff-viewer>`;
         } else {
             body = html`<div class="p-8 text-muted-foreground">No diff available</div>`;
         }
@@ -694,14 +743,20 @@ export class GitStatusWidget extends LitElement {
             <div style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px"
                  @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeModal(); }}>
                 <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeModal()}></div>
-                <div style="position:relative;width:100%;max-width:calc(100vw - 48px);height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
+                <div
+                    style="position:relative;width:100%;max-width:calc(100vw - 48px);height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="git-diff-modal-title"
+                >
                     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-                        <span class="font-mono text-sm text-foreground truncate" title=${this._modalFile}>${this._modalFile}</span>
+                        <span id="git-diff-modal-title" class="font-mono text-sm text-foreground truncate" title=${this._modalFile}>${this._modalFile}</span>
                         <button
                             style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
                             class="hover:text-foreground hover:bg-muted/50"
                             @click=${() => this._closeModal()}
                             title="Close"
+                            aria-label="Close diff modal"
                         >&times;</button>
                     </div>
                     <div style="flex:1;overflow:auto">${body}</div>
@@ -712,22 +767,27 @@ export class GitStatusWidget extends LitElement {
 
     private _closeModal() {
         this._modalFile = null;
+        this._loadingDiff = null;
+        this._diffRequestKey = null;
         this._diffContent = null;
         this._diffError = null;
         this._removeModal();
     }
 
     private _removeModal() {
-        document.removeEventListener('keydown', this._onEscapeKey);
         if (this._modalEl) {
             this._modalEl.remove();
             this._modalEl = null;
+        }
+        if (!this._commitsModalEl) {
+            document.removeEventListener('keydown', this._onEscapeKey);
         }
     }
 
     private async _fetchCommits(direction: 'ahead' | 'behind' = 'ahead', vs?: 'primary') {
         this._commitsLoading = true;
         this._commits = [];
+        this._expandedCommits = new Set();
         this._commitsError = null;
         this._commitsDirection = direction;
         this._commitsVs = vs;
@@ -749,7 +809,11 @@ export class GitStatusWidget extends LitElement {
                 this._commitsError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
             } else {
                 const body = await resp.json();
-                this._commits = (body as Record<string, unknown>).commits as typeof this._commits || [];
+                const commits = ((body as Record<string, unknown>).commits as CommitInfo[] | undefined) || [];
+                this._commits = commits.map((commit) => ({
+                    ...commit,
+                    files: Array.isArray(commit.files) ? commit.files : [],
+                }));
             }
         } catch (err) {
             this._commitsError = String(err);
@@ -767,6 +831,98 @@ export class GitStatusWidget extends LitElement {
         this._renderCommitsModal();
     }
 
+    private _commitStatusLabel(file: CommitChangedFile): string {
+        if (file.statusLabel) return file.statusLabel;
+        const normalized = file.status?.startsWith('R') ? 'R' : file.status;
+        return this._statusLabel(normalized);
+    }
+
+    private _commitFileDisplay(file: CommitChangedFile): string {
+        return file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
+    }
+
+    private _toggleCommitExpanded(sha: string) {
+        const next = new Set(this._expandedCommits);
+        if (next.has(sha)) next.delete(sha);
+        else next.add(sha);
+        this._expandedCommits = next;
+        this._renderCommitsModal();
+    }
+
+    private _openCommitDiffModal(commit: CommitInfo, file: CommitChangedFile) {
+        if (!this.sessionId && !this.goalId) return;
+        this._openDiffModal(file.path, undefined, { commit: commit.sha });
+    }
+
+    private _renderCommitFiles(commit: CommitInfo) {
+        const files = commit.files;
+        if (!files) {
+            return html`<div class="px-4 pb-3 pl-12 text-[12px] text-muted-foreground">Loading changed files…</div>`;
+        }
+        if (files.length === 0) {
+            return html`<div class="px-4 pb-3 pl-12 text-[12px] text-muted-foreground">No file changes reported for this commit.</div>`;
+        }
+        return html`
+            <div class="px-4 pb-3 pl-12 flex flex-col gap-0.5" data-testid="commit-file-list">
+                ${files.map((file) => {
+                    const status = file.status?.startsWith('R') ? 'R' : file.status;
+                    const label = this._commitStatusLabel(file);
+                    const displayPath = this._commitFileDisplay(file);
+                    return html`
+                        <button
+                            type="button"
+                            class="flex items-center gap-2 py-1 min-w-0 rounded px-1 -mx-1 text-left hover:bg-muted/50 cursor-pointer"
+                            style="background:none;border:0;color:inherit;width:100%;font:inherit"
+                            data-testid="commit-file-row"
+                            @click=${(e: MouseEvent) => { e.stopPropagation(); this._openCommitDiffModal(commit, file); }}
+                        >
+                            <span class="${this._statusColor(status)} font-mono w-[70px] shrink-0 text-right text-[12px]" title=${label}>${label}</span>
+                            <span class="text-foreground truncate text-[13px]" title=${displayPath}>${displayPath}</span>
+                        </button>
+                    `;
+                })}
+            </div>
+        `;
+    }
+
+    private _renderCommitRow(commit: CommitInfo) {
+        const expanded = this._expandedCommits.has(commit.sha);
+        return html`
+            <div class="border-b border-border last:border-b-0" data-testid="commit-row" data-commit-sha=${commit.sha}>
+                <button
+                    type="button"
+                    class="flex items-start gap-3 px-4 py-3 hover:bg-muted/30 text-left"
+                    style="min-width:0;width:100%;background:none;border:0;color:inherit;font:inherit;cursor:pointer"
+                    aria-expanded=${expanded ? 'true' : 'false'}
+                    @click=${() => this._toggleCommitExpanded(commit.sha)}
+                >
+                    <span class="text-muted-foreground shrink-0 pt-0.5" aria-hidden="true" style="width:12px">${expanded ? '▾' : '▸'}</span>
+                    <span class="font-mono text-[12px] text-muted-foreground shrink-0 pt-0.5" title=${commit.sha}>${commit.shortSha}</span>
+                    <span class="flex-1 min-w-0">
+                        <span class="text-sm text-foreground break-words" style="display:block">${commit.message}</span>
+                        <span class="flex items-center gap-3 mt-1 text-[12px] text-muted-foreground" style="display:flex">
+                            <span>${commit.author}</span>
+                            <span>${this._relativeTime(commit.timestamp)}</span>
+                            ${commit.filesChanged > 0 ? html`<span class="flex items-center gap-1.5">
+                                <span>${commit.filesChanged} file${commit.filesChanged !== 1 ? 's' : ''}</span>
+                                ${commit.insertions > 0 ? html`<span class="text-green-600 dark:text-green-400">+${commit.insertions}</span>` : nothing}
+                                ${commit.deletions > 0 ? html`<span class="text-red-600 dark:text-red-400">-${commit.deletions}</span>` : nothing}
+                            </span>` : nothing}
+                        </span>
+                    </span>
+                </button>
+                ${expanded ? this._renderCommitFiles(commit) : nothing}
+            </div>
+        `;
+    }
+
+    private _commitsModalTitle(): string {
+        const range = this._commitsVs === 'primary'
+            ? (this._commitsDirection === 'behind' ? `Behind ${this.primaryRef}` : `Ahead of ${this.primaryRef}`)
+            : (this._commitsDirection === 'behind' ? 'Incoming' : 'Unpushed');
+        return `${this._commits.length} ${range} Commit${this._commits.length !== 1 ? 's' : ''}`;
+    }
+
     private _renderCommitsModal() {
         if (!this._commitsModalEl) return;
 
@@ -782,23 +938,7 @@ export class GitStatusWidget extends LitElement {
             body = html`<div class="p-8 text-muted-foreground">${this._commitsDirection === 'behind' ? 'No incoming commits' : 'No unpushed commits'}</div>`;
         } else {
             body = html`<div class="flex flex-col">
-                ${this._commits.map(c => html`
-                    <div class="flex items-start gap-3 px-4 py-3 border-b border-border last:border-b-0 hover:bg-muted/30" style="min-width:0">
-                        <span class="font-mono text-[12px] text-muted-foreground shrink-0 pt-0.5" title=${c.sha}>${c.shortSha}</span>
-                        <div class="flex-1 min-w-0">
-                            <div class="text-sm text-foreground break-words">${c.message}</div>
-                            <div class="flex items-center gap-3 mt-1 text-[12px] text-muted-foreground">
-                                <span>${c.author}</span>
-                                <span>${this._relativeTime(c.timestamp)}</span>
-                                ${c.filesChanged > 0 ? html`<span class="flex items-center gap-1.5">
-                                    <span>${c.filesChanged} file${c.filesChanged !== 1 ? 's' : ''}</span>
-                                    ${c.insertions > 0 ? html`<span class="text-green-600 dark:text-green-400">+${c.insertions}</span>` : nothing}
-                                    ${c.deletions > 0 ? html`<span class="text-red-600 dark:text-red-400">-${c.deletions}</span>` : nothing}
-                                </span>` : nothing}
-                            </div>
-                        </div>
-                    </div>
-                `)}
+                ${this._commits.map((commit) => this._renderCommitRow(commit))}
             </div>`;
         }
 
@@ -808,7 +948,7 @@ export class GitStatusWidget extends LitElement {
                 <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeCommitsModal()}></div>
                 <div style="position:relative;width:100%;max-width:600px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
                     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-                        <span class="text-sm font-medium text-foreground">${this._commits.length} ${this._commitsVs === 'primary' ? (this._commitsDirection === 'behind' ? 'Behind Master' : 'Ahead of Master') : (this._commitsDirection === 'behind' ? 'Incoming' : 'Unpushed')} Commit${this._commits.length !== 1 ? 's' : ''}</span>
+                        <span class="text-sm font-medium text-foreground">${this._commitsModalTitle()}</span>
                         <button
                             style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
                             class="hover:text-foreground hover:bg-muted/50"
@@ -824,6 +964,7 @@ export class GitStatusWidget extends LitElement {
 
     private _closeCommitsModal() {
         this._commits = [];
+        this._expandedCommits = new Set();
         this._commitsError = null;
         this._commitsLoading = false;
         this._removeCommitsModal();
@@ -831,9 +972,11 @@ export class GitStatusWidget extends LitElement {
 
     private _removeCommitsModal() {
         if (this._commitsModalEl) {
-            document.removeEventListener('keydown', this._onEscapeKey);
             this._commitsModalEl.remove();
             this._commitsModalEl = null;
+        }
+        if (!this._modalEl) {
+            document.removeEventListener('keydown', this._onEscapeKey);
         }
     }
 
@@ -918,6 +1061,7 @@ export class GitStatusWidget extends LitElement {
             <div class="flex flex-col gap-1 mb-2">
                 ${this._renderPrimaryStatus()}
                 ${this._renderRemoteStatus()}
+                ${this._renderLocalOnlyPolicyStatus()}
             </div>
 
             ${this._renderPrSection()}

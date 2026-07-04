@@ -153,6 +153,13 @@ const PACKS = [
 			{ in: "dashboard-panel.js", out: "lib/HindsightDashboardPanel.js" },
 		],
 	},
+	{
+		pack: "terminal",
+		entries: [
+			{ in: "terminal-panel.ts", out: "lib/terminal-panel.js" },
+			{ in: "terminal-channel.ts", out: "lib/terminal-channel.mjs", platform: "node" },
+		],
+	},
 ];
 
 async function main() {

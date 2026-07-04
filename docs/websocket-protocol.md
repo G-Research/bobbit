@@ -18,6 +18,24 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 
 Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Treat these messages as refresh triggers only; the session list REST response remains the source of truth.
 
+## Frame size routing and limits
+
+Bobbit has separate limits for the socket transport, the chat composer, and Extension Host channel envelopes. They are intentionally layered so normal chat prompts can carry large legitimate payloads while channel traffic stays bounded.
+
+| Limit | Source of truth | Scope | Current default | Why it exists |
+|---|---|---|---|---|
+| WebSocket transport payload | `WS_MAX_PAYLOAD_BYTES` in `src/server/server.ts` | All inbound frames accepted by the gateway WebSocket server | 256 MiB | Keeps the `ws` transport bounded, but high enough that the composer can reject oversized prompt sends with a clear UI error before the socket is torn down. |
+| Composer serialized-send guard | `MessageEditor.MAX_SERIALIZED_SEND_BYTES` in `src/ui/components/MessageEditor.ts` | User prompt sends assembled by the message editor, especially attachment/image sends whose serialized prompt frame can include multiple base64 copies | 200 MiB | Gives users an actionable inline error and preserves the draft/attachments instead of relying on transport-level close behavior. |
+| Extension-channel envelope cap | `MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES` in `src/server/ws/handler.ts` | Authenticated client messages whose `type` is `ext_channel_*` | 1 MiB | Keeps generic Extension Host channel operation envelopes cheap to parse and route; channel handlers still enforce their own contribution quotas. |
+
+Routing rules:
+
+- The first unauthenticated frame is only expected to authenticate. Oversized unauthenticated frames are rejected before command routing to avoid parsing arbitrary large unauthenticated input.
+- After authentication, non-extension session commands such as `prompt`, `steer`, `follow_up`, queue edits, `ext_session_write_permit`, and `ext_session_post` are governed by the WebSocket transport limit plus their feature-specific validation. They are **not** rejected solely because the serialized frame is larger than the 1 MiB extension-channel envelope cap.
+- Prompt frames sent from the browser composer should stay below `MessageEditor.MAX_SERIALIZED_SEND_BYTES`, which is deliberately lower than `WS_MAX_PAYLOAD_BYTES`. This ordering makes the composer error the common failure mode for oversized attachment sends, not a socket close.
+- Extension-channel operations (`ext_channel_open_grant`, `ext_channel_open`, `ext_channel_attach`, `ext_channel_list`, `ext_channel_send`, `ext_channel_close`, `ext_channel_detach`) remain capped by `MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES`. If one is too large, the server returns a structured size error and leaves the socket usable. With a `requestId`, callers receive an `ext_channel_result` or `ext_channel_open_grant_result` failure; without one, the fallback is a normal `error` frame with code `FRAME_TOO_LARGE`.
+- The 1 MiB cap is only an envelope guard. It does not replace per-channel quotas such as declared frame and inbound-byte limits, pack identity checks, open grants, attachment checks, or session-write permits.
+
 ## Client → Server
 
 | Type | Fields | Description |

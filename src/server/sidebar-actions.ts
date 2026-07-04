@@ -1,6 +1,6 @@
 export type GoalGithubLinkResponse =
 	| { available: true; url: string; kind: "pr" | "branch" }
-	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" | "no-worktree"; message?: string };
 
 export function parseGithubRemoteUrl(remoteUrl: string): { host: string; owner: string; repo: string } | null {
 	const raw = remoteUrl.trim();

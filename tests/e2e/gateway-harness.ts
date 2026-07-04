@@ -22,9 +22,9 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
@@ -79,7 +79,13 @@ function readHarnessToken(info: GatewayInfo): string {
 	throw new Error(`missing token for ${info.bobbitDir}`);
 }
 
-async function seedHarnessDefaultWorkflows(info: GatewayInfo, headers: Record<string, string>, projectId: string): Promise<void> {
+function harnessDefaultProjectRoot(bobbitDir: string): string {
+	const root = join(dirname(bobbitDir), `${basename(bobbitDir)}-default-project`);
+	mkdirSync(root, { recursive: true });
+	try { return realpathSync(root); } catch { return root; }
+}
+
+async function seedHarnessDefaultWorkflows(info: { baseURL: string }, headers: Record<string, string>, projectId: string): Promise<void> {
 	const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
 	let current: Record<string, any> = {};
 	try {
@@ -124,7 +130,7 @@ async function restoreHarnessDefaultProject(info: GatewayInfo): Promise<void> {
 	const registerResp = await fetch(`${info.baseURL}/api/projects`, {
 		method: "POST",
 		headers,
-		body: JSON.stringify({ name: "default", rootPath: info.bobbitDir, upsert: true, acceptCanonical: true }),
+		body: JSON.stringify({ name: "default", rootPath: harnessDefaultProjectRoot(info.bobbitDir), upsert: true, acceptCanonical: true }),
 	});
 	const registerText = await registerResp.text().catch(() => "<failed to read body>");
 	if (!registerResp.ok) {
@@ -200,6 +206,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);
 		} catch { /* not all platforms / first-call edge cases — fall back */ }
+		const defaultProjectRoot = harnessDefaultProjectRoot(bobbitDir);
+		rmSync(defaultProjectRoot, { recursive: true, force: true });
+		mkdirSync(defaultProjectRoot, { recursive: true });
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
@@ -314,8 +323,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			const serverConfigDir = join(bobbitDir, "config");
 			mkSync(serverConfigDir, { recursive: true });
 			wrSync(join(serverConfigDir, "project.yaml"), yamlContent);
-			// Per-project config (project-context): <bobbitDir>/.bobbit/config/project.yaml
-			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			// Harness default project config: <defaultProjectRoot>/.bobbit/config/project.yaml
+			const projectConfigDir = join(defaultProjectRoot, ".bobbit", "config");
 			mkSync(projectConfigDir, { recursive: true });
 			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
@@ -351,9 +360,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// When running in-process we must do that ourselves.
 		writeFileSync(join(bobbitDir, "state", "gateway-url"), gatewayUrl);
 
-		// Register the server CWD as a default project via REST. The server no
-		// longer does this implicitly — see "eliminate default project" refactor.
-		// Workflows already seeded above via direct project.yaml write.
+		// Register a normal harness default project beside Headquarters. The server
+		// workspace itself is now the immutable Headquarters project.
 		const defaultProjectRegister = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 			method: "POST",
 			headers: {
@@ -366,7 +374,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			// SymlinkProjectRootError 400 and the harness must fail loudly;
 			// otherwise every POST /api/sessions or /api/goals then 400s with
 			// "projectId required".
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+			body: JSON.stringify({ name: "default", rootPath: defaultProjectRoot, upsert: true, acceptCanonical: true }),
 		});
 		if (!defaultProjectRegister.ok) {
 			const body = await defaultProjectRegister.text().catch(() => "<failed to read body>");
@@ -375,6 +383,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				`${defaultProjectRegister.status} ${defaultProjectRegister.statusText} body=${body || "<empty>"}`,
 			);
 		}
+		const defaultProject = await defaultProjectRegister.json().catch(() => undefined) as { id?: string } | undefined;
+		if (!defaultProject?.id) {
+			throw new Error(`[gateway-harness] default project registration returned no id`);
+		}
+		await seedHarnessDefaultWorkflows({ baseURL: `http://127.0.0.1:${port}` }, {
+			"Content-Type": "application/json",
+			"Authorization": `Bearer ${token}`,
+		}, defaultProject.id);
 
 		const info: GatewayInfo = {
 			port,
@@ -446,6 +462,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			onFinalFailure: (err) => {
 				const msg = (err as Error)?.message ?? String(err);
 				console.warn(`[gateway-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
+			},
+		});
+		await awaitableRm(defaultProjectRoot, {
+			onFinalFailure: (err) => {
+				const msg = (err as Error)?.message ?? String(err);
+				console.warn(`[gateway-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
 			},
 		});
 		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;

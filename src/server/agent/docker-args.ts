@@ -22,16 +22,27 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
-import { BUILTIN_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
+import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
+import { scopePaths } from "./pack-types.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
+
+export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
+	{ sub: "sessions" },
+	{ sub: "tool-guard" },
+	{ sub: "html-snapshots" },
+	{ sub: "google-code-assist", readOnly: true },
+	{ sub: "tool-result-error-bridge", readOnly: true },
+];
 
 export interface DockerRunConfig {
 	image: string;
@@ -51,6 +62,8 @@ export interface DockerRunConfig {
 	// ── Per-project container ────────────────────────────────────────────
 	/** Project ID — when set, uses a named Docker volume instead of bind mount for /workspace. */
 	projectId?: string;
+	/** Host project marketplace pack root to mount in named-volume sandbox mode. */
+	projectMarketPacksRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
 	/**
@@ -175,12 +188,31 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// Mount shipped first-party market packs so pack-owned bobbit-extension tools
 	// (and any shared pack modules they import) resolve inside Docker sandboxes.
-	try {
-		if (fs.statSync(builtinPacksDir).isDirectory()) {
-			args.push("-v", `${toDockerPath(builtinPacksDir)}:${BUILTIN_PACKS_CONTAINER_DIR}:ro`);
+	const addReadonlyDirectoryMount = (hostPath: string, containerPath: string): void => {
+		try {
+			if (fs.statSync(hostPath).isDirectory()) {
+				args.push("-v", `${toDockerPath(hostPath)}:${containerPath}:ro`);
+			}
+		} catch {
+			// Optional mount roots are absent until their corresponding feature/scope is used.
 		}
-	} catch {
-		// Built-in pack dir is absent in source-only/dev test layouts before build:packs.
+	};
+	addReadonlyDirectoryMount(builtinPacksDir, BUILTIN_PACKS_CONTAINER_DIR);
+
+	// Mount installed marketplace pack roots, not only their tools/ subtrees, so
+	// standalone pi-extension entries and shared pack-local modules resolve in Docker.
+	// Long-lived project containers must receive these mounts even before any pack
+	// is installed; Docker cannot add a later host bind mount to an existing
+	// container, so create the scope roots before assembling docker run args.
+	const addMarketPacksRootMount = (hostPath: string, containerPath: string): void => {
+		fs.mkdirSync(hostPath, { recursive: true });
+		addReadonlyDirectoryMount(hostPath, containerPath);
+	};
+	addMarketPacksRootMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
+	addMarketPacksRootMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
+	const projectMarketPacksRoot = config.projectMarketPacksRoot ?? (workspaceDir ? scopePaths("project", workspaceDir).marketPacksRoot : undefined);
+	if (projectMarketPacksRoot) {
+		addMarketPacksRootMount(projectMarketPacksRoot, PROJECT_MARKET_PACKS_CONTAINER_DIR);
 	}
 
 	// ── Per-session preview mount (WP-A/F) ────────────────────────────
@@ -205,27 +237,22 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// `google-code-assist` and `openai-orphan-tool-result` hold generated
-	// pi-coding-agent extensions loaded by sandboxed sessions via `--extension`.
-	// Host paths are remapped to `/bobbit-state/<subdir>/...` by
-	// remapArgsForContainer, so those container paths only resolve if the subdirs
-	// are bind-mounted here. They contain generated extension source only — no
-	// secrets are baked into either file.
+	// Generated extension state dirs (`google-code-assist` and
+	// `tool-result-error-bridge`) hold content-addressed pi-coding-agent
+	// extensions loaded via `--extension`. remapArgsForContainer rewrites their
+	// host paths to `/bobbit-state/<subdir>/...`; those container paths only
+	// resolve if the subdirs are bind-mounted here. They contain only generated
+	// extension source (no secrets), so mounting them is safe.
 	//
-	// Both generated-extension subdirs are mounted READ-ONLY (`:ro`): sandboxed
-	// agents only ever *load* them. A writable mount would let a compromised
-	// sandbox tamper with content-addressed source reused by later sessions.
-	// The gateway also revalidates cached contents before reuse as
-	// defense-in-depth (see the corresponding extension writer modules).
+	// Generated extension dirs are mounted READ-ONLY (`:ro`): sandboxed agents
+	// only ever *load* these files via `--extension`, never write them. A writable
+	// mount would let a compromised sandbox tamper with content-addressed source
+	// reused by later sessions. The `:ro` flag closes that hole at the kernel
+	// mount level; the gateway also revalidates cached contents before reuse as
+	// defense-in-depth (see google-code-assist-provider-extension.ts and
+	// tool-result-error-bridge-extension.ts).
 	if (stateDir) {
-		const sandboxStateDirs: Array<{ sub: string; readOnly?: boolean }> = [
-			{ sub: "sessions" },
-			{ sub: "tool-guard" },
-			{ sub: "html-snapshots" },
-			{ sub: "google-code-assist", readOnly: true },
-			{ sub: "openai-orphan-tool-result", readOnly: true },
-		];
-		for (const { sub, readOnly } of sandboxStateDirs) {
+		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 			const hostPath = path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
@@ -233,10 +260,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		}
 	}
 
-	// Host agent sessions dir (~/.bobbit/agent/sessions/) — mount ONLY sessions, not the
-	// full agent dir, to prevent sandboxed agents from accessing auth.json credentials.
+	// Host agent sessions dir — mount ONLY sessions, not the full agent dir, to
+	// prevent sandboxed agents from accessing host auth.json credentials.
 	const hostAgentDir = globalAgentDir();
-	const hostSessionsDir = path.join(hostAgentDir, "sessions");
+	const hostSessionsDir = activeAgentSessionsDir();
 	fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 

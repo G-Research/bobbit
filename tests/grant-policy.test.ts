@@ -133,9 +133,9 @@ describe("resolveGrantPolicy", () => {
 		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "ask");
 	});
 
-	it("tool YAML default wins over group default", () => {
+	it("MCP group default wins over tool YAML default", () => {
 		const role = {};
-		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "ask" } });
+		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "allow" } });
 		const gps = mockGroupPolicyStore({ "mcp__pw": "ask" });
 		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "ask");
 	});
@@ -193,28 +193,28 @@ describe("mcpPolicyKeys — four name shapes", () => {
 	it("per-op sub-namespaced → group=mcp__<server>, tool=mcp__<server>__<sub>", () => {
 		assert.deepEqual(
 			mcpPolicyKeys("mcp__gr__ai-adoption__list-articles"),
-			{ group: "mcp__gr", tool: "mcp__gr__ai-adoption" },
+			{ group: "mcp__gr", server: "mcp__gr", tool: "mcp__gr__ai-adoption", package: "mcp__gr__ai-adoption", operation: "mcp__gr__ai-adoption__list-articles" },
 		);
 	});
 
 	it("per-op flat → group=tool=mcp__<server>", () => {
 		assert.deepEqual(
 			mcpPolicyKeys("mcp__playwright__click"),
-			{ group: "mcp__playwright", tool: "mcp__playwright" },
+			{ group: "mcp__playwright", server: "mcp__playwright", tool: "mcp__playwright", operation: "mcp__playwright__click" },
 		);
 	});
 
 	it("meta sub-namespaced → group=mcp__<server>, tool=mcp__<server>__<sub>", () => {
 		assert.deepEqual(
 			mcpPolicyKeys("mcp_gr__ai-adoption"),
-			{ group: "mcp__gr", tool: "mcp__gr__ai-adoption" },
+			{ group: "mcp__gr", server: "mcp__gr", tool: "mcp__gr__ai-adoption", package: "mcp__gr__ai-adoption" },
 		);
 	});
 
 	it("meta flat → group=tool=mcp__<server>", () => {
 		assert.deepEqual(
 			mcpPolicyKeys("mcp_playwright"),
-			{ group: "mcp__playwright", tool: "mcp__playwright" },
+			{ group: "mcp__playwright", server: "mcp__playwright", tool: "mcp__playwright" },
 		);
 	});
 
@@ -260,20 +260,59 @@ describe("resolveGrantPolicy — tool-key beats group-key", () => {
 		assert.equal(resolveGrantPolicy("mcp_gr__jira", "MCP: gr", role, undefined), "never");
 	});
 
-	it("group-store tool-key wins over group-store group-key", () => {
+	it("group-store operation-key wins over package-key and server-key, before YAML defaults", () => {
 		const role = {};
-		const tm = mockToolManager({});
+		const tm = mockToolManager({ "mcp__gr__ai-adoption__list-articles": { grantPolicy: "allow" } });
 		const gps = mockGroupPolicyStore({
-			"mcp__gr": "never",
+			"mcp__gr": "allow",
 			"mcp__gr__ai-adoption": "ask",
+			"mcp__gr__ai-adoption__list-articles": "never",
 		});
 		assert.equal(
 			resolveGrantPolicy("mcp__gr__ai-adoption__list-articles", "MCP: gr", role, tm, gps),
-			"ask",
+			"never",
 		);
 		assert.equal(
-			resolveGrantPolicy("mcp__gr__jira__get-queue", "MCP: gr", role, tm, gps),
-			"never",
+			resolveGrantPolicy("mcp__gr__ai-adoption__create-article", "MCP: gr", role, tm, gps),
+			"ask",
+		);
+	});
+
+	it("role MCP policies beat persisted/group operation-level never for available tools", () => {
+		const tm = mockToolManager({ "mcp__gr__ai-adoption__delete-article": { grantPolicy: "allow" } });
+		const gps = mockGroupPolicyStore({
+			"mcp__gr__ai-adoption__delete-article": "never",
+		});
+
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr": "allow" as const } },
+				tm,
+				gps,
+			),
+			"allow",
+		);
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr__ai-adoption": "allow" as const } },
+				tm,
+				gps,
+			),
+			"allow",
+		);
+		assert.equal(
+			resolveGrantPolicy(
+				"mcp__gr__ai-adoption__delete-article",
+				"MCP: gr",
+				{ toolPolicies: { "mcp__gr__ai-adoption__delete-article": "allow" as const } },
+				tm,
+				gps,
+			),
+			"allow",
 		);
 	});
 

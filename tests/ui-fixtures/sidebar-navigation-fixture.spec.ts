@@ -15,6 +15,7 @@ const DEPS = [
 	path.resolve("src/app/render-helpers.ts"),
 	path.resolve("src/app/sidebar-nesting.ts"),
 	path.resolve("src/app/sidebar-spawned-children.ts"),
+	path.resolve("src/app/sidebar-tree-builder.ts"),
 	path.resolve("src/app/team-archived-bucket.ts"),
 	path.resolve("src/app/state.ts"),
 	path.resolve("src/app/api.ts"),

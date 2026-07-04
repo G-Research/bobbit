@@ -23,7 +23,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const PHANTOM_WORKFLOW = "__does_not_exist_wf__";
 
@@ -31,16 +31,7 @@ const PHANTOM_WORKFLOW = "__does_not_exist_wf__";
 async function openGoalAssistantProposal(page: import("@playwright/test").Page) {
 	test.setTimeout(90_000);
 	await openApp(page);
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 10_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");

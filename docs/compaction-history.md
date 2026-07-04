@@ -212,11 +212,16 @@ Response envelope:
 
 `nextCursor` is `null` when no more pages are available.
 
-Error codes match the sibling `GET /api/sessions/:id/transcript` route:
-`session_not_found` (404), `transcript_unavailable` (404),
-`compaction_not_found` (404), `invalid_params` (400),
-`permission_denied` (403), `internal_error` (500). Same-project
-authorization via the `x-bobbit-session-id` request header.
+Authorization matches the sibling `GET /api/sessions/:id/transcript`
+route and `read_session`: after normal bearer/session authentication,
+any authenticated caller on the same gateway that can reach the target
+session may read pre-compaction history, even when caller and target
+`projectId` values differ. Reads still use the target session's
+sandbox-aware transcript file context.
+
+Route-specific structured errors are `session_not_found` (404),
+`transcript_unavailable` (404), `compaction_not_found` (404),
+`invalid_params` (400), and `internal_error` (500).
 
 Implementation: `readOrphanedBeforeCompaction` in
 `src/server/agent/transcript-reader.ts`. Branch-split rules:

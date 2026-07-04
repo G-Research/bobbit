@@ -4,7 +4,7 @@
  * edit and retry. Pin for the "Robust goal workflow UX" goal §1.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -29,16 +29,7 @@ test("goal assistant is preserved when POST /api/goals returns 400", async ({ pa
 	await openApp(page);
 
 	// Drive the goal-assistant flow far enough to render the proposal panel.
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	const sessionCreated = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 60_000 },
-	);
-	await newGoalBtn.click();
-	await sessionCreated;
-	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
+	await createGoalAssistantViaUI(page);
 
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 15_000 });

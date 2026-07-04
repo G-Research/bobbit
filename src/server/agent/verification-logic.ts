@@ -28,8 +28,11 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	"process exited",
 	"Session lost during server restart",
 	"ECONNRESET",
+	"ENOTCONN",
 	"EPIPE",
 	"spawn UNKNOWN",
+	"WebSocket error",
+	"socket error",
 	"socket hang up",
 	"connect ECONNREFUSED",
 	// Tool-call schema validation failure from the provider SDK — distinct
@@ -195,6 +198,25 @@ export const TRANSIENT_ERROR_REGEXES: RegExp[] = [
 ];
 
 /**
+ * Regex patterns for transient agent/runtime infrastructure failures. Kept
+ * separate from TRANSIENT_ERROR_REGEXES so detectJsonValidationError() remains
+ * scoped to tool-argument JSON/schema glitches and does not send JSON-retry
+ * prompts for socket/process failures.
+ */
+export const TRANSIENT_INFRA_ERROR_REGEXES: RegExp[] = [
+	/\bwebsocket\s+error\b/i,
+	/\bsocket\s+error\b/i,
+	/\bsocket\s+hang\s+up\b/i,
+	/\b(?:TypeError:\s*)?fetch failed\b/i,
+	/\bUND_ERR_(?:SOCKET|HEADERS_TIMEOUT|CONNECT_TIMEOUT|BODY_TIMEOUT|ABORTED|DESTROYED)\b/i,
+	/\b(?:ECONNRESET|ECONNREFUSED|ENOTCONN|EPIPE)\b/i,
+	/\bconnection\s+(?:reset|refused|closed|lost|terminated)\b/i,
+	/\bconnect\s+ECONNREFUSED\b/i,
+	/\b(?:agent\s+)?process[-\s]+not[-\s]+running\b/i,
+	/\b(?:agent\s+)?process[-\s]+(?:exited|exit(?:ed)?|died|terminated)\b/i,
+];
+
+/**
  * Return the matched JSON/validation error substring (roughly one line of
  * context around the match) if `output` looks like an LLM tool-argument
  * glitch, otherwise null. Used to craft a targeted retry prompt.
@@ -233,6 +255,7 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 function matchesAnyTransient(output: string): boolean {
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
+	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
 	// Provider overload / rate-limit conditions (HTTP 429/529 phrasings) are
 	// transient too — keep `isTransientReviewError()` as the single source of
 	// truth so any consumer that gates on "transient" also covers these.
@@ -260,6 +283,43 @@ export function isProviderBackoffError(output: string): boolean {
 	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
+const GENERIC_AGENT_RETRYABLE_REGEXES: RegExp[] = [
+	/\bthe system encountered an unexpected error\b/i,
+	/\ban unexpected (?:agent |system |internal )?error (?:occurred|happened|was encountered)\b/i,
+	/\b(?:internal|system) (?:server )?error\b/i,
+];
+
+const GENERIC_AGENT_NON_RETRYABLE_REGEXES: RegExp[] = [
+	/\b(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden)\b/i,
+	/\b(?:invalid|missing|no) api key\b/i,
+	/\b(?:api key|token|credential)s? (?:is |are )?(?:missing|invalid|expired|not configured|required)\b/i,
+	/\b(?:configuration|config) (?:error|invalid|missing|not configured)\b/i,
+	/\b(?:unsupported|unknown|unrecognized) (?:provider|model)\b/i,
+	/\b(?:provider|model)\b.{0,80}\b(?:unsupported|not supported|unrecognized)\b/i,
+	/\b(?:permission denied|access denied|operation not permitted|eacces|eperm)\b/i,
+	/\b(?:user|human) (?:aborted|cancelled|canceled|interrupted)\b/i,
+	/\b(?:aborterror|cancelled by user|canceled by user)\b/i,
+	/\b(?:content policy|policy violation|safety policy|blocked by policy|disallowed content)\b/i,
+	/\b(?:validationerror|validation error|invalid request|bad request|schema validation)\b/i,
+];
+
+export function isNonRetryableAgentError(output: string): boolean {
+	return !!output && GENERIC_AGENT_NON_RETRYABLE_REGEXES.some(re => re.test(output));
+}
+
+/**
+ * Classify generic agent/runtime failures that are worth one short bounded
+ * retry burst even when they do not match the narrower transient/provider
+ * classifiers above. Deterministic operator/config/user-policy failures are
+ * excluded first so sanitized "unexpected error" wrappers with a concrete
+ * cause (for example, "missing API key") do not loop.
+ */
+export function isRetryableGenericAgentError(output: string): boolean {
+	if (!output) return false;
+	if (isNonRetryableAgentError(output)) return false;
+	return GENERIC_AGENT_RETRYABLE_REGEXES.some(re => re.test(output));
+}
+
 /**
  * Decide whether a verification-step retry loop should attempt another
  * pass given the latest result, or break out.
@@ -284,7 +344,9 @@ export function shouldRetryVerificationStep(args: {
 	isTransient: (output: string) => boolean;
 }): RetryDecision {
 	if (args.passed) return "break";
-	if (!args.isTransient(args.output)) return "break";
+	if (isNonRetryableAgentError(args.output)) return "break";
+	const retryable = args.isTransient(args.output) || isRetryableGenericAgentError(args.output);
+	if (!retryable) return "break";
 	const isBackoff = isProviderBackoffError(args.output);
 	if (isBackoff) return "retry"; // unbounded for rate-limit / overload
 	return args.attempt >= args.maxBoundedAttempts ? "break" : "retry";

@@ -6,6 +6,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
+import { isHeadquartersProject } from "./headquarters.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
@@ -70,6 +71,43 @@ export interface CommitInfo {
 
 let currentGoalId: string | null = null;
 let currentGoal: Goal | null = null;
+
+function syncCurrentGoalLifecycleFromState(): void {
+	if (!currentGoal || !currentGoalId || currentGoal.id !== currentGoalId) return;
+	const stateGoal = state.goals.find(g => g.id === currentGoalId);
+	if (!stateGoal) return;
+
+	const archived = stateGoal.archived === true ? true : undefined;
+	const archivedAt = archived ? (stateGoal.archivedAt ?? currentGoal.archivedAt ?? Date.now()) : undefined;
+	const paused = stateGoal.paused === true ? true : undefined;
+	const setupStatus = stateGoal.setupStatus ?? currentGoal.setupStatus;
+	const setupError = stateGoal.setupError;
+	const updatedAt = stateGoal.updatedAt ?? currentGoal.updatedAt;
+
+	if (
+		currentGoal.archived === archived
+		&& currentGoal.archivedAt === archivedAt
+		&& currentGoal.paused === paused
+		&& currentGoal.setupStatus === setupStatus
+		&& currentGoal.setupError === setupError
+		&& currentGoal.state === stateGoal.state
+		&& currentGoal.updatedAt === updatedAt
+	) {
+		return;
+	}
+
+	currentGoal = {
+		...currentGoal,
+		archived,
+		archivedAt,
+		paused,
+		setupStatus,
+		setupError,
+		state: stateGoal.state,
+		updatedAt,
+	};
+}
+
 let tasks: Task[] = [];
 let commits: CommitInfo[] = [];
 let gates: GateState[] = [];
@@ -197,6 +235,7 @@ interface PrStatus {
 	state: "OPEN" | "MERGED" | "CLOSED";
 	mergeable?: string;
 	viewerIsAdmin?: boolean;
+	viewerCanMergeAsAdmin?: boolean;
 	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
 	headRefName?: string;
 }
@@ -709,10 +748,11 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		const sidebarIdx = state.goals.findIndex((g) => g.id === goalId);
 		if (sidebarIdx >= 0) {
 			const sidebarGoal = state.goals[sidebarIdx];
-			if (sidebarGoal.setupStatus !== currentGoal!.setupStatus || sidebarGoal.state !== currentGoal!.state) {
+			if (sidebarGoal.setupStatus !== currentGoal!.setupStatus || sidebarGoal.setupError !== currentGoal!.setupError || sidebarGoal.state !== currentGoal!.state) {
 				state.goals[sidebarIdx] = { ...sidebarGoal, setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError, state: currentGoal!.state };
 			}
 		}
+		syncCurrentGoalLifecycleFromState();
 
 		if (tasksRes.ok) {
 			const data = await tasksRes.json();
@@ -922,9 +962,10 @@ export async function refreshDashboardGoal(): Promise<void> {
 			currentGoal = await res.json();
 			// Propagate setupStatus to sidebar's goal list so it stays in sync
 			const idx = state.goals.findIndex((g) => g.id === currentGoalId);
-			if (idx >= 0 && currentGoal!.setupStatus !== state.goals[idx].setupStatus) {
+			if (idx >= 0 && (currentGoal!.setupStatus !== state.goals[idx].setupStatus || currentGoal!.setupError !== state.goals[idx].setupError)) {
 				state.goals[idx] = { ...state.goals[idx], setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError };
 			}
+			syncCurrentGoalLifecycleFromState();
 			renderApp();
 		}
 	} catch { /* ignore - polling will catch up */ }
@@ -1735,6 +1776,19 @@ async function handleRetrySetup(goalId: string): Promise<void> {
 	}
 }
 
+function isHeadquartersNoWorktreeGoal(goal: Goal): boolean {
+	return isHeadquartersProject(goal.projectId) && !goal.branch && !goal.worktreePath;
+}
+
+function renderHeadquartersNoWorktreeNotice(goal: Goal): TemplateResult | typeof nothing {
+	if (!isHeadquartersNoWorktreeGoal(goal)) return nothing;
+	return html`
+		<div class="setup-banner" data-testid="headquarters-no-worktree-notice" style="background:color-mix(in oklch, var(--info, var(--primary)) 10%, transparent);border-color:color-mix(in oklch, var(--info, var(--primary)) 35%, var(--border));color:var(--foreground);">
+			<span>This Headquarters goal runs in the server directory without a git worktree. Git branch and merge actions are unavailable.</span>
+		</div>
+	`;
+}
+
 function renderSetupBanner(goal: Goal): TemplateResult {
 	if (goal.setupStatus === "preparing") {
 		return html`
@@ -1856,21 +1910,21 @@ function renderNavBar(goal: Goal): TemplateResult {
 }
 
 function renderTeamButton(goal: Goal): TemplateResult {
+	if (goal.archived) {
+		return html`
+			<div class="btn-split">
+				<button class="btn-split-main" ?disabled=${true} style="opacity:0.5;cursor:default">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg><span>Archived</span>
+				</button>
+			</div>
+		`;
+	}
 	if (teamActive) {
 		return html`
 			<div class="btn-split">
 				<button class="btn-split-main danger" title="Stop the goal team" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
 					${svgStop}
 					<span>${teamStopping ? "Stopping\u2026" : "Stop Team"}</span>
-				</button>
-			</div>
-		`;
-	}
-	if (goal.archived) {
-		return html`
-			<div class="btn-split">
-				<button class="btn-split-main" ?disabled=${true} style="opacity:0.5;cursor:default">
-					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg><span>Archived</span>
 				</button>
 			</div>
 		`;
@@ -2053,6 +2107,7 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 function renderMetaRows(goal: Goal): TemplateResult {
 	const branch = goal.branch || "";
 	const gs = gitStatus;
+	const hideGitAffordances = isHeadquartersNoWorktreeGoal(goal);
 
 	return html`
 		<div class="meta-rows">
@@ -2079,7 +2134,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 				</div>
 			</div>
 			` : nothing}
-			${gitRepoKnown !== 'no' && (branch || gs || gitRepoKnown === 'unknown') ? html`
+			${!hideGitAffordances && gitRepoKnown !== 'no' && (branch || gs || gitRepoKnown === 'unknown') ? html`
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
 						.goalId=${goal.id}
@@ -2099,6 +2154,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.deletionsVsPrimary=${gs?.deletionsVsPrimary ?? 0}
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
 						.unpushed=${gs?.unpushed ?? false}
+						.remotePublication=${(gs as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}
@@ -2108,6 +2164,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prTitle=${prStatus?.title}
 						.prMergeable=${prStatus?.mergeable}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
+						.viewerCanMergeAsAdmin=${prStatus?.viewerCanMergeAsAdmin ?? false}
 						.reviewDecision=${prStatus?.reviewDecision}
 						.headRefName=${prStatus?.headRefName}
 						@pr-merge=${handlePrMerge}
@@ -3093,6 +3150,7 @@ export function renderGoalDashboard(): TemplateResult {
 		`;
 	}
 
+	syncCurrentGoalLifecycleFromState();
 	const activeTab = dashboardTab;
 
 	const isArchived = currentGoal.archived === true;
@@ -3107,6 +3165,7 @@ export function renderGoalDashboard(): TemplateResult {
 				</div>
 			` : nothing}
 			${renderSetupBanner(currentGoal)}
+			${renderHeadquartersNoWorktreeNotice(currentGoal)}
 			${renderMetaRows(currentGoal)}
 			${renderDashboardMutationPending()}
 			${renderGatePipeline()}

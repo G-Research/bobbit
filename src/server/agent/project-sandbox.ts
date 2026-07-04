@@ -20,10 +20,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs } from "./docker-args.js";
+import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS } from "./docker-args.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
+import { globalAgentDir } from "../bobbit-dir.js";
+import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
-import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
+import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
@@ -32,6 +35,31 @@ const DOCKER_BIN = "docker";
 
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
+const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
+const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
+
+interface DockerMountInfo {
+	Type?: string;
+	Source?: string;
+	Destination?: string;
+	RW?: boolean;
+	Mode?: string;
+}
+
+export interface AgentDirMountExpectation {
+	sessionsDir: string;
+	modelsJson: string;
+	modelsJsonExists: boolean;
+}
+
+export interface AgentDirMountStalenessResult {
+	stale: boolean;
+	reason?: string;
+}
+
+export interface StateDirMountExpectation {
+	stateDir: string;
+}
 
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
@@ -59,6 +87,88 @@ function dockerChildLabel(args: readonly string[]): string {
 	if (op.startsWith("exec git")) return "docker exec git";
 	if (op.startsWith("exec ")) return "docker exec";
 	return `docker ${args[0] || "command"}`;
+}
+
+function normalizeContainerMountDestination(value: string | undefined): string {
+	return (value ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function comparableMountPath(value: string): string {
+	const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function hostPathMountCandidates(hostPath: string): Set<string> {
+	const candidates = new Set<string>();
+	const add = (value: string | undefined): void => {
+		if (!value) return;
+		candidates.add(comparableMountPath(value));
+	};
+	add(path.resolve(hostPath));
+	add(toDockerPath(path.resolve(hostPath)));
+	const dockerPath = toDockerPath(path.resolve(hostPath));
+	if (dockerPath.startsWith("/")) {
+		add(`/host_mnt${dockerPath}`);
+		add(`/run/desktop/mnt/host${dockerPath}`);
+	}
+	try { add(fs.realpathSync(hostPath)); } catch { /* path may not exist yet */ }
+	return candidates;
+}
+
+function mountSourceMatches(source: string | undefined, expectedHostPath: string): boolean {
+	if (!source) return false;
+	return hostPathMountCandidates(expectedHostPath).has(comparableMountPath(source));
+}
+
+function isMountReadOnly(mount: DockerMountInfo): boolean {
+	if (mount.RW === false) return true;
+	return typeof mount.Mode === "string" && mount.Mode.split(",").includes("ro");
+}
+
+export function getAgentDirMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: AgentDirMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const sessionsMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === CONTAINER_AGENT_SESSIONS_DIR);
+	if (sessionsMounts.length === 0) return { stale: true, reason: "missing active agent sessions mount" };
+	if (sessionsMounts.some((mount) => !mountSourceMatches(mount.Source, expected.sessionsDir))) {
+		return { stale: true, reason: "agent sessions mount source does not match the active agent directory" };
+	}
+
+	const modelMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === CONTAINER_AGENT_MODELS_JSON);
+	if (!expected.modelsJsonExists) {
+		return modelMounts.length > 0
+			? { stale: true, reason: "container still has an agent models.json mount, but the active agent directory does not" }
+			: { stale: false };
+	}
+	if (modelMounts.length === 0) return { stale: true, reason: "missing active agent models.json mount" };
+	if (modelMounts.some((mount) => !mountSourceMatches(mount.Source, expected.modelsJson) || !isMountReadOnly(mount))) {
+		return { stale: true, reason: "agent models.json mount source does not match the active agent directory" };
+	}
+	return { stale: false };
+}
+
+export function getStateDirMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: StateDirMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
+		const destination = `/bobbit-state/${sub}`;
+		const hostPath = path.join(expected.stateDir, sub);
+		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
+		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
+		const compatible = stateMounts.some((mount) => {
+			if (!mountSourceMatches(mount.Source, hostPath)) return false;
+			return readOnly ? isMountReadOnly(mount) : !isMountReadOnly(mount);
+		});
+		if (!compatible) {
+			const mode = readOnly ? "read-only" : "writable";
+			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
+		}
+	}
+	return { stale: false };
 }
 
 async function execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
@@ -332,20 +442,12 @@ export class ProjectSandbox {
 			}
 		}
 
-		// Install post-commit hook for push-to-remote durability
-		await this._installPostCommitHook(containerId, worktreePath);
-
-		// Publish with an explicit destination refspec, then set upstream tracking
-		// only after that safe publish succeeds (non-fatal).
-		if (!shouldSkipRemotePush()) {
-			try {
-				await this._publishBranchToOrigin(containerId, worktreePath, branch, true);
-			} catch { /* push may fail with no remote, auth issues, or offline */ }
-		}
+		// Sandbox worktrees are local-only by default. Do not publish the branch
+		// or install a post-commit push hook during worktree creation.
 
 		// When the project has a configured `base_ref`, override the per-branch
 		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
-		// integration target rather than `origin/<branch>` created above.
+		// integration target.
 		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
 		// Non-fatal in the sandbox — host-side save-time validation already
 		// guarantees the ref resolves; this is defence-in-depth.
@@ -441,13 +543,8 @@ export class ProjectSandbox {
 				}
 			}
 
-			await this._installPostCommitHook(containerId, wtPath);
-
-			if (!shouldSkipRemotePush()) {
-				try {
-					await this._publishBranchToOrigin(containerId, wtPath, branch, true);
-				} catch { /* push may fail with no remote, auth issues, or offline */ }
-			}
+			// Sandbox worktrees are local-only by default. Do not publish the branch
+			// or install a post-commit push hook during worktree creation.
 
 			// Override per-branch upstream to the configured `base_ref` when set,
 			// mirroring host-side `createWorktreeSet` (see `docs/design/base-ref.md` §2).
@@ -665,6 +762,34 @@ export class ProjectSandbox {
 		const existingId = await this._findContainerByLabel(label);
 
 		if (existingId) {
+			// Docker bind mounts are immutable. If Bobbit restarted with a new
+			// active agent directory, an old long-lived project container would still
+			// point /home/node/.bobbit/agent/{sessions,models.json} at the previous
+			// host dir. Recreate before reconnecting or restarting to avoid split-brain
+			// transcripts/models between the container and host path translation.
+			const staleAgentMounts = await this._hasStaleAgentDirMounts(existingId);
+			if (staleAgentMounts) {
+				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale agent-dir mounts; recreating`);
+				await this._removeContainer(existingId);
+				await this._createContainer();
+				await this._runInitSequence();
+				return;
+			}
+
+			// Docker bind mounts are immutable. Containers created before new
+			// sandbox-visible state subdirs were added (for example the generated
+			// tool-result-error bridge extension mount) cannot load remapped
+			// /bobbit-state/... paths. Recreate stale containers before reuse so the
+			// current buildDockerRunArgs mount contract is applied.
+			const staleStateMounts = await this._hasStaleStateDirMounts(existingId);
+			if (staleStateMounts) {
+				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale state mounts; recreating`);
+				await this._removeContainer(existingId);
+				await this._createContainer();
+				await this._runInitSequence();
+				return;
+			}
+
 			// Stale-image check: if the container was created from an older image
 			// than the current tag (e.g. host upgraded pi-coding-agent and
 			// `ensureImageAgentVersion` rebuilt the image), the container still
@@ -755,9 +880,10 @@ export class ProjectSandbox {
 		);
 
 		// Collect read-only bind mounts for any `mounted` clone sources (remote-less
-		// repos). The host repo is mounted at a fixed container path so the init
-		// sequence clones it via `file://<mountPath>` instead of an unreachable
-		// host path. De-dupe by mountPath so multi-repo sources can't collide.
+		// repos). The caller supplies sanitized git sources (not the full project
+		// root) at fixed container paths so the init sequence clones them via
+		// `file://<mountPath>` instead of an unreachable host path. De-dupe by
+		// mountPath so multi-repo sources can't collide.
 		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
 		const seenMountPaths = new Set<string>();
 		const addMount = (src?: SandboxCloneSource): void => {
@@ -771,7 +897,8 @@ export class ProjectSandbox {
 
 		const dockerArgs = buildDockerRunArgs({
 			image,
-			workspaceDir: "", // unused — named volume instead
+			workspaceDir: "", // unused for /workspace — named volume instead
+			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
 			label: projectId,
 			labelPrefix: "bobbit-project",
 			projectId,
@@ -968,48 +1095,62 @@ export class ProjectSandbox {
 		console.log(`[project-sandbox] Multi-repo init sequence complete for project ${this.options.projectId}`);
 	}
 
-	// ── Private: Post-commit hook ──────────────────────────────────────
+	// ── Private: Docker helpers ────────────────────────────────────────
 
-	private async _publishBranchToOrigin(containerId: string, worktreePath: string, branch: string, setUpstream: boolean): Promise<void> {
-		await this._dockerExec(containerId, ["git", "push", "origin", `${branch}:refs/heads/${branch}`], {
-			cwd: worktreePath,
-			timeout: 30_000,
-		});
-		if (!setUpstream) return;
-		await this._dockerExec(containerId, ["git", "fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
-			cwd: worktreePath,
-			timeout: 15_000,
-		});
-		await this._dockerExec(containerId, ["git", "branch", `--set-upstream-to=origin/${branch}`, branch], {
-			cwd: worktreePath,
-			timeout: 10_000,
-		});
-	}
-
-	private async _installPostCommitHook(containerId: string, worktreePath: string): Promise<void> {
-		if (shouldSkipRemotePush()) return; // No push hook in test mode
-
-		// Determine the .git dir for this worktree (may be a file pointing to the main repo)
-		const hookScript = [
-			"#!/bin/sh",
-			'branch=$(git symbolic-ref --short HEAD 2>/dev/null)',
-			'[ -n "$branch" ] && git push origin "HEAD:refs/heads/$branch" 2>/dev/null &',
-		].join("\n");
+	private async _hasStaleAgentDirMounts(containerId: string): Promise<boolean> {
+		const activeAgentDir = globalAgentDir();
+		const expected = {
+			sessionsDir: activeAgentSessionsDir(),
+			modelsJson: path.join(activeAgentDir, "models.json"),
+			modelsJsonExists: false,
+		};
+		try {
+			expected.modelsJsonExists = fs.statSync(expected.modelsJson).isFile();
+		} catch {
+			expected.modelsJsonExists = false;
+		}
 
 		try {
-			// Create hooks directory and write the hook
-			await this._dockerExec(containerId, ["sh", "-c", `
-				gitdir=$(git rev-parse --git-dir) &&
-				mkdir -p "$gitdir/hooks" &&
-				printf '%s\\n' '${hookScript.replace(/'/g, "'\\''")}' > "$gitdir/hooks/post-commit" &&
-				chmod +x "$gitdir/hooks/post-commit"
-			`], { cwd: worktreePath });
+			const { stdout } = await execDocker([
+				"inspect", "--format", "{{json .Mounts}}", containerId,
+			], {
+				timeout: 5_000,
+				env: DOCKER_ENV,
+			});
+			const mounts = JSON.parse(stdout.trim() || "[]") as DockerMountInfo[];
+			const result = getAgentDirMountStaleness(mounts, expected);
+			if (result.stale && result.reason) {
+				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
+			}
+			return result.stale;
 		} catch (err: any) {
-			console.warn(`[project-sandbox] Failed to install post-commit hook in ${worktreePath}:`, err?.message || err);
+			console.warn(`[project-sandbox] Could not inspect agent-dir mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
+			return false;
 		}
 	}
 
-	// ── Private: Docker helpers ────────────────────────────────────────
+	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
+		const expected = {
+			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
+		};
+		try {
+			const { stdout } = await execDocker([
+				"inspect", "--format", "{{json .Mounts}}", containerId,
+			], {
+				timeout: 5_000,
+				env: DOCKER_ENV,
+			});
+			const mounts = JSON.parse(stdout.trim() || "[]") as DockerMountInfo[];
+			const result = getStateDirMountStaleness(mounts, expected);
+			if (result.stale && result.reason) {
+				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
+			}
+			return result.stale;
+		} catch (err: any) {
+			console.warn(`[project-sandbox] Could not inspect state mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
+			return false;
+		}
+	}
 
 	private async _findContainerByLabel(label: string): Promise<string | null> {
 		try {

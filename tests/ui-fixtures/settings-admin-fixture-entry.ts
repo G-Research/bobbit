@@ -6,9 +6,10 @@ import { setConfigScope } from "../../src/app/config-scope.js";
 import { setProjects, setRenderApp, state, type Project } from "../../src/app/state.js";
 import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 
-type FetchLogEntry = { url: string; method: string; body: any; credentials?: RequestCredentials };
+type FetchLogEntry = { url: string; method: string; body: any };
 type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
+type WorktreeInventoryFixture = Record<string, any>;
 
 const STORE_PREFIX = "bobbit-settings-admin-fixture";
 const PREFS_KEY = `${STORE_PREFIX}:prefs`;
@@ -25,29 +26,11 @@ const DEFAULT_IMAGE_MODELS = [
 	{ id: "imagen-4.0-fast-generate-001", name: "Imagen 4 Fast", provider: "google", api: "google-imagen", authenticated: true },
 ];
 
-// Full model shape so the shared ModelSelector dialog renders selectable rows
-// (it reads input/contextWindow/maxTokens/cost when building each item — a
-// minimal {id,provider,reasoning} stub throws on `model.input.includes`).
-const MODEL_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const DEFAULT_MODELS = [
-	{ id: "claude-opus-4-1", name: "Claude Opus 4.1", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
-	{ id: "claude-sonnet", name: "Claude Sonnet", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 64_000, reasoning: true, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
-	{ id: "gpt-4o", name: "GPT-4o", provider: "openai", api: "openai-responses", contextWindow: 128_000, maxTokens: 16_000, reasoning: false, input: ["text", "image"], cost: MODEL_COST, authenticated: true },
-	{ id: "sonnet", name: "Claude Code Sonnet", provider: "claude-code", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 64_000, reasoning: true, input: ["text", "image"], cost: MODEL_COST, authenticated: true, runtime: "claude-code", localRuntime: true, runtimeLabel: "Claude Code (local)" },
+	{ id: "claude-opus-4-1", provider: "anthropic", reasoning: true },
+	{ id: "claude-sonnet", provider: "anthropic", reasoning: true },
+	{ id: "gpt-4o", provider: "openai", reasoning: false },
 ];
-
-let claudeCodeStatus = {
-	available: true,
-	authenticated: false,
-	ready: false,
-	checking: false,
-	commandPath: "claude",
-	version: "1.2.3",
-	modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
-	permissionMode: "default",
-	reason: "auth_required",
-	message: "Claude Code is installed but not authenticated.",
-};
 
 function defaultRoles(): RoleData[] {
 	return [
@@ -99,6 +82,36 @@ function defaultStructuredProjects(): Record<string, StructuredProject> {
 	};
 }
 
+function defaultWorktreeInventory(): WorktreeInventoryFixture {
+	return {
+		items: [],
+		counts: {
+			total: 0,
+			readyToClean: 0,
+			protectedInUse: 0,
+			archivedOwned: 0,
+			unownedGitWorktrees: 0,
+			poolEntries: 0,
+			alreadyCleaned: 0,
+			needsAttention: 0,
+			scanErrors: 0,
+			defaultSelected: 0,
+			byClassification: {},
+			byReason: {},
+			bySource: {},
+		},
+		generatedAt: Date.now(),
+		scanned: { projects: 1, repos: 1, worktreeRoots: 1 },
+	};
+}
+
+function defaultWorktreeCleanup(): WorktreeInventoryFixture {
+	return {
+		counts: { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0 },
+		results: [],
+	};
+}
+
 let currentPage: "settings" | "roles" | "tools" = "settings";
 let prefs: Record<string, any> = readJson(PREFS_KEY, {});
 let roles: RoleData[] = readJson(ROLES_KEY, defaultRoles());
@@ -110,6 +123,9 @@ let oauthStatus: OAuthStatus = {
 	anthropic: { authenticated: true },
 	"openai-codex": { authenticated: false },
 };
+let worktreeInventory: WorktreeInventoryFixture = defaultWorktreeInventory();
+let worktreeCleanup: WorktreeInventoryFixture = defaultWorktreeCleanup();
+let worktreeNextInventory: WorktreeInventoryFixture | null = null;
 let fetchLog: FetchLogEntry[] = [];
 
 function readJson<T>(key: string, fallback: T): T {
@@ -218,11 +234,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const params = new URLSearchParams(query);
 	const method = (init?.method || "GET").toUpperCase();
 	const body = parseBody(init);
-	fetchLog.push({ url, method, body, credentials: init?.credentials });
-
-	if (pathname === "/api/preferences/claude-code/confirmation" && method === "POST") {
-		return response({ confirmationRequired: true, confirmationToken: "fixture-confirmation" });
-	}
+	fetchLog.push({ url, method, body });
 
 	if (pathname === "/api/preferences") {
 		if (method === "GET") {
@@ -237,11 +249,6 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 
 	if (pathname === "/api/aigw/status") return response({ configured: false, url: "", models: [] });
-	if (pathname === "/api/claude-code/status") return response(claudeCodeStatus);
-	if (pathname === "/api/claude-code/status/refresh" && method === "POST") {
-		claudeCodeStatus = { ...claudeCodeStatus, checking: false };
-		return response(claudeCodeStatus);
-	}
 	if (pathname === "/api/models") return response(DEFAULT_MODELS);
 	if (pathname === "/api/image-models") return response(DEFAULT_IMAGE_MODELS);
 	if (pathname === "/api/models/test") return response({ ok: true, latencyMs: 1 });
@@ -300,6 +307,15 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (pathname === "/api/sandbox-status") return response({ available: false, configured: false });
 	if (pathname === "/api/worktree-pool") return response({ enabled: false });
 	if (pathname === "/api/sandbox/host-tokens") return response([]);
+	if (pathname === "/api/maintenance/worktrees" && method === "GET") return response(worktreeInventory);
+	if (pathname === "/api/maintenance/cleanup-worktrees" && method === "POST") {
+		const cleanup = worktreeCleanup;
+		if (worktreeNextInventory) {
+			worktreeInventory = worktreeNextInventory;
+			worktreeNextInventory = null;
+		}
+		return response(cleanup);
+	}
 	if (pathname.startsWith("/api/search/") || pathname.startsWith("/api/maintenance/")) return response({ count: 0, sample: [] });
 
 	return response({ ok: true });
@@ -330,7 +346,6 @@ updatePlayFinishDataset();
 	workflows?: Workflow[];
 	structuredProjects?: Record<string, StructuredProject>;
 	oauthStatus?: OAuthStatus;
-	claudeCodeStatus?: typeof claudeCodeStatus;
 } = {}) => {
 	localStorage.removeItem(PREFS_KEY);
 	localStorage.removeItem(ROLES_KEY);
@@ -346,18 +361,9 @@ updatePlayFinishDataset();
 		"openai-codex": { authenticated: false },
 		...(opts.oauthStatus || {}),
 	};
-	claudeCodeStatus = opts.claudeCodeStatus || {
-		available: true,
-		authenticated: false,
-		ready: false,
-		checking: false,
-		commandPath: "claude",
-		version: "1.2.3",
-		modelAliases: ["claude-opus-4-8", "default", "sonnet", "opus"],
-		permissionMode: "default",
-		reason: "auth_required",
-		message: "Claude Code is installed but not authenticated.",
-	};
+	worktreeInventory = defaultWorktreeInventory();
+	worktreeCleanup = defaultWorktreeCleanup();
+	worktreeNextInventory = null;
 	fetchLog = [];
 	setConfigScope("system");
 	persistStores();
@@ -398,6 +404,11 @@ updatePlayFinishDataset();
 (window as any).__getSettingsAdminPrefs = () => ({ ...prefs });
 (window as any).__getSettingsAdminRoles = () => roles.map((r) => ({ ...r }));
 (window as any).__getSettingsAdminStructured = (projectId = "proj-1") => JSON.parse(JSON.stringify(structuredProjects[projectId] || null));
+(window as any).__setWorktreeInventory = (scan: WorktreeInventoryFixture) => { worktreeInventory = scan; };
+(window as any).__setWorktreeCleanup = (cleanup: WorktreeInventoryFixture, nextScan?: WorktreeInventoryFixture) => {
+	worktreeCleanup = cleanup;
+	worktreeNextInventory = nextScan || null;
+};
 (window as any).__getSettingsAdminFetchLog = () => fetchLog.slice();
 (window as any).__clearSettingsAdminFetchLog = () => { fetchLog = []; };
 (window as any).__settingsAdminReady = true;

@@ -40,7 +40,6 @@ import {
 	createSession,
 	createGoal,
 	deleteSession,
-	defaultProjectId,
 	connectWs,
 	agentEndPredicate,
 	messageEndPredicate,
@@ -79,7 +78,6 @@ interface HindsightStub {
 	url: string;
 	calls: RecordedCall[];
 	setHealthy(ok: boolean): void;
-	setRecallError(err: { status: number; detail: string } | null): void;
 	seedMemories(bank: string, mem: { text: string; id?: string; score?: number; tags?: string[] }[]): void;
 	retained(bank?: string): RetainedItem[];
 	close(): Promise<void>;
@@ -274,7 +272,6 @@ describe("hindsight pack — external mode (stub)", () => {
 		// no hook fires during teardown deletes.
 		await setProviderDisabled([PROVIDER_ID]).catch(() => {});
 		seedConfig(bobbitDir, null);
-		stub?.setRecallError(null);
 		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
 		for (const cwd of cwds.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 	});
@@ -307,27 +304,6 @@ describe("hindsight pack — external mode (stub)", () => {
 		const recallCalls = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path));
 		expect(recallCalls.length).toBeGreaterThan(0);
 		expect(recallCalls.every((c) => c.bank === "bobbit")).toBeTruthy();
-	});
-
-	test("default config recall scope is project+global: untagged + own-project recalled, other-project excluded", async () => {
-		// No explicit recallScope ⇒ the new default (`project`, tags_match `any`). This
-		// proves the acceptance criterion: global/untagged memories ARE still injected
-		// under the default scope, while another project's tagged memories are NOT.
-		seedConfig(bobbitDir, defaultConfig(stub.url, { recallScope: undefined }));
-		await setProviderDisabled([]);
-		const projectId = (await defaultProjectId())!;
-		stub.seedMemories("bobbit", [
-			{ text: "GLOBAL untagged knowledge.", id: "g1" }, // untagged/global ⇒ included by `any`
-			{ text: "MINE project knowledge.", id: "p1", tags: [`project:${projectId}`] }, // included
-			{ text: "THEIRS other-project secret.", id: "o1", tags: ["project:some-other-project"] }, // excluded
-		]);
-
-		const { id } = await newSession("default-scope");
-		const before = await callBeforePrompt(id, "what do we know?");
-		expect(before.status).toBe(200);
-		expect(before.content).toContain("GLOBAL untagged knowledge.");
-		expect(before.content).toContain("MINE project knowledge.");
-		expect(before.content).not.toContain("other-project secret");
 	});
 
 	test("a turn remains unaffected while the Hindsight provider is configured", async () => {
@@ -378,32 +354,6 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.seedMemories("bobbit", [{ text: "Recovered recall works.", id: "r1" }]);
 		const up = await callBeforePrompt(id, "memory after recovery");
 		expect(up.content).toContain("Recovered recall works.");
-	});
-
-	test("a 400 'Query too long' recall is SOFT-skipped (empty, non-fatal, no sticky diagnostic)", async () => {
-		// Even with the token-safe clamp, the data plane's 500-token "Query too long"
-		// 400 must be swallowed: recall is empty for the turn and NO provider error is
-		// recorded, so the marketplace/panel banner can never reappear from this cause.
-		seedConfig(bobbitDir, defaultConfig(stub.url));
-		await setProviderDisabled([]);
-		stub.setRecallError({ status: 400, detail: "Query too long: 620 tokens exceeds maximum of 500 tokens" });
-
-		const { id } = await newSession("query-too-long");
-		const before = await callBeforePrompt(id, "an extremely long, dense query the data plane would reject");
-		expect(before.status).toBe(200);
-		expect(before.content).toBe("");
-		expect(before.blocks).toEqual([]);
-
-		// Recall WAS attempted against the stub (the 400 fired)...
-		const recallCalls = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path));
-		expect(recallCalls.length).toBeGreaterThan(0);
-		// ...but it was swallowed: a memory-provider row exists with NO error diagnostic.
-		const trace = await readContextTrace(id);
-		const memoryRows = trace.flatMap((e) => e.providers.filter((p) => p.id === PROVIDER_ID));
-		expect(memoryRows.length).toBeGreaterThan(0);
-		expect(memoryRows.every((p) => !p.error)).toBeTruthy();
-
-		stub.setRecallError(null);
 	});
 
 	test("beforeCompact retains the about-to-be-lost span (not an empty no-op)", async () => {

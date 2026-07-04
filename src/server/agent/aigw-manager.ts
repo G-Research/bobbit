@@ -161,6 +161,10 @@ const INFER_RULES: InferRule[] = [
 	// ── OpenAI GPT-4 (catch-all for 4o, 4.1, 4-turbo, …) ────────────
 	{ test: /gpt-4/, meta: { contextWindow: 128_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] } },
 
+	// ── Z.ai GLM ────────────────────────────────────────────────────
+	// GLM 5.x models expose OpenRouter reasoning controls; older GLM families do not.
+	{ test: /(?:^|\/)glm-5(?:\b|[-.])/, meta: { contextWindow: 128_000, maxTokens: 16_384, reasoning: true, input: ["text"] } },
+
 	// ── Alibaba Qwen ────────────────────────────────────────────────
 	{ test: /qwen/, meta: { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: false, input: ["text"] } },
 ];
@@ -237,36 +241,177 @@ function writeModelsJson(data: Record<string, any>): void {
 	}
 }
 
+function unescapeGeneratedString(raw: string): string {
+	try {
+		return JSON.parse(`"${raw}"`);
+	} catch {
+		return raw.replace(/\\(["'\\])/g, "$1");
+	}
+}
+
+function findMatchingBrace(source: string, openBraceIndex: number): number {
+	let depth = 0;
+	let quote: string | null = null;
+	let escaped = false;
+	let lineComment = false;
+	let blockComment = false;
+
+	for (let i = openBraceIndex; i < source.length; i++) {
+		const ch = source[i];
+		const next = source[i + 1];
+
+		if (lineComment) {
+			if (ch === "\n" || ch === "\r") lineComment = false;
+			continue;
+		}
+		if (blockComment) {
+			if (ch === "*" && next === "/") {
+				blockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (quote) {
+			if (escaped) {
+				escaped = false;
+			} else if (ch === "\\") {
+				escaped = true;
+			} else if (ch === quote) {
+				quote = null;
+			}
+			continue;
+		}
+
+		if (ch === "/" && next === "/") {
+			lineComment = true;
+			i++;
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			blockComment = true;
+			i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "{") depth++;
+		else if (ch === "}") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+function topLevelDepthAt(source: string, targetIndex: number): number {
+	let depth = 0;
+	let quote: string | null = null;
+	let escaped = false;
+	let lineComment = false;
+	let blockComment = false;
+
+	for (let i = 0; i < targetIndex; i++) {
+		const ch = source[i];
+		const next = source[i + 1];
+
+		if (lineComment) {
+			if (ch === "\n" || ch === "\r") lineComment = false;
+			continue;
+		}
+		if (blockComment) {
+			if (ch === "*" && next === "/") {
+				blockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === quote) quote = null;
+			continue;
+		}
+
+		if (ch === "/" && next === "/") {
+			lineComment = true;
+			i++;
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			blockComment = true;
+			i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "{") depth++;
+		else if (ch === "}") depth = Math.max(0, depth - 1);
+	}
+	return depth;
+}
+
+function topLevelStringProperty(objectBody: string, property: string): string | undefined {
+	const quoted = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const propertyRegex = new RegExp(`(?:^|[,\\s])(?:"${quoted}"|${quoted})\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "g");
+	let match: RegExpExecArray | null;
+	while ((match = propertyRegex.exec(objectBody)) !== null) {
+		if (topLevelDepthAt(objectBody, match.index) === 0) {
+			return unescapeGeneratedString(match[1]);
+		}
+	}
+	return undefined;
+}
+
+function addProviderModel(providerModels: Map<string, string[]>, provider: string, modelId: string): void {
+	if (!provider || !modelId) return;
+	const models = providerModels.get(provider) ?? [];
+	if (!models.includes(modelId)) models.push(modelId);
+	providerModels.set(provider, models);
+}
+
+/**
+ * Parse model IDs from pi-ai's models.generated.js text, grouped by provider.
+ * Supports both the older flat shape and the current provider-nested shape.
+ */
+export function parseModelsGeneratedText(text: string): Map<string, string[]> {
+	const providerModels = new Map<string, string[]>();
+	const entryRegex = /"((?:\\.|[^"\\])+)"\s*:\s*\{/g;
+	let match: RegExpExecArray | null;
+
+	while ((match = entryRegex.exec(text)) !== null) {
+		const key = unescapeGeneratedString(match[1]);
+		const openBraceIndex = entryRegex.lastIndex - 1;
+		const closeBraceIndex = findMatchingBrace(text, openBraceIndex);
+		if (closeBraceIndex < 0) continue;
+
+		const objectBody = text.slice(openBraceIndex + 1, closeBraceIndex);
+		const provider = topLevelStringProperty(objectBody, "provider");
+		if (!provider) continue;
+
+		addProviderModel(providerModels, provider, topLevelStringProperty(objectBody, "id") ?? key);
+		entryRegex.lastIndex = closeBraceIndex + 1;
+	}
+
+	return providerModels;
+}
+
 /**
  * Parse model IDs from pi-ai's models.generated.js, grouped by provider.
- * Reads the file as text and extracts id+provider pairs via regex.
  */
 function parseModelsGenerated(): Map<string, string[]> {
-	const providerModels = new Map<string, string[]>();
 	try {
 		const pkgUrl = import.meta.resolve("@earendil-works/pi-ai");
 		const pkgDir = path.dirname(fileURLToPath(pkgUrl));
 		const modelsPath = path.join(pkgDir, "models.generated.js");
-		const text = fs.readFileSync(modelsPath, "utf-8");
-
-		// The file has entries like:
-		//   "some-model-id": {
-		//       id: "some-model-id",
-		//       ...
-		//       provider: "amazon-bedrock",
-		// We extract (id, provider) pairs.
-		const entryRegex = /"([^"]+)":\s*\{[^}]*?provider:\s*"([^"]+)"/g;
-		let match: RegExpExecArray | null;
-		while ((match = entryRegex.exec(text)) !== null) {
-			const modelId = match[1];
-			const provider = match[2];
-			if (!providerModels.has(provider)) providerModels.set(provider, []);
-			providerModels.get(provider)!.push(modelId);
-		}
+		return parseModelsGeneratedText(fs.readFileSync(modelsPath, "utf-8"));
 	} catch (err) {
 		console.error("[aigw-manager] Failed to parse models.generated.js:", err);
+		return new Map<string, string[]>();
 	}
-	return providerModels;
 }
 
 /**
@@ -280,16 +425,14 @@ function parseModelsGenerated(): Map<string, string[]> {
  * Preserves existing user modelOverrides — only sets contextWindow if the user
  * hasn't already overridden it for that model.
  */
-export function writeContextWindowOverrides(): void {
-	const providerModels = parseModelsGenerated();
-	const targetProviders = ["amazon-bedrock", "anthropic"];
+const CONTEXT_WINDOW_OVERRIDE_PROVIDERS = ["amazon-bedrock", "anthropic"] as const;
 
-	const data = readModelsJson();
+export function applyContextWindowOverrides(data: Record<string, any>, providerModels: Map<string, string[]>): number {
 	if (!data.providers) data.providers = {};
 
 	let overridesWritten = 0;
 
-	for (const provider of targetProviders) {
+	for (const provider of CONTEXT_WINDOW_OVERRIDE_PROVIDERS) {
 		const modelIds = providerModels.get(provider) || [];
 		const claudeIds = modelIds.filter(id => id.toLowerCase().includes("claude"));
 
@@ -312,6 +455,14 @@ export function writeContextWindowOverrides(): void {
 			}
 		}
 	}
+
+	return overridesWritten;
+}
+
+export function writeContextWindowOverrides(): void {
+	const providerModels = parseModelsGenerated();
+	const data = readModelsJson();
+	const overridesWritten = applyContextWindowOverrides(data, providerModels);
 
 	if (overridesWritten > 0) {
 		writeModelsJson(data);

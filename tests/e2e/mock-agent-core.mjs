@@ -49,6 +49,12 @@
  *  Write:<path>::<content>  Recursive mkdir + writeFileSync.
  *  Edit:<path>::<old>::<new>  read + replace + write.
  *  Bash:<cmd>               execSync(cmd, {cwd, timeout:10_000}).
+ *  PI_EXTENSION_TOOL:<name>::<json>
+ *                           Invoke a tool registered by a loaded --extension
+ *                           in the in-process mock runtime.
+ *  SESSION_PROMPT_TOOL:<targetSessionId>::<message>
+ *                           Simulate ask-gated session_prompt: request a tool
+ *                           grant, then POST the message to the target session.
  *
  * Proposals (assistant-driven)
  * ----------------------------
@@ -106,10 +112,28 @@ const ASK_RESPONSE_ENVELOPE_REGEX = new RegExp(
 	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
 );
 
+const DEFAULT_MODEL = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
+
+const KNOWN_MODELS = {
+	"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+};
+
+export function mockModelFromString(modelString) {
+	if (typeof modelString !== "string") return null;
+	const slash = modelString.indexOf("/");
+	if (slash <= 0 || slash >= modelString.length - 1) return null;
+	const provider = modelString.slice(0, slash);
+	const modelId = modelString.slice(slash + 1);
+	const known = KNOWN_MODELS[modelId];
+	if (known && known.provider === provider) return { ...known };
+	return { provider, id: modelId, contextWindow: 128000, maxTokens: 16384 };
+}
+
 /**
  * @typedef {Object} MockAgentOptions
  * @property {string} [cwd] - Working directory (defaults to process.cwd())
  * @property {Object} [env] - Env-var overrides (defaults to process.env)
+ * @property {string} [initialModel] - Optional spawn-time `<provider>/<modelId>` pin.
  * @property {(event: any) => void} [onEvent] - Event emitter. Required for in-process mode.
  */
 
@@ -120,7 +144,7 @@ export class MockAgentCore {
 		this.env = options.env || process.env;
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
-		this.currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
+		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
 		this.sessionFilePath = null;
 		// When an AUTO_COMPACT turn has run, this holds the FULL on-disk
 		// transcript (orphaned pre-compaction entries + a compaction marker +
@@ -130,6 +154,8 @@ export class MockAgentCore {
 		// transcript at firstKeptEntryId. Null until a compaction fires.
 		this._postCompactionEntries = null;
 		this.currentAbortController = null;
+		this.mockPiTools = options.mockPiTools || new Map();
+		this.mockPiToolCallHandlers = options.mockPiToolCallHandlers || [];
 		// Serializes concurrent handlePrompt calls so a second prompt queued
 		// while the first is still in flight runs after the first completes.
 		// Mirrors the real agent's sequential stream behaviour, which the
@@ -175,7 +201,21 @@ export class MockAgentCore {
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
 
-		// Live-update flow: two consecutive propose_project tool calls in the
+		const sessionPromptToolMatch = text.match(/SESSION_PROMPT_TOOL:([\w-]+)::([\s\S]+)/);
+		if (sessionPromptToolMatch) {
+			return { sessionPromptTool: { targetSessionId: sessionPromptToolMatch[1], message: sessionPromptToolMatch[2].trim() } };
+		}
+
+		const piExtensionToolMatch = text.match(/PI_EXTENSION_TOOL:([^:\s]+)(?:::(\{[\s\S]*\}))?/);
+		if (piExtensionToolMatch) {
+			let input = {};
+			if (piExtensionToolMatch[2]) {
+				try { input = JSON.parse(piExtensionToolMatch[2]); } catch { input = { raw: piExtensionToolMatch[2] }; }
+			}
+			return { piExtensionTool: { name: piExtensionToolMatch[1], input } };
+		}
+
+		// Live-update flow: two consecutive propose_project calls in the
 		// same turn. Checked BEFORE the more general project_proposal substring
 		// match because LIVE_UPDATE_PROPOSAL also contains "proposal".
 		if (text.includes("LIVE_UPDATE_PROPOSAL")) {
@@ -370,6 +410,31 @@ export class MockAgentCore {
 				tool: "propose_staff",
 				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "" },
 				output: "Staff proposal submitted.",
+			};
+		}
+
+		// Failed workflow-validation proposal path. The omitted workflow makes the
+		// gateway seed endpoint return MISSING_WORKFLOW; _handleSingleTool mirrors
+		// that 400 as an isError toolResult so the UI can render the failed draft.
+		if (text.includes("GOAL_PROPOSAL_MISSING_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Missing Workflow Goal",
+					spec: "A draft intentionally missing workflow so the proposal seed endpoint rejects it.",
+				},
+				output: "Goal proposal failed workflow validation.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_FIXED_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Fixed Workflow Goal",
+					workflow: "general",
+					spec: "A corrected draft with an explicit valid workflow.",
+				},
+				output: "Corrected goal proposal submitted.",
 			};
 		}
 
@@ -922,6 +987,10 @@ export class MockAgentCore {
 
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
+		} else if (toolAction && toolAction.sessionPromptTool) {
+			await this._handleSessionPromptTool(toolAction.sessionPromptTool.targetSessionId, toolAction.sessionPromptTool.message);
+		} else if (toolAction && toolAction.piExtensionTool) {
+			await this._handlePiExtensionTool(toolAction.piExtensionTool.name, toolAction.piExtensionTool.input);
 		} else if (toolAction && toolAction.askUserChoices) {
 			if (toolAction.askUserChoices === "errorThenRetry") {
 				await this._handleAskUserChoicesErrorThenRetry();
@@ -1679,6 +1748,150 @@ export class MockAgentCore {
 		this.emit({ type: "message_end", message: assistantMsg });
 	}
 
+	async _handlePiExtensionTool(toolName, input = {}) {
+		const toolId = `tool_pi_ext_${Date.now()}`;
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: toolName, arguments: input, input }],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "tool_execution_start", toolName, toolId, input });
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		let isError = false;
+		let output;
+		try {
+			for (const handler of this.mockPiToolCallHandlers) {
+				const decision = await handler({ toolName, tool: toolName, input, args: input, toolCallId: toolId });
+				if (decision?.block) {
+					isError = true;
+					output = `Tool blocked: ${decision.reason || "blocked by policy"}`;
+					break;
+				}
+			}
+			if (!isError) {
+				const tool = this.mockPiTools.get(toolName);
+				if (!tool) {
+					isError = true;
+					output = `Pi extension tool not registered in mock runtime: ${toolName}`;
+				} else {
+					const result = await tool.handler(input, { toolCallId: toolId });
+					output = typeof result === "string" ? result : JSON.stringify(result);
+				}
+			}
+		} catch (err) {
+			isError = true;
+			output = `Pi extension tool error: ${err?.message || err}`;
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	async _gatewayJson(method, pathname, body, extraHeaders = {}) {
+		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		const gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+		const token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		const payload = body === undefined ? "" : JSON.stringify(body);
+		const url = new URL(gwUrl + pathname);
+		return new Promise((resolve, reject) => {
+			const headers = {
+				"Authorization": "Bearer " + token,
+				...extraHeaders,
+			};
+			if (payload) {
+				headers["Content-Type"] = "application/json";
+				headers["Content-Length"] = Buffer.byteLength(payload);
+			}
+			const req = http.request(url, { method, headers, timeout: 30_000 }, (res) => {
+				let data = "";
+				res.on("data", (chunk) => data += chunk);
+				res.on("end", () => {
+					let json;
+					try { json = JSON.parse(data); } catch { json = {}; }
+					resolve({ status: res.statusCode || 0, body: json, raw: data });
+				});
+			});
+			req.on("timeout", () => { req.destroy(); resolve({ status: 0, body: { error: "timeout" }, raw: "" }); });
+			req.on("error", reject);
+			if (payload) req.write(payload);
+			req.end();
+		});
+	}
+
+	async _postGatewayJson(pathname, body, extraHeaders = {}) {
+		return this._gatewayJson("POST", pathname, body, extraHeaders);
+	}
+
+	async _getGatewayJson(pathname) {
+		return this._gatewayJson("GET", pathname);
+	}
+
+	async _deliverSessionPromptTool(targetSessionId, message) {
+		return this._postGatewayJson(
+			"/api/sessions/" + encodeURIComponent(targetSessionId) + "/prompt",
+			{ message, mode: "prompt" },
+			{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+		);
+	}
+
+	async _isSessionPromptPersistentlyAllowed() {
+		try {
+			const session = await this._getGatewayJson("/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID));
+			const roleName = session.body?.role || session.body?.roleId || "general";
+			const role = await this._getGatewayJson("/api/roles/" + encodeURIComponent(roleName));
+			return role.body?.toolPolicies?.session_prompt === "allow";
+		} catch {
+			return false;
+		}
+	}
+
+	async _handleSessionPromptTool(targetSessionId, message) {
+		const toolName = "session_prompt";
+		const toolId = `tool_${Date.now()}`;
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: { targetSessionId, message } });
+
+		try {
+			if (!(await this._isSessionPromptPersistentlyAllowed())) {
+				const grant = await this._postGatewayJson(
+					"/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID) + "/tool-grant-request",
+					{ toolName, toolGroup: "Agent" },
+				);
+				if (!grant.body?.granted) {
+					this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+					const deniedMsg = { role: "assistant", content: [{ type: "text", text: "I tried to use session_prompt but permission was denied." }] };
+					this.conversationMessages.push(deniedMsg);
+					this.emit({ type: "message_end", message: deniedMsg });
+					return;
+				}
+			}
+
+			const delivery = await this._deliverSessionPromptTool(targetSessionId, message);
+			const ok = delivery.status >= 200 && delivery.status < 300 && delivery.body?.ok !== false;
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: !ok });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: ok ? `session_prompt delivered: ${message}` : `session_prompt failed: ${delivery.status} ${JSON.stringify(delivery.body)}` }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		} catch (err) {
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+			const assistantMsg = { role: "assistant", content: [{ type: "text", text: `session_prompt error: ${err.message}` }] };
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		}
+	}
+
 	async _handleToolDenied(deniedTool) {
 		const toolId = `tool_${Date.now()}`;
 		this.emit({ type: "tool_execution_start", toolName: deniedTool, toolId, input: {} });
@@ -2167,10 +2380,19 @@ export class MockAgentCore {
 		// propose_* tools: mirror the real extension's seed POST so the file-on-disk
 		// source of truth (Slice B) is populated during E2E. Awaited so the seed
 		// completes before message_end fires — the rehydrate path on reload depends
-		// on the file already existing.
-	let revMarker = undefined;
+		// on the file already existing. If the gateway rejects the seed, surface that
+		// structured body as an isError result to match the real tool extension.
+		let revMarker = undefined;
 		if (typeof toolAction.tool === "string" && toolAction.tool.startsWith("propose_")) {
-			revMarker = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			const seedResult = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			if (seedResult && typeof seedResult === "object") {
+				if (typeof seedResult.rev === "number") {
+					revMarker = seedResult.rev;
+				} else if (seedResult.ok === false || typeof seedResult.code === "string" || typeof seedResult.message === "string") {
+					isError = true;
+					output = JSON.stringify(seedResult, null, 2);
+				}
+			}
 		}
 		// edit_proposal tool: shell to the gateway edit endpoint so the file
 		// updates and the server broadcasts proposal_update {source:"edit"}.
@@ -2263,7 +2485,7 @@ export class MockAgentCore {
 		const creds = this._gatewayCreds();
 		if (!creds) return undefined;
 		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
-		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
+		return body && typeof body === "object" ? body : undefined;
 	}
 
 	async _editProposal(type, oldText, newText) {
@@ -2446,15 +2668,9 @@ export class MockAgentCore {
 				return { success: true, data: this.conversationMessages };
 
 			case "set_model": {
-				const knownModels = {
-					"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
-				};
-				const known = knownModels[msg.modelId];
-				if (known) {
-					this.currentModel = known;
-				} else {
-					this.currentModel = { provider: msg.provider || "mock", id: msg.modelId || "mock-model", contextWindow: 128000, maxTokens: 16384 };
-				}
+				const provider = msg.provider || "mock";
+				const modelId = msg.modelId || "mock-model";
+				this.currentModel = mockModelFromString(`${provider}/${modelId}`) || { ...DEFAULT_MODEL };
 				return { success: true };
 			}
 

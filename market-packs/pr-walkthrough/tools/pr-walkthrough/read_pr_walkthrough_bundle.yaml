@@ -14,6 +14,8 @@ notes:
   - The gateway validates the caller session secret and resolves the bound walkthrough job.
   - The persisted bundle is authoritative for the launched PR metadata and diff content.
   - format=compact returns a unified-diff-like tool result for lower token use; compact manifest is the authoritative envelope read, while compact summary/files/file reads suppress repeated target/changeset/limits blocks.
+  - Compact file output is hard-capped at 64KiB and may window long lines or large hunks; truncation markers explain omitted bytes/lines.
+  - For generated/minified or very large files, request narrow reads with mode=file format=compact hunkOffset=<n> hunkLimit=1; use format=legacy only when exact line ids, old_line, or new_line metadata is required.
   - format is optional. When omitted, legacy output is preserved for compatibility; use format=legacy when exact line ids, old_line, or new_line metadata is required.
   - Does not read arbitrary filesystem paths and does not loosen readonly_bash.
   - Large bundles are truncated by limit/offset; use mode=files or mode=file with format=compact for bounded follow-up reads.

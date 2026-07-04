@@ -6,6 +6,15 @@ import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
+const ERROR_PREVIEW_MAX_LENGTH = 500;
+let payloadSectionId = 0;
+
+function truncateErrorPreview(text: string): string {
+	const trimmed = text.trim();
+	if (trimmed.length <= ERROR_PREVIEW_MAX_LENGTH) return trimmed;
+	return `${trimmed.slice(0, ERROR_PREVIEW_MAX_LENGTH)}…`;
+}
+
 export class DefaultRenderer implements ToolRenderer {
 	private toolName?: string;
 
@@ -27,6 +36,40 @@ export class DefaultRenderer implements ToolRenderer {
 			.replace(/\b\w/g, (c) => c.toUpperCase());
 	}
 
+	private renderPayloadSection(label: string, code: string, language: string) {
+		const payloadType = language === "json" ? "JSON" : "text";
+		const payloadId = `default-payload-${++payloadSectionId}`;
+		const onToggle = (event: Event) => {
+			const button = event.currentTarget as HTMLButtonElement;
+			const section = button.closest("[data-default-payload-section]");
+			const expanded = button.getAttribute("aria-expanded") === "true";
+			const nextExpanded = !expanded;
+			button.setAttribute("aria-expanded", String(nextExpanded));
+			section?.querySelector<HTMLElement>(`[data-payload-region="${payloadId}"]`)?.toggleAttribute("hidden", !nextExpanded);
+			section?.querySelector('[data-state="collapsed"]')?.toggleAttribute("hidden", nextExpanded);
+			section?.querySelector('[data-state="expanded"]')?.toggleAttribute("hidden", !nextExpanded);
+		};
+
+		return html`
+			<div class="rounded-md border border-border bg-muted/20 p-2" data-default-payload-section>
+				<button
+					type="button"
+					class="cursor-pointer select-none rounded-sm text-left text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+					aria-expanded="false"
+					aria-controls=${payloadId}
+					@click=${onToggle}
+				>
+					${label} ${payloadType} payload
+					<span class="font-normal opacity-80" data-state="collapsed">(collapsed; expand to inspect)</span>
+					<span class="font-normal opacity-80" data-state="expanded" hidden>(expanded)</span>
+				</button>
+				<div id=${payloadId} data-payload-region=${payloadId} class="mt-2" hidden>
+					<code-block .code=${code} language=${language}></code-block>
+				</div>
+			</div>
+		`;
+	}
+
 	render(params: any | undefined, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
 
@@ -46,11 +89,12 @@ export class DefaultRenderer implements ToolRenderer {
 
 		// With result: show header + params + result
 		if (result) {
-			let outputJson =
+			const rawOutputText =
 				result.content
 					?.filter((c) => c.type === "text")
 					.map((c: any) => c.text)
 					.join("\n") || i18n("(no output)");
+			let outputJson = rawOutputText;
 			let outputLanguage = "text";
 
 			// Try to parse and pretty-print if it's valid JSON
@@ -62,23 +106,15 @@ export class DefaultRenderer implements ToolRenderer {
 				// Not valid JSON, leave as-is and use text highlighting
 			}
 
+			const errorPreview = state === "error" ? truncateErrorPreview(rawOutputText) : "";
 			const images = renderInlineImages(result.content);
 			return {
 				content: html`
 					<div class="space-y-3">
 						${renderHeader(state, Code, this.label)}
-						${
-							paramsJson
-								? html`<div>
-							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
-							<code-block .code=${paramsJson} language="json"></code-block>
-						</div>`
-								: ""
-						}
-						<div>
-							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Output")}</div>
-							<code-block .code=${outputJson} language="${outputLanguage}"></code-block>
-						</div>
+						${errorPreview ? html`<div class="text-sm text-destructive whitespace-pre-wrap break-words" role="alert">${errorPreview}</div>` : ""}
+						${paramsJson ? this.renderPayloadSection(i18n("Input"), paramsJson, "json") : ""}
+						${this.renderPayloadSection(i18n("Output"), outputJson, outputLanguage)}
 						${images}
 					</div>
 				`,
@@ -103,10 +139,7 @@ export class DefaultRenderer implements ToolRenderer {
 				content: html`
 					<div class="space-y-3">
 						${renderHeader(state, Code, this.label)}
-						<div>
-							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
-							<code-block .code=${paramsJson} language="json"></code-block>
-						</div>
+						${this.renderPayloadSection(i18n("Input"), paramsJson, "json")}
 					</div>
 				`,
 				isCustom: false,

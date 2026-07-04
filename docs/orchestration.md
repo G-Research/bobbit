@@ -54,6 +54,11 @@ still named **`delegateOf`** — only the *tool* name changed, not the data mode
 a workflow gate — it is the team-lead's tool and is unchanged. `team_delegate` works
 anywhere `delegate` was granted and runs the child in *your* worktree.
 
+When `OrchestrationCore` is asked to create a child on its own sub-branch worktree
+(for example a team member or full-lifecycle helper/session child), that branch is
+local-only by default. The persisted worktree is the durability boundary; remote
+publication happens only through explicit user/workflow handoff or final PR flows.
+
 ### `team_delegate`
 
 Launch a child agent in your worktree. The child has **no conversation context** — it
@@ -74,6 +79,8 @@ mutating (file-changing) tool.
   unless you pass `model` / `thinking_level`. (The old `delegate` silently dropped to the
   system default; that bug is gone.)
 - **Timeout** — blocking-mode default is 10 minutes.
+
+The System Prompt Inspector treats the child's persisted `instructions` and optional `context` as a durable **Delegate Task**. Prompt-section refreshes, including provider `before-prompt` hooks and restart restore, rebuild that task from the session record so the viewer keeps the same task-oriented section the model received. Delegate instructions should appear in that Task section only, not duplicated into both Goal and Task.
 
 > ### ⚠️ Shared-worktree race (non-blocking mode) — accepted, not mitigated
 >
@@ -110,15 +117,67 @@ child settles** (not when all are done), so you can process that result eagerly 
 
 For non-blocking children you spawned, these verbs work over the child's session id:
 
-- **`team_prompt`** — run-if-idle / queue-if-busy a follow-up prompt (re-task the child).
-- **`team_steer`** — mid-turn redirect; requires the child to be `streaming` (else `409`).
+- **`team_prompt`** — default-steered follow-up. It injects into a streaming child, or queues a steered prompt when the child is idle/non-streaming. Use `mode: "prompt"` for normal run-if-idle / queue-if-busy next-turn semantics.
+- **`team_steer`** — backward-compatible mid-turn redirect; requires the child to be `streaming` (else `409`). Prefer `team_prompt(mode="steer")` for routine nudges because it also handles idle targets.
 - **`team_abort`** — force-abort a stuck child.
 - **`team_dismiss`** — terminate and archive the child.
-- **`read_session`** — read the child's full transcript (unchanged).
+- **`read_session`** — read the child's transcript; tool result bodies are omitted by default unless `include_tool_results: true` is passed. See [Transcript reads and tool-result redaction](read-session.md).
+
+### `team_dismiss` outcomes
+
+`team_dismiss` uses a structured result instead of a bare `{ "ok": false }`, so callers
+can tell whether a retry is useful. The tool result text and structured `details` carry
+the same fields:
+
+```ts
+type DismissStatus = "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+
+interface DismissResult {
+  ok: boolean;
+  status: DismissStatus;
+  sessionId: string;
+  message: string;
+  retryable: boolean;
+}
+```
+
+| Status | Meaning | Retry behavior |
+|---|---|---|
+| `dismissed` | The target was live, owned by the caller, terminated, and archived. | Do not retry. |
+| `already-dismissed` | The target is already not live or archived, and ownership can still be verified from current, persisted, or remembered ownership. Duplicate dismiss requests land here as idempotent success. | Do not retry. |
+| `not-owned` | The target exists, but it belongs to another owner/goal, is the team lead, or the authentic caller is not allowed to dismiss it. Live targets require runtime ownership; mutable persisted ownership metadata is used only for already-dismissed idempotency. | Do not retry. |
+| `not-found` | No live, persisted, or remembered target exists for that session id. | Do not retry. |
+| `failed` | Termination/archive failed, or a tool wrapper had to normalize an unstructured gateway failure. | Follow `retryable`; canonical server failures set it to `true`. |
+
+HTTP routes map `dismissed` and `already-dismissed` to `200`, `not-owned` to `403`,
+`not-found` to `404`, and `failed` to `500`. Missing required request fields still use
+ordinary validation errors.
+
+Authorization is intentionally split by surface:
+
+- **Own-child route** (`/api/sessions/:ownerId/orchestrate/dismiss`) requires the
+  caller's per-session secret to resolve to `:ownerId`, then checks the target is an
+  owned child. A live foreign session cannot be dismissed by patching persisted metadata.
+- **Goal-team route** (`/api/goals/:goalId/team/dismiss`) dismisses real team agents
+  through `TeamManager`, so goal state, subscriptions, timers, broadcasts, and worktree
+  metadata are cleaned up. Tracked team-agent dismiss is team-lead-only; same-goal workers
+  using a sandbox token receive structured `not-owned`.
+- **Team-lead own-child fallback** lets the goal-scoped tool dismiss a team lead's
+  non-blocking `team_delegate` helper, which is not a goal team member. The fallback uses
+  the same owner-secret check as the own-child route and excludes real team agents so they
+  still flow through `TeamManager` cleanup.
+
+Tool and UI surfaces must keep the outcome visible. The extension text starts with
+`team_dismiss <status> for <sessionId>`, stores `DismissResult` in `details`, and
+normalizes malformed gateway replies to `failed` rather than returning ambiguous data. The
+chat renderer prefers `details`, labels `already-dismissed`, `not-owned`, `not-found`, and
+`failed` distinctly from `dismissed`, includes the target session id, and renders the
+retry guidance from `retryable`.
 
 The team-lead's goal-scoped versions of these verbs (plus `team_spawn`, `team_list`,
-`team_complete`) keep their existing behaviour, signatures, and worktree/role/gate
-semantics — `team_delegate` and `team_wait` are *added* alongside them.
+`team_complete`) keep their worktree/role/gate semantics. `team_prompt` also preserves
+`workflowGateId` / `inputGateIds` dependency context injection in both prompt and steer
+modes. `team_delegate` and `team_wait` are *added* alongside the goal-scoped tools.
 
 ### Recursion is fully blocked at all depths
 
@@ -192,10 +251,11 @@ giving delegates the two things workers always had: a **durable task** and **liv
    task (not an empty goal/role prompt).
 3. **Re-run + reminded.** The respawned delegate is re-driven by the shared boot-resume
    drain (the same mechanism that resumes a mid-turn worker). When a restored parent has
-   live children, the core injects a **system reminder** (`remindOwnersWithLiveChildren`)
-   enumerating them and pointing at `team_wait`; the parent re-collects through the shared
-   wait, which now re-attaches to a **live** child and returns a **real** result instead of a
-   `terminated` placeholder.
+   collectable live children, the core injects a **system reminder**
+   (`remindOwnersWithLiveChildren`) enumerating them and pointing at `team_wait`; the parent
+   re-collects through the shared wait, which now re-attaches to a **live** child and returns
+   a **real** result instead of a `terminated` placeholder. Regular delegate children remain
+   in this generic collection flow.
 4. **Orphans still reaped.** A child is reaped on boot **only** if its parent is gone or
    archived, **or** if the child carries a generic terminal marker (see below) — the
    generalized `shouldReapChildOnBoot`, covering delegate, `host.agents`, and future kinds.
@@ -217,6 +277,15 @@ giving delegates the two things workers always had: a **durable task** and **liv
 > the owner-gone/archived rule below or explicit user termination — never by a terminal
 > marker (see [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md)).
 
+> **Restart collection reminder policy.** The generic post-restart `team_wait` reminder is
+> only for child kinds that the owning agent can collect directly. It includes regular
+> collectable delegates and deliberately excludes non-collectable child kinds handled by
+> other workflows: `team` (handled by `TeamManager`), `host-agents` (polled/managed by the
+> extension workflow), and the legacy `pr-walkthrough` kind. Current PR Walkthrough reviewers
+> are `host-agents` children with role `pr-reviewer` and title `PR Walkthrough`, so they are
+> restored and kept visible without asking the owning agent to collect them via generic
+> `team_wait`.
+>
 > **Why reuse the worker machinery?** Delegates and workers now share **one** restart path —
 > durable task + live restore + prompt rebuild + re-nudge — with no parallel registry. The
 > earlier "delegates stay dormant" carve-out is what lost work and dropped the task; folding
@@ -317,6 +386,7 @@ child belongs to the calling owner; it is not client-trusted.
 ## Related docs
 
 - [docs/design/orchestration-core.md](design/orchestration-core.md) — the design record (the HOW).
+- [docs/session-prompt-tools.md](session-prompt-tools.md) — `session_prompt`, `team_prompt` delivery modes, authorization, and tests.
 - [docs/extension-host-authoring.md](extension-host-authoring.md) — `host.agents` for packs.
 - [docs/goals-workflows-tasks.md](goals-workflows-tasks.md) — goal teams and `team_spawn`.
 - [docs/rest-api.md](rest-api.md) — session and orchestration endpoints.

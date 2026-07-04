@@ -16,6 +16,7 @@
  * fetch; subsequent calls reuse the same module promise.
  */
 import type { Goal } from "./state.js";
+import type { ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
 import type { CascadeArchiveResult, CascadePauseResult, CascadeResumeResult } from "./dialogs.js";
 
 let _loaded: Promise<typeof import("./dialogs.js")> | null = null;
@@ -77,6 +78,11 @@ export async function checkOAuthStatus(provider?: string): Promise<boolean> {
 export async function openOAuthDialog(provider?: string): Promise<boolean> {
 	const m = await load();
 	return m.openOAuthDialog(provider);
+}
+
+export async function showOAuthExpiryModal(credentials: readonly ExpiredAccountOAuthCredential[]): Promise<void> {
+	const m = await load();
+	return m.showOAuthExpiryModal(credentials);
 }
 
 export async function createProjectAssistantSession(

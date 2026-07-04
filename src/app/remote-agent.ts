@@ -30,7 +30,8 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 	maxTokens: 128000,
 };
 
-import { isProposalType, type ProposalType } from "./proposal-registry.js";
+import { isProposalType, type GoalWorkflowValidationError, type ProposalType } from "./proposal-registry.js";
+import { workflowValidationErrorFromProposalResult } from "../ui/tools/renderers/proposal-rev-marker.js";
 
 export type ProposalSource = "tool" | "legacy" | "edit" | "seed" | "rehydrate" | "restore";
 const SERVER_PROPOSAL_SOURCES = new Set<ProposalSource>(["edit", "seed", "rehydrate", "restore"]);
@@ -42,7 +43,7 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
-import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
+import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
@@ -50,6 +51,7 @@ import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePa
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
+import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-bridge.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -221,6 +223,15 @@ function toolEventId(event: any): string | undefined {
 	return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
+function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	if (!a || !b) return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function parseGoalWorkflowValidationError(result: any, input?: Record<string, unknown>): GoalWorkflowValidationError | null {
+	return workflowValidationErrorFromProposalResult(result, input) ?? null;
+}
+
 /**
  * A remote agent adapter that connects to the Bobbit Gateway via WebSocket.
  * Duck-types the Agent interface from pi-agent-core so it can be used
@@ -259,13 +270,19 @@ export class RemoteAgent {
 	// In-flight C2 write-permit MINT requests, keyed by the correlation id on the
 	// `ext_session_write_permit` frame, settled by `ext_session_write_permit_result`.
 	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
+	// In-flight pack-bound surface-token MINT requests, settled by
+	// `ext_surface_token_result`.
+	private _pendingExtSurfaceTokens = new Map<string, { resolve: (token: string) => void; reject: (e: Error) => void }>();
+	private _sessionPoster: ((req: SessionPostRequest) => Promise<void>) | undefined;
+	private _surfaceTokenMinter: ((surface: PackSurfaceRef) => Promise<string>) | undefined;
+	private _surfaceTokenAuthorityKey: string | undefined;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
-	private _pendingModelRollback: { model: any; runtime: "pi" | "claude-code" | undefined } | null = null;
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
 	private _toolCallInputsById = new Map<string, unknown>();
+	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Client-side outbox for user-intent frames issued while the WS is not OPEN
@@ -580,7 +597,6 @@ export class RemoteAgent {
 		this._state = {
 			systemPrompt: "",
 			model: { ...PLACEHOLDER_DEFAULT_MODEL, contextWindow: 0 },
-			runtime: "pi",
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],
@@ -645,6 +661,21 @@ export class RemoteAgent {
 	}
 	get connected() {
 		return this.ws?.readyState === WebSocket.OPEN;
+	}
+	registerHostApiTransports(): void {
+		if (!this._sessionId) return;
+		this._sessionPoster = (req) => this._postExtSession(req);
+		this._surfaceTokenMinter = (surface) => this._mintPackSurfaceToken(surface);
+		registerSessionPoster(this._sessionId, this._sessionPoster);
+		registerSurfaceTokenMinter(this._sessionId, this._surfaceTokenMinter);
+	}
+	private _unregisterHostApiTransports(reason: string): void {
+		unregisterSessionPoster(this._sessionId, this._sessionPoster);
+		unregisterSurfaceTokenMinter(this._sessionId, this._surfaceTokenMinter);
+		this._sessionPoster = undefined;
+		this._surfaceTokenMinter = undefined;
+		this._surfaceTokenAuthorityKey = undefined;
+		this._rejectPendingExtPosts(reason);
 	}
 	get connectionStatus(): ConnectionStatus {
 		return this._connectionStatus;
@@ -743,15 +774,16 @@ export class RemoteAgent {
 		const wsUrl = this._gatewayUrl.replace(/^http/, "ws");
 
 		return new Promise<void>((resolve, reject) => {
-			this.ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
+			const ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
+			this.ws = ws;
 			let settled = false;
 
-			this.ws.onopen = () => {
+			ws.onopen = () => {
 				bootMark("ws-open");
-				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
+				ws.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
 			};
 
-			this.ws.onmessage = (evt) => {
+			ws.onmessage = (evt) => {
 				let msg: any;
 				try {
 					msg = JSON.parse(evt.data);
@@ -769,12 +801,13 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
-						// Register the trusted WS poster for `host.session.postMessage` (C2 session
-						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
-						// agent's private WS; pack code has no handle to it and cannot import this
-						// transport, so it cannot drive the agent. No session secret is delivered
-						// to (or capturable from) the client at all — the trusted WS IS the gate.
-						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
+						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
+						// Register the sanctioned WS transports for pack-bound surface-token minting
+						// and `host.session.postMessage` (C2 session WRITE, extension-host-phase2.md
+						// §8 C2.1). Server-side session binding, surface-token resolution, and
+						// one-time content-bound permits carry the authorization/provenance checks;
+						// the app transport is not an unspoofable same-origin security boundary.
+						this.registerHostApiTransports();
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -830,7 +863,7 @@ export class RemoteAgent {
 				this.handleServerMessage(msg).catch(() => {});
 			};
 
-			this.ws.onerror = () => {
+			ws.onerror = () => {
 				if (!settled) {
 					settled = true;
 					if (initial) {
@@ -839,7 +872,7 @@ export class RemoteAgent {
 				}
 			};
 
-			this.ws.onclose = () => {
+			ws.onclose = () => {
 				// Mark that the WS dropped — the next visibility-driven resync
 				// must run a fresh `requestMessages()` to pick up anything we
 				// missed while disconnected.
@@ -850,6 +883,12 @@ export class RemoteAgent {
 						reject(new Error("Connection closed before auth"));
 						return;
 					}
+				}
+				// If this is still the current socket, drop registered Host API transports so
+				// stale minters/posters cannot mask the background fallback during reconnect.
+				if (this.ws === ws) {
+					this.ws = null;
+					this._unregisterHostApiTransports("session WebSocket closed");
 				}
 				// If this wasn't an intentional disconnect, attempt to reconnect
 				if (!this._intentionalDisconnect) {
@@ -900,10 +939,9 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
-		// Drop the trusted WS poster + reject any in-flight session posts so a torn-down
-		// session leaves no stale transport (re-registered on the next auth_ok).
-		unregisterSessionPoster(this._sessionId);
-		this._rejectPendingExtPosts("session disconnected");
+		// Drop the registered WS transports + reject in-flight extension requests so a
+		// torn-down session leaves no stale transport (re-registered on the next auth_ok).
+		this._unregisterHostApiTransports("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
 
@@ -1141,11 +1179,18 @@ export class RemoteAgent {
 		this._deferProposalCheck = false;
 		if (this._hasDeferredProposals) {
 			this._hasDeferredProposals = false;
-			for (const m of this._state.messages) {
-				if (m.role === "assistant") {
-					this._checkToolProposals(m);
-					this._checkProposals(m);
-				}
+			this._scanLoadedProposalMessages();
+		}
+	}
+
+	private _scanLoadedProposalMessages(): void {
+		for (const m of this._state.messages) {
+			if (m.role === "assistant") {
+				const normalizedMessage = normalizeProposalToolCallInputs(m, (id) => this._toolCallInputsById.get(id));
+				this._checkToolProposals(normalizedMessage);
+				this._checkProposals(normalizedMessage);
+			} else {
+				this._checkProposalToolResult(m);
 			}
 		}
 	}
@@ -1242,12 +1287,9 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any): void {
-		this._pendingModelRollback = { model: this._state.model, runtime: this._state.runtime };
 		this._state.model = model;
-		this._state.runtime = model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
 		this._clearProviderAuthRequired();
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
-		this.send({ type: "get_state" });
 		state.chatPanel?.agentInterface?.requestUpdate();
 		this.emit({ type: "render" });
 	}
@@ -1268,29 +1310,11 @@ export class RemoteAgent {
 		// no-op: tools are server-side for the coding agent
 	}
 
-	/** Pending prompt text to replay after a tool permission grant restarts the session */
-	private _pendingGrantReplay?: string;
-
-	/**
-	 * After a tool permission grant, the server restarts the session. When it
-	 * becomes idle, replay the original prompt so the tool call succeeds. Fired
-	 * from `case "session_status"` on every frame (live, idempotent, and gap)
-	 * so a missed transition + heartbeat-driven recovery still triggers replay.
-	 */
-	private _maybeReplayGrant(status: string): void {
-		if (status === "idle" && this._pendingGrantReplay) {
-			const replayText = this._pendingGrantReplay;
-			this._pendingGrantReplay = undefined;
-			// Small delay to ensure the session is fully ready
-			setTimeout(() => {
-				this.send({ type: "prompt", text: replayText });
-			}, 200);
-		}
-	}
-
 	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
-		// Save the prompt to replay after the session restarts with the new tool
-		this._pendingGrantReplay = lastPromptText;
+		// The guard long-poll/server grant path owns resuming the blocked tool call.
+		// Re-sending lastPromptText here would create a fresh user turn and can
+		// duplicate side-effecting tools such as session_prompt.
+		void lastPromptText;
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
 
@@ -1386,13 +1410,12 @@ export class RemoteAgent {
 	// ── Internal ─────────────────────────────────────────────────────
 
 	/**
-	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
-	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
-	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
-	 * involved; pack code has no handle to the WS. The server ignores `req.sessionId`
-	 * as a target and posts into its OWN authenticated session.
+	 * Drive the C2 session WRITE (`host.session.postMessage`) over this agent's
+	 * authenticated WebSocket (registered with session-write-bridge.ts on auth_ok).
+	 * The server ignores `req.sessionId` as a target and posts into its own
+	 * authenticated session.
 	 *
-	 * TWO trusted-WS round-trips (design §8 C2.1): first MINT a server-minted,
+	 * TWO permit-bound round-trips (design §8 C2.1): first MINT a server-minted,
 	 * one-time, content-bound write permit (bound to `req.contentHash`), then send the
 	 * post carrying the returned nonce. A captured/replayed post frame is rejected
 	 * (permit already consumed); a forged post without a mint has no valid nonce.
@@ -1402,7 +1425,46 @@ export class RemoteAgent {
 		return this._sendExtSessionPost(req, nonce);
 	}
 
-	/** Step 1: mint a content-bound write permit over the trusted WS. Resolves with
+	/** Mint a pack-bound surface token over the session WS. The frame carries no
+	 *  session id; the server binds the token to this authenticated connection. */
+	private _mintPackSurfaceToken(surface: PackSurfaceRef): Promise<string> {
+		return new Promise<string>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("pack surface-token mint: WebSocket not connected"));
+				return;
+			}
+			if (!this._surfaceTokenAuthorityKey) {
+				reject(new Error("pack surface-token mint: app surface-token key unavailable"));
+				return;
+			}
+			const requestId = `extsurface_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtSurfaceTokens.delete(requestId)) {
+					reject(new Error("pack surface-token mint: timed out awaiting token"));
+				}
+			}, 30_000);
+			this._pendingExtSurfaceTokens.set(requestId, {
+				resolve: (token: string) => { clearTimeout(timer); resolve(token); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_surface_token",
+					requestId,
+					surfaceTokenKey: this._surfaceTokenAuthorityKey,
+					packId: surface.packId,
+					contributionKind: surface.contributionKind,
+					contributionId: surface.contributionId,
+				}));
+			} catch (e) {
+				this._pendingExtSurfaceTokens.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Step 1: mint a content-bound write permit over the session WS. Resolves with
 	 *  the opaque nonce; rejects on server error / timeout / not-connected. */
 	private _mintExtWritePermit(req: SessionPostRequest): Promise<string> {
 		return new Promise<string>((resolve, reject) => {
@@ -1474,10 +1536,13 @@ export class RemoteAgent {
 	/** Reject and clear every in-flight session post + permit mint (call on
 	 *  disconnect/teardown). */
 	private _rejectPendingExtPosts(reason: string): void {
-		const pending = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
+		const pendingPosts = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
+		const pendingSurfaceTokens = [...this._pendingExtSurfaceTokens.values()];
 		this._pendingExtPosts.clear();
 		this._pendingExtPermits.clear();
-		for (const p of pending) p.reject(new Error(`host.session.postMessage: ${reason}`));
+		this._pendingExtSurfaceTokens.clear();
+		for (const p of pendingPosts) p.reject(new Error(`host.session.postMessage: ${reason}`));
+		for (const p of pendingSurfaceTokens) p.reject(new Error(`pack surface-token mint: ${reason}`));
 	}
 
 	private send(msg: any): void {
@@ -1529,6 +1594,15 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "ext_surface_token_result": {
+				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
+				if (pending) {
+					this._pendingExtSurfaceTokens.delete(msg.requestId);
+					if (msg.ok && typeof msg.token === "string" && msg.token) pending.resolve(msg.token);
+					else pending.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "pack surface-token mint denied"));
+				}
+				break;
+			}
 			case "ext_session_write_permit_result": {
 				// Async reply to a C2 write-permit MINT (step 1). Settle the correlated
 				// promise with the opaque nonce (resolve) or the server-side error (reject).
@@ -1575,7 +1649,6 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
-					this._pendingModelRollback = null;
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -1583,11 +1656,6 @@ export class RemoteAgent {
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
-				if (msg.data?.runtime === "claude-code" || msg.data?.runtime === "pi") this._state.runtime = msg.data.runtime;
-				if (typeof msg.data?.runtimeLabel === "string") this._state.runtimeLabel = msg.data.runtimeLabel;
-				if (typeof msg.data?.claudeCodeSessionId === "string") this._state.claudeCodeSessionId = msg.data.claudeCodeSessionId;
-				if (typeof msg.data?.claudeCodeModelAlias === "string") this._state.claudeCodeModelAlias = msg.data.claudeCodeModelAlias;
-				if (typeof msg.data?.claudeCodePermissionMode === "string") this._state.claudeCodePermissionMode = msg.data.claudeCodePermissionMode;
 				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
 					this._state.serverCost = msg.data.serverCost ?? null;
 					if (this._state.serverCost) {
@@ -1651,12 +1719,7 @@ export class RemoteAgent {
 					if (this._deferProposalCheck) {
 						this._hasDeferredProposals = true;
 					} else {
-						for (const m of this._state.messages) {
-							if (m.role === "assistant") {
-								this._checkToolProposals(m);
-								this._checkProposals(m);
-							}
-						}
+						this._scanLoadedProposalMessages();
 					}
 					// Rebuild review pane state from message history (same persistence as preview pane).
 					// Hydrate annotation cache from server before checking submitted state.
@@ -1667,12 +1730,12 @@ export class RemoteAgent {
 					state.reviewPanelOpen = false;
 					if (!isReviewSubmitted(this._sessionId || "")) {
 						for (const m of this._state.messages) {
-							this._checkReviewToolResult(m);
+							await this._checkReviewToolResult(m);
 						}
 					} else {
 						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
 					}
-					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
+					(await loadReviewSources()).restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -1769,11 +1832,9 @@ export class RemoteAgent {
 				// See docs/design/unify-session-status.md §4.3.
 				const v = typeof (msg as any).statusVersion === "number" ? (msg as any).statusVersion : undefined;
 
-				// Idempotent: heartbeat or duplicate. Side effects (grant replay,
-				// onStatusChange) still fire so consumers don't miss a refresh,
-				// but we drop the actual status mutation.
+				// Idempotent: heartbeat or duplicate. onStatusChange still fires so
+				// consumers don't miss a refresh, but we drop the actual status mutation.
 				if (v !== undefined && v <= this._lastStatusVersion) {
-					this._maybeReplayGrant(msg.status);
 					this.onStatusChange?.(msg.status);
 					break;
 				}
@@ -1813,7 +1874,6 @@ export class RemoteAgent {
 					try { publishClientStatus(this._sessionId, msg.status); } catch { /* non-fatal */ }
 				}
 
-				this._maybeReplayGrant(msg.status);
 				this.onStatusChange?.(msg.status);
 				break;
 			}
@@ -2066,12 +2126,6 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
-				if ((msg.code === "SET_MODEL_FAILED" || msg.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION") && this._pendingModelRollback) {
-					this._state.model = this._pendingModelRollback.model;
-					this._state.runtime = this._pendingModelRollback.runtime;
-					this._pendingModelRollback = null;
-					state.chatPanel?.agentInterface?.requestUpdate();
-				}
 				// Status mutation is the server's job — it broadcasts a matching
 				// `session_status` frame in the same termination path. We only
 				// clear local-only fields here.
@@ -2106,6 +2160,47 @@ export class RemoteAgent {
 	 * message_end of non-assistant clears it, agent_end clears it) so the
 	 * tool call never appears in both message-list and streaming-container.
 	 */
+	private _checkProposalToolResult(message: any): void {
+		if (message?.role !== "toolResult" && message?.role !== "tool_result" && message?.type !== "tool_result") return;
+		const toolCallId = typeof message.toolCallId === "string"
+			? message.toolCallId
+			: typeof message.tool_use_id === "string"
+				? message.tool_use_id
+				: "";
+		const remembered = toolCallId ? this._proposalToolCallsById.get(toolCallId) : undefined;
+		const toolName = typeof message.toolName === "string" ? message.toolName : "";
+		const typeFromName = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
+		const proposalType = remembered?.type ?? (isProposalType(typeFromName) ? typeFromName : undefined);
+		if (proposalType !== "goal") return;
+		const input = remembered?.input ?? (toolCallId ? parseToolPayload(this._toolCallInputsById.get(toolCallId)) ?? undefined : undefined);
+		if (!input) return;
+		const validation = parseGoalWorkflowValidationError(message, input);
+		if (!validation) return;
+		const current = state.activeProposals.goal;
+		if (current?.sessionId === this._sessionId && (current.rev ?? 0) > 0) {
+			// Historical replay may encounter an older failed no-rev tool result after a
+			// later successful retry has already rehydrated a rev-backed draft. Keep the
+			// failed metadata tied to its own tool card/open event instead of poisoning
+			// the current successful proposal slot.
+			return;
+		}
+		if (!current || current.sessionId !== this._sessionId) {
+			if (input && this.onProposal) this.onProposal("goal", input, false, undefined, "tool");
+		}
+		const slot = state.activeProposals.goal;
+		if (!slot || slot.sessionId !== this._sessionId) return;
+		if (input && (slot.rev ?? 0) === 0 && !sameProposalFields(slot.fields, input)) {
+			(state.activeProposals.goal as any) = { ...slot, fields: { ...input } };
+		}
+		const target = state.activeProposals.goal;
+		if (!target || target.sessionId !== this._sessionId) return;
+		(state.activeProposals.goal as any) = { ...target, workflowValidationError: validation };
+		if (validation.workflowId !== undefined) {
+			(state.activeProposals.goal as any).fields = { ...target.fields, workflow: validation.workflowId };
+		}
+		renderApp();
+	}
+
 	/**
 	 * Check an assistant message for propose_* tool calls and fire the matching callback.
 	 * @param streaming — true during message_update (live streaming). In streaming mode,
@@ -2127,10 +2222,7 @@ export class RemoteAgent {
 			// Either may be unset — we keep going as long as one is wired.
 			if (!callback && !this.onProposal) continue;
 
-			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
-			// During streaming we still check this so we don't re-fire after message_end marks it.
 			const blockId = block.id || block.toolCallId || "";
-			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			// Extract input — tool_use blocks use `input`, toolCall blocks may use `arguments`
 			let input = block.input;
@@ -2144,6 +2236,20 @@ export class RemoteAgent {
 			// During streaming, tool arguments arrive incrementally (e.g. "{}" → {"title":""} → full).
 			// Skip empty objects to avoid firing with no meaningful data.
 			if (Object.keys(input).length === 0) continue;
+
+			if (blockId && isProposalType(proposalType)) {
+				this._proposalToolCallsById.set(blockId, { type: proposalType, input: { ...input } });
+			}
+
+			// Track that this message had a tool-based proposal before the dedupe
+			// return, so historical scans do not also parse any legacy XML fallback.
+			const msgId = message.id || "";
+			if (msgId) this._toolProposalMessageIds.add(msgId);
+
+			// Deduplicate callbacks — but only after remembering the input above, so a
+			// later historical toolResult row can still reconstruct failed workflow
+			// metadata from a processed propose_goal call.
+			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
 			const tagKey = `${proposalType}_proposal`;
 			if (streaming) {
@@ -2180,9 +2286,7 @@ export class RemoteAgent {
 					} catch { /* ignore quota errors */ }
 				}
 			}
-			// Track that this message had a tool-based proposal
-			const msgId = message.id || "";
-			if (msgId) this._toolProposalMessageIds.add(msgId);
+			// Message id was recorded before callback dedupe.
 		}
 	}
 
@@ -2293,8 +2397,10 @@ export class RemoteAgent {
 	 * `state.remoteAgent`-based check would no-op the initial review-pane
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
-	private _checkReviewToolResult(msg: any, isLive = false): void {
-		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
+	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
+		const sessionId = this._sessionId || "";
+		const isActiveSession = (): boolean => !sessionId || state.selectedSessionId === sessionId;
+		if (!isActiveSession()) return;
 
 		// Extract review tool-result payloads. Production providers are not fully
 		// consistent here: the review extension usually returns a JSON text block,
@@ -2333,10 +2439,11 @@ export class RemoteAgent {
 		collectReviewPayloads((msg as any).result);
 
 		for (const data of payloads) {
+			if (!isActiveSession()) return;
 			if (data.action === "review_open" && data.title && data.markdown) {
-				if (this._sessionId) {
+				if (sessionId) {
 					const title = String(data.title);
-					const hasOpenWorkspaceTab = getSidePanelWorkspace(this._sessionId).tabs.some((tab) => {
+					const hasOpenWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.some((tab) => {
 						if (tab.kind !== "review") return false;
 						const source = tab.source as Record<string, unknown> | undefined;
 						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
@@ -2351,46 +2458,50 @@ export class RemoteAgent {
 				// On a LIVE event (the agent emits a fresh review_open after a prior
 				// submit) we DO want to reopen — fall through and clear the flag.
 				// RP-09.
-				if (!isLive && this._sessionId && isReviewSubmitted(this._sessionId)) return;
+				if (!isLive && sessionId && isReviewSubmitted(sessionId)) return;
 				const replace = data.replace !== false;
+				const reviewSources = await loadReviewSources();
+				if (!isActiveSession()) return;
 				// New review opened on a LIVE event — clear any prior submitted flag
 				// so the panel can reopen on subsequent reconnects. Skip on replay
 				// (the fire-and-forget PUT would race with concurrent server-side
 				// setSubmitted(true) and clobber it on reload). RP-09.
-				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
-				openMarkdownReviewDocument({
+				if (isLive && sessionId) clearReviewSubmitted(sessionId);
+				if (!isActiveSession()) return;
+				reviewSources.openMarkdownReviewDocument({
 					title: data.title,
 					markdown: data.markdown,
 					replace,
-					sessionId: this._sessionId || "",
+					sessionId,
 				});
 			} else if (data.action === "review_close") {
-				const sid = this._sessionId || "";
 				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+				const reviewSources = await loadReviewSources();
+				if (!isActiveSession()) return;
 				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (closingTitle) {
 					state.reviewDocuments.delete(closingTitle);
-					clearAnnotations(sid, closingTitle);
-					removePersistedReviewDocument(sid, closingTitle);
+					clearAnnotations(sessionId, closingTitle);
+					reviewSources.removePersistedReviewDocument(sessionId, closingTitle);
 					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
 					}
-					closeReviewWorkspaceTabs([closingTitle], { sessionId: sid, select: false });
+					closeReviewWorkspaceTabs([closingTitle], { sessionId, select: false });
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
-					clearAllAnnotations(sid);
-					clearPersistedReviewDocuments(sid);
-					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
+					clearAllAnnotations(sessionId);
+					reviewSources.clearPersistedReviewDocuments(sessionId);
+					closeReviewWorkspaceTabs(undefined, { sessionId, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 				if (shouldReselect) {
 					if (state.reviewPanelOpen && state.reviewActiveTab) {
-						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId: sid, select: true });
+						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
 					} else {
-						selectSensiblePanelWorkspaceTab({ sessionId: sid, select: true });
+						selectSensiblePanelWorkspaceTab({ sessionId, select: true });
 					}
 				}
 				renderApp();
@@ -2448,6 +2559,14 @@ export class RemoteAgent {
 				(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
 					? String(prefs.maxNestingDepth)
 					: "3";
+		}
+
+		// Apply showHeadquartersInProjectLists — default ON. The broadcast sends
+		// the full safe prefs object, so absence means the default visible state.
+		const showHeadquartersInProjectLists = prefs.showHeadquartersInProjectLists !== false;
+		if (state.showHeadquartersInProjectLists !== showHeadquartersInProjectLists) {
+			state.showHeadquartersInProjectLists = showHeadquartersInProjectLists;
+			renderApp();
 		}
 
 		// Apply shortcuts
@@ -2750,6 +2869,7 @@ export class RemoteAgent {
 						}
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
+						this._checkProposalToolResult(msg);
 
 						// Slice C2: bridge the live message onto the typed Host session
 						// event bus for `host.session.subscribe` (contract shapes, scoped
@@ -2761,7 +2881,7 @@ export class RemoteAgent {
 						// Check for review tool results (review_open/review_close JSON).
 						// `isLive: true` distinguishes a fresh agent emission from a snapshot
 						// replay so the submitted-flag handling can differentiate. RP-09.
-						this._checkReviewToolResult(msg, /* isLive */ true);
+						void this._checkReviewToolResult(msg, /* isLive */ true);
 
 						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {
@@ -2782,6 +2902,9 @@ export class RemoteAgent {
 					this._state.pendingToolCalls.add(id);
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
+					const toolName = typeof event.toolName === "string" ? event.toolName : "";
+					const proposalType = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
+					if (input && isProposalType(proposalType)) this._proposalToolCallsById.set(id, { type: proposalType, input: { ...input } });
 				}
 				break;
 			}
@@ -2791,6 +2914,8 @@ export class RemoteAgent {
 				if (id) {
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
+					const existing = this._proposalToolCallsById.get(id);
+					if (input && existing) this._proposalToolCallsById.set(id, { ...existing, input: { ...existing.input, ...input } });
 				}
 				// Store partial results from long-running tools (e.g., skill invocations)
 				// so the UI can show real-time progress.

@@ -1,5 +1,7 @@
 // src/server/agent/orchestration-core.ts
 //
+import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionPromptMode } from "./session-prompt-delivery.js";
+
 // OrchestrationCore — the ONE goal-agnostic implementation of "launch and
 // orchestrate a child agent (a new, properly-scoped principal)".
 //
@@ -17,9 +19,9 @@
 //
 // Key invariants (see the design doc):
 //   • Parent↔child linkage is DERIVED from existing persisted session fields
-//     (`delegateOf` / `parentSessionId` + `childKind`). There is NO new
-//     persisted registry. The core keeps an in-memory index keyed on owner
-//     session id, rebuilt on boot from those fields (§3).
+//     (`delegateOf` / `parentSessionId` + `childKind`) that match a server-created
+//     child shape. There is NO new persisted registry. The core keeps an in-memory
+//     index keyed on owner session id, rebuilt on boot from those fields (§3).
 //   • "Blocking-ness" is RUNTIME-ONLY, never persisted (§4).
 //   • ONE shared `wait` primitive with two policies (`all` / `first`) and
 //     terminal-child handling that never rejects the aggregate (§2.3).
@@ -53,6 +55,24 @@ export type LiveChildStatus = "idle" | "streaming" | "queued" | "not-started";
 export type TerminalChildStatus = "terminated" | "timeout" | "failed";
 /** A child is SETTLED when its status is idle OR terminal. */
 export type ChildStatus = LiveChildStatus | TerminalChildStatus;
+
+export type DismissStatus = "dismissed" | "already-dismissed" | "not-owned" | "not-found" | "failed";
+export interface DismissResult {
+	ok: boolean;
+	status: DismissStatus;
+	sessionId: string;
+	message: string;
+	retryable: boolean;
+}
+
+export function dismissHttpStatus(result: DismissResult): number {
+	switch (result.status) {
+		case "not-owned": return 403;
+		case "not-found": return 404;
+		case "failed": return 500;
+		default: return 200;
+	}
+}
 
 const TERMINAL_STATUSES = new Set<ChildStatus>(["terminated", "timeout", "failed"]);
 export function isTerminalStatus(s: ChildStatus): boolean {
@@ -155,6 +175,23 @@ export interface ChildHandle {
 	blocking: boolean;
 }
 
+const RESTART_COLLECTION_REMINDER_EXCLUDED_CHILD_KINDS = new Set<ChildKind>([
+	"team",
+	"pr-walkthrough",
+	"host-agents",
+]);
+
+/**
+ * Whether a restored child belongs to the generic post-restart collection flow.
+ * Non-collectable workflows opt out by child kind; all other child kinds keep
+ * existing restart-reminder behaviour and can be collected through `team_wait`.
+ * `host-agents` children are collected/polled by their owning extension workflow
+ * (for example PR Walkthrough reviewers), not by generic `team_wait` reminders.
+ */
+export function shouldSendRestartCollectionReminder(handle: Pick<ChildHandle, "childKind">): boolean {
+	return !RESTART_COLLECTION_REMINDER_EXCLUDED_CHILD_KINDS.has(handle.childKind);
+}
+
 export interface WaitResult {
 	/** Session id of the first child that became settled (idle or terminal). */
 	firstIdle?: string;
@@ -208,6 +245,8 @@ export interface PersistedSessionLike {
 	id: string;
 	title?: string;
 	delegateOf?: string;
+	/** Durable delegate task; present on server-created delegate children. */
+	instructions?: string;
 	parentSessionId?: string;
 	childKind?: string;
 	archived?: boolean;
@@ -221,6 +260,8 @@ export interface PersistedSessionLike {
 	 */
 	sandboxed?: boolean;
 	projectId?: string;
+	/** Remote publication policy for this session's worktree branch. */
+	worktreePushPolicy?: "local-only" | "publish";
 	/** Owner's validated host-side cwd (never trust a container-internal cwd). */
 	cwd?: string;
 	/**
@@ -231,6 +272,10 @@ export interface PersistedSessionLike {
 	 * pack-store keys and has NO per-pack knowledge.
 	 */
 	childTerminal?: boolean;
+	/** Goal/team adapter ownership marker for role-agent sessions. */
+	teamGoalId?: string;
+	/** Team lead session that owns a goal/team worker. */
+	teamLeadSessionId?: string;
 	/** When the terminal marker was stamped (epoch ms). */
 	terminalAt?: number;
 }
@@ -353,6 +398,8 @@ const OUTPUT_TAIL_CHARS = 1500;
 export class OrchestrationCore {
 	/** In-memory index keyed on owner session id (NOT persisted). */
 	private index = new Map<string, ChildHandle[]>();
+	/** childSessionId → owner/kind record for idempotent duplicate dismiss classification. */
+	private dismissedChildren = new Map<string, { ownerSessionId: string; childKind?: ChildKind }>();
 
 	constructor(private deps: OrchestrationCoreDeps) {}
 
@@ -432,8 +479,29 @@ export class OrchestrationCore {
 
 	private addHandle(handle: ChildHandle): void {
 		const list = this.index.get(handle.ownerSessionId) ?? [];
-		if (!list.some(h => h.sessionId === handle.sessionId)) list.push(handle);
+		const existingIndex = list.findIndex(h => h.sessionId === handle.sessionId);
+		if (existingIndex === -1) {
+			list.push(handle);
+		} else {
+			list[existingIndex] = { ...list[existingIndex], ...handle };
+		}
 		this.index.set(handle.ownerSessionId, list);
+	}
+
+	private trustedRestorableChild(ps: PersistedSessionLike): { ownerSessionId: string; childKind: ChildKind } | undefined {
+		if (ps.archived) return undefined;
+		if (ps.delegateOf) {
+			// `delegateOf` was historically API-mutable. Only promote it back into the
+			// trusted live-dismiss index when the row also has the server-created durable
+			// delegate task. A patched top-level or first-class child can gain delegateOf,
+			// but cannot gain `instructions` through the public metadata PATCH route.
+			if (typeof ps.instructions !== "string") return undefined;
+			return { ownerSessionId: ps.delegateOf, childKind: (ps.childKind as ChildKind) ?? "delegate" };
+		}
+		if (ps.parentSessionId && ps.childKind) {
+			return { ownerSessionId: ps.parentSessionId, childKind: ps.childKind as ChildKind };
+		}
+		return undefined;
 	}
 
 	private resolveOwnerCwd(ownerId: string): string | undefined {
@@ -526,6 +594,7 @@ export class OrchestrationCore {
 				projectId: ownerPs?.projectId,
 			};
 			if (opts.worktree?.mode === "sub-branch") {
+				createOpts.worktreePushPolicy = "local-only";
 				createOpts.sandboxBranch = opts.worktree.branch;
 			}
 			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);
@@ -565,6 +634,36 @@ export class OrchestrationCore {
 		});
 	}
 
+	/** Owner recorded by a previous successful/idempotent dismiss, if any. */
+	dismissedOwnerOf(sessionId: string): string | undefined {
+		return this.dismissedChildren.get(sessionId)?.ownerSessionId;
+	}
+
+	/** Trusted child kind for a child owned (currently or previously) by this owner. */
+	ownedChildKind(ownerId: string, sessionId: string): ChildKind | undefined {
+		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === sessionId);
+		if (handle) return handle.childKind;
+		const persisted = this.deps.sessionManager.getPersistedSession(sessionId);
+		const remembered = this.dismissedChildren.get(sessionId);
+		if (remembered?.ownerSessionId === ownerId) {
+			return remembered.childKind ?? this.persistedChildKind(ownerId, persisted);
+		}
+		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
+		return persistedOwned ? this.persistedChildKind(ownerId, persisted) : undefined;
+	}
+
+	private persistedChildKind(ownerId: string, persisted: PersistedSessionLike | undefined): ChildKind | undefined {
+		if (!persisted) return undefined;
+		if (persisted.childKind) return persisted.childKind as ChildKind;
+		const owned = persisted.delegateOf === ownerId || persisted.parentSessionId === ownerId || persisted.teamLeadSessionId === ownerId;
+		// Old records without a source discriminator are never host.agents children.
+		return owned ? "delegate" : undefined;
+	}
+
+	private rememberDismissed(childId: string, ownerId: string, childKind: ChildKind | undefined): void {
+		this.dismissedChildren.set(childId, { ownerSessionId: ownerId, childKind });
+	}
+
 	/** Forget a child from the runtime index (cleanup after dismiss/terminate). */
 	forgetChild(sessionId: string): void {
 		for (const [owner, list] of this.index) {
@@ -597,13 +696,30 @@ export class OrchestrationCore {
 		return handle;
 	}
 
-	async prompt(ownerId: string, childId: string, message: string): Promise<{ status: "dispatched" | "queued" }> {
+	async prompt(ownerId: string, childId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
+	async prompt(
+		ownerId: string,
+		childId: string,
+		message: string,
+		opts: { mode?: SessionPromptMode; defaultMode?: SessionPromptMode },
+	): Promise<DeliverSessionPromptResult>;
+	async prompt(
+		ownerId: string,
+		childId: string,
+		message: string,
+		opts?: { mode?: SessionPromptMode; defaultMode?: SessionPromptMode },
+	): Promise<DeliverSessionPromptResult | { status: "dispatched" | "queued" }> {
 		this.requireOwnChild(ownerId, childId);
-		const result = await this.deps.sessionManager.enqueuePrompt(childId, message);
-		this.audit({ event: "prompt", ownerSessionId: ownerId, childSessionId: childId });
-		// enqueuePrompt returns run-if-idle ("dispatched"/running) or "queued".
-		const status = result?.status === "queued" ? "queued" : "dispatched";
-		return { status };
+		const result = await deliverSessionPrompt({
+			getSession: (id) => this.deps.sessionManager.getSession(id),
+			enqueuePrompt: async (id, text, promptOpts) => {
+				const queued = await this.deps.sessionManager.enqueuePrompt(id, text, promptOpts);
+				return { status: queued?.status === "queued" ? "queued" : "dispatched" };
+			},
+			deliverLiveSteer: (id, text, steerOpts) => this.deps.sessionManager.deliverLiveSteer(id, text, steerOpts),
+		}, childId, message, { mode: opts?.mode, defaultMode: opts ? (opts.defaultMode ?? "steer") : "prompt" });
+		this.audit({ event: result.mode === "steer" ? "steer" : "prompt", ownerSessionId: ownerId, childSessionId: childId });
+		return opts ? result : { status: "status" in result && result.status === "queued" ? "queued" : "dispatched" };
 	}
 
 	async steer(ownerId: string, childId: string, message: string): Promise<unknown> {
@@ -626,8 +742,37 @@ export class OrchestrationCore {
 		this.audit({ event: "abort", ownerSessionId: ownerId, childSessionId: childId });
 	}
 
-	async dismiss(ownerId: string, childId: string): Promise<boolean> {
-		this.requireOwnChild(ownerId, childId);
+	async dismiss(ownerId: string, childId: string): Promise<DismissResult> {
+		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === childId);
+		const live = this.deps.sessionManager.getSession(childId);
+		const persisted = this.deps.sessionManager.getPersistedSession(childId);
+		const remembered = this.dismissedChildren.get(childId);
+		const rememberedOwner = remembered?.ownerSessionId;
+		const persistedOwned = persisted?.delegateOf === ownerId || persisted?.parentSessionId === ownerId || persisted?.teamLeadSessionId === ownerId;
+		const rememberedOwned = rememberedOwner === ownerId;
+		const exists = !!live || !!persisted || !!rememberedOwner;
+		const isLive = this.deps.sessionManager.isSessionLive?.call(this.deps.sessionManager, childId);
+		const isCurrentlyLive = !!live && live.status !== "terminated" && persisted?.archived !== true && isLive !== false;
+
+		if (isCurrentlyLive && !handle) {
+			// Live termination is authorized only by the server-owned runtime child index.
+			// Persisted ownership fields are API-mutable, so they are used solely for
+			// already-dismissed idempotency once the target is no longer live.
+			return { ok: false, status: "not-owned", sessionId: childId, message: `Child session ${childId} is not owned by ${ownerId}.`, retryable: false };
+		}
+
+		if (!handle && !persistedOwned && !rememberedOwned) {
+			return exists
+				? { ok: false, status: "not-owned", sessionId: childId, message: `Child session ${childId} is not owned by ${ownerId}.`, retryable: false }
+				: { ok: false, status: "not-found", sessionId: childId, message: `Child session ${childId} was not found.`, retryable: false };
+		}
+
+		if (!isCurrentlyLive) {
+			this.rememberDismissed(childId, ownerId, handle?.childKind ?? this.persistedChildKind(ownerId, persisted) ?? remembered?.childKind);
+			this.forgetChild(childId);
+			return { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
+		}
+
 		// Stamp the GENERIC persisted terminal marker BEFORE terminating, so a restart
 		// between here and the terminate still lets the generic boot-reap remove the
 		// child (Decision E / Findings 3–4). Best-effort: never let it break dismiss.
@@ -636,10 +781,17 @@ export class OrchestrationCore {
 		} catch (err) {
 			console.error(`[orchestration] markChildTerminal failed for ${childId}:`, err);
 		}
-		const ok = await this.deps.sessionManager.terminateSession(childId);
-		this.forgetChild(childId);
-		this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
-		return ok;
+		try {
+			const ok = await this.deps.sessionManager.terminateSession(childId);
+			this.rememberDismissed(childId, ownerId, handle?.childKind ?? this.persistedChildKind(ownerId, persisted) ?? remembered?.childKind);
+			this.forgetChild(childId);
+			this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
+			return ok
+				? { ok: true, status: "dismissed", sessionId: childId, message: `Child session ${childId} dismissed.`, retryable: false }
+				: { ok: true, status: "already-dismissed", sessionId: childId, message: `Child session ${childId} is already dismissed.`, retryable: false };
+		} catch (err) {
+			return { ok: false, status: "failed", sessionId: childId, message: `Failed to dismiss child session ${childId}: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
+		}
 	}
 
 	async read(ownerId: string, childId: string, opts?: ReadTranscriptLike): Promise<unknown> {
@@ -740,23 +892,19 @@ export class OrchestrationCore {
 
 	/**
 	 * Rebuild the in-memory index on boot from persisted session fields (§3).
-	 * A child is any persisted session with `delegateOf` set, OR
-	 * (`parentSessionId` set AND `childKind` present). Owner = delegateOf ??
-	 * parentSessionId. Archived sessions are skipped. Blocking-ness is never
-	 * persisted, so every restored child is `blocking:false`.
+	 * A child is a non-archived persisted session whose ownership fields match a
+	 * server-created child shape. Blocking-ness is never persisted, so every
+	 * restored child is `blocking:false`.
 	 */
 	rebuildIndexFromPersisted(persisted: PersistedSessionLike[]): void {
 		this.index.clear();
 		for (const ps of persisted) {
-			if (ps.archived) continue;
-			const isChild = !!ps.delegateOf || (!!ps.parentSessionId && !!ps.childKind);
-			if (!isChild) continue;
-			const ownerSessionId = ps.delegateOf ?? ps.parentSessionId;
-			if (!ownerSessionId) continue;
+			const restored = this.trustedRestorableChild(ps);
+			if (!restored) continue;
 			this.addHandle({
 				sessionId: ps.id,
-				ownerSessionId,
-				childKind: (ps.childKind as ChildKind) ?? "delegate",
+				ownerSessionId: restored.ownerSessionId,
+				childKind: restored.childKind,
 				title: ps.title,
 				spawnedAt: Date.now(),
 				blocking: false,
@@ -769,8 +917,8 @@ export class OrchestrationCore {
 	 * restored child (restart survival, §4). The owner re-collects through the
 	 * shared `team_wait` path — no transparent tool-call resumption.
 	 *
-	 * `filterOwner` lets callers skip owners handled elsewhere (e.g. team-managed
-	 * children are nudged by team-manager — filter childKind!=="team").
+	 * `filterOwner` lets callers skip child kinds handled elsewhere; the boot path
+	 * uses `shouldSendRestartCollectionReminder` for that policy.
 	 */
 	async remindOwnersWithLiveChildren(filter?: (handle: ChildHandle) => boolean): Promise<number> {
 		let reminded = 0;

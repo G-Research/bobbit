@@ -11,12 +11,25 @@
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { MockAgentCore } from "./mock-agent-core.mjs";
+import { MockAgentCore, mockModelFromString } from "./mock-agent-core.mjs";
 
 const argv = process.argv;
 const cwd = argv.includes("--cwd") ? argv[argv.indexOf("--cwd") + 1] : process.cwd();
 
-const agent = new MockAgentCore({ cwd, env: process.env });
+function lastModelArg(args) {
+	let model;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--model" && i + 1 < args.length) {
+			model = args[++i];
+		} else if (typeof arg === "string" && arg.startsWith("--model=")) {
+			model = arg.slice("--model=".length);
+		}
+	}
+	return mockModelFromString(model) ? model : undefined;
+}
+
+const agent = new MockAgentCore({ cwd, env: process.env, initialModel: lastModelArg(argv) });
 
 /** Send a JSONL message to stdout */
 function send(msg) {

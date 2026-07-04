@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rich Git Diff Viewer Prototype</title>
+  <!--
+    Prototype spec: Rich Git Diff Viewer for the Git Status modal.
+    Ownership: design-only artifact. No production imports, no external assets.
+
+    Design rationale:
+    - Mirrors PR Walkthrough's richer review affordances: icon-only split/inline mode control,
+      collapsible per-file diff cards, rename-aware file headers, and hunk context reveal controls.
+    - Uses Bobbit theme CSS variables directly. No :root palette, no hardcoded colour values, no
+      prefers-color-scheme. Colour tints are derived with color-mix from semantic/theme tokens.
+    - Keeps Git Status modal responsibilities visible: loading, error, no-diff and truncation states
+      are first-class, not hidden behind the diff renderer.
+    - Mobile ergonomics: under the narrow breakpoint the content reflows to inline even if split is
+      selected, and the mode control communicates that inline is the effective layout.
+
+    Consistency checklist:
+    1. Existing primitives matched: modal shell, icon buttons, segmented radiogroup, file rows,
+       pill counts, status notices, focus-visible rings and muted helper text.
+    2. Spacing mirrors current compact Bobbit surfaces: 8/10/12/16px rhythm, 999px pills,
+       8-12px rounded cards, monospaced diff paths and line numbers.
+    3. Mode controls live in the same toolbar row as diff summary metadata; file toggles live in the
+       file header row rather than inventing a second action row.
+    4. All interactive controls include labels/titles, aria-expanded or aria-checked, visible focus,
+       disabled state examples, and keyboard support for button semantics.
+    5. Fresh pattern justification: the context reveal button is adapted from PR Walkthrough because
+       Git Status currently has no equivalent primitive; it is intentionally tiny and hunk-scoped.
+  -->
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      min-height: 100vh;
+      background: var(--background);
+      color: var(--foreground);
+      font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button { font: inherit; }
+    .page {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at top left, color-mix(in oklch, var(--primary) 10%, transparent), transparent 32%),
+        radial-gradient(circle at bottom right, color-mix(in oklch, var(--info) 9%, transparent), transparent 30%),
+        var(--background);
+    }
+    .modal-backdrop {
+      width: min(1180px, 100%);
+      min-height: min(860px, calc(100vh - 48px));
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--card);
+      color: var(--card-foreground);
+      box-shadow: 0 28px 80px color-mix(in oklch, var(--foreground) 12%, transparent);
+    }
+    .modal-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in oklch, var(--card) 94%, var(--background));
+    }
+    .title-stack { min-width: 0; display: grid; gap: 2px; }
+    .eyebrow {
+      color: var(--muted-foreground);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      overflow: hidden;
+      color: var(--foreground);
+      font-size: 15px;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .modal-close,
+    .icon-button,
+    .context-toggle,
+    .state-tab,
+    .file-toggle {
+      border: 1px solid var(--border);
+      background: color-mix(in oklch, var(--card) 92%, var(--background));
+      color: var(--foreground);
+      cursor: pointer;
+    }
+    .modal-close,
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 8px;
+      color: var(--muted-foreground);
+    }
+    .modal-close:hover,
+    .icon-button:hover,
+    .state-tab:hover,
+    .file-toggle:hover,
+    .context-toggle:hover {
+      color: var(--foreground);
+      border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+      background: color-mix(in oklch, var(--primary) 9%, transparent);
+    }
+    button:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 2px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in oklch, var(--background) 54%, transparent);
+    }
+    .summary {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted-foreground);
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: color-mix(in oklch, var(--card) 80%, transparent);
+      color: var(--foreground);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pill.positive { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 24%, var(--border)); }
+    .pill.negative { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 24%, var(--border)); }
+    .controls { display: flex; align-items: center; gap: 8px; }
+    .mode-toggle {
+      display: inline-flex;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in oklch, var(--background) 62%, transparent);
+    }
+    .mode-toggle button {
+      width: 28px;
+      height: 24px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted-foreground);
+      cursor: pointer;
+    }
+    .mode-toggle button[aria-checked="true"] {
+      background: color-mix(in oklch, var(--primary) 20%, transparent);
+      color: var(--primary);
+      box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 42%, var(--border));
+    }
+    .mode-icon, .status-icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .state-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px 14px 0;
+      overflow-x: auto;
+      background: var(--card);
+    }
+    .state-tab {
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      color: var(--muted-foreground);
+      white-space: nowrap;
+    }
+    .state-tab[aria-selected="true"] {
+      color: var(--primary);
+      border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+      background: color-mix(in oklch, var(--primary) 12%, transparent);
+    }
+    .content {
+      min-height: 0;
+      overflow: auto;
+      padding: 14px;
+    }
+    .state-panel { display: none; }
+    .state-panel.active { display: block; }
+    .diff-list { display: grid; gap: 12px; }
+    .diff-file-card {
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: color-mix(in oklch, var(--card) 98%, var(--background));
+      box-shadow: 0 10px 28px color-mix(in oklch, var(--foreground) 5%, transparent);
+    }
+    .diff-file-card.closed .diff-overflow { display: none; }
+    .file-header-row {
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+    }
+    .diff-file-card.closed .file-header-row { border-bottom: 0; }
+    .file-toggle {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+    }
+    .caret {
+      width: 14px;
+      color: var(--muted-foreground);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      transition: transform 140ms ease;
+    }
+    .diff-file-card:not(.closed) .caret { transform: rotate(90deg); }
+    .file-main { min-width: 0; display: grid; gap: 2px; }
+    .path {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--foreground);
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .rename-path {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--muted-foreground);
+      font: 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .counts {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-weight: 800;
+    }
+    .add-count { color: var(--positive); }
+    .del-count { color: var(--negative); }
+    .repo-tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 2px 6px;
+      border-left: 1px solid var(--border);
+      color: var(--muted-foreground);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .diff-overflow { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+    .split-grid { min-width: 980px; }
+    .inline-lines { min-width: 660px; }
+    .split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; }
+    .split-row .diff-line:first-child { border-right: 1px solid var(--border); }
+    .hunk-header {
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+      min-width: max-content;
+      color: var(--muted-foreground);
+      background: color-mix(in oklch, var(--info) 10%, transparent);
+      font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .hunk-context-cell {
+      min-height: 25px;
+      padding: 3px;
+      display: inline-flex;
+      align-items: stretch;
+      justify-content: center;
+    }
+    .hunk-signature {
+      min-width: 0;
+      padding: 3px 8px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .context-toggle {
+      width: 100%;
+      height: 19px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: 5px;
+      background: color-mix(in oklch, var(--info) 12%, transparent);
+      color: var(--muted-foreground);
+    }
+    .context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .diff-line {
+      position: relative;
+      width: 100%;
+      min-height: 24px;
+      display: grid;
+      grid-template-columns: 44px 18px minmax(280px, 1fr);
+      align-items: stretch;
+      overflow: hidden;
+      color: var(--foreground);
+      font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: transparent;
+    }
+    .inline-lines .diff-line { grid-template-columns: 44px 44px 18px minmax(280px, 1fr); }
+    .diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
+    .diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+    .diff-line.empty { color: transparent; pointer-events: none; }
+    .diff-line:hover { background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 32%, transparent); }
+    .line-no, .prefix {
+      padding: 3px 6px;
+      color: var(--muted-foreground);
+      user-select: none;
+    }
+    .line-no { text-align: right; }
+    .line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .hidden-context { display: none; }
+    .hidden-context.revealed { display: contents; }
+    .notice {
+      display: grid;
+      gap: 10px;
+      max-width: 680px;
+      margin: 38px auto;
+      padding: 24px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: color-mix(in oklch, var(--card) 96%, var(--background));
+      text-align: center;
+    }
+    .notice-icon {
+      width: 36px;
+      height: 36px;
+      display: inline-grid;
+      place-items: center;
+      justify-self: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted-foreground);
+      background: color-mix(in oklch, var(--background) 70%, transparent);
+    }
+    .notice h2 { margin: 0; color: var(--foreground); font-size: 16px; }
+    .notice p { margin: 0; color: var(--muted-foreground); }
+    .notice.error { border-color: color-mix(in oklch, var(--negative) 34%, var(--border)); }
+    .notice.error .notice-icon { color: var(--negative); background: color-mix(in oklch, var(--negative) 11%, transparent); }
+    .notice.warning { border-color: color-mix(in oklch, var(--warning) 38%, var(--border)); }
+    .notice.warning .notice-icon { color: var(--warning); background: color-mix(in oklch, var(--warning) 12%, transparent); }
+    .skeleton { display: grid; gap: 10px; text-align: left; }
+    .skeleton-line {
+      height: 12px;
+      border-radius: 999px;
+      background: color-mix(in oklch, var(--muted-foreground) 16%, transparent);
+      animation: pulse 1.45s ease-in-out infinite;
+    }
+    .skeleton-line.short { width: 42%; }
+    .skeleton-line.medium { width: 68%; }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--foreground);
+      border-radius: 999px;
+      animation: spin .7s linear infinite;
+    }
+    .truncated-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid color-mix(in oklch, var(--warning) 38%, var(--border));
+      border-radius: 12px;
+      background: color-mix(in oklch, var(--warning) 10%, transparent);
+      color: var(--foreground);
+    }
+    .truncated-banner p { margin: 0; color: var(--muted-foreground); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 50% { opacity: .52; } }
+    @media (max-width: 760px) {
+      .page { padding: 0; }
+      .modal-backdrop { min-height: 100vh; border-radius: 0; border-left: 0; border-right: 0; }
+      .modal-titlebar, .toolbar { padding-inline: 12px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .controls { justify-content: space-between; }
+      .content { padding: 10px; }
+      .repo-tag { display: none; }
+      .counts { gap: 6px; }
+      .split-grid { min-width: 0; }
+      .split-row { display: contents; }
+      .split-row .diff-line:first-child { border-right: 0; }
+      .split-row .diff-line.empty { display: none; }
+      .diff-line { grid-template-columns: 42px 42px 18px minmax(180px, 1fr); }
+      .split-grid .diff-line .line-no.new-only::before { content: ""; }
+      .inline-lines { min-width: 0; }
+      .path, .rename-path { white-space: normal; }
+      .mode-note::after { content: " · mobile preview uses inline layout"; color: var(--muted-foreground); }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="modal-backdrop" aria-labelledby="modal-title" data-mode="split">
+      <header class="modal-titlebar">
+        <div class="title-stack">
+          <span class="eyebrow">Git diff</span>
+          <h1 id="modal-title">goal/c9b5d015/ux-designer-d423 · worktree changes</h1>
+        </div>
+        <button class="modal-close" type="button" aria-label="Close diff modal" title="Close diff modal">×</button>
+      </header>
+
+      <div class="toolbar" aria-label="Diff toolbar">
+        <div class="summary">
+          <span class="pill">3 files</span>
+          <span class="pill positive">+74</span>
+          <span class="pill negative">−31</span>
+          <span class="mode-note">Split on wide screens, inline on mobile</span>
+        </div>
+        <div class="controls">
+          <div class="mode-toggle" role="radiogroup" aria-label="Diff display mode">
+            <button class="mode-button" type="button" role="radio" aria-label="Split diff" title="Split diff" aria-checked="true" data-mode-target="split">
+              <svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="5" height="10" rx="1"></rect><rect x="9" y="3" width="5" height="10" rx="1"></rect></svg>
+            </button>
+            <button class="mode-button" type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked="false" data-mode-target="inline">
+              <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h4"></path><path d="M13 6h8"></path><path d="M5 12h4"></path><path d="M13 12h8"></path><path d="M5 18h4M7 16v4"></path><path d="M13 18h8"></path></svg>
+            </button>
+          </div>
+          <button class="icon-button" type="button" aria-label="Copy raw unified diff" title="Copy raw unified diff">
+            <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <nav class="state-tabs" role="tablist" aria-label="Prototype states">
+        <button class="state-tab" type="button" role="tab" aria-selected="true" data-state="diff">Diff</button>
+        <button class="state-tab" type="button" role="tab" aria-selected="false" data-state="loading">Loading</button>
+        <button class="state-tab" type="button" role="tab" aria-selected="false" data-state="error">Error</button>
+        <button class="state-tab" type="button" role="tab" aria-selected="false" data-state="empty">No diff</button>
+        <button class="state-tab" type="button" role="tab" aria-selected="false" data-state="truncated">Truncated</button>
+      </nav>
+
+      <div class="content">
+        <section class="state-panel active" data-panel="diff" role="tabpanel" aria-label="Rendered diff">
+          <div class="diff-list" data-layout="split">
+            <article class="diff-file-card" data-file="rich-viewer">
+              <div class="file-header-row">
+                <button class="file-toggle" type="button" aria-expanded="true" aria-controls="file-rich-viewer-body">
+                  <span class="caret" aria-hidden="true">▸</span>
+                  <span class="file-main">
+                    <span class="path">src/ui/components/RichGitDiffViewer.ts</span>
+                    <span class="rename-path">renamed from src/ui/components/DiffBlock.ts</span>
+                  </span>
+                  <span class="counts" aria-label="42 additions, 18 deletions"><span class="add-count">+42</span><span class="del-count">−18</span></span>
+                </button>
+                <span class="repo-tag">repo .</span>
+              </div>
+              <div class="diff-overflow" id="file-rich-viewer-body">
+                <div class="split-grid split-view">
+                  <div class="hunk-header"><div class="hunk-context-cell"></div><div class="hunk-signature">@@ -42,18 +42,42 @@ function renderDiffModal()</div></div>
+                  <div class="split-row"><div class="diff-line ctx"><span class="line-no">42</span><span class="prefix"> </span><span class="line-text">const base = sessionId ? `/api/sessions/${sessionId}/git-diff` : `/api/goals/${goalId}/git-diff`;</span></div><div class="diff-line ctx"><span class="line-no">42</span><span class="prefix"> </span><span class="line-text">const base = sessionId ? `/api/sessions/${sessionId}/git-diff` : `/api/goals/${goalId}/git-diff`;</span></div></div>
+                  <div class="hunk-header"><div class="hunk-context-cell"><button class="context-toggle" type="button" aria-label="Show 4 hidden lines above in RichGitDiffViewer.ts" title="Show hidden context above" data-context="top"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg></button></div><div class="hunk-signature">4 hidden context lines · request envelope remains raw unified diff</div></div>
+                  <div class="hidden-context" data-context-block="top">
+                    <div class="split-row"><div class="diff-line ctx"><span class="line-no">43</span><span class="prefix"> </span><span class="line-text">headers.Authorization = token ? `Bearer ${token}` : undefined;</span></div><div class="diff-line ctx"><span class="line-no">43</span><span class="prefix"> </span><span class="line-text">headers.Authorization = token ? `Bearer ${token}` : undefined;</span></div></div>
+                    <div class="split-row"><div class="diff-line ctx"><span class="line-no">44</span><span class="prefix"> </span><span class="line-text">const body = await response.json();</span></div><div class="diff-line ctx"><span class="line-no">44</span><span class="prefix"> </span><span class="line-text">const body = await response.json();</span></div></div>
+                  </div>
+                  <div class="split-row"><div class="diff-line del"><span class="line-no">47</span><span class="prefix">−</span><span class="line-text">body = html`&lt;diff-block .content=${diff}&gt;&lt;/diff-block&gt;`;</span></div><div class="diff-line add"><span class="line-no">47</span><span class="prefix">+</span><span class="line-text">body = html`&lt;rich-git-diff-viewer .content=${diff} .file=${file}&gt;&lt;/rich-git-diff-viewer&gt;`;</span></div></div>
+                  <div class="split-row"><div class="diff-line del"><span class="line-no">48</span><span class="prefix">−</span><span class="line-text">return renderLegacyDiffModal(body);</span></div><div class="diff-line add"><span class="line-no">48</span><span class="prefix">+</span><span class="line-text">return renderGitDiffModal({ body, state: "ready", truncated });</span></div></div>
+                  <div class="split-row"><div class="diff-line empty"><span class="line-no"></span><span class="prefix"></span><span class="line-text"></span></div><div class="diff-line add"><span class="line-no">49</span><span class="prefix">+</span><span class="line-text">viewer.mode = window.matchMedia("(max-width: 760px)").matches ? "inline" : "split";</span></div></div>
+                  <div class="hunk-header"><div class="hunk-context-cell"><button class="context-toggle" type="button" aria-label="Show 8 hidden lines below in RichGitDiffViewer.ts" title="Show hidden context below" data-context="bottom"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg></button></div><div class="hunk-signature">8 hidden context lines · keyboard and cleanup handlers unchanged</div></div>
+                  <div class="hidden-context" data-context-block="bottom">
+                    <div class="split-row"><div class="diff-line ctx"><span class="line-no">51</span><span class="prefix"> </span><span class="line-text">document.addEventListener("keydown", onEscapeKey);</span></div><div class="diff-line ctx"><span class="line-no">52</span><span class="prefix"> </span><span class="line-text">document.addEventListener("keydown", onEscapeKey);</span></div></div>
+                    <div class="split-row"><div class="diff-line ctx"><span class="line-no">52</span><span class="prefix"> </span><span class="line-text">modalRoot.remove();</span></div><div class="diff-line ctx"><span class="line-no">53</span><span class="prefix"> </span><span class="line-text">modalRoot.remove();</span></div></div>
+                  </div>
+                </div>
+                <div class="inline-lines inline-view" hidden>
+                  <div class="hunk-header"><div class="hunk-context-cell"></div><div class="hunk-signature">@@ -42,18 +42,42 @@ function renderDiffModal()</div></div>
+                  <div class="diff-line ctx"><span class="line-no">42</span><span class="line-no">42</span><span class="prefix"> </span><span class="line-text">const base = sessionId ? `/api/sessions/${sessionId}/git-diff` : `/api/goals/${goalId}/git-diff`;</span></div>
+                  <div class="hunk-header"><div class="hunk-context-cell"><button class="context-toggle" type="button" aria-label="Show hidden lines above" data-context="top"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg></button></div><div class="hunk-signature">4 hidden context lines</div></div>
+                  <div class="hidden-context" data-context-block="top"><div class="diff-line ctx"><span class="line-no">43</span><span class="line-no">43</span><span class="prefix"> </span><span class="line-text">headers.Authorization = token ? `Bearer ${token}` : undefined;</span></div></div>
+                  <div class="diff-line del"><span class="line-no">47</span><span class="line-no"></span><span class="prefix">−</span><span class="line-text">body = html`&lt;diff-block .content=${diff}&gt;&lt;/diff-block&gt;`;</span></div>
+                  <div class="diff-line add"><span class="line-no"></span><span class="line-no">47</span><span class="prefix">+</span><span class="line-text">body = html`&lt;rich-git-diff-viewer .content=${diff} .file=${file}&gt;&lt;/rich-git-diff-viewer&gt;`;</span></div>
+                  <div class="diff-line del"><span class="line-no">48</span><span class="line-no"></span><span class="prefix">−</span><span class="line-text">return renderLegacyDiffModal(body);</span></div>
+                  <div class="diff-line add"><span class="line-no"></span><span class="line-no">48</span><span class="prefix">+</span><span class="line-text">return renderGitDiffModal({ body, state: "ready", truncated });</span></div>
+                  <div class="diff-line add"><span class="line-no"></span><span class="line-no">49</span><span class="prefix">+</span><span class="line-text">viewer.mode = window.matchMedia("(max-width: 760px)").matches ? "inline" : "split";</span></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="diff-file-card closed" data-file="widget">
+              <div class="file-header-row">
+                <button class="file-toggle" type="button" aria-expanded="false" aria-controls="file-widget-body">
+                  <span class="caret" aria-hidden="true">▸</span>
+                  <span class="file-main"><span class="path">src/ui/components/GitStatusWidget.ts</span><span class="rename-path">commit-file diff request preserves renamed file path</span></span>
+                  <span class="counts" aria-label="16 additions, 7 deletions"><span class="add-count">+16</span><span class="del-count">−7</span></span>
+                </button>
+                <span class="repo-tag">repo ui</span>
+              </div>
+              <div class="diff-overflow" id="file-widget-body">
+                <div class="split-grid split-view">
+                  <div class="hunk-header"><div class="hunk-context-cell"></div><div class="hunk-signature">@@ -835,7 +837,12 @@ private _openCommitDiffModal</div></div>
+                  <div class="split-row"><div class="diff-line del"><span class="line-no">837</span><span class="prefix">−</span><span class="line-text">this._openDiffModal(file.path, undefined, { commit: commit.sha });</span></div><div class="diff-line add"><span class="line-no">837</span><span class="prefix">+</span><span class="line-text">this._openDiffModal(file.path, undefined, { commit: commit.sha, oldPath: file.oldPath });</span></div></div>
+                  <div class="split-row"><div class="diff-line empty"><span class="line-no"></span><span class="prefix"></span><span class="line-text"></span></div><div class="diff-line add"><span class="line-no">838</span><span class="prefix">+</span><span class="line-text">// Rename metadata is header-only; endpoint remains raw { diff }.</span></div></div>
+                </div>
+                <div class="inline-lines inline-view" hidden>
+                  <div class="hunk-header"><div class="hunk-context-cell"></div><div class="hunk-signature">@@ -835,7 +837,12 @@ private _openCommitDiffModal</div></div>
+                  <div class="diff-line del"><span class="line-no">837</span><span class="line-no"></span><span class="prefix">−</span><span class="line-text">this._openDiffModal(file.path, undefined, { commit: commit.sha });</span></div>
+                  <div class="diff-line add"><span class="line-no"></span><span class="line-no">837</span><span class="prefix">+</span><span class="line-text">this._openDiffModal(file.path, undefined, { commit: commit.sha, oldPath: file.oldPath });</span></div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="state-panel" data-panel="loading" role="tabpanel" aria-label="Loading state">
+          <div class="notice" aria-live="polite">
+            <span class="notice-icon"><span class="spinner" aria-hidden="true"></span></span>
+            <h2>Loading diff…</h2>
+            <p>Fetching raw unified diff for <span class="path">src/ui/components/GitStatusWidget.ts</span>.</p>
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line medium"></span><span class="skeleton-line short"></span></div>
+          </div>
+        </section>
+
+        <section class="state-panel" data-panel="error" role="tabpanel" aria-label="Error state">
+          <div class="notice error">
+            <span class="notice-icon"><svg class="status-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 4.2 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z"></path></svg></span>
+            <h2>Diff could not be loaded</h2>
+            <p>HTTP 404: file is no longer present in this commit. Keep the retry and close actions available.</p>
+          </div>
+        </section>
+
+        <section class="state-panel" data-panel="empty" role="tabpanel" aria-label="No diff state">
+          <div class="notice">
+            <span class="notice-icon"><svg class="status-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span>
+            <h2>No diff available</h2>
+            <p>The endpoint returned an empty <span class="path">{ diff }</span> payload. This mirrors the current clear empty state.</p>
+          </div>
+        </section>
+
+        <section class="state-panel" data-panel="truncated" role="tabpanel" aria-label="Truncated diff state">
+          <div class="truncated-banner" role="status">
+            <svg class="status-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 4.2 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z"></path></svg>
+            <div><strong>Diff truncated</strong><p>Showing the first 200 KB. Counts and file headers remain visible so users understand scope before opening the raw diff.</p></div>
+          </div>
+          <div class="diff-list">
+            <article class="diff-file-card">
+              <div class="file-header-row"><button class="file-toggle" type="button" aria-expanded="true"><span class="caret" aria-hidden="true">▸</span><span class="file-main"><span class="path">src/server/agent/session-store.ts</span><span class="rename-path">large generated diff preview</span></span><span class="counts"><span class="add-count">+918</span><span class="del-count">−642</span></span></button></div>
+              <div class="diff-overflow"><div class="inline-lines"><div class="hunk-header"><div class="hunk-context-cell"></div><div class="hunk-signature">@@ preview truncated after rendered hunks @@</div></div><div class="diff-line add"><span class="line-no"></span><span class="line-no">1204</span><span class="prefix">+</span><span class="line-text">return persistSessionSnapshot(session, { durable: true });</span></div></div></div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const shell = document.querySelector('.modal-backdrop');
+    const setMode = (mode) => {
+      shell.dataset.mode = mode;
+      document.querySelectorAll('.mode-button').forEach((button) => {
+        const active = button.dataset.modeTarget === mode;
+        button.setAttribute('aria-checked', String(active));
+      });
+      document.querySelectorAll('.split-view').forEach((node) => { node.hidden = mode !== 'split'; });
+      document.querySelectorAll('.inline-view').forEach((node) => { node.hidden = mode !== 'inline'; });
+      document.querySelectorAll('.diff-list').forEach((node) => { node.dataset.layout = mode; });
+    };
+    document.querySelectorAll('.mode-button').forEach((button) => {
+      button.addEventListener('click', () => setMode(button.dataset.modeTarget));
+    });
+    document.querySelectorAll('.file-toggle').forEach((button) => {
+      button.addEventListener('click', () => {
+        const card = button.closest('.diff-file-card');
+        const isClosed = card.classList.toggle('closed');
+        button.setAttribute('aria-expanded', String(!isClosed));
+      });
+    });
+    document.querySelectorAll('.context-toggle').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const key = button.dataset.context;
+        const scope = button.closest('.split-grid, .inline-lines');
+        scope.querySelectorAll(`[data-context-block="${key}"]`).forEach((block) => block.classList.add('revealed'));
+        button.disabled = true;
+        button.setAttribute('aria-label', 'Hidden context expanded');
+        button.style.opacity = '.55';
+      });
+    });
+    document.querySelectorAll('.state-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.state-tab').forEach((item) => item.setAttribute('aria-selected', String(item === tab)));
+        document.querySelectorAll('.state-panel').forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === tab.dataset.state));
+      });
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') document.querySelector('.modal-backdrop').setAttribute('aria-hidden', 'true');
+    });
+  </script>
+</body>
+</html>

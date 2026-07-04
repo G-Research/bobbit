@@ -3,12 +3,13 @@ import { renderSettingsPage } from "../../src/app/settings-page.js";
 import { setRenderApp, state } from "../../src/app/state.js";
 
 type FetchLogEntry = { url: string; method: string; body: unknown };
-
-type Worktree = { path: string; branch: string };
 type Session = { id: string; title?: string };
 type Archives = { count: number; totalSizeBytes: number };
+type WorktreeInventory = Record<string, any>;
 
-let worktrees: Worktree[] = [];
+let worktreeInventory: WorktreeInventory = emptyWorktreeInventory();
+let worktreeCleanup: WorktreeInventory = cleanupResponse({});
+let worktreeNextInventory: WorktreeInventory | null = null;
 let sessions: Session[] = [];
 let archives: Archives = { count: 0, totalSizeBytes: 0 };
 let orphanRows: { count: number; sample: Array<{ id: string; source_id: string; parent_id?: string | null }> } = { count: 0, sample: [] };
@@ -31,10 +32,7 @@ localStorage.setItem("gateway.url", "http://fixture.test");
 localStorage.setItem("gateway.token", "fixture-token");
 
 function response(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
+	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
 function requestPath(input: RequestInfo | URL): string {
@@ -63,6 +61,36 @@ function searchStatsBody() {
 	};
 }
 
+function emptyWorktreeInventory(): WorktreeInventory {
+	return {
+		items: [],
+		counts: {
+			total: 0,
+			readyToClean: 0,
+			protectedInUse: 0,
+			archivedOwned: 0,
+			unownedGitWorktrees: 0,
+			poolEntries: 0,
+			alreadyCleaned: 0,
+			needsAttention: 0,
+			scanErrors: 0,
+			defaultSelected: 0,
+			byClassification: {},
+			byReason: {},
+			bySource: {},
+		},
+		generatedAt: Date.now(),
+		scanned: { projects: 1, repos: 1, worktreeRoots: 1 },
+	};
+}
+
+function cleanupResponse(counts: Record<string, number>, results: any[] = []): WorktreeInventory {
+	return {
+		counts: { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0, ...counts },
+		results,
+	};
+}
+
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const url = requestPath(input);
 	const method = (init?.method || "GET").toUpperCase();
@@ -75,10 +103,14 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		orphanRows = { count: 0, sample: [] };
 		return response({ deleted: 0 });
 	}
-	if (url === "/api/maintenance/orphaned-worktrees") return response({ worktrees });
+	if (url === "/api/maintenance/worktrees" && method === "GET") return response(worktreeInventory);
 	if (url === "/api/maintenance/cleanup-worktrees" && method === "POST") {
-		worktrees = [];
-		return response({ cleaned: true });
+		const cleanup = worktreeCleanup;
+		if (worktreeNextInventory) {
+			worktreeInventory = worktreeNextInventory;
+			worktreeNextInventory = null;
+		}
+		return response(cleanup);
 	}
 	if (url === "/api/maintenance/orphaned-sessions") return response({ sessions });
 	if (url === "/api/maintenance/cleanup-sessions" && method === "POST") {
@@ -103,12 +135,16 @@ setRenderApp(doRender);
 window.addEventListener("hashchange", doRender);
 
 (window as any).__setMaintenanceFixture = (opts: {
-	worktrees?: Worktree[];
+	worktreeInventory?: WorktreeInventory;
+	worktreeCleanup?: WorktreeInventory;
+	worktreeNextInventory?: WorktreeInventory;
 	sessions?: Session[];
 	archives?: Archives;
 	orphanRows?: { count: number; sample: Array<{ id: string; source_id: string; parent_id?: string | null }> };
 }) => {
-	worktrees = opts.worktrees || [];
+	worktreeInventory = opts.worktreeInventory || emptyWorktreeInventory();
+	worktreeCleanup = opts.worktreeCleanup || cleanupResponse({});
+	worktreeNextInventory = opts.worktreeNextInventory || null;
 	sessions = opts.sessions || [];
 	archives = opts.archives || { count: 0, totalSizeBytes: 0 };
 	orphanRows = opts.orphanRows || { count: 0, sample: [] };

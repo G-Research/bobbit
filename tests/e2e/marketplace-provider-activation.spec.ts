@@ -50,6 +50,10 @@ function writePack(root: string, packName: string): string {
 	return packDir;
 }
 
+function piExtensionRefs(rows: any[]): string[] {
+	return rows.map((row) => typeof row === "string" ? row : String(row?.ref ?? row?.listName ?? "")).filter(Boolean);
+}
+
 function writeSchema1Pack(root: string, packName: string): string {
 	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
@@ -116,7 +120,7 @@ test.describe("marketplace pack activation — providers", () => {
 			expect(putBody.catalogue.providers).toEqual(["memory"]);
 			expect(putBody.catalogue.hooks).toEqual(["turn-hook"]);
 			expect(putBody.catalogue.mcp).toEqual(["local-mcp"]);
-			expect(putBody.catalogue.piExtensions).toEqual(["pi-card"]);
+			expect(piExtensionRefs(putBody.catalogue.piExtensions)).toEqual(["pi-card"]);
 			expect(putBody.catalogue.runtimes).toEqual(["node"]);
 			expect(putBody.catalogue.workflows).toEqual(["review-flow"]);
 			expect(putBody.disabled.providers).toEqual(["memory"]);
@@ -129,10 +133,10 @@ test.describe("marketplace pack activation — providers", () => {
 				providers: ["memory"],
 				hooks: ["turn-hook"],
 				mcp: ["local-mcp"],
-				piExtensions: ["pi-card"],
 				runtimes: ["node"],
 				workflows: ["review-flow"],
 			});
+			expect(piExtensionRefs(getBody.catalogue.piExtensions)).toEqual(["pi-card"]);
 		} finally {
 			await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",

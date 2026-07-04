@@ -5,15 +5,48 @@ import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface ToolProvider {
-	type: 'builtin' | 'bobbit-extension' | 'mcp';
+	type: 'builtin' | 'bobbit-extension' | 'mcp' | 'pi-extension';
 	tool?: string;       // for builtin
 	extension?: string;  // for bobbit-extension
 	server?: string;     // for mcp
 	mcpTool?: string;    // for mcp
+	providerKey?: string; // for pi-extension
+}
+
+export interface ScopedToolContext {
+	projectId?: string;
+	cwd?: string;
+	scopeKey: string;
+}
+
+export interface PiExtensionToolProviderInfo {
+	providerKey: string;
+	packName: string;
+	packId: string;
+	listName: string;
+	scope: string;
+	sourcePath?: string;
+}
+
+export interface PiExtensionExternalTool {
+	name: string;
+	runtimeName?: string;
+	description?: string;
+	summary?: string;
+	group?: string;
+	docs?: string;
+	inputSchema?: Record<string, unknown>;
+	providerKey?: string;
+	packName: string;
+	packId: string;
+	listName: string;
+	scope: string;
+	sourcePath?: string;
 }
 
 /**
@@ -73,6 +106,14 @@ export interface ToolInfo {
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
 	params?: string[];
+	providerType?: "pi-extension";
+	origin?: "marketplace-pi-extension" | string;
+	originPackName?: string;
+	originPackId?: string;
+	sourcePath?: string;
+	providers?: PiExtensionToolProviderInfo[];
+	/** Invalid config-level override diagnostics related to this tool, when a lower-priority fallback won. */
+	diagnostics?: ToolExtensionDiagnostic[];
 }
 
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
@@ -126,7 +167,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
@@ -243,6 +284,78 @@ function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 /** Test/maintenance hook: drop the scan cache. */
 export function __resetToolScanCache(): void {
 	_scanCache.clear();
+	__resetToolExtensionPreflightDiagnostics();
+}
+
+function invalidConfigToolDiagnostic(tool: BaseToolInfo): ToolExtensionDiagnostic | undefined {
+	return preflightConfigBobbitExtension({
+		toolName: tool.name,
+		groupDir: tool.groupDir,
+		baseDir: tool.baseDir,
+		provider: tool.provider,
+	});
+}
+
+function groupHasBobbitProviderForExtension(tools: BaseToolInfo[], groupDir: string, extension: string): boolean {
+	return tools.some((tool) => tool.groupDir === groupDir && tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === extension);
+}
+
+function invalidConfigGroupExtensionDiagnostic(toolsDir: string, groupDir: string, extension = "extension.ts", groupTools?: BaseToolInfo[]): ToolExtensionDiagnostic | undefined {
+	if (groupTools && groupHasBobbitProviderForExtension(groupTools, groupDir, extension)) return undefined;
+	const extensionPath = path.join(toolsDir, groupDir, extension);
+	try {
+		if (!fs.statSync(extensionPath).isFile()) return undefined;
+	} catch {
+		return undefined;
+	}
+	return preflightConfigExtensionFile({
+		toolName: `${groupDir}/${extension}`,
+		groupDir,
+		baseDir: toolsDir,
+		extension,
+	});
+}
+
+function collectInvalidConfigGroupExtensionDiagnostics(toolsDir: string, tools: BaseToolInfo[] = scanToolsDirCached(toolsDir, toolsDir)): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	try {
+		for (const entry of fs.readdirSync(toolsDir, { withFileTypes: true })) {
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
+			const diagnostic = invalidConfigGroupExtensionDiagnostic(toolsDir, entry.name, "extension.ts", tools);
+			if (diagnostic) diagnostics.push(diagnostic);
+		}
+	} catch { /* config tools dir absent */ }
+	return diagnostics;
+}
+
+function collectInvalidConfigToolDiagnostics(tools: BaseToolInfo[]): ToolExtensionDiagnostic[] {
+	const diagnostics: ToolExtensionDiagnostic[] = [];
+	const seen = new Set<string>();
+	for (const tool of tools) {
+		const diagnostic = invalidConfigToolDiagnostic(tool);
+		if (!diagnostic) continue;
+		const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		diagnostics.push(diagnostic);
+	}
+	return diagnostics;
+}
+
+function filterInvalidConfigTools(tools: BaseToolInfo[], invalidGroupExtensions: Set<string> = new Set()): BaseToolInfo[] {
+	const invalidNames = new Set<string>();
+	for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidNames.add(diagnostic.toolName);
+	}
+	return tools.filter((tool) => !invalidNames.has(tool.name) && !toolDependsOnInvalidGroupExtension(tool, invalidGroupExtensions));
+}
+
+function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExtensions: Set<string>): boolean {
+	if (!tool.groupDir || !invalidGroupExtensions.has(tool.groupDir)) return false;
+	if (tool.provider?.type === "builtin" && tool.provider.tool === "bash") return true;
+	if (tool.provider?.type === "bobbit-extension" && (tool.provider.extension ?? "extension.ts") === "extension.ts") return true;
+	return false;
 }
 
 /**
@@ -294,14 +407,28 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
 	const userIdx = layers.length - 1;
 
-	const scanned = layers.map((l) => scanToolsDirCached(l.dir, l.dir));
+	const invalidUserGroupExtensions = new Set<string>();
+	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidUserGroupExtensions.add(diagnostic.groupDir);
+	}
+	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
+	const scanned = layers.map((l, idx) => {
+		const tools = scanToolsDirCached(l.dir, l.dir);
+		if (idx !== userIdx) return tools;
+		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
+		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
+	});
 
 	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
 	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
 	// Market layers neither own nor are shadowed by groups — they overlay by
-	// tool NAME only (design §3.2 / finding #1).
+	// tool NAME only (design §3.2 / finding #1). If any config tool/extension in
+	// the group failed preflight, disable whole-group shadowing so lower-priority
+	// builtins can still provide per-tool fallbacks while valid config tools keep
+	// winning by name.
 	const userGroups = new Set<string>();
-	for (const t of scanned[userIdx]) if (t.groupDir) userGroups.add(t.groupDir);
+	for (const t of scanned[userIdx]) if (t.groupDir && !invalidUserToolGroups.has(t.groupDir)) userGroups.add(t.groupDir);
 
 	// Resolve the winner per tool name (higher layer wins — matches the
 	// PackResolver), but emit in first-seen low→high order so prompt/doc output
@@ -350,6 +477,7 @@ export function copyDirRecursive(src: string, dest: string): void {
  */
 export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
+	private scopedPiExtensionTools = new Map<string, Map<string, PiExtensionExternalTool[]>>();
 	private readonly toolsDir: string;
 	private readonly builtinToolsDir: string | undefined;
 	/**
@@ -365,6 +493,23 @@ export class ToolManager {
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
+	}
+
+	private configGroupHasInvalidExtension(groupDir: string): boolean {
+		let invalid = false;
+		const tools = scanToolsDirCached(this.toolsDir, this.toolsDir).filter((tool) => tool.groupDir === groupDir);
+		const groupDiagnostic = invalidConfigGroupExtensionDiagnostic(this.toolsDir, groupDir, "extension.ts", tools);
+		if (groupDiagnostic) {
+			logToolExtensionDiagnostic(groupDiagnostic);
+			invalid = true;
+		}
+		for (const tool of tools) {
+			const diagnostic = invalidConfigToolDiagnostic(tool);
+			if (!diagnostic) continue;
+			logToolExtensionDiagnostic(diagnostic);
+			invalid = true;
+		}
+		return invalid;
 	}
 
 	/**
@@ -403,10 +548,11 @@ export class ToolManager {
 	 * Config-level (toolsDir) takes priority over builtins.
 	 */
 	getToolGroupBaseDir(groupDir: string): string {
-		// Check config-level first
+		// Check config-level first. Archived/disabled groups and groups with broken
+		// config-level bobbit-extension providers must not shadow bundled tools.
 		const configGroup = path.join(this.toolsDir, groupDir);
 		try {
-			if (fs.statSync(configGroup).isDirectory()) return this.toolsDir;
+			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidExtension(groupDir)) return this.toolsDir;
 		} catch { /* not found */ }
 
 		// Check builtins
@@ -462,13 +608,133 @@ export class ToolManager {
 		}
 	}
 
+	/** Replace discovered pi-extension tools for one scoped context. */
+	setScopedPiExtensionTools(context: ScopedToolContext, tools: PiExtensionExternalTool[]): void {
+		const scopeKey = this.normalizeScopeKey(context);
+		const grouped = new Map<string, PiExtensionExternalTool[]>();
+		for (const tool of tools) {
+			const runtimeName = this.piToolRuntimeName(tool);
+			if (!runtimeName) continue;
+			const key = runtimeName.toLowerCase();
+			const list = grouped.get(key) ?? [];
+			list.push({ ...tool, name: runtimeName, runtimeName });
+			grouped.set(key, list);
+		}
+		this.scopedPiExtensionTools.set(scopeKey, grouped);
+	}
+
+	/** Append discovered pi-extension tools to one scoped context. */
+	registerScopedPiExtensionTools(context: ScopedToolContext, tools: PiExtensionExternalTool[]): void {
+		const scoped = this.scopedPiExtensionTools.get(this.normalizeScopeKey(context));
+		const existing = scoped ? [...scoped.values()].flat() : [];
+		this.setScopedPiExtensionTools(context, [...existing, ...tools]);
+	}
+
+	/** Remove discovered pi-extension tools for one scoped context. */
+	clearScopedPiExtensionTools(context?: ScopedToolContext): void {
+		if (!context) {
+			this.scopedPiExtensionTools.clear();
+			return;
+		}
+		this.scopedPiExtensionTools.delete(this.normalizeScopeKey(context));
+	}
+
+	/** Return pi-extension tools visible in the supplied scope (global/default + exact scope). */
+	resolveScopedPiExtensionTools(context?: ScopedToolContext): PiExtensionExternalTool[] {
+		const keys = this.visibleScopeKeys(context);
+		const out: PiExtensionExternalTool[] = [];
+		for (const key of keys) {
+			const scoped = this.scopedPiExtensionTools.get(key);
+			if (!scoped) continue;
+			for (const providers of scoped.values()) out.push(...providers);
+		}
+		return out;
+	}
+
+	private normalizeScopeKey(context?: ScopedToolContext): string {
+		return context?.scopeKey?.trim() || "default";
+	}
+
+	private visibleScopeKeys(context?: ScopedToolContext): string[] {
+		const scopeKey = this.normalizeScopeKey(context);
+		return scopeKey === "default" ? ["default"] : ["default", scopeKey];
+	}
+
+	private piToolRuntimeName(tool: PiExtensionExternalTool): string {
+		return (tool.runtimeName || tool.name || "").trim();
+	}
+
+	private piToolProviderInfo(tool: PiExtensionExternalTool, scopeKey: string): PiExtensionToolProviderInfo {
+		const runtimeName = this.piToolRuntimeName(tool);
+		return {
+			providerKey: tool.providerKey || `pi-ext:${scopeKey}:${tool.packId}:${tool.listName}:${runtimeName}`,
+			packName: tool.packName,
+			packId: tool.packId,
+			listName: tool.listName,
+			scope: tool.scope,
+			sourcePath: tool.sourcePath,
+		};
+	}
+
+	private scopedPiToolGroups(context?: ScopedToolContext): Map<string, { runtimeName: string; tools: PiExtensionExternalTool[]; providers: PiExtensionToolProviderInfo[] }> {
+		const out = new Map<string, { runtimeName: string; tools: PiExtensionExternalTool[]; providers: PiExtensionToolProviderInfo[] }>();
+		for (const scopeKey of this.visibleScopeKeys(context)) {
+			const scoped = this.scopedPiExtensionTools.get(scopeKey);
+			if (!scoped) continue;
+			for (const providers of scoped.values()) {
+				for (const tool of providers) {
+					const runtimeName = this.piToolRuntimeName(tool);
+					if (!runtimeName) continue;
+					const key = runtimeName.toLowerCase();
+					let entry = out.get(key);
+					if (!entry) {
+						entry = { runtimeName, tools: [], providers: [] };
+						out.set(key, entry);
+					}
+					entry.tools.push(tool);
+					entry.providers.push(this.piToolProviderInfo(tool, scopeKey));
+				}
+			}
+		}
+		return out;
+	}
+
+	private piToolInfoFromGroup(entry: { runtimeName: string; tools: PiExtensionExternalTool[]; providers: PiExtensionToolProviderInfo[] }): ToolInfo {
+		const first = entry.tools[0];
+		return {
+			name: entry.runtimeName,
+			description: first?.description || `Tool provided by pi extension ${first?.listName ?? "unknown"}`,
+			group: first?.group || "Pi Extensions",
+			docs: first?.docs,
+			detail_docs: undefined,
+			hasRenderer: false,
+			rendererFile: undefined,
+			grantPolicy: undefined,
+			params: undefined,
+			providerType: "pi-extension",
+			origin: "marketplace-pi-extension",
+			originPackName: first?.packName,
+			originPackId: first?.packId,
+			sourcePath: first?.sourcePath,
+			providers: entry.providers,
+		};
+	}
+
 	/**
 	 * Returns only tools defined locally in the config dir (not inherited from builtins).
 	 * Used by the config cascade to determine which tools are server/project overrides.
 	 */
 	getLocalTools(): ToolInfo[] {
-		// Scan only the config-level tools dir — no builtins
-		const tools = scanToolsDir(this.toolsDir, this.toolsDir);
+		// Scan only the config-level tools dir — no builtins. Apply the same
+		// invalid direct group-extension filtering as runtime resolution so the
+		// config cascade and /api/tools do not advertise overrides that launch will skip.
+		const scanned = scanToolsDir(this.toolsDir, this.toolsDir);
+		const invalidGroupExtensions = new Set<string>();
+		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
+			logToolExtensionDiagnostic(diagnostic);
+			invalidGroupExtensions.add(diagnostic.groupDir);
+		}
+		const tools = filterInvalidConfigTools(scanned, invalidGroupExtensions);
 		return tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -483,10 +749,27 @@ export class ToolManager {
 		}));
 	}
 
+	/** Invalid active config-level tool override diagnostics for this manager's config dir. */
+	getToolDiagnostics(): ToolExtensionDiagnostic[] {
+		const diagnostics = [
+			...collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir),
+			...collectInvalidConfigToolDiagnostics(scanToolsDir(this.toolsDir, this.toolsDir)),
+		];
+		const seen = new Set<string>();
+		const unique = diagnostics.filter((diagnostic) => {
+			const key = `${diagnostic.toolName}\0${diagnostic.extensionPath}\0${diagnostic.message}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+		for (const diagnostic of unique) logToolExtensionDiagnostic(diagnostic);
+		return unique;
+	}
+
 	/** Returns all tools, re-scanning the YAML directory on every call. */
-	getAvailableTools(): ToolInfo[] {
+	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const result = tools.map((tool) => ({
+		const result: ToolInfo[] = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
 			group: tool.group,
@@ -511,33 +794,51 @@ export class ToolManager {
 				params: undefined,
 			});
 		}
+		const byLower = new Map<string, ToolInfo>();
+		for (const tool of result) byLower.set(tool.name.toLowerCase(), tool);
+		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
+			const existing = byLower.get(entry.runtimeName.toLowerCase());
+			if (existing) {
+				existing.providers = [...(existing.providers ?? []), ...entry.providers];
+				continue;
+			}
+			const info = this.piToolInfoFromGroup(entry);
+			result.push(info);
+			byLower.set(info.name.toLowerCase(), info);
+		}
 		return result;
 	}
 
 	/** Returns a single tool's full detail, or undefined if not found. Case-insensitive lookup. */
-	getToolByName(name: string): ToolInfo | undefined {
+	getToolByName(name: string, scopedContext?: ScopedToolContext): ToolInfo | undefined {
 		const nameLower = name.toLowerCase();
 		// Check external tools (case-insensitive)
 		for (const ext of this.externalTools.values()) {
 			if (ext.name.toLowerCase() === nameLower) {
-				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined };
+				const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
+				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined, providers: pi?.providers };
 			}
 		}
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
-		if (!base) return undefined;
-		return {
-			name: base.name,
-			description: base.description,
-			group: base.group,
-			docs: base.docs,
-			detail_docs: base.detail_docs,
-			hasRenderer: !!base.renderer,
-			rendererFile: base.renderer,
-			...contributionFields(base),
-			grantPolicy: base.grantPolicy,
-			params: base.params,
-		};
+		if (base) {
+			const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
+			return {
+				name: base.name,
+				description: base.description,
+				group: base.group,
+				docs: base.docs,
+				detail_docs: base.detail_docs,
+				hasRenderer: !!base.renderer,
+				rendererFile: base.renderer,
+				...contributionFields(base),
+				grantPolicy: base.grantPolicy,
+				params: base.params,
+				providers: pi?.providers,
+			};
+		}
+		const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
+		return pi ? this.piToolInfoFromGroup(pi) : undefined;
 	}
 
 	/**
@@ -580,11 +881,12 @@ export class ToolManager {
 	 *
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
-	getToolDocsForPrompt(toolNames?: string[], stateDir?: string): string {
+	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();
+		const included = new Set<string>();
 
 		for (const tool of tools) {
 			if (toolNames && !toolNames.includes(tool.name)) continue;
@@ -592,6 +894,7 @@ export class ToolManager {
 			const summary = tool.summary ?? tool.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
 			grouped.get(group)!.entries.push({ name: tool.name, summary, params: tool.params });
+			included.add(tool.name.toLowerCase());
 		}
 
 		// Include external tools (e.g. MCP) — no params, no inlined docs.
@@ -601,6 +904,16 @@ export class ToolManager {
 			const summary = ext.summary ?? ext.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
 			grouped.get(group)!.entries.push({ name: ext.name, summary });
+			included.add(ext.name.toLowerCase());
+		}
+
+		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
+			if (included.has(entry.runtimeName.toLowerCase())) continue;
+			if (toolNames && !toolNames.includes(entry.runtimeName)) continue;
+			const info = this.piToolInfoFromGroup(entry);
+			if (!grouped.has(info.group)) grouped.set(info.group, { groupDir: '', entries: [] });
+			grouped.get(info.group)!.entries.push({ name: info.name, summary: info.description });
+			included.add(info.name.toLowerCase());
 		}
 
 		if (grouped.size === 0) return "";
@@ -648,12 +961,15 @@ export class ToolManager {
 	}
 
 	/** Returns the provider info for a tool, or undefined if not found. */
-	getToolProvider(name: string): ToolProvider | undefined {
+	getToolProvider(name: string, scopedContext?: ScopedToolContext): ToolProvider | undefined {
 		const ext = this.externalTools.get(name);
 		if (ext) return ext.provider;
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const base = tools.find((t) => t.name === name);
-		return base?.provider;
+		if (base?.provider) return base.provider;
+		const pi = this.scopedPiToolGroups(scopedContext).get(name.toLowerCase());
+		const provider = pi?.providers[0];
+		return provider ? { type: "pi-extension", providerKey: provider.providerKey } : undefined;
 	}
 
 	/**
@@ -692,7 +1008,7 @@ export class ToolManager {
 	}
 
 	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
-	getToolProviders(): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
+	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
 		for (const tool of tools) {
@@ -701,13 +1017,17 @@ export class ToolManager {
 		for (const [name, ext] of this.externalTools) {
 			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
 		}
+		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
+			if (map.has(entry.runtimeName)) continue;
+			const provider = entry.providers[0];
+			map.set(entry.runtimeName, { type: "pi-extension", providerKey: provider.providerKey, groupDir: '', baseDir: '' });
+		}
 		return map;
 	}
 
 	/** Returns all tool names from YAML definitions. */
-	getAllToolNames(): string[] {
-		const yamlNames = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots()).map((t) => t.name);
-		return [...yamlNames, ...this.externalTools.keys()];
+	getAllToolNames(scopedContext?: ScopedToolContext): string[] {
+		return this.getAvailableTools(scopedContext).map((t) => t.name);
 	}
 
 	/**

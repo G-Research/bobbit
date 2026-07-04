@@ -5,7 +5,6 @@
  * kill/dismiss buttons, outside-click close, Escape close, exit code display.
  */
 import { test, expect, type Page } from "@playwright/test";
-import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
@@ -13,12 +12,11 @@ const FIXTURE = `file://${path.resolve("tests/bg-process-states.html").replace(/
 const TIMER_FIXTURE_PATH = path.resolve("tests/fixtures/bg-process-timer.html");
 const TIMER_FIXTURE = `file://${TIMER_FIXTURE_PATH.replace(/\\/g, "/")}`;
 const TIMER_ENTRY = path.resolve("tests/fixtures/bg-process-timer-entry.ts");
-const TIMER_BUNDLE = path.resolve("test-results/bg-process-timer-bundle.js");
+const TIMER_BUNDLE = path.resolve("tests/fixtures/bg-process-timer-bundle.js");
 const BG_PROCESS_PILL_SRC = path.resolve("src/ui/components/BgProcessPill.ts");
 const LIVE_TIMER_SRC = path.resolve("src/ui/components/LiveTimer.ts");
 
 test.beforeAll(() => {
-	fs.mkdirSync(path.dirname(TIMER_BUNDLE), { recursive: true });
 	buildBundle({
 		entry: TIMER_ENTRY,
 		outfile: TIMER_BUNDLE,

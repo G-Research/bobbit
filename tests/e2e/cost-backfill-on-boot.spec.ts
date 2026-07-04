@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Per-worker V8 compile cache (mirrors in-process-harness.ts).
@@ -54,16 +54,30 @@ interface StartedGateway {
 	port: number;
 	baseURL: string;
 	bobbitDir: string;
+	defaultProjectRoot: string;
 	token: string;
 	consoleLogs: string[];
 	shutdown: () => Promise<void>;
 }
 
+function defaultProjectRootForBobbitDir(bobbitDir: string): string {
+	return join(dirname(bobbitDir), `${basename(bobbitDir)}-default-project`);
+}
+
+function canonicalDefaultProjectRoot(bobbitDir: string): string {
+	const root = defaultProjectRootForBobbitDir(bobbitDir);
+	mkdirSync(root, { recursive: true });
+	try { return realpathSync(root); } catch { return root; }
+}
+
 async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Promise<StartedGateway> {
 	mkdirSync(E2E_TEMP_ROOT, { recursive: true });
+	const defaultProjectRoot = canonicalDefaultProjectRoot(bobbitDir);
 	if (opts.freshDir) {
 		rmSync(bobbitDir, { recursive: true, force: true });
+		rmSync(defaultProjectRoot, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		mkdirSync(defaultProjectRoot, { recursive: true });
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		writeFileSync(
@@ -148,7 +162,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 			const serverConfigDir = join(bobbitDir, "config");
 			mkdirSync(serverConfigDir, { recursive: true });
 			writeFileSync(join(serverConfigDir, "project.yaml"), yamlContent);
-			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			const projectConfigDir = join(defaultProjectRoot, ".bobbit", "config");
 			mkdirSync(projectConfigDir, { recursive: true });
 			writeFileSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
@@ -185,7 +199,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+			body: JSON.stringify({ name: "default", rootPath: defaultProjectRoot, upsert: true, acceptCanonical: true }),
 		});
 		if (!resp.ok) {
 			throw new Error(`project register failed: ${resp.status} ${await resp.text()}`);
@@ -196,6 +210,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		port,
 		baseURL,
 		bobbitDir,
+		defaultProjectRoot,
 		token,
 		consoleLogs,
 		shutdown: async () => {
@@ -229,7 +244,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 /** Resolve the default project's state dir on disk. */
 function projectStateDir(bobbitDir: string): string {
-	return join(bobbitDir, ".bobbit", "state");
+	return join(defaultProjectRootForBobbitDir(bobbitDir), ".bobbit", "state");
 }
 
 /** Write a v2-shape sessions.json with the supplied PersistedSession-like rows. */
@@ -302,8 +317,8 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 				headers: { Authorization: `Bearer ${gw.token}` },
 			});
 			const projects = await projResp.json() as Array<{ id: string; name: string }>;
-			const projectId = (projects.find(p => p.name === "default") ?? projects[0])?.id;
-			expect(projectId, "default project must exist after boot 1").toBeTruthy();
+			const projectId = projects.find(p => p.name === "default")?.id;
+			expect(projectId, "normal default project must exist after boot 1").toBeTruthy();
 
 			// Create goalA. We deliberately bypass the e2e-setup createGoal
 			// helper to keep this spec self-contained (no shared harness fixture).
@@ -414,6 +429,7 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 		} finally {
 			await gw.shutdown();
 			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			try { rmSync(defaultProjectRootForBobbitDir(bobbitDir), { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 
@@ -428,7 +444,8 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 		try {
 			const projResp = await fetch(`${gw.baseURL}/api/projects`, { headers: { Authorization: `Bearer ${gw.token}` } });
 			const projects = await projResp.json() as Array<{ id: string; name: string }>;
-			const projectId = (projects.find(p => p.name === "default") ?? projects[0])?.id;
+			const projectId = projects.find(p => p.name === "default")?.id;
+			expect(projectId, "normal default project must exist after boot 1").toBeTruthy();
 			const cwd = join(tmpdir(), `bobbit-cost-backfill-clean-${gw.port}-${Date.now()}`);
 			mkdirSync(cwd, { recursive: true });
 			const goalResp = await fetch(`${gw.baseURL}/api/goals`, {
@@ -465,6 +482,7 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 		} finally {
 			await gw.shutdown();
 			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			try { rmSync(defaultProjectRootForBobbitDir(bobbitDir), { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 });

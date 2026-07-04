@@ -238,8 +238,14 @@ export async function generateImage(prefs: PreferencesStore, request: ImageGener
 	if (!request.prompt || typeof request.prompt !== "string") {
 		throw new Error("prompt is required");
 	}
-	const model = getImageModelByPref(prefs, request.model) || getImageModelByPref(prefs, defaultImageModelPref());
-	if (!model) throw new Error("No image generation model is configured");
+	const model = request.model
+		? getImageModelByPref(prefs, request.model)
+		: getImageModelByPref(prefs, defaultImageModelPref());
+	if (!model) {
+		throw new Error(request.model
+			? `Unknown or unavailable image generation model: ${request.model}`
+			: "No image generation model is configured");
+	}
 	if (model.api === "openai-images") {
 		const images = await generateOpenAIImage(prefs, model, request);
 		return { model, images };

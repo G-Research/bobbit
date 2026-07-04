@@ -18,9 +18,114 @@
  * in-process move — a single Node process can host hundreds of independent
  * "agent" instances cheaply.
  */
-import { MockAgentCore } from "./mock-agent-core.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { MockAgentCore, mockModelFromString } from "./mock-agent-core.mjs";
 
 export const IN_PROCESS_MOCK_SENTINEL = "<in-process-mock>";
+
+function lastModelArg(args = []) {
+	let model;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--model" && i + 1 < args.length) {
+			model = args[++i];
+		} else if (typeof arg === "string" && arg.startsWith("--model=")) {
+			model = arg.slice("--model=".length);
+		}
+	}
+	return mockModelFromString(model) ? model : undefined;
+}
+
+function extensionArgs(args = []) {
+	const out = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--extension" && typeof args[i + 1] === "string") {
+			out.push(args[++i]);
+		}
+	}
+	return out;
+}
+
+function shouldLoadInMock(extensionPath) {
+	const normalized = String(extensionPath || "").replace(/\\/g, "/");
+	return normalized.includes("/pi-extensions/") || normalized.includes("/state/tool-guard/");
+}
+
+function parseToolRegistration(args) {
+	let name;
+	let description = "";
+	let inputSchema;
+	let handler;
+	if (typeof args[0] === "string") {
+		name = args[0];
+		if (typeof args[1] === "function") {
+			handler = args[1];
+		} else {
+			description = args[1]?.description || "";
+			inputSchema = args[1]?.inputSchema || args[1]?.schema;
+			handler = typeof args[2] === "function" ? args[2] : args[1]?.handler || args[1]?.execute;
+		}
+	} else if (args[0] && typeof args[0] === "object") {
+		name = args[0].name;
+		description = args[0].description || "";
+		inputSchema = args[0].inputSchema || args[0].schema;
+		handler = typeof args[1] === "function" ? args[1] : args[0].handler || args[0].execute;
+	}
+	if (!name || typeof handler !== "function") return null;
+	return { name, description, inputSchema, handler };
+}
+
+async function importExtensionModule(filePath) {
+	if (!/\.tsx?$/i.test(filePath)) return import(pathToFileURL(filePath).href);
+	const ts = await import("typescript");
+	const source = fs.readFileSync(filePath, "utf-8");
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
+		fileName: filePath,
+	});
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mock-pi-ext-"));
+	const out = path.join(dir, path.basename(filePath).replace(/\.tsx?$/i, ".mjs"));
+	fs.writeFileSync(out, transpiled.outputText, "utf-8");
+	return import(pathToFileURL(out).href);
+}
+
+async function loadMockPiExtensions(args = []) {
+	const tools = new Map();
+	const toolCallHandlers = [];
+	const pi = {
+		on(event, handler) {
+			if (event === "tool_call" && typeof handler === "function") toolCallHandlers.push(handler);
+		},
+		tool(...registrationArgs) {
+			const parsed = parseToolRegistration(registrationArgs);
+			if (parsed) tools.set(parsed.name, parsed);
+			return parsed;
+		},
+		registerTool(...registrationArgs) {
+			return pi.tool(...registrationArgs);
+		},
+	};
+	pi.tools = { register: (...registrationArgs) => pi.tool(...registrationArgs) };
+
+	for (const extensionPath of extensionArgs(args)) {
+		if (!shouldLoadInMock(extensionPath)) continue;
+		try {
+			const mod = await importExtensionModule(extensionPath);
+			const activate = typeof mod.default === "function" ? mod.default : mod.default?.default;
+			if (typeof activate === "function") await activate(pi);
+		} catch (err) {
+			// The real pi runtime reports extension-load failures without killing the
+			// gateway. Mirror that behaviour for the mock: tests assert diagnostics via
+			// server APIs, not stderr from this helper.
+			console.warn(`[in-process-mock] failed to load extension ${extensionPath}: ${err?.message || err}`);
+		}
+	}
+	return { tools, toolCallHandlers };
+}
 
 export class InProcessMockBridge {
 	constructor(options = {}) {
@@ -41,10 +146,15 @@ export class InProcessMockBridge {
 		// spawn() does in the real bridge). The core reads only env values,
 		// not argv, so we pass cwd directly via opts.
 		const env = { ...process.env, ...(this.options.env || {}) };
+		const argModel = lastModelArg(this.options.args);
+		const mockPi = await loadMockPiExtensions(this.options.args);
 		this._agent = new MockAgentCore({
 			cwd: this.options.cwd || process.cwd(),
 			env,
+			initialModel: argModel || this.options.initialModel,
 			onEvent: (evt) => this._emit(evt),
+			mockPiTools: mockPi.tools,
+			mockPiToolCallHandlers: mockPi.toolCallHandlers,
 		});
 		this._running = true;
 		// Mirror the child process's initial "session_status: idle" emission.

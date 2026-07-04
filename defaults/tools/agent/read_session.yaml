@@ -1,22 +1,23 @@
 name: read_session
 description: "Paginated, regex-filterable transcript read of another session"
 summary: "Read another session's transcript, paginated"
-params: [session_id, offset?, limit?, pattern?, context?, verbose?]
+params: [session_id, offset?, limit?, pattern?, context?, verbose?, include_tool_results?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Agent
 renderer: src/ui/tools/renderers/ReadSessionRenderer.ts
 docs: |-
-  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. `verbose: true` includes full content blocks (subject to the standard 32 KB tool-result cap with lazy-load).
+  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. By default, tool result bodies are omitted and replaced with compact metadata placeholders. Pass `include_tool_results: true` only for narrow, deliberate raw-output reads. `verbose: true` includes full content blocks but still omits tool result bodies unless `include_tool_results: true` is also set.
 detail_docs: >-
   ## Purpose
 
 
-  Read the conversation transcript of another Bobbit session — a peer team
-  agent, a delegate session, or an archived session. The tool resolves the
-  session's JSONL file server-side so callers never deal with paths, sandbox
-  remapping, or filesystem permissions.
+  Read the conversation transcript of another Bobbit session on the same
+  gateway — a peer team agent, a delegate session, a session from another
+  project, or an archived session. The tool resolves the session's JSONL file
+  server-side so callers never deal with paths, sandbox remapping, or
+  filesystem permissions.
 
 
   ## Parameters
@@ -38,7 +39,9 @@ detail_docs: >-
 
   | `context` | number | no | `0..5`. Only meaningful with `pattern`. Expands each match by ±N neighbours; the deduplicated match-with-context list is what `offset`/`limit` then paginate. |
 
-  | `verbose` | boolean | no | Default `false`. When true, returns full content blocks instead of compact summaries. Subject to the 32 KB tool-result cap (with lazy-load). |
+  | `verbose` | boolean | no | Default `false`. When true, returns full content blocks instead of compact summaries. Tool result bodies are still omitted unless `include_tool_results: true` is also set. |
+
+  | `include_tool_results` | boolean | no | Default `false`. Opt in to raw tool result bodies/previews. Use only after narrowing with `pattern`, `context`, `offset`, and `limit`. Subject to the 32 KB tool-result cap (with lazy-load). |
 
 
   ## Indexing & filter semantics
@@ -73,7 +76,7 @@ detail_docs: >-
         "ts": "2026-05-04T12:34:56Z",
         "text": "compact text up to ~800 chars",
         "toolUses":    [{ "name": "bash", "inputPreview": "{\"cmd\":\"…\"}" }],
-        "toolResults": [{ "name": "bash", "preview": "…" }]
+        "toolResults": [{ "name": "bash", "omitted": true, "status": "ok", "size": { "type": "string", "chars": 1200, "lines": 42, "bytes": 1200 } }]
       }
     ]
   }
@@ -83,7 +86,10 @@ detail_docs: >-
 
   In `verbose: true` mode each message carries a full `content` array of
   `{ type, text|tool_use|tool_result, … }` blocks instead of `text` /
-  `toolUses` / `toolResults`.
+  `toolUses` / `toolResults`. By default, verbose `tool_result` blocks use
+  `contentOmitted: true`, a stable omission marker in `content`, and
+  `resultSize` metadata instead of the raw body. Pass
+  `include_tool_results: true` to include raw result content.
 
 
   When `messages` is empty, both `offsetStart` and `offsetEnd` are `-1`.
@@ -109,8 +115,6 @@ detail_docs: >-
 
   | `invalid_params` | 400 | `limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc. |
 
-  | `permission_denied` | 403 | Cross-project read. |
-
 
   ## Examples
 
@@ -132,8 +136,8 @@ detail_docs: >-
   read_session(session_id="abc-123", pattern="TypeError", context=2)
 
 
-  # Get the full content of one message
+  # Inspect one raw tool output after narrowing to a specific message
 
-  read_session(session_id="abc-123", offset=42, limit=1, verbose=true)
+  read_session(session_id="abc-123", offset=42, limit=1, verbose=true, include_tool_results=true)
 
   ```

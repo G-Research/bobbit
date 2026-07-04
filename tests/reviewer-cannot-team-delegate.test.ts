@@ -25,7 +25,7 @@ const ROLES_DIR = path.join(DEFAULTS_DIR, "roles");
 const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
 
 /** Reviewer-family roles that must NOT be able to spawn child agents. */
-const REVIEWER_ROLES = ["reviewer", "spec-auditor", "security-reviewer", "code-reviewer"];
+const REVIEWER_ROLES = ["reviewer", "spec-auditor", "security-reviewer", "code-reviewer", "bug-hunter"];
 
 function loadRole(name: string): { toolPolicies?: Record<string, GrantPolicy> } {
 	const text = fs.readFileSync(path.join(ROLES_DIR, `${name}.yaml`), "utf-8");

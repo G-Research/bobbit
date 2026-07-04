@@ -45,16 +45,19 @@ describe("session-setup spawn env contract", () => {
 			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 			"utf-8",
 		);
-		// Verify the env-spread shape spreads provider env first, caller env
-		// (`...plan.env`) next, then the gateway-owned BOBBIT_SESSION_ID +
-		// per-session BOBBIT_SESSION_SECRET so a caller-supplied toolEnv key can
-		// NEVER clobber the session identity or its capability secret (which would
-		// let a child impersonate another session for the binding-routed
-		// PR-walkthrough tool routes):
-		//   { ...(directProviderEnv || {}), ...plan.env, BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ... }
+		// Verify the env-spread shape spreads caller env first, then the
+		// gateway-owned BOBBIT_SESSION_ID + per-session BOBBIT_SESSION_SECRET so a
+		// caller-supplied toolEnv key can NEVER clobber the session identity or its
+		// capability secret (which would let a child impersonate another session for
+		// the binding-routed PR-walkthrough tool routes). Provider env is merged
+		// afterward with existing env precedence preserved.
 		assert.ok(
-			/env:\s*\{\s*\.\.\.\(directProviderEnv\s*\|\|\s*\{\}\),\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
-			"bridge env must spread provider env, then caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
+			/env:\s*\{\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
+			"bridge env must spread caller env, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
+		);
+		assert.ok(
+			/mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\),\s*\}\)/.test(src),
+			"direct host provider env must be merged after active model resolution with only the active model provider plus controlled fallback allowlist",
 		);
 	});
 
@@ -81,7 +84,7 @@ describe("session-setup spawn env contract", () => {
 			"utf-8",
 		);
 		assert.ok(
-			/const directProviderEnv\s*=\s*plan\.sandboxed\s*\?\s*undefined\s*:\s*mergeHostAgentProviderEnv\(undefined,\s*ctx\.preferencesStore\)/.test(src),
+			/if \(!plan\.sandboxed\) \{\s*plan\.bridgeOptions\.env = mergeHostAgentProviderEnv\(plan\.bridgeOptions\.env,\s*ctx\.preferencesStore,\s*\{\s*model:\s*plan\.bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\),\s*\}\);\s*\}/.test(src),
 			"sandboxed sessions must not receive Settings provider keys through the direct host env path; sandbox token policy remains the only sandbox credential path",
 		);
 	});
@@ -92,12 +95,12 @@ describe("session-setup spawn env contract", () => {
 			"utf-8",
 		);
 		assert.ok(
-			/import \{ mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
-			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver",
+			/import \{ fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
+			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver and controlled fallback allowlist resolver",
 		);
 		assert.ok(
-			/env:\s*mergeHostAgentProviderEnv\(toolActivation\.env,\s*this\.preferencesStore\)/.test(src),
-			"legacy direct RpcBridge review fallback must merge providerKey.openrouter into bridgeOptions.env for non-sandbox review agents",
+			/bridgeOptions\.env = mergeHostAgentProviderEnv\(bridgeOptions\.env,\s*this\.preferencesStore,\s*\{\s*model:\s*bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\),\s*\}\)/.test(src),
+			"legacy direct RpcBridge review fallback must merge only the active model provider plus controlled fallback allowlist for non-sandbox review agents",
 		);
 	});
 

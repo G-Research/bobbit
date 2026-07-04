@@ -1,14 +1,14 @@
 /**
  * Boot-time worktree sweeper.
  *
- * Reconciles on-disk git worktrees against persisted goal/session/staff
+ * Reconciles on-disk git worktrees against persisted goal/session/team/staff
  * records before the worktree pool fills. This catches:
  *
  *   - Pool worktrees that were left behind after a crash and aren't yet
  *     in the in-memory pool (logged for the pool to reclaim itself —
  *     `WorktreePool.reclaimOrphaned` already handles directory-based
  *     reclaim). The sweeper just counts these so they're visible in logs.
- *   - Active session/goal/staff branches with intact worktrees → keep.
+ *   - Active session/goal/team/staff branches with intact worktrees → keep.
  *   - Worktrees on a branch that no live record claims → cleanup.
  *   - A live record whose worktree path differs from git's tracking
  *     (rename-mid-shutdown) → repair via `git worktree repair`.
@@ -26,10 +26,11 @@ import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { isPoolBranch } from "./worktree-pool.js";
 import { cleanupWorktree } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
+import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, parseGitWorktreeList } from "./worktree-inventory.js";
+import { worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
 
 const execFile = promisify(execFileCb);
 
@@ -72,6 +73,8 @@ export interface SweepProject {
 	rootPath: string;
 	/** Multi-repo: distinct repo subfolder names. Single-repo omits or supplies ["."]. */
 	repos?: string[];
+	/** Project-level worktree_root override, resolved with the shared helper. */
+	worktreeRoot?: string;
 }
 
 export interface SweepRecord {
@@ -90,29 +93,19 @@ export interface SweepResult {
 	repaired: number;
 }
 
-interface ParsedWorktree {
-	path: string;
-	branch?: string;
-}
-
-/** Parse `git worktree list --porcelain` output. */
-function parseWorktreeList(stdout: string): ParsedWorktree[] {
-	const blocks = stdout.split(/\r?\n\r?\n/);
-	const out: ParsedWorktree[] = [];
-	for (const block of blocks) {
-		if (!block.trim()) continue;
-		const pathMatch = block.match(/^worktree (.+)$/m);
-		if (!pathMatch) continue;
-		const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
-		out.push({
-			path: pathMatch[1].trim(),
-			branch: branchMatch ? branchMatch[1].trim() : undefined,
-		});
-	}
-	return out;
-}
+type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
 const normalize = normalizeWorktreeHostPath;
+
+function resolveSingleRepoRoot(projectRoot: string): string {
+	let current = path.resolve(projectRoot);
+	for (;;) {
+		if (fs.existsSync(path.join(current, ".git"))) return current;
+		const parent = path.dirname(current);
+		if (parent === current) return path.resolve(projectRoot);
+		current = parent;
+	}
+}
 
 /**
  * Sweep orphaned worktrees across all projects.
@@ -124,6 +117,7 @@ export async function sweepOrphanedWorktrees(opts: {
 	projects: SweepProject[];
 	goals: SweepRecord[];
 	sessions: SweepRecord[];
+	teams?: SweepRecord[];
 	staff: SweepRecord[];
 }): Promise<SweepResult> {
 	const diagEnabled = cpuDiagnosticsEnabled();
@@ -142,19 +136,29 @@ export async function sweepOrphanedWorktrees(opts: {
 	let repaired = 0;
 
 	try {
-		// Build the set of branches/paths owned by live (non-archived) records.
+		// Build the set of branches/paths owned by live records plus durable
+		// archived branch references that must survive orphan worktree cleanup.
 		const ownedBranches = new Set<string>();
 		const ownedPaths = new Set<string>();
+		const archivedBranches = new Set<string>();
+		const teamContainerPaths = new Set<string>();
 		const branchToExpectedPath = new Map<string, string>();
-		const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+		const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
+		const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
 		for (const rec of allRecords) {
-			if (rec.archived) continue;
+			if (rec.archived) {
+				if (rec.branch) archivedBranches.add(rec.branch);
+				continue;
+			}
 			if (rec.branch) ownedBranches.add(rec.branch);
 			const np = normalize(rec.worktreePath);
 			if (np) ownedPaths.add(np);
 			const cwd = normalize(rec.cwd);
 			if (cwd) ownedPaths.add(cwd);
 			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+			// Durable team-agent records store the branch container, not per-repo
+			// worktrees. Protect component worktrees underneath that container.
+			if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
 			// Multi-repo: each per-repo worktree is separately owned. The branch is
 			// shared across repos so we only add to ownedPaths.
 			if (rec.repoWorktrees) {
@@ -167,13 +171,16 @@ export async function sweepOrphanedWorktrees(opts: {
 
 		for (const project of opts.projects) {
 			if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
+			const singleRepoRoot = resolveSingleRepoRoot(project.rootPath);
+			const isMultiRepo = !!project.repos?.some(r => r !== ".");
+			const resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: isMultiRepo ? project.rootPath : singleRepoRoot, worktreeRoot: project.worktreeRoot });
 
 			// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
 			// is reconciled against the goal/session/staff record map. Single-repo
-			// projects have one entry with `repoPath === project.rootPath`.
+			// projects use the actual git root, which may be above project.rootPath.
 			const repoList = (project.repos && project.repos.length > 0)
-				? project.repos.map(r => r === "." ? project.rootPath : path.join(project.rootPath, r))
-				: [project.rootPath];
+				? project.repos.map(r => r === "." ? singleRepoRoot : path.join(project.rootPath, r))
+				: [singleRepoRoot];
 
 			const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
 			for (const repoPath of repoList) {
@@ -190,7 +197,7 @@ export async function sweepOrphanedWorktrees(opts: {
 						cwd: repoPath,
 						timeout: 10_000,
 					});
-					for (const wt of parseWorktreeList(stdout)) {
+					for (const wt of parseGitWorktreeList(stdout)) {
 						worktrees.push({ ...wt, repoPath });
 						if (diagCounters) diagCounters.worktreesSeen++;
 					}
@@ -208,17 +215,24 @@ export async function sweepOrphanedWorktrees(opts: {
 
 				const branch = wt.branch;
 
+				// Container-internal paths are not host cleanup targets.
+				if (isContainerInternalWorktreePath(wt.path)) continue;
+
 				// Pool branch — leave for `WorktreePool.reclaimOrphaned` to absorb.
-				// We just count it as "reclaimed" so logs reflect what's happening.
-				if (branch && isPoolBranch(branch)) {
-					reclaimed++;
-					if (diagCounters) diagCounters.reclaimed++;
+				// Use the same branch/root/path classifier primitives as maintenance.
+				if (branch && isBobbitPoolBranch(branch)) {
+					const poolVerdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot, candidatePath: wt.path, branch, gitMetadataExists: true });
+					if (poolVerdict.eligible || poolVerdict.reason === "filesystem-only-needs-attention") {
+						reclaimed++;
+						if (diagCounters) diagCounters.reclaimed++;
+					}
 					continue;
 				}
 
 				// Active record owns this worktree (by branch or path).
 				const ownedByBranch = !!(branch && ownedBranches.has(branch));
-				const ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
+				let ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
+				if (!ownedByPath) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
 
 				if (ownedByBranch || ownedByPath) {
 					// Multi-repo: a per-repo path explicitly listed in any record's
@@ -254,7 +268,7 @@ export async function sweepOrphanedWorktrees(opts: {
 				if (!branch) continue; // detached worktree; leave alone.
 
 				try {
-					await cleanupWorktree(wt.repoPath, wt.path, branch, true);
+					await cleanupWorktree(wt.repoPath, wt.path, branch, !archivedBranches.has(branch));
 					cleaned++;
 					if (diagCounters) diagCounters.cleaned++;
 					console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
@@ -277,6 +291,7 @@ export function classifyWorktrees(opts: {
 	repoPath: string;
 	goals: SweepRecord[];
 	sessions: SweepRecord[];
+	teams?: SweepRecord[];
 	staff: SweepRecord[];
 }): {
 	pool: ParsedWorktree[];
@@ -284,11 +299,13 @@ export function classifyWorktrees(opts: {
 	orphan: ParsedWorktree[];
 	repair: ParsedWorktree[];
 } {
-	const all = parseWorktreeList(opts.porcelainStdout);
+	const all = parseGitWorktreeList(opts.porcelainStdout);
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
+	const teamContainerPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
-	const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+	const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
+	const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
 	for (const rec of allRecords) {
 		if (rec.archived) continue;
 		if (rec.branch) ownedBranches.add(rec.branch);
@@ -297,6 +314,7 @@ export function classifyWorktrees(opts: {
 		const cwd = normalize(rec.cwd);
 		if (cwd) ownedPaths.add(cwd);
 		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
 		if (rec.repoWorktrees) {
 			for (const wp of Object.values(rec.repoWorktrees)) {
 				const n = normalize(wp);
@@ -311,12 +329,14 @@ export function classifyWorktrees(opts: {
 	for (const wt of all) {
 		const wtPathNorm = normalize(wt.path);
 		if (wtPathNorm === normalize(opts.repoPath)) continue;
-		if (wt.branch && isPoolBranch(wt.branch)) {
+		if (isContainerInternalWorktreePath(wt.path)) continue;
+		if (wt.branch && isBobbitPoolBranch(wt.branch)) {
 			pool.push(wt);
 			continue;
 		}
 		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
-		const ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
+		let ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
+		if (!ownedByPath && wtPathNorm) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
 		if (ownedByBranch || ownedByPath) {
 			// Multi-repo: a per-repo path explicitly listed in any record's
 			// `repoWorktrees` map is active even if it differs from the record's

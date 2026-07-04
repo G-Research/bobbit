@@ -4,6 +4,7 @@
 import { render } from "lit";
 import { __testResetModelsTab, renderModelsTab } from "../../src/app/settings-page.js";
 import { setRenderApp } from "../../src/app/state.js";
+import { storage } from "../../src/app/storage.js";
 
 // ── Fetch stub ────────────────────────────────────────────────────────────────
 type StubResponseInit = { ok: boolean; status?: number; body: any };
@@ -15,6 +16,8 @@ let responder: Responder = { ok: true, body: {} };
 (window as any).__setNextFetchResponse = (r: Responder) => { responder = r; };
 (window as any).__getFetchLog = () => fetchLog.slice();
 (window as any).__clearFetchLog = () => { fetchLog.length = 0; };
+(window as any).__seedProviderKey = (provider: string, key: string) => storage.providerKeys.set(provider, key);
+(window as any).__clearProviderKey = (provider: string) => storage.providerKeys.delete(provider);
 
 const origFetch = window.fetch.bind(window);
 window.fetch = (async (input: any, init?: RequestInit) => {

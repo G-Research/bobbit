@@ -21,7 +21,7 @@
 import { test as base, expect } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
@@ -42,8 +42,19 @@ interface StartedGateway {
 	port: number;
 	baseURL: string;
 	bobbitDir: string;
+	defaultProjectRoot: string;
 	token: string;
 	shutdown: () => Promise<void>;
+}
+
+function defaultProjectRootForBobbitDir(bobbitDir: string): string {
+	return join(dirname(bobbitDir), `${basename(bobbitDir)}-default-project`);
+}
+
+function canonicalDefaultProjectRoot(bobbitDir: string): string {
+	const root = defaultProjectRootForBobbitDir(bobbitDir);
+	mkdirSync(root, { recursive: true });
+	try { return realpathSync(root); } catch { return root; }
 }
 
 /**
@@ -53,9 +64,12 @@ interface StartedGateway {
  */
 async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Promise<StartedGateway> {
 	mkdirSync(E2E_TEMP_ROOT, { recursive: true });
+	const defaultProjectRoot = canonicalDefaultProjectRoot(bobbitDir);
 	if (opts.freshDir) {
 		rmSync(bobbitDir, { recursive: true, force: true });
+		rmSync(defaultProjectRoot, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		mkdirSync(defaultProjectRoot, { recursive: true });
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 	}
@@ -65,7 +79,6 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	process.env.BOBBIT_DIR = bobbitDir;
 	process.env.BOBBIT_AGENT_DIR = agentDir;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -111,16 +124,12 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	const baseURL = `http://127.0.0.1:${port}`;
 
 	if (opts.freshDir) {
-		// Register the default project at the bobbitDir, mirroring the in-process
-		// harness. The session-store under test lives at
-		// `<rootPath>/.bobbit/state/sessions.json`.
-		// acceptCanonical:true handles the macOS /var → /private/var tmpdir symlink
-		// (bobbitDir lives under tmpdir()). Without it the server rejects with 400
-		// symlink_root and the rest of this fixture has nothing to register against.
+		// Register a normal default project beside Headquarters. The session-store
+		// under test lives at `<rootPath>/.bobbit/state/sessions.json`.
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+			body: JSON.stringify({ name: "default", rootPath: defaultProjectRoot, upsert: true, acceptCanonical: true }),
 		});
 		if (!resp.ok) {
 			throw new Error(`project register failed: ${resp.status} ${await resp.text()}`);
@@ -131,6 +140,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		port,
 		baseURL,
 		bobbitDir,
+		defaultProjectRoot,
 		token,
 		shutdown: () => gw.shutdown(),
 	};
@@ -155,8 +165,8 @@ async function createNonGitSession(gw: StartedGateway, label: string): Promise<s
 		headers: { Authorization: `Bearer ${gw.token}` },
 	});
 	const projects = await projResp.json() as Array<{ id: string; name: string }>;
-	const projectId = (projects.find(p => p.name === "default") ?? projects[0])?.id;
-	expect(projectId, "default project must exist").toBeTruthy();
+	const projectId = projects.find(p => p.name === "default")?.id;
+	expect(projectId, "normal default project must exist").toBeTruthy();
 
 	const resp = await fetch(`${gw.baseURL}/api/sessions`, {
 		method: "POST",
@@ -169,12 +179,10 @@ async function createNonGitSession(gw: StartedGateway, label: string): Promise<s
 }
 
 /**
- * Resolve the sessions.json path for the registered "default" project.
- * The in-process harness anchors the project at `bobbitDir` itself, so the
- * project's state dir is `<bobbitDir>/.bobbit/state/`.
+ * Resolve the sessions.json path for the registered normal "default" project.
  */
 function sessionsJsonPath(bobbitDir: string): string {
-	return join(bobbitDir, ".bobbit", "state", "sessions.json");
+	return join(defaultProjectRootForBobbitDir(bobbitDir), ".bobbit", "state", "sessions.json");
 }
 
 function bakPath(bobbitDir: string, n: number): string {
@@ -241,6 +249,7 @@ test.describe("session-store crash-safety (E2E)", () => {
 		} finally {
 			await gw.shutdown();
 			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			try { rmSync(defaultProjectRootForBobbitDir(bobbitDir), { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 
@@ -300,6 +309,7 @@ test.describe("session-store crash-safety (E2E)", () => {
 		} finally {
 			await gw.shutdown();
 			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			try { rmSync(defaultProjectRootForBobbitDir(bobbitDir), { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 });

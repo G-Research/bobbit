@@ -6,11 +6,13 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 ### Goals
 
-A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath`.
+A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath` when worktree support is enabled.
 
-`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` inside a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
+`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` inside a registered project's `rootPath`. Headquarters is a valid built-in project with `projectId: "headquarters"`. There is no fallback to an arbitrary normal project — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
 
-Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). That flag is evaluated only during the goal creation / setup flow: after worktree setup completes, the server may call `teamManager.startTeam()` so no manual "Start Team" click is needed. The retry-setup handler also respects the same flag.
+Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). That flag is evaluated only during the goal creation / setup flow: after worktree setup completes, the server may call `teamManager.startTeam()` so no manual "Start Team" click is needed. The retry-setup handler also respects the same flag. Data-only no-worktree goals should normally use `autoStartTeam: false` unless the chosen workflow/team path is known to be git-independent.
+
+Team worker capacity counts only live active worker sessions, not every historical row in `team-state.json`. Missing or terminated worker records are passively reaped before spawn-cap checks and during restart resubscribe, while explicit dismiss/completion paths still own archive and worktree cleanup. Verification-harness reviewer sessions are excluded from worker capacity; ordinary team-spawned workers with role `reviewer` still count as workers. See [internals.md — Worker liveness, spawn capacity, and stale reap](internals.md#worker-liveness-spawn-capacity-and-stale-reap).
 
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
@@ -23,25 +25,36 @@ Worktree setup for a goal is driven by **per-component / project setup commands*
 
 > **Legacy note — per-goal setup command removed.** An earlier design (PR #816) added bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` fields on `PersistedGoal`, plus matching REST, `propose_goal`, and goal-dialog affordances. That surface is **superseded by goal metadata and the `goalProvisioned` hook** and has been removed: the goal-store load path **drops** those legacy fields, the REST / `propose_goal` / UI inputs no longer exist, and posting them has no effect. Only the **component / project** `worktree_setup_command` (and its `worktree_setup_timeout_ms`) remains supported. To run goal-specific setup, declare metadata that an extension's `goalProvisioned` provider acts on — that hook fires at **every** worktree provisioning in the subtree (including pool claims), so filesystem treatments land on every agent and sub-goal worktree symmetrically, which the single per-goal command could not guarantee.
 
+### Headquarters no-worktree goals
+
+Headquarters can host explicit data-only goals without a git worktree. A goal created with `projectId: "headquarters"`, `worktree: false`, and a valid workflow snapshot can reach `setupStatus: "ready"` with no `branch`, `worktreePath`, or `repoPath`.
+
+Supported no-worktree flows include goal listing, archive, gates, signals, tasks, and cost/search surfaces that do not require git state.
+
+Git-dependent affordances are guarded instead of falling back to the server checkout. Goal git status, diff, commit history, PR status, PR merge, and child-goal merge return `409` with `code: "GOAL_GIT_UNAVAILABLE"` when the goal lacks branch/worktree data. The UI shows this copy and hides branch/merge/PR actions:
+
+> This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.
+
 ### Workflows
 
 A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
 
-Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) and [No default workflow scaffold](internals.md#no-default-workflow-scaffold).
+Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New normal projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Headquarters can own workflows too: `projectId=headquarters` reads the Headquarters `project.yaml::workflows` block from the aliased server config store. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only), [No default workflow scaffold](internals.md#no-default-workflow-scaffold), and [Headquarters project](headquarters.md).
 
-When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
+When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
 
-Goals without workflows still work fine — workflows are optional **at the data-model layer**. However, the standard goal-creation flow (the +New Goal picker and the goal assistant) requires the linked project to have at least one workflow. See [Default workflow resolution](#default-workflow-resolution) below for the resolution rules and the empty-workflows UX.
+Goals without workflows still work fine — workflows are optional **at the data-model layer**. However, the standard goal-creation flow (the +New Goal picker and the goal assistant) requires either a linked project workflow or a valid inline workflow snapshot carried by the proposal. See [Default workflow resolution](#default-workflow-resolution) below for the resolution rules and the empty-workflows UX.
 
 #### Default workflow resolution
 
-Goal creation never assumes a workflow named `"general"` exists. The default-workflow rule, applied both server-side (`GoalManager.createGoal`) and UI-side (the goal preview panel and proposal toast), is:
+Goal creation never assumes a workflow named `"general"` exists. The default-workflow rule, applied both server-side and UI-side (the goal preview panel and proposal toast), is:
 
-1. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
-2. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
-3. **No workflows at all** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
+1. **Inline `workflow` body supplied** — the public `POST /api/goals` route uses that workflow snapshot directly. The goal proposal UI sends this body field, not `workflowId`, when the draft carries a valid `inlineWorkflow`.
+2. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
+3. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
+4. **No workflows at all and no inline workflow body** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
 
-These defaults are final goal-creation and user-side acceptance safety nets. They do **not** relax proposal seed validation for agents: when project workflows are resolvable and non-empty, `propose_goal` must name an explicit workflow ID (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
+These defaults are final goal-creation and user-side acceptance safety nets. Proposal seed validation follows the same precedence for bespoke workflows: a structurally valid `inlineWorkflow` satisfies the workflow requirement, and any omitted, stale, or unknown `workflow` field is non-authoritative. Without a valid `inlineWorkflow`, `propose_goal` must still name an explicit project workflow ID when project workflows are resolvable and non-empty (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
 
 No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
@@ -49,13 +62,42 @@ No source file outside seed data, tests, and documentation may use the literal s
 
 Projects can legitimately exist with zero workflows (e.g. a freshly registered project whose assistant has not yet run). The goal-creation UX in that state:
 
-- **Goal preview panel** (the +New Goal picker and the goal-assistant accept panel) renders an **empty-workflows banner** with a brief explanation and an **Open Project Assistant** button. The button calls `createProjectAssistantSession(project.rootPath, …)` from `src/app/dialogs.ts`, passing the linked project's id and existing name. The Accept button is disabled while the banner is visible, with a tooltip explaining why.
+- **Goal preview panel** (the +New Goal picker and the goal-assistant accept panel) renders an **empty-workflows banner** with a brief explanation and an **Open Project Assistant** button. The button calls `createProjectAssistantSession(project.rootPath, …)` from `src/app/dialogs.ts`, passing the linked project's id and existing name. The Accept button is disabled while the banner is visible, with a tooltip explaining why. A proposal with a valid `inlineWorkflow` is the exception: the inline snapshot supplies the workflow, so the banner stays hidden and Accept remains enabled.
 - **While workflows are still loading** for the linked project, the panel shows a skeleton placeholder instead of either the dropdown or the banner. This prevents the banner from flickering on initial load before `ensureWorkflowsLoaded(projectId)` resolves.
 - **Goal assistant LLM** receives a stern sentinel from `SessionManager._buildWorkflowList()` when the project has no workflows: an instruction *not* to call `propose_goal` and to surface the empty state to the user. The assistant's normal "pick the first listed workflow" guidance only applies when at least one workflow is present.
 
 The per-project workflow availability is cached client-side (`_workflowCacheByProject` in `src/app/render.ts`) so switching back to a project that has workflows does not refetch unnecessarily. Browser E2E coverage lives in [`tests/e2e/ui/goal-empty-workflows-banner.spec.ts`](../tests/e2e/ui/goal-empty-workflows-banner.spec.ts).
 
 To author workflows for a project, see [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) and run the project assistant from Settings → Components.
+
+#### Unified goal proposal tabs
+
+Every goal proposal surface uses the same tabbed form rendered by `renderGoalForm()` in `src/app/proposal-panels.ts`. This includes assistant proposal panels, the `+ New Goal` flow, historical proposal revision views, and project-scoped goal creation. The unified form keeps proposal editing predictable: fields no longer move between surfaces, and accept/dismiss/create footer actions stay available regardless of the selected tab.
+
+Guaranteed tab layout:
+
+- **Goal** is the default active tab.
+- **Goal**, **Workflow**, **Roles**, and **Metadata** are always visible for goal proposals.
+- **Sub-goals** appears only when the Settings sub-goals flag is enabled.
+- The footer is outside the tab panels, so submit/dismiss/create behavior is preserved across tabs.
+
+Tab ownership is strict:
+
+- The **Goal** tab owns title, project/directory, workflow picker shortcut, sandbox/team toggles, optional workflow-step toggles, and the spec editor/preview.
+- The **Workflow** tab owns workflow inspection and per-goal workflow customization. When no workflows are available, it renders a read-only empty state instead of disappearing.
+- The **Roles** tab owns role inspection and per-goal role customization. While roles are loading or unavailable, it renders loading/empty states instead of hiding the tab.
+- The **Metadata** tab is the only place the key/value metadata editor renders. The main Goal tab must never contain `renderGoalMetadataEditor()`.
+- The **Sub-goals** tab owns parent/child goal controls and is gated only by the system sub-goals setting.
+
+Workflow and Roles draft state is also shared by the proposal form, not by the active DOM panel. Proposal-supplied `inlineWorkflow` and `inlineRoles` hydrate the Workflow/Roles tabs on every goal proposal surface, including the goal assistant / `+ New Goal`, project-scoped goal creation, re-attempt sessions, and historical revision tabs. Customizing a workflow forwards the inline workflow snapshot instead of `workflowId`; customizing a role forwards only the touched role entries as `inlineRoles`. These snapshots are goal-scoped and do not mutate project workflow or role definitions.
+
+When a valid `inlineWorkflow` is active, the Goal and Workflow tab pickers both prepend a selected bespoke option labeled exactly `Bespoke (N Gates)`, where `N` is the current `inlineWorkflow.gates.length`. The label is derived from the draft, so adding or removing gates in the Workflow tab updates both pickers before acceptance. The inline workflow selection takes precedence over any project workflow id in the proposal fields; project workflow options remain available and keep the `<workflow name> (<gate count> gates)` label. Selecting or reverting to a project workflow clears the stale inline workflow draft so submission returns to `workflowId`.
+
+Goal proposal tab state is scoped by proposal context. A newly opened proposal context starts on **Goal**, while returning to the same in-progress proposal revision can preserve its selected tab and inline Workflow/Roles draft. Historical revisions use their own session/revision-scoped state and render from the historical snapshot, not from the live proposal mirrors. The form also resolves the proposal's source project before loading Workflow/Roles or submitting, replacing any stale project id left by a previous proposal context so customizations and created goals apply to the correct project.
+
+Metadata draft state is shared across tabs rather than stored in panel-local DOM. Seeded `propose_goal` metadata hydrates the Metadata tab, user edits survive tab switches, blank-key rows are dropped on submit, values are JSON-parsed where possible, and accepted/created goals persist the resulting `metadata` field. An empty metadata editor sends no override, preserving legacy goal records.
+
+Browser coverage lives in [`tests/e2e/ui/goal-metadata.spec.ts`](../tests/e2e/ui/goal-metadata.spec.ts), [`tests/e2e/ui/goal-tabs-wiring.spec.ts`](../tests/e2e/ui/goal-tabs-wiring.spec.ts), [`tests/e2e/ui/goal-role-tabs-wiring.spec.ts`](../tests/e2e/ui/goal-role-tabs-wiring.spec.ts), and [`tests/e2e/ui/goal-proposal-workflow-tab.spec.ts`](../tests/e2e/ui/goal-proposal-workflow-tab.spec.ts). They pin the default Goal tab, required tab visibility, Metadata-tab-only editor placement, Sub-goals flag behavior, metadata edit persistence, inline Workflow/Roles customization wiring and persistence, bespoke inline workflow labels and submission, active-tab/draft isolation across contexts, historical revision isolation, and accepted-goal metadata persistence.
 
 #### `createGoal` failure preserves the assistant
 
@@ -65,15 +107,17 @@ On failure (any rejection from `createGoal`), the assistant session, chat histor
 
 #### Validating a proposed workflow at proposal time
 
-The goal assistant emits a goal via the `propose_goal` tool, which names a `workflow` ID and optional `options` (comma-separated optional-step names). Because the assistant's prompt is seeded with the project's workflow list at session-creation time, that list can go stale — a project's workflows may be renamed or removed after the session started — and an LLM can hallucinate IDs outright. **Why this matters:** without validation a stale or invented workflow silently produces a broken proposal that only fails much later at goal-creation submit, by which point the assistant has already torn down its rationale. Worse, the `propose_goal` tool used to swallow the rejection and report a false `"Proposal submitted"` ack, so the agent never learned it needed to correct itself.
+The goal assistant emits a goal via the `propose_goal` tool. The default path names a registered project `workflow` ID plus optional `options` (comma-separated optional-step names). A proposal may instead carry a bespoke `inlineWorkflow` snapshot for a custom one-off workflow; registered workflows remain preferred by default because they keep project policy reusable and centrally inspectable. Because the assistant's prompt is seeded with the project's workflow list at session-creation time, that list can go stale — a project's workflows may be renamed or removed after the session started — and an LLM can hallucinate IDs outright. **Why this matters:** without validation a stale or invented workflow silently produces a broken proposal that only fails much later at goal-creation submit, by which point the assistant has already torn down its rationale. Worse, the `propose_goal` tool used to swallow the rejection and report a false `"Proposal submitted"` ack, so the agent never learned it needed to correct itself.
 
-Validation now happens **at seed time**, the moment the proposal is written. The `POST /api/sessions/:id/proposal/goal/seed` handler (which the tool calls to persist the draft) resolves the session's project workflows — mirroring goal creation: `configCascade.resolveWorkflows(projectId)`, falling back to the project context `workflowStore` — and runs `validateGoalProposalWorkflow()` **before** writing the file, so an invalid workflow never produces a draft at all.
+Validation now happens **at seed time**, before the server commits a revisioned proposal file. The `POST /api/sessions/:id/proposal/goal/seed` handler (which the tool calls to persist the draft) resolves the session's project workflows — mirroring goal creation: `configCascade.resolveWorkflows(projectId)`, falling back to the project context `workflowStore` — and runs `validateGoalProposalWorkflow()` **before** writing the file. Validation first honors a structurally valid `inlineWorkflow`: that snapshot satisfies the workflow requirement, takes precedence over an omitted or stale `workflow` field, and becomes the workflow used for optional-step checks. If `inlineWorkflow` is malformed, the seed fails with a structural validation error instead of falling through to misleading `MISSING_WORKFLOW` or `UNKNOWN_WORKFLOW` errors. An invalid workflow therefore produces no server-stamped `goal.md`, no `proposal_update {source:"seed"}`, and no proposal revision marker.
+
+The attempted draft is still recoverable in the client because the `propose_goal` tool call input and its failed tool result live in the transcript. Bobbit uses that transcript data to render/open a failed, non-revisioned proposal snapshot for inspection.
 
 Rejections are structured `400` JSON so the agent can self-correct:
 
-- **`MISSING_WORKFLOW`** — `workflow` is omitted or blank while the session has resolvable, non-empty project workflows. The body carries `availableWorkflows: [{id, name}]` and a `message` instructing the agent to re-call `propose_goal` with one of those IDs.
-- **`UNKNOWN_WORKFLOW`** — `workflow` is named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
-- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step.
+- **`MISSING_WORKFLOW`** — `workflow` is omitted or blank, no valid `inlineWorkflow` is present, and the session has resolvable, non-empty project workflows. The body carries `availableWorkflows: [{id, name}]` and a `message` instructing the agent to re-call `propose_goal` with one of those IDs.
+- **`UNKNOWN_WORKFLOW`** — `workflow` is named but is not a configured workflow ID, and no valid `inlineWorkflow` is present to take precedence. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
+- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the selected workflow source. With `inlineWorkflow`, options are validated against optional `verify` steps in the inline snapshot; otherwise they are validated against the named project workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step.
 
 **Validation is skipped** (no error) only when there is genuinely nothing to validate against:
 
@@ -81,15 +125,34 @@ Rejections are structured `400` JSON so the agent can self-correct:
 - Workflow resolution itself is unavailable for the session/project context.
 - The resolved workflow list is empty, preserving the zero-workflow state (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)).
 
-The proposal panel and final user-side Accept flow may still display or normalize to a safe valid workflow after workflows load. That UI fallback protects manual acceptance from stale or phantom selections; it is not a default the agent may rely on. Agent-side `propose_goal` seed validation must include an explicit valid `workflow` whenever project workflows are resolvable and non-empty.
+Ordinary proposal panels and final user-side Accept flows may still normalize stale empty/phantom workflow selections after workflows load. A failed workflow-validation proposal is the exception: the failed snapshot preserves the missing or unknown value so the UI does not hide the server rejection by selecting the first available workflow. Agent-side `propose_goal` seed validation must include an explicit valid `workflow` whenever project workflows are resolvable and non-empty, unless the proposal supplies a structurally valid bespoke `inlineWorkflow`.
 
-On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the missing/available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
+On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the missing/available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged.
+
+The client accepts both structured JSON error bodies and plaintext extension errors. Some tool runtimes preserve only the extension's text block, so the proposal renderer and session glue infer `MISSING_WORKFLOW` / `UNKNOWN_WORKFLOW` from phrases such as `Workflow is required...` or `Unknown workflow...`, and parse valid workflow IDs from `workflow IDs:`, `available workflows:`, or `one of these IDs:` segments. This keeps the failed proposal card and panel actionable even when `availableWorkflows` did not survive as JSON.
+
+Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API), [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level), [`tests/proposal-renderer-failed.spec.ts`](../tests/proposal-renderer-failed.spec.ts) (renderer), [`tests/e2e/ui/failed-goal-proposal-ux.spec.ts`](../tests/e2e/ui/failed-goal-proposal-ux.spec.ts) (browser UX), and [`tests/e2e/ui/goal-proposal-workflow-tab.spec.ts`](../tests/e2e/ui/goal-proposal-workflow-tab.spec.ts) (bespoke inline workflow proposal UX).
+
+#### Failed workflow-validation proposal UX
+
+A failed `propose_goal` workflow validation is not treated like a successful proposal. The chat tool card renders with a failed visual state, displays the server rejection message, and keeps an **Open proposal** action so the user can inspect what the agent attempted.
+
+Opening that card creates a failed, non-revisioned goal proposal snapshot from the tool-call input plus the parsed workflow error metadata. The goal proposal panel then:
+
+- shows the workflow error in the bottom-left footer/status area;
+- marks the workflow selector invalid and keeps the missing/unknown attempted value visible (`Select workflow` for missing, `Unknown workflow: <id>` for unknown);
+- disables **Create Goal** until the user selects a configured workflow;
+- clears the validation error only after the selected workflow ID is known for the linked project.
+
+This is deliberately different from ordinary phantom-workflow normalization. Auto-selecting the first workflow would make the failed draft look valid and would obscure why the server rejected the agent's proposal.
+
+The failed metadata lives in the in-memory `ProposalSlot.workflowValidationError`, not in `goal.md`, because no server-stamped draft exists for the rejected seed. Reload and reconnect recover the same state from durable transcript data: `_checkToolProposals` remembers the failed tool call input, `_checkProposalToolResult` re-parses the failed result, and the **Open proposal** event carries `workflowValidationError` for no-rev failed snapshots. A later successful `propose_goal` retry has a real revision marker and server `proposal_update`; opening that successful card renders the normal rev-backed proposal with an enabled create flow. Historical scans keep the failed no-rev metadata tied to its own card so it does not poison a later successful retry.
 
 #### Phantom workflow IDs in the proposal panel
 
 A second failure mode lived in the proposal panel's workflow `<select>` (`src/app/proposal-panels.ts`). The dropdown binds its value to the proposed workflow ID. When that ID isn't among the project's loaded workflows, no `<option>` matches, so the browser visually falls back to the first option while the form state still holds the **phantom** (not-in-list) value. Re-selecting the displayed option fires no `change` event, so the phantom persists and Create submits the invalid workflow — the dropdown appears to "have no effect."
 
-The fix is `normalizeWorkflowSelections()`: once the workflow list is loaded, any empty or phantom selection is reset to the first available ID so the rendered option and the underlying state always agree. A value already present in the list is never clobbered. It runs from the cached and async paths of `ensureWorkflowsLoaded`, from `syncProposalFormState()` (the inline goal-proposal panel's `_proposalWorkflowId`), and from `setSelectedWorkflowId()` (the assistant preview panel's `_selectedWorkflowId`). Because workflows load asynchronously, the post-load pass is the safety net for a phantom ID present before the list arrived; stale async loads for a project the user has navigated away from never clobber the active selection. Browser E2E for both panels: [`tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts`](../tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts).
+The fix is `normalizeWorkflowSelections()`: once the workflow list is loaded, ordinary empty or phantom selections reset to the first available ID so the rendered option and the underlying state always agree. A value already present in the list is never clobbered. Failed workflow-validation proposals opt out through `shouldPreserveFailedWorkflowSelection()` so the invalid state remains visible until corrected. Normalization runs from the cached and async paths of `ensureWorkflowsLoaded`, from `syncProposalFormState()` (the inline goal-proposal panel's `_proposalWorkflowId`), and from `setSelectedWorkflowId()` (the assistant preview panel's `_selectedWorkflowId`). Because workflows load asynchronously, the post-load pass is the safety net for a phantom ID present before the list arrived; stale async loads for a project the user has navigated away from never clobber the active selection. Browser E2E for both panels: [`tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts`](../tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts).
 
 **Removed runtime concepts:**
 
@@ -356,7 +419,7 @@ Agents signal gates via the `gate_signal` tool (or `POST /api/goals/:id/gates/:g
 
 Each signal is recorded in the gate's signal history with a unique ID, timestamp, and session reference.
 
-**`gate_signal` is restricted to the team lead role at the tool-policy layer.** Every contributor role (`coder`, `test-engineer`, `reviewer`, `code-reviewer`, `security-reviewer`, `architect`, `spec-auditor`, `qa-tester`, `docs-writer`) declares `toolPolicies.gate_signal: never` in `defaults/roles/*.yaml`, so the tool-guard extension hard-blocks the call at runtime. Only the team lead has the goal branch checked out and can merge contributor work before verification runs from the goal-branch HEAD. Contributors hand off command-format / expect-failure gate inputs (raw shell command, `error_pattern` regex) via task `result_summary` for the team lead to attach when signalling. Invariant enforced by `tests/role-gate-signal-policy.test.ts`.
+**`gate_signal` is restricted to the team lead role at the tool-policy layer.** Every contributor role (`coder`, `test-engineer`, `reviewer`, `code-reviewer`, `bug-hunter`, `security-reviewer`, `architect`, `spec-auditor`, `qa-tester`, `docs-writer`) declares `toolPolicies.gate_signal: never` in `defaults/roles/*.yaml`, so the tool-guard extension hard-blocks the call at runtime. Only the team lead has the goal branch checked out and can merge contributor work before verification runs from the goal-branch HEAD. Contributors hand off command-format / expect-failure gate inputs (raw shell command, `error_pattern` regex) via task `result_summary` for the team lead to attach when signalling. Invariant enforced by `tests/role-gate-signal-policy.test.ts`.
 
 ### Verification
 
@@ -401,6 +464,14 @@ Running command steps can include live stdout/stderr tails. The server reads tho
 
 Completed command steps also retain stdout/stderr under Bobbit state. Default status surfaces and implicit inspection stay compact, but any explicit `gate_inspect(section="verification", mode=...)` request can query the retained logs and returns diagnostics metadata when available. Playwright-style `test-results` and `playwright-report` artifacts are copied into the same retained diagnostics tree, including `error-context.md`, traces, screenshots, and reports. Retained log streams are capped at 20 MiB each, artifact copying is symlink-hardened, and diagnostics are cleaned up when the owning goal is archived or deleted. Team leads should inspect these persisted diagnostics before rerunning expensive suites. See [Retained gate diagnostics](gate-diagnostics.md) for the full storage, inspection, and cleanup model.
 
+#### Command step restart recovery
+
+Command verification steps persist enough state to survive a gateway restart: process metadata, stdout/stderr log paths, durable exit-file paths, identity files, heartbeat files, original deadlines, and cancellation/timeout kill intent. If a restarted gateway finds an exit file, it finalizes from that real command verdict and retained logs. If the command is still running, Bobbit reattaches only after identity checks prove the PID belongs to the recorded command.
+
+A restart that leaves no durable exit status is not treated as a command failure. Bobbit records an explicit restart-interrupted step row, leaves the gate `pending`, and asks the team lead to re-signal. Timeout and cancellation cleanup also persists intent until Bobbit verifies the command tree is gone; if identity cannot be proven, Bobbit refuses unsafe PID kills and keeps retryable cleanup state instead of killing an unrelated process.
+
+See [Restart-safe command gate verification](verification-restart.md) for the full recovery, identity, and cleanup model.
+
 ##### Targeting a single verification step
 
 A gate often runs several verify steps (e.g. type-check + lint + unit + e2e, or multiple review steps). By default `gate_inspect section=verification` returns *every* step, so a team lead chasing one failing step still receives all the others' output and cannot scope a `grep`/`slice` to the step they care about. The optional `step` parameter fixes that: pass the step **name** and the snapshot is scoped to just that one step.
@@ -435,7 +506,17 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 | Implementation & later | `origin/<primary>...HEAD`                 | All other verify-bearing gates        |
 | `ready-to-merge`       | `origin/<primary>` via `git merge-base`   | Hardcoded in workflow YAML            |
 
-**Why `origin/<primary>` and not local `<primary>`:** in remote-backed projects, local refs are only as fresh as the last `git pull` on the host. Goal worktrees are normally created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work. Before verification, the harness checks whether an `origin` remote exists. If it does, it syncs the goal worktree from `origin/<branch>` and fetches the baseline branch so `origin/<primary>` / `origin/{{baseBranch}}` is current. If the repository is local-only and has no `origin`, remote sync and baseline fetch are skipped quietly, and verification continues from the current local worktree state.
+**Why `origin/<primary>` and not local `<primary>`:** in remote-backed projects, local refs are only as fresh as the last `git pull` on the host. Goal worktrees are normally created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work.
+
+Before verification, the harness first checks whether the repo has an `origin` remote. If there is no `origin`, remote sync and baseline fetch are skipped quietly, and verification continues from the current local worktree state.
+
+When `origin` exists, the harness checks for `refs/heads/<goalBranch>` before syncing the goal branch:
+
+- If the remote goal branch exists, verification fetches it and resets the worktree to `origin/<goalBranch>` so published work is verified exactly as remote consumers see it.
+- If the remote goal branch is missing, verification treats that as an expected local-only branch case. This covers goal worktrees claimed from the pool and unpublished goal branches: remote goal-branch sync is skipped without a warning or stack trace, and verification runs against the current local worktree.
+- Unexpected remote-check, network, auth, or fetch/reset failures still warn non-fatally. The gate can continue using the best local state available, but the warning stays visible because it may affect diff freshness.
+
+The baseline branch is fetched separately when `origin` exists so `origin/<primary>` / `origin/{{baseBranch}}` is current for implementation and Ready-to-Merge checks.
 
 **Why pre-implementation gates skip the diff entirely:** a design-doc or issue-analysis gate, by workflow construction, runs before any code is committed. A branch with zero goal-unique commits is the normal expected state. Running a diff produces noise at best, and — if local `<primary>` is stale — false positives at worst. The reviewer prompt explicitly forbids `git diff` / `git log` for these gates.
 
@@ -510,7 +591,7 @@ interface GateSignalStep {
 }
 ```
 
-**LLM review artifacts:** When an `llm-review` step completes, the verification harness stores the reviewer's full analysis as a `text/markdown` artifact. The `output` field retains the short summary, while the artifact preserves the complete review text that was previously lost.
+**LLM review artifacts:** When an `llm-review` step completes, the verification harness stores the reviewer's full analysis as a `text/markdown` artifact. The `output` field retains the short summary, while the artifact preserves the complete review text that was previously lost. For reviewer retry, reminder, restart-resume, and exhausted-recovery diagnostics, see [llm-review Recovery](llm-review-recovery.md).
 
 **Size limit:** Artifact content is capped at 10 MB. Content exceeding this limit is truncated.
 
@@ -652,7 +733,9 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. Those safety-net publishes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+Team-member and delegated helper/session sub-agent branches are local-only by default. Bobbit does not push them to origin as a default safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
+
+Remote publication is still allowed when it is intentional: a user-requested push, a workflow/cross-machine/container handoff that needs a remote branch, or the final Ready-to-Merge / PR publication of the goal integration branch. Intentional Bobbit-owned pushes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only routine PR in the workflow is the final goal-to-primary-branch PR for human review.
 
 #### Multi-repo git handoff
 
@@ -665,7 +748,7 @@ task.gitHandoff: { [repoName]: { baseSha: string, headSha?: string, branch: stri
 
 The single-repo flat shape (`task.baseSha` / `task.headSha` / `task.branch` directly on the task) is preserved for back-compat — read helpers transparently project a single-repo task into the same shape so callers don't need to special-case mode.
 
-Goal `git-status` and `git-diff` endpoints aggregate across all repos; the git-status widget shows per-repo collapsible sections. Cleanup tears down all per-repo worktrees and deletes all matching remote branches. PR/merge tooling (gh integration) operates per-repo; a multi-repo goal opens N PRs (one per repo with commits), all titled with the goal's branch.
+Goal `git-status` and `git-diff` endpoints aggregate across all repos; the git-status widget shows per-repo collapsible sections. Cleanup tears down all per-repo worktrees and deletes matching remote branches when they exist; missing remotes for local-only sub-agent branches are expected. PR/merge tooling (gh integration) operates per-repo; a multi-repo goal opens N PRs (one per repo with commits), all titled with the goal's branch.
 
 Multi-repo invariant: all repos in a worktree set sit on the same branch name. There is no per-repo branch divergence within a goal.
 
@@ -738,8 +821,9 @@ Here's the typical flow for a team goal with a workflow:
      workflowGateId="design-doc")
    → Agent gets the goal spec in its system prompt (no upstream deps for first gate)
 
-5. Agent produces the design, pushes its branch, marks task complete.
-   Team Lead merges the branch and signals the gate:
+5. Agent produces the design, commits locally, and marks the task complete
+   with `head_sha`. Team Lead merges from the local ref/worktree and signals
+   the gate:
    gate_signal(gate_id="design-doc", content="# Design\n\n...")
    → Server runs verification (if configured) → gate status: passed
    (Only the team lead can call gate_signal — see "Signaling a gate" above.)
@@ -749,8 +833,9 @@ Here's the typical flow for a team goal with a workflow:
      workflowGateId="implementation")
    → Agent receives the passed design-doc content in its system prompt
 
-7. Agent completes implementation, pushes branch, marks task complete.
-   Team Lead merges the branch and signals the gate:
+7. Agent completes implementation, commits locally, and marks the task
+   complete with `head_sha`. Team Lead merges from the local ref/worktree and
+   signals the gate:
    gate_signal(gate_id="implementation")
    → Verification runs (npm run check + LLM review) → gate status: passed
 

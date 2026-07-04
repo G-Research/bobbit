@@ -37,6 +37,8 @@ import { consumeGesture } from "./gesture-context.js";
 import { postSessionMessageOverWs } from "./session-write-bridge.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
+import { createHostChannelsApi, type HostChannelsApi } from "./channel-bridge.js";
+import { mintPackSurfaceTokenOverWs } from "./surface-token-bridge.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -115,8 +117,8 @@ async function sessionWriteContentHash(role: string, text: string): Promise<stri
 // A surface reference the TRUSTED app loader supplies to bind the Host API's
 // scoped capabilities (pack schema V1 §8.4). Renderer/action surfaces are
 // TOOL-bound (they need a tool call / `toolUseId`); panel/entrypoint/route
-// surfaces are PACK-bound (no carrier tool). The server mints the matching
-// server-derived surface token from whichever shape it receives.
+// surfaces are PACK-bound (no carrier tool). Tool-bound tokens mint through REST;
+// pack-bound tokens mint through the trusted app-owned session WebSocket.
 export type SurfaceRef =
 	// A TOOL-bound surface. `packId` is the structural packId of the renderer's
 	// OWN pack (threaded from /api/tools via `packIdForTool`); it is NOT sent to the
@@ -160,31 +162,23 @@ export function getHostApi(
 	// `surface` (the TRUSTED app loader passes it) identifies the renderer/panel's
 	// owning contribution. The Host API MINTS a SERVER-MINTED surface binding token
 	// bound to {sessionId, packId, contributionId, tool?} (the server resolves the
-	// winning contribution). The opaque token is captured in THIS closure — pack
-	// module code never sees or sets it — and echoed on every scoped call
-	// (store/callRoute/session). The server DERIVES {packId, tool?} from the validated
-	// token and IGNORES any caller-supplied tool/pack, closing the cross-pack identity
-	// hole (design pack-schema-v1-rationalisation.md §4 + §6.5). A pack-bound surface
-	// has NO tool — its gate is installed + active + own-session (§4.5), so an
-	// orphan/UI-only pack can use scoped surfaces without a tool in allowedTools.
+	// winning contribution). Tool-bound surfaces use REST; pack-bound surfaces use the
+	// app-owned session WebSocket so pack code cannot choose arbitrary pack ids via a
+	// public REST body. The opaque token is captured in THIS closure — pack module code
+	// never sees or sets it — and echoed on every scoped call (store/callRoute/session).
+	// The server DERIVES {packId, tool?} from the validated token and IGNORES any
+	// caller-supplied tool/pack.
 	let surfaceTokenPromise: Promise<string> | undefined;
-	const surfaceTokenBody = (): Record<string, unknown> => {
-		if (!surface) throw new Error("host scoped capabilities require a pack-served context");
-		if (surface.kind === "tool") return { sessionId, tool: surface.tool };
-		return {
-			sessionId,
-			packId: surface.packId,
-			contributionKind: surface.contributionKind,
-			contributionId: surface.contributionId,
-		};
-	};
 	const getSurfaceToken = (): Promise<string> => {
 		if (!surface) return Promise.reject(new Error("host scoped capabilities require a pack-served context"));
 		if (!surfaceTokenPromise) {
 			const p = (async (): Promise<string> => {
+				if (surface.kind === "pack") {
+					return mintPackSurfaceTokenOverWs(sessionId, surface);
+				}
 				const resp = await gatewayFetch(
 					"/api/ext/surface-token",
-					withSession({ method: "POST", body: JSON.stringify(surfaceTokenBody()) }, sessionId),
+					withSession({ method: "POST", body: JSON.stringify({ sessionId, tool: surface.tool }) }, sessionId),
 				);
 				if (!resp.ok) throw new Error(`surface-token HTTP ${resp.status}`);
 				const data = (await resp.json()) as { token?: string };
@@ -196,6 +190,9 @@ export function getHostApi(
 			surfaceTokenPromise = p;
 		}
 		return surfaceTokenPromise;
+	};
+	const invalidateSurfaceToken = (): void => {
+		surfaceTokenPromise = undefined;
 	};
 	// Run a scoped fetch with the surface token threaded by `build`. On a 403 (e.g. a
 	// token that expired on a long-lived tab) the memo is dropped and the call re-mints
@@ -234,10 +231,11 @@ export function getHostApi(
 		session: true,
 		ui: true,
 		store: true,
+		channels: true,
 	};
-	return {
+	const api = {
 		version: HOST_API_VERSION,
-		contractVersion: HOST_CONTRACT_VERSION,
+		contractVersion: Math.max(HOST_CONTRACT_VERSION, 4),
 		capabilities: {
 			...flags,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -396,5 +394,12 @@ export function getHostApi(
 			deletePrefix: async (prefix: string) => (await storeOp("deletePrefix", { prefix })) as number,
 			stats: async (prefix?: string) => (await storeOp("stats", { prefix })) as StoreStats,
 		} as HostApi["store"],
-	};
+		channels: createHostChannelsApi({
+			sessionId,
+			getSurfaceToken,
+			invalidateSurfaceToken,
+			consumeOpenGesture: consumeGesture,
+		}) as HostChannelsApi,
+	} as HostApi & { channels: HostChannelsApi };
+	return api as HostApi;
 }

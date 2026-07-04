@@ -17,13 +17,11 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
-import { readClaudeCodeConfig } from "./claude-code-config.js";
-import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime, runtimeFromModelString, runtimeFromProvider, type SessionBridgeOptions } from "./session-runtime.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
-import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -33,8 +31,8 @@ import {
 	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
-import { SessionStore, type PersistedSession } from "./session-store.js";
-import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
+import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -51,35 +49,42 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
+import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
-import { writeOpenAiOrphanToolResultExtension } from "./openai-orphan-tool-result-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
-import type { GrantPolicy } from "./role-store.js";
+import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
+import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
-import { McpManager } from "../mcp/mcp-manager.js";
-import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
+import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
+import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
+import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
+import type { ProjectContext } from "./project-context.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
+import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
+import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
@@ -89,6 +94,11 @@ import {
 	type SessionSetupPlan,
 	type PipelineContext,
 	type SandboxWiringOptions,
+	type MarketplacePiExtensionResolver,
+	type MarketplacePiExtensionActivation,
+	type PiExtensionDiagnostic,
+	resolveMarketplacePiExtensionActivation,
+	scopedToolContext,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -107,7 +117,261 @@ function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
 }
 
+function isWindowsAbsolutePath(filePath: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function isContainerAgentSessionPath(filePath: string): boolean {
+	const normalized = filePath.replace(/\\/g, "/");
+	return normalized === "/home/node/.bobbit/agent/sessions"
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
+		|| normalized === "/bobbit-state/sessions"
+		|| normalized.startsWith("/bobbit-state/sessions/");
+}
+
+function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
+	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
+	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
+}
+
+function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
+	if (!filePath) return null;
+	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
+	trustPersistedAgentSessionFile(filePath);
+	return resolveReadablePersistedAgentSessionFile(filePath);
+}
+
+export function switchSessionPathForAgent(ps: PersistedSession): string {
+	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
+	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
+	return hostPathToContainer(mountedHostPath);
+}
+
+export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
+export type ArchivedWorktreeDisposition = "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
+export type ArchivedWorktreeReason =
+	| "safe-archived-session-worktree"
+	| "already-cleaned"
+	| "no-worktree-path"
+	| "missing-repo-path"
+	| "sandbox-container-path"
+	| "delegate-shared-worktree"
+	| "stale-worktree-directory"
+	| "referenced-by-live-session"
+	| "referenced-by-live-goal"
+	| "referenced-by-live-team"
+	| "referenced-by-staff"
+	| "scan-error";
+export type ArchivedWorktreeReasonCategory = "safe" | "already-cleaned" | "missing-metadata" | "container-path" | "shared-delegate" | "stale-path" | "referenced-record" | "error";
+export type ArchivedWorktreeSelectionCategory = "archived-session" | "goal-session" | "team-session" | "delegate-session" | "child-session" | "single-repo" | "multi-repo";
+export type ArchivedWorktreeCleanupStatus = "cleaned" | "skipped" | "already-cleaned" | "failed";
+export type ArchivedWorktreeCleanupReason = "worktree-and-branch-cleaned" | "worktree-cleaned" | "already-cleaned" | "invalid-selection" | ArchivedWorktreeReason;
+
+export class CleanupArchivedSessionWorktreesRequestError extends Error {
+	statusCode = 400;
+	constructor(message: string) {
+		super(message);
+		this.name = "CleanupArchivedSessionWorktreesRequestError";
+	}
+}
+
+export interface ArchivedSessionWorktreeScanResponse {
+	sessions: ArchivedSessionWorktreeSession[];
+	items: ArchivedSessionWorktreeItem[];
+	counts: {
+		archivedSessions: number;
+		sessionsWithWorktrees: number;
+		removableWorktrees: number;
+		skippedWorktrees: number;
+		alreadyCleanedWorktrees: number;
+		totalItems: number;
+		readyToClean: number;
+		defaultSelected: number;
+		alreadyCleaned: number;
+		ineligible: number;
+		needsAttention: number;
+		failed: number;
+		byDisposition: Partial<Record<ArchivedWorktreeDisposition, number>>;
+		byReason: Partial<Record<ArchivedWorktreeReason, number>>;
+		bySelectionCategory: Partial<Record<ArchivedWorktreeSelectionCategory, number>>;
+	};
+	groups: ArchivedSessionWorktreeGroup[];
+	selectionPresets: ArchivedSessionWorktreeSelectionPreset[];
+	generatedAt: number;
+}
+
+export interface ArchivedSessionWorktreeGroup {
+	key: string;
+	label: string;
+	description: string;
+	disposition: ArchivedWorktreeDisposition;
+	reason?: ArchivedWorktreeReason;
+	reasonCategory?: ArchivedWorktreeReasonCategory;
+	count: number;
+	sampleKeys: string[];
+	sampleItems: ArchivedSessionWorktreeItem[];
+	hasMore: boolean;
+	actionable: boolean;
+}
+
+export interface ArchivedSessionWorktreeSelectionPreset {
+	id: string;
+	label: string;
+	description: string;
+	enabled: boolean;
+	count: number;
+	worktreeKeys: string[];
+	cleanupRequest: CleanupArchivedSessionWorktreesRequest;
+}
+
+export interface ArchivedSessionWorktreeSession {
+	id: string;
+	title: string;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
+	goalId?: string;
+	teamGoalId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	sandboxed?: boolean;
+	branch?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	worktrees: ArchivedSessionWorktreeItem[];
+}
+
+export interface ArchivedSessionWorktreeItem {
+	key: string;
+	sessionId: string;
+	title: string;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
+	goalId?: string;
+	teamGoalId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	sandboxed?: boolean;
+	repo: string;
+	repoPath: string;
+	repoDisplayName: string;
+	path: string;
+	branch?: string;
+	source: "repoWorktrees" | "sessionWorktree";
+	pathExists: boolean;
+	gitWorktreeMetadataExists: boolean;
+	localBranchExists: boolean;
+	status: ArchivedWorktreeLegacyStatus;
+	reason: ArchivedWorktreeReason;
+	detail: string;
+	willDeleteBranch: boolean;
+	branchDeleteBlockedReason?: "branch-referenced-by-live-record" | "branch-referenced-by-archived-record";
+	disposition: ArchivedWorktreeDisposition;
+	reasonCategory: ArchivedWorktreeReasonCategory;
+	actionable: boolean;
+	selectable: boolean;
+	defaultSelected: boolean;
+	selectionCategories: ArchivedWorktreeSelectionCategory[];
+}
+
+export type CleanupArchivedSessionWorktreesRequest =
+	| { mode: "all" }
+	| { mode: "selected"; sessionIds?: string[]; worktrees?: Array<{ sessionId: string; repo?: string; path?: string; key?: string }> }
+	| { mode: "category"; categories: ArchivedWorktreeSelectionCategory[]; projectId?: string; repoPath?: string }
+	| { mode: "preset"; presetId: string };
+
+export interface CleanupArchivedSessionWorktreesResponse {
+	counts: {
+		requested: number;
+		cleaned: number;
+		branchDeleted: number;
+		skipped: number;
+		alreadyCleaned: number;
+		failed: number;
+		worktreeRemoved: number;
+		invalidSelection: number;
+		notActionable: number;
+		byStatus: Partial<Record<ArchivedWorktreeCleanupStatus, number>>;
+		byReason: Partial<Record<ArchivedWorktreeCleanupReason, number>>;
+	};
+	results: ArchivedSessionWorktreeCleanupResult[];
+	generatedAt: number;
+}
+
+export interface ArchivedSessionWorktreeCleanupResult {
+	key: string;
+	sessionId: string;
+	title?: string;
+	repo?: string;
+	repoPath?: string;
+	path?: string;
+	branch?: string;
+	status: ArchivedWorktreeCleanupStatus;
+	reason?: ArchivedWorktreeCleanupReason;
+	detail?: string;
+	error?: string;
+	worktreeRemoved: boolean;
+	branchDeleted: boolean;
+}
+
+interface GitWorktreeRef {
+	path: string;
+	branch?: string;
+}
+
+interface GitWorktreeRefs {
+	entries: GitWorktreeRef[];
+}
+
+interface ArchivedWorktreeGuardRef {
+	id?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	cwd?: string;
+	branch?: string;
+	repoWorktrees?: Record<string, string>;
+}
+
+interface ArchivedWorktreeScanContext {
+	candidateContexts: ProjectContext[];
+	sessionPathRecords: WorktreeReferenceRecord[];
+	goalRefs: ArchivedWorktreeGuardRef[];
+	teamRefs: ArchivedWorktreeGuardRef[];
+	staffRefs: ArchivedWorktreeGuardRef[];
+	branchGuardsByRepo: Map<string, Set<string>>;
+	archivedBranchGuardsByRepo: Map<string, Map<string, Set<string>>>;
+	gitRefsCache: Map<string, Promise<GitWorktreeRefs>>;
+	branchExistsCache: Map<string, Promise<boolean>>;
+}
+
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
+
+export type RestartRedriveSnapshot = {
+	status: SessionStatus;
+	/**
+	 * Set only while restoreSession() is recreating a persisted session. During
+	 * that restore-startup window, `starting` is a lifecycle state, not proof of
+	 * an interrupted turn; the persisted pre-restore value stays authoritative.
+	 */
+	restoreStartupWasStreaming?: boolean;
+};
+
+/**
+ * Durable restart re-drive marker for every active/busy session state.
+ * The persisted field is still named `wasStreaming` for compatibility, but
+ * restart recovery must cover real non-idle/non-terminal work — not cold
+ * restore-startup of a previously idle session.
+ */
+export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedriveSnapshot): boolean {
+	const status = typeof snapshot === "string" ? snapshot : snapshot.status;
+	const restoreStartupWasStreaming = typeof snapshot === "string" ? undefined : snapshot.restoreStartupWasStreaming;
+	if (status === "idle" || status === "terminated") return false;
+	if (status === "starting" && restoreStartupWasStreaming !== undefined) return restoreStartupWasStreaming;
+	return true;
+}
 
 /**
  * Max consecutive errored agent turns before an incoming prompt/steer is
@@ -129,6 +393,9 @@ const MAX_CONSECUTIVE_ERROR_TURNS = 3;
  * we stop scheduling and leave the rows queued for the next agent_end drain.
  */
 const MAX_RECOVER_DRAIN_RETRIES = 2;
+
+type ToolGrantMode = "persistent" | "session-only" | "one-time";
+type ToolGrantResolution = { granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string; mode?: ToolGrantMode; reason?: string };
 
 const PROVIDER_AUTH_FAILURE_PATTERNS = [
 	/No API key found for\s+([A-Za-z0-9_.-]+)/i,
@@ -227,20 +494,6 @@ function isBlankContentBlockError(errMsg: string | undefined): boolean {
 	return /text field in the ContentBlock/i.test(errMsg) && /is blank/i.test(errMsg);
 }
 
-function extractClaudeCodeSessionId(value: any): string | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	for (const key of ["claudeCodeSessionId", "session_id"] as const) {
-		const candidate = value[key];
-		if (typeof candidate === "string" && candidate.trim()) return candidate;
-	}
-	return extractClaudeCodeSessionId(value.data) ?? extractClaudeCodeSessionId(value.result) ?? extractClaudeCodeSessionId(value.metadata);
-}
-
-function canResumeClaudeCodeSession(ps: Pick<PersistedSession, "runtime" | "modelProvider" | "claudeCodeSessionId"> | undefined): boolean {
-	if (!ps || typeof ps.claudeCodeSessionId !== "string" || !ps.claudeCodeSessionId.trim()) return false;
-	return resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
-}
-
 /** Provenance of a prompt enqueued into a session. Read by TeamManager on
  *  agent_start to decide whether to reset idle-nudge backoff counters.
  *  Only "user" and "system" reset the counter; everything else preserves it. */
@@ -268,7 +521,7 @@ export interface SessionInfo {
 	createdAt: number;
 	lastActivity: number;
 	clients: Set<WebSocket>;
-	rpcClient: IRpcBridge;
+	rpcClient: RpcBridge;
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -317,8 +570,16 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
+	recoveredPromptDispatchQueueIds?: string[];
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
+	/**
+	 * Persisted wasStreaming value captured while restoreSession() is in its
+	 * startup window. Prevents rapid shutdown during cold restore from converting
+	 * a previously idle interactive session into a false interrupted-turn prompt.
+	 */
+	restoreStartupWasStreaming?: boolean;
 	/**
 	 * True for a DORMANT entry (restored delegate/kinded child whose agent process
 	 * is NOT running — placeholder RpcBridge). Used by `isSessionLive` so the
@@ -380,7 +641,7 @@ export interface SessionInfo {
 	lastPromptSource?: PromptSource;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
-		resolve: (result: { granted: boolean; tools?: string[] }) => void;
+		resolve: (result: ToolGrantResolution) => void;
 		reject: (err: Error) => void;
 		toolName: string;
 		toolGroup: string;
@@ -393,7 +654,7 @@ export interface SessionInfo {
 	};
 	/** Tools granted via "session-only" mode — re-applied across Refresh agent, not persisted to disk. */
 	sessionOnlyGrantedTools?: string[];
-	/** Tools granted via "one-time" mode — re-applied across Refresh agent and revoked on agent_end. */
+	/** Tools granted via "one-time" mode — used for server-side allow checks and revoked on agent_end. */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
 	setupComplete?: boolean;
@@ -422,6 +683,10 @@ export interface SessionInfo {
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
 	branch?: string;
+	/** Worktree branch publication policy; scoped sub-agent branches are local-only by default. */
+	worktreePushPolicy?: "local-only" | "publish";
+	/** Back-compat alias for persisted publication policy metadata. */
+	remotePublicationPolicy?: "local-only" | "publish";
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	/**
@@ -639,9 +904,14 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 		}
 	}
 
-	const safeTopLevelError = sanitizeErrorText(ev.errorMessage);
-	if (safeTopLevelError && safeTopLevelError !== ev.errorMessage) {
-		clone().errorMessage = safeTopLevelError;
+	const safeTopLevelErrorMessage = sanitizeErrorText(ev.errorMessage);
+	if (safeTopLevelErrorMessage && safeTopLevelErrorMessage !== ev.errorMessage) {
+		clone().errorMessage = safeTopLevelErrorMessage;
+	}
+
+	const safeTopLevelError = sanitizeErrorText(ev.error);
+	if (safeTopLevelError && safeTopLevelError !== ev.error) {
+		clone().error = safeTopLevelError;
 	}
 
 	return next;
@@ -654,7 +924,8 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
-	const sanitized = sanitizeProviderAuthEventForEmit(truncated);
+	const normalized = normalizeToolResultErrorEvent(truncated);
+	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
 	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
 	const entry = session.eventBuffer.push(spliced);
 	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
@@ -719,6 +990,16 @@ export interface PendingToolPermissionSnapshot {
 	ts: number;
 }
 
+export interface ExtensionChannelLifecycle {
+	closeSession?(sessionId: string, reason?: string): void | Promise<void>;
+	dispose?(reason?: string): void | Promise<void>;
+}
+
+export interface ExtensionChannelServices {
+	registry?: ExtensionChannelLifecycle;
+	openPermits?: unknown;
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -742,6 +1023,8 @@ export interface SessionManagerOptions {
 	configCascade?: import("./config-cascade.js").ConfigCascade;
 	/** PR status store — single source of truth for goal PR URLs. */
 	prStatusStore?: PrStatusStore;
+	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
+	extensionChannels?: ExtensionChannelServices;
 }
 
 type RestoreCoordinator = {
@@ -754,43 +1037,6 @@ type IdleWaiter = {
 	reject: (error: Error) => void;
 	cleanup: () => void;
 };
-
-function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
-	const askToolIds = new Set<string>();
-	for (const message of messages as any[]) {
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
-			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
-		}
-	}
-	return messages.map((message: any) => {
-		if (message?.role !== "toolResult") return message;
-		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
-		const text = stringifyPersistedToolResultContent(message.content).trim();
-		if (text !== "Answer questions?") return message;
-		const rest = { ...message };
-		delete rest.error;
-		return {
-			...rest,
-			isError: false,
-			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
-		};
-	});
-}
-
-function stringifyPersistedToolResultContent(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content.map((item: any) => {
-			if (typeof item === "string") return item;
-			if (item?.type === "text" && typeof item.text === "string") return item.text;
-			try { return JSON.stringify(item); } catch { return String(item); }
-		}).join("\n");
-	}
-	if (content == null) return "";
-	try { return JSON.stringify(content); } catch { return String(content); }
-}
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
@@ -822,6 +1068,10 @@ export class SessionManager {
 	private projectContextManager: ProjectContextManager | null = null;
 	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
+	private scopedMcpManagers: Map<string, McpManager> = new Map();
+	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
+	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -847,6 +1097,7 @@ export class SessionManager {
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
+	private _extensionChannels?: ExtensionChannelServices;
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
 	 * persisted `agentSessionFile` (and are newer than the most recent
@@ -1198,6 +1449,7 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
+		this._extensionChannels = options?.extensionChannels;
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -1223,6 +1475,24 @@ export class SessionManager {
 			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
 		);
 		(this._statusHeartbeatTimer as any).unref?.();
+	}
+
+	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
+		this._extensionChannels = services;
+	}
+
+	get extensionChannels(): ExtensionChannelServices | undefined {
+		return this._extensionChannels;
+	}
+
+	private async closeExtensionChannelsForSession(sessionId: string, reason: string): Promise<void> {
+		const registry = this._extensionChannels?.registry;
+		if (!registry?.closeSession) return;
+		try {
+			await registry.closeSession(sessionId, reason);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to close extension channels for ${sessionId}:`, err);
+		}
 	}
 
 	/** Resolve goal tools extension path via toolManager cascade (with fallback). */
@@ -1404,16 +1674,8 @@ export class SessionManager {
 		return this.sandboxManager;
 	}
 
-	private readClaudeCodeConfigForProject(projectId?: string) {
-		if (!this.preferencesStore) return undefined;
-		const projectConfigStore = projectId && this.projectContextManager
-			? (this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore ?? null)
-			: (this.projectConfigStore ?? null);
-		return readClaudeCodeConfig(this.preferencesStore, projectConfigStore);
-	}
-
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
-	buildPipelineContext(projectId?: string): PipelineContext {
+	buildPipelineContext(projectId?: string, cwd?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		let resolvedGoalManager: GoalManager;
@@ -1443,7 +1705,8 @@ export class SessionManager {
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
-			mcpManager: this.mcpManager,
+			mcpManager: this.getMcpManagerForContext(projectId, cwd),
+			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -1464,6 +1727,7 @@ export class SessionManager {
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
+			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
@@ -1639,6 +1903,11 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
+		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
+		const projectRootPath = projectContext?.project.rootPath;
+		if (projectRootPath) {
+			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
+		}
 
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
@@ -1699,9 +1968,6 @@ export class SessionManager {
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
 		// Get project-scoped config/secrets when available.
-		const projectContext = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)
-			: null;
 		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
@@ -1809,8 +2075,271 @@ export class SessionManager {
 		return tasks.length > 0 ? tasks[0].id : undefined;
 	}
 
-	getMcpManager(): McpManager | null {
+	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
+		if (scope?.scopeKey) return scope.scopeKey;
+		if (scope?.projectId) return `project:${scope.projectId}`;
+		if (scope?.cwd) return `cwd:${path.resolve(scope.cwd)}`;
+		return "default";
+	}
+
+	getMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): McpManager | null {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		return this.scopedMcpManagers.get(key) ?? null;
+	}
+
+	getActiveMcpManagers(): McpManager[] {
+		return [
+			...(this.mcpManager ? [this.mcpManager] : []),
+			...this.scopedMcpManagers.values(),
+		];
+	}
+
+	refreshExternalMcpToolRegistrations(): void {
+		if (!this.toolManager) return;
+		const removePrefixes = new Set<string>(["mcp__"]);
+		const toolInfos: ReturnType<McpManager["getToolInfos"]> = [];
+		for (const mgr of this.getActiveMcpManagers()) {
+			const refresh = mgr.getToolRegistrationRefresh();
+			for (const prefix of refresh.removePrefixes) removePrefixes.add(prefix);
+			toolInfos.push(...refresh.toolInfos);
+		}
+		for (const prefix of removePrefixes) this.toolManager.removeExternalTools(prefix);
+		this.toolManager.registerExternalTools(toolInfos.map(info => ({
+			name: info.name,
+			description: info.description,
+			summary: info.summary ?? info.description,
+			group: info.group,
+			docs: info.docs,
+			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+		})));
+	}
+
+	private async removeScopedMcpManagerByKey(key: string): Promise<boolean> {
+		const mgr = this.scopedMcpManagers.get(key);
+		if (!mgr) return false;
+		this.scopedMcpManagers.delete(key);
+		try {
+			await mgr.disconnectAll();
+		} finally {
+			this.refreshExternalMcpToolRegistrations();
+		}
+		return true;
+	}
+
+	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
+		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
+		const projectScopeKey = this.mcpScopeKey({ projectId });
+		const targetCwdScopeKey = targetRoot ? this.mcpScopeKey({ cwd: targetRoot }) : undefined;
+		const keys: string[] = [];
+		for (const [key, mgr] of this.scopedMcpManagers) {
+			const scope = mgr.getDiscoveryScope();
+			if (
+				key === projectScopeKey
+				|| key === targetCwdScopeKey
+				|| scope.projectId === projectId
+				|| (targetRoot && path.resolve(scope.cwd) === targetRoot)
+			) {
+				keys.push(key);
+			}
+		}
+		for (const key of keys) await this.removeScopedMcpManagerByKey(key);
+	}
+
+	private async cleanupScopedMcpManagersForSessionScope(scope: { projectId?: string; cwd?: string }): Promise<void> {
+		if (!scope.cwd) return;
+		const cwdKey = this.mcpScopeKey({ cwd: scope.cwd });
+		if (!this.scopedMcpManagers.has(cwdKey)) return;
+		const cwd = path.resolve(scope.cwd);
+		const stillInUse = [...this.sessions.values()].some((s) => !!s.cwd && path.resolve(s.cwd) === cwd);
+		if (!stillInUse) await this.removeScopedMcpManagerByKey(cwdKey);
+	}
+
+	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
+		const projectConfigStore = opts?.projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(opts.projectId)?.projectConfigStore ?? this.projectConfigStore)
+			: this.projectConfigStore;
+		const mgr = new McpManager(cwd, projectConfigStore, bobbitStateDir(), {
+			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
+			...(opts?.projectId ? { projectId: opts.projectId } : {}),
+			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
+		});
+		if (opts?.includeAdditionalProjects && this.projectContextManager) {
+			const additionalProjects = Array.from(this.projectContextManager.all())
+				.filter(ctx => ctx.project.rootPath !== cwd)
+				.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
+			if (additionalProjects.length > 0) mgr.setAdditionalProjects(additionalProjects);
+		}
+		return mgr;
+	}
+
+	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
+		const key = this.mcpScopeKey(scope);
+		if (key === "default") return this.mcpManager;
+		const existing = this.scopedMcpManagers.get(key);
+		if (existing) return existing;
+		let cwd = scope?.cwd;
+		let projectId = scope?.projectId;
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (!ctx) return null;
+			cwd = ctx.project.rootPath;
+		}
+		if (!cwd) return null;
+		const mgr = this.createMcpManager(cwd, { projectId, scopeKey: key });
+		this.scopedMcpManagers.set(key, mgr);
+		await mgr.connectAll();
+		return mgr;
+	}
+
+	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
+		if (projectId) return this.getMcpManager({ projectId, cwd });
+		if (cwd) return this.getMcpManager({ cwd });
 		return this.mcpManager;
+	}
+
+	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
+		if (projectId) return this.ensureMcpManager({ projectId, cwd });
+		if (cwd) return this.ensureMcpManager({ cwd });
+		return this.mcpManager;
+	}
+
+	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
+		const live = this.sessions.get(sessionId);
+		const persisted = live ? null : this.getPersistedSession(sessionId);
+		return { projectId: live?.projectId ?? persisted?.projectId, cwd: live?.cwd ?? persisted?.cwd };
+	}
+
+	getMcpManagerForSession(sessionId: string): McpManager | null {
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.getMcpManagerForContext(projectId, cwd);
+	}
+
+	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		return this.ensureMcpManagerForContext(projectId, cwd);
+	}
+
+	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
+		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
+		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
+		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
+		const cwdScopeKey = cwd ? this.mcpScopeKey({ cwd }) : undefined;
+		if (!projectId && cwd && scopeKey === cwdScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ cwd, scopeKey });
+		return null;
+	}
+
+	private aggregateMcpReloadResults(results: McpReloadResult[]): McpReloadResult | undefined {
+		if (results.length === 0) return undefined;
+		const connected = results.flatMap(r => r.connected);
+		const disconnected = results.flatMap(r => r.disconnected);
+		const unchanged = results.flatMap(r => r.unchanged);
+		const skippedErrored = results.flatMap(r => r.skippedErrored);
+		const failed = results.flatMap(r => r.failed);
+		const statuses = results.flatMap(r => r.statuses);
+		let status: McpReloadResult["status"] = "ok";
+		if (results.some(r => r.status === "pending")) {
+			status = "pending";
+		} else if (results.every(r => r.status === "error")) {
+			status = "error";
+		} else if (results.some(r => r.status === "error" || r.status === "partial")) {
+			status = "partial";
+		}
+		return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses };
+	}
+
+	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
+		const managers = new Set<McpManager>();
+		if (scope === "project") {
+			const mgr = await this.ensureMcpManager({ projectId });
+			if (mgr) managers.add(mgr);
+		} else {
+			if (this.mcpManager) managers.add(this.mcpManager);
+			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
+		}
+		const results: McpReloadResult[] = [];
+		const pendingRefreshes: Promise<unknown>[] = [];
+		for (const mgr of managers) {
+			try {
+				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000, queueIfInFlight: true });
+				results.push(result);
+				if (result.status === "pending") {
+					const pending = mgr.currentReload();
+					if (pending) pendingRefreshes.push(pending.catch(() => undefined));
+				}
+			} catch (err) {
+				const scopeKey = mgr.getScopeKey();
+				results.push({
+					status: "error",
+					connected: [],
+					disconnected: [],
+					unchanged: [],
+					skippedErrored: [],
+					failed: [{ name: scopeKey, error: err instanceof Error ? err.message : String(err) }],
+					statuses: [],
+				});
+			}
+		}
+		if (pendingRefreshes.length > 0) {
+			void Promise.allSettled(pendingRefreshes).then(() => this.refreshExternalMcpToolRegistrations());
+		}
+		return this.aggregateMcpReloadResults(results);
+	}
+
+	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
+		this.marketplaceMcpResolver = resolver ?? null;
+		this.mcpManager?.setMarketplaceResolver(this.marketplaceMcpResolver);
+		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
+	}
+
+	setMarketplacePiExtensionResolver(resolver: MarketplacePiExtensionResolver | null | undefined): void {
+		this.marketplacePiExtensionResolver = resolver ?? null;
+	}
+
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
+		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
+	}
+
+	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
+		const activation = resolveMarketplacePiExtensionActivation((scope) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd), projectId, cwd);
+		return activation;
+	}
+
+	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
+		const keys = [
+			`path:${path.resolve(extension.entryPath)}`,
+			`origin:${extension.origin.scope}:${extension.origin.packId}:${extension.listName}`,
+			`pack:${extension.origin.scope}:${extension.origin.packName}:${extension.listName}`,
+		];
+		return keys;
+	}
+
+	private overlayPiExtensionRuntimeDiagnostics(rows: ReturnType<MarketplacePiExtensionResolver>): ReturnType<MarketplacePiExtensionResolver> {
+		return rows.map((row) => {
+			if (!row.entryPath || row.diagnostic.status === "disabled" || row.diagnostic.status === "unresolved" || row.diagnostic.status === "remap-failed") return row;
+			const diagnostic = this.piExtensionDiagnosticKeys({ entryPath: row.entryPath, listName: row.listName, origin: row.origin })
+				.map((key) => this.piExtensionRuntimeDiagnostics.get(key))
+				.find(Boolean);
+			return diagnostic ? { ...row, diagnostic } : row;
+		});
+	}
+
+	private recordPiExtensionDiagnostic(session: SessionInfo, diagnostic: RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo): void {
+		const piDiagnostic: PiExtensionDiagnostic = { ...diagnostic };
+		for (const key of this.piExtensionDiagnosticKeys(extension)) this.piExtensionRuntimeDiagnostics.set(key, piDiagnostic);
+		console.warn(`[pi-extension] ${diagnostic.status} ${extension.origin.packName}/${extension.listName}: ${diagnostic.message}`);
+		emitSessionEvent(session, {
+			type: "pi_extension_diagnostic",
+			diagnostic: piDiagnostic,
+			extension: {
+				listName: extension.listName,
+				entryPath: extension.entryPath,
+				entryRelativePath: extension.entryRelativePath,
+				packRoot: extension.packRoot,
+				origin: extension.origin,
+			},
+		});
 	}
 
 	/**
@@ -1818,7 +2347,7 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
 		if (this.worktreePools.has(projectId)) return;
 		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
 		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
@@ -1827,7 +2356,7 @@ export class SessionManager {
 		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
 		// `setupTimeoutResolver` reads `worktree_setup_timeout_ms` so the project
 		// default applies to per-component setup during pool prebuild.
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -1873,33 +2402,23 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir());
-
-			// Register additional projects for multi-project MCP discovery
-			if (this.projectContextManager) {
-				const additionalProjects = Array.from(this.projectContextManager.all())
-					.filter(ctx => ctx.project.rootPath !== cwd)
-					.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
-				if (additionalProjects.length > 0) {
-					mgr.setAdditionalProjects(additionalProjects);
-				}
-			}
+			const mgr = this.createMcpManager(cwd, { includeAdditionalProjects: true });
 
 			await mgr.connectAll();
 			this.mcpManager = mgr;
 
-			// Register MCP tools with ToolManager
-			if (this.toolManager) {
-				const infos = mgr.getToolInfos();
-				this.toolManager.registerExternalTools(infos.map(info => ({
-					name: info.name,
-					description: info.description,
-					summary: info.summary ?? info.description,
-					group: info.group,
-					docs: info.docs,
-					provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-				})));
+			if (this.projectContextManager) {
+				for (const ctx of this.projectContextManager.all()) {
+					const key = this.mcpScopeKey({ projectId: ctx.project.id });
+					if (this.scopedMcpManagers.has(key)) continue;
+					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
+					this.scopedMcpManagers.set(key, scoped);
+					await scoped.connectAll();
+				}
 			}
+
+			// Register MCP tools with ToolManager across default and scoped managers.
+			this.refreshExternalMcpToolRegistrations();
 			console.log(`[mcp] MCP initialization complete`);
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
@@ -2048,7 +2567,8 @@ export class SessionManager {
 		cwd: string,
 		projectId?: string,
 		effectiveGoalId?: string,
-	): { args: string[]; env: Record<string, string> } {
+		grantedTools?: string[],
+	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
 		// so restart/respawn/force-abort keep the same disablement initial setup
@@ -2058,27 +2578,37 @@ export class SessionManager {
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
+		const toolScope = scopedToolContext(projectId, cwd);
+
+		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
-		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools)
+		const mcpExtPaths = mcpManager
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools);
+		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = [...activation.args];
+		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
+		// and layer explicit grant records on top. Ask-gated tools are part of the
+		// effective role surface so the derived diff alone cannot identify that a
+		// session-only approval should pre-populate the guard after restart. One-time
+		// approvals are intentionally not threaded into grantedTools; the guard lets
+		// only the blocked invocation continue based on the grant response mode.
 		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
-		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const derivedSessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const sessionGrants = this.mergeToolNames(derivedSessionGrants, grantedTools) ?? [];
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -2100,14 +2630,6 @@ export class SessionManager {
 			}
 		}
 
-		// OpenAI Responses preflight guard. Mirrors session setup so restore,
-		// role-reassignment, and force-abort respawn paths keep dropping orphan
-		// function_call_output items before provider requests are sent.
-		const openAiOrphanGuardPath = writeOpenAiOrphanToolResultExtension();
-		if (openAiOrphanGuardPath) {
-			args.push("--extension", openAiOrphanGuardPath);
-		}
-
 		// Google account (Code Assist) provider extension. Mirrors
 		// session-setup.ts::resolveToolActivation so respawn/restore paths keep the
 		// provider registered and `google-gemini-cli/*` models stay runnable after a
@@ -2118,7 +2640,7 @@ export class SessionManager {
 			args.push("--extension", codeAssistPath);
 		}
 
-		return { args, env: activation.env };
+		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string, projectId?: string): import("./role-store.js").Role | undefined {
@@ -2126,9 +2648,10 @@ export class SessionManager {
 		// Cascade-first: pack-shipped roles (e.g. `pr-reviewer`) live in the config
 		// cascade, not the in-memory RoleManager. Resolving via roleManager alone
 		// returns `undefined` for a pack role, which on the restore / force-respawn
-		// paths drops its tools (guard falls through to group defaults). Mirror the
-		// cascade-first-then-roleManager pattern used by resolveRolePromptTemplate.
-		if (projectId && this.configCascade) {
+		// paths drops its tools (guard falls through to group defaults). Always ask
+		// the cascade, even without projectId, so server-scope/builtin market-pack
+		// roles work for system-scope sessions too.
+		if (this.configCascade) {
 			try {
 				const match = this.configCascade.resolveRoles(projectId).find(r => r.item.name === name);
 				if (match) return match.item;
@@ -2194,18 +2717,19 @@ export class SessionManager {
 			// Best-available market-scope wiring (finding #3): thread the server
 			// base + server config store so server/global-user market skill packs
 			// resolve for the active project even when its root != server cwd.
+			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 			const marketContext: SkillMarketContext = {
 				serverBase: getProjectRoot(),
 				globalUserBase: os.homedir(),
-				projectBase: discoveryRoot,
+				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
-				projectConfigStore: projectConfigStore as SkillMarketContext["projectConfigStore"],
+				projectConfigStore: headquartersScope ? undefined : projectConfigStore as SkillMarketContext["projectConfigStore"],
 				// pack-schema-v1 §7: filter disabled market-pack skills out of the runtime
 				// activation catalog too, using the SAME pack_activation store (server/
 				// global-user → server config store; project → the project's config store).
 				packActivation: (scope, packName) => {
 					const store = scope === "project"
-						? (projectId && this.projectContextManager
+						? (!headquartersScope && projectId && this.projectContextManager
 							? this.projectContextManager.getOrCreate(projectId)?.projectConfigStore
 							: undefined)
 						: this.projectConfigStore;
@@ -2222,11 +2746,87 @@ export class SessionManager {
 		}
 	}
 
+	private buildDelegateTaskSpec(instructions: string, context?: Record<string, string>): string {
+		let taskSpec = instructions;
+		if (context && Object.keys(context).length > 0) {
+			taskSpec += "\n\n## Context";
+			for (const [key, value] of Object.entries(context)) {
+				taskSpec += `\n- **${key}**: ${value}`;
+			}
+		}
+		return taskSpec;
+	}
+
+	private buildDelegatePromptParts(opts: {
+		cwd: string;
+		projectRoot?: string;
+		instructions: string;
+		context?: Record<string, string>;
+		allowedTools?: string[];
+		sectionOrder?: string[];
+	}): PromptParts {
+		return {
+			baseSystemPromptPath: this.systemPromptPath,
+			cwd: opts.cwd,
+			projectRoot: opts.projectRoot,
+			// Delegates carry a durable task, not a goal. Older spawn code mapped this
+			// through goalSpec before the live SessionInfo existed; reconstruction uses
+			// the existing Task renderer so the inspector shows one task-oriented section
+			// and never duplicates the instructions across Goal + Task.
+			taskTitle: "Delegate Task",
+			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
+			allowedTools: opts.allowedTools,
+			projectConfigStore: this.projectConfigStore,
+			sectionOrder: opts.sectionOrder,
+		};
+	}
+
 	/** Get cached PromptParts for serving prompt-sections API.
 	 *  If not cached (e.g. dormant session), rebuild from session metadata. */
 	getPromptParts(sessionId: string): PromptParts | undefined {
 		const session = this.sessions.get(sessionId);
 		if (!session) return undefined;
+
+		let persisted: PersistedSession | undefined;
+		try { persisted = this.resolveStoreForId(session.id)?.get(session.id); }
+		catch { persisted = undefined; }
+		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
+		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+
+		// Delegate task instructions are durable store data, not ordinary cached prompt
+		// state. A provider hook can run after an early incomplete cache was created;
+		// for delegates, always rebuild from persisted instructions/context so the
+		// refresh path cannot overwrite the inspector snapshot with a task-less prompt.
+		const isDelegate = !!(session.delegateOf || persisted?.delegateOf);
+		if (isDelegate && persisted?.instructions?.trim()) {
+			const parts = this.buildDelegatePromptParts({
+				cwd: session.cwd,
+				projectRoot: persisted.repoPath,
+				instructions: persisted.instructions,
+				context: persisted.context,
+				allowedTools: session.allowedTools ?? persisted.allowedTools,
+				sectionOrder,
+			});
+			parts.dynamicContext = session.promptParts?.dynamicContext;
+			if (this.toolManager && !parts.toolDocs) {
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			}
+			if (!parts.skillsCatalog) {
+				parts.skillsCatalog = this.computeSkillsCatalog(
+					parts.allowedTools,
+					parts.projectRoot || parts.cwd,
+					parts.projectConfigStore,
+					session.projectId ?? persisted.projectId,
+				);
+			}
+			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+				const pref = this.preferencesStore.get("skillsCatalogBudget");
+				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
+			}
+			session.promptParts = parts;
+			return parts;
+		}
+
 		if (session.promptParts) return session.promptParts;
 
 		// Rebuild on demand for dormant / restored sessions missing cached parts
@@ -2258,11 +2858,13 @@ export class SessionManager {
 				// so it survives respawn / rebuild paths (not just initial session-setup).
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
+				projectRoot: persisted?.repoPath,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder,
 			};
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
@@ -2283,6 +2885,7 @@ export class SessionManager {
 			parts = {
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
+				projectRoot: persisted?.repoPath,
 				goalTitle: goal?.title,
 				goalState: goal?.state,
 				goalSpec: goal?.spec,
@@ -2290,7 +2893,24 @@ export class SessionManager {
 				roleName,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
+				sectionOrder,
 			};
+		}
+
+		if (this.toolManager && !parts.toolDocs) {
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		}
+		if (!parts.skillsCatalog) {
+			parts.skillsCatalog = this.computeSkillsCatalog(
+				parts.allowedTools,
+				parts.projectRoot || parts.cwd,
+				parts.projectConfigStore,
+				session.projectId ?? persisted?.projectId,
+			);
+		}
+		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+			const pref = this.preferencesStore.get("skillsCatalogBudget");
+			if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 		}
 
 		// Cache for future calls
@@ -2395,7 +3015,7 @@ export class SessionManager {
 			|| session.lifecycleFenced === true;
 		if (inReviveWindow) {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
+			if (ps && ps.agentSessionFile) {
 				// Coalesces: joins an in-flight restore or starts the single restore.
 				await this._restoreSessionCoalesced(ps);
 				const revived = this.sessions.get(sessionId);
@@ -2483,6 +3103,11 @@ export class SessionManager {
 			console.log(
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
+
+			// A fresh prompt supersedes any recovered dispatch-time copy of the
+			// failed prompt. Drop it before dispatching the new intent so a later
+			// agent_end drain cannot replay stale work after the follow-up succeeds.
+			this.consumeRecoveredPromptDispatchRows(session);
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
@@ -2748,9 +3373,13 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined): void {
+	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): void {
 		if (sandboxed) return;
-		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore);
+		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
+			provider,
+			model: bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
+		});
 	}
 
 	private safeDispatchError(session: SessionInfo, reason: string): Error {
@@ -2786,6 +3415,32 @@ export class SessionManager {
 		});
 	}
 
+	private maybeAutoRetryPromptDeliveryFailure(session: SessionInfo, reason: string, source: string): boolean {
+		if (!reason || isNonRetryableAgentError(reason)) return false;
+		const isRetryable = isProviderBackoffError(reason) || isTransientReviewError(reason) || isRetryableGenericAgentError(reason);
+		if (!isRetryable) return false;
+
+		// The agent rejected the prompt before it could emit an assistant
+		// message_end, so synthesize the same error state that message_end would
+		// have established. The failed prompt never reached agent_start, so no
+		// tools ran in that turn; clear any stale flag from a previous turn so
+		// retryLastPrompt(auto:true) re-sends the recovered prompt instead of a
+		// mid-work continuation. The recovered queue row remains the single
+		// durable copy of the prompt; retryLastPrompt(auto:true) consumes it
+		// before dispatching so a later agent_end cannot replay it a second time.
+		session.lastTurnErrored = true;
+		session.lastTurnErrorMessage = reason;
+		session.turnHadToolCalls = false;
+		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+		const scheduled = this.maybeAutoRetryTransient(session);
+		if (scheduled) {
+			console.log(`[session-manager] ${source} dispatch for ${session.id} failed with retryable delivery error; auto-retry scheduled. Error: ${reason.slice(0, 200)}`);
+		} else {
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} exhausted retryable delivery auto-retries; leaving recovered row queued for manual Retry. Error: ${reason.slice(0, 200)}`);
+		}
+		return true;
+	}
+
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -2805,12 +3460,20 @@ export class SessionManager {
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
+		const recoveredIds: string[] = [];
 		for (const r of [...rows].reverse()) {
-			session.promptQueue.enqueueAtFront(r.text, {
+			const recovered = session.promptQueue.enqueueAtFront(r.text, {
 				images: r.images,
 				attachments: r.attachments,
 				isSteered: r.isSteered,
 			});
+			recoveredIds.push(recovered.id);
+		}
+		if (recoveredIds.length > 0) {
+			session.recoveredPromptDispatchQueueIds = [
+				...(session.recoveredPromptDispatchQueueIds ?? []),
+				...recoveredIds,
+			];
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
@@ -2819,6 +3482,9 @@ export class SessionManager {
 		}
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
+		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
+			return;
+		}
 		// Schedule a follow-up drain on the next tick so the rows we just
 		// re-enqueued get another chance once the bridge has finished its
 		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
@@ -2969,29 +3635,6 @@ export class SessionManager {
 			});
 	}
 
-	private persistClaudeCodeMessageToTranscript(session: SessionInfo, event: any): void {
-		if (event?.type !== "message_end" || !event.message) return;
-		const store = this.resolveStoreForSession(session.id);
-		const ps = store.get(session.id);
-		if (resolveSessionRuntime({ runtime: ps?.runtime, modelProvider: ps?.modelProvider }) !== "claude-code") return;
-		let agentSessionFile = ps?.agentSessionFile;
-		if (!agentSessionFile) {
-			agentSessionFile = path.join(bobbitStateDir(), "claude-code-transcripts", `${session.id}.jsonl`);
-			store.update(session.id, { agentSessionFile });
-		}
-		try {
-			fs.mkdirSync(path.dirname(agentSessionFile), { recursive: true });
-			fs.appendFileSync(agentSessionFile, JSON.stringify({
-				type: "message",
-				id: event.message.id,
-				ts: new Date().toISOString(),
-				message: event.message,
-			}) + "\n");
-		} catch (err) {
-			console.warn(`[session-manager] Failed to persist Claude Code transcript for ${session.id}:`, err);
-		}
-	}
-
 	/**
 	 * Handle agent events that track error state and control queue draining.
 	 * Called from every event listener before broadcasting.
@@ -2999,12 +3642,6 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
-		const claudeCodeSessionId = extractClaudeCodeSessionId(event);
-		if (claudeCodeSessionId) {
-			this.resolveStoreForSession(session.id).update(session.id, { runtime: "claude-code", claudeCodeSessionId });
-		}
-		this.persistClaudeCodeMessageToTranscript(session, event);
-
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -3347,6 +3984,7 @@ export class SessionManager {
 			});
 			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
 			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
+			void this.closeExtensionChannelsForSession(session.id, "session-process-exit");
 			broadcastStatus(session, "terminated");
 		}
 
@@ -3411,33 +4049,53 @@ export class SessionManager {
 	 * - Other transient glitches (malformed tool-call JSON, ECONNRESET, etc.):
 	 *   bounded 3 attempts at 1s/2s/4s, after which the error surfaces and
 	 *   the user can manually retry.
+	 *
+	 * - Retryable generic agent/runtime errors (sanitized unexpected/internal
+	 *   system errors): bounded 3 attempts at 1s/5s/60s, then manual retry.
 	 */
-	private maybeAutoRetryTransient(session: SessionInfo): void {
+	private maybeAutoRetryTransient(session: SessionInfo): boolean {
 		const BOUNDED_MAX_ATTEMPTS = 3;
 		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
+		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
-		if (!errMsg) return;
-		if (!isTransientReviewError(errMsg)) return;
+		if (!errMsg) return false;
+		if (isNonRetryableAgentError(errMsg)) return false;
 
 		const isBackoff = isProviderBackoffError(errMsg);
+		const isTransient = isTransientReviewError(errMsg);
+		const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
+		if (!isBackoff && !isTransient && !isGenericRetryable) return false;
+
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
 
 		if (!isBackoff && attempt > BOUNDED_MAX_ATTEMPTS) {
+			const label = isGenericRetryable ? "generic" : "transient";
 			console.warn(
-				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
+				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} ${label} auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
-			return;
+			// Dispatch-time failures can exhaust before an agent_start arrives to
+			// clear the last visible countdown. Emit the standard cancellation
+			// frame even though the timer already fired so the UI does not keep a
+			// stale "retrying" banner while manual Retry is required.
+			this.cancelPendingAutoRetry(session, "new-prompt", { emitWithoutTimer: true });
+			return false;
 		}
 		session.transientRetryAttempts = attempt;
 
 		const delayMs = isBackoff
 			? nextBackoffDelay(attempt, { baseMs: 1000, maxMs: PROVIDER_BACKOFF_MAX_MS, jitterRatio: 0.2 })
-			: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
+			: isGenericRetryable
+				? GENERIC_RETRY_DELAYS_MS[attempt - 1]!
+				: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
 
 		if (isBackoff) {
 			console.log(
 				`[session-manager] Session ${session.id} hit provider overload/rate-limit (attempt ${attempt}); auto-retrying in ${Math.round(delayMs / 1000)}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		} else if (isGenericRetryable) {
+			console.log(
+				`[session-manager] Session ${session.id} turn failed with a retryable generic error (attempt ${attempt}/${BOUNDED_MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
 			);
 		} else {
 			console.log(
@@ -3476,6 +4134,7 @@ export class SessionManager {
 				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
 			});
 		}, delayMs);
+		return true;
 	}
 
 	/**
@@ -3486,11 +4145,13 @@ export class SessionManager {
 	private cancelPendingAutoRetry(
 		session: SessionInfo,
 		reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown",
+		opts?: { emitWithoutTimer?: boolean },
 	): void {
-		if (!session.pendingAutoRetryTimer) return;
-		clearTimeout(session.pendingAutoRetryTimer);
+		const hadTimer = !!session.pendingAutoRetryTimer;
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = undefined;
-		if (reason !== "shutdown" && session.clients.size > 0) {
+		if (!hadTimer && !opts?.emitWithoutTimer) return;
+		if (reason !== "shutdown") {
 			const cancelledEvent: AutoRetryCancelledEvent = {
 				type: "auto_retry_cancelled",
 				reason,
@@ -3520,9 +4181,21 @@ export class SessionManager {
 		let ps: PersistedSession | undefined;
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
-		if (!ps || (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps))) return undefined;
+		if (!ps?.agentSessionFile) return undefined;
 		const restored = await this._respawnAgentInPlace(session, ps);
 		return restored ?? this.sessions.get(session.id);
+	}
+
+	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
+		const ids = session.recoveredPromptDispatchQueueIds;
+		if (!ids?.length) return false;
+		let removedAny = false;
+		for (const id of ids) {
+			removedAny = session.promptQueue.remove(id) || removedAny;
+		}
+		session.recoveredPromptDispatchQueueIds = undefined;
+		if (removedAny) this.broadcastQueue(session);
+		return removedAny;
 	}
 
 	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
@@ -3589,14 +4262,14 @@ export class SessionManager {
 				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
 				target.lastPromptText = retryText;
 				target.lastPromptImages = savedPromptImages;
-				await target.rpcClient.prompt(retryText, savedPromptImages);
+				await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
 				return;
 			}
 		}
 
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt
-			await session.rpcClient.prompt(
+			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
 				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
@@ -3609,14 +4282,19 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			// Provider-auth dispatch failures re-enqueue the failed row for recovery.
-			// Explicit retry is the recovery dispatch, so consume that row first;
-			// otherwise the next successful agent_end drain would send it a second time.
-			this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			// Dispatch failures before agent_start re-enqueue the failed row for
+			// recovery. Explicit/auto retry is the recovery dispatch, so consume
+			// that row first; otherwise the next successful agent_end drain would
+			// send it a second time. Prefer tracked recovery row IDs; fall back to
+			// text matching for sessions created before the ID ledger existed.
+			if (!this.consumeRecoveredPromptDispatchRows(session)) {
+				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+			}
 			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
-			await session.rpcClient.prompt(
+			this.consumeRecoveredPromptDispatchRows(session);
+			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"
 			);
@@ -3632,96 +4310,114 @@ export class SessionManager {
 	 *   - "session-only": adds to session.allowedTools in memory only (survives Refresh agent, not gateway restart)
 	 *   - "one-time": adds to session.allowedTools + tracks for revocation on agent_end
 	 */
-	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: "persistent" | "session-only" | "one-time"): Promise<string[]> {
+	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: ToolGrantMode): Promise<string[]> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 		if (!this.roleManager) throw new Error("No role manager available");
 
-		// Use explicit role, or fall back to "general" role (implicit default for all sessions)
+		// Use explicit role, or fall back to "general" role (implicit default for all sessions).
+		// Resolve cascade-first so pack-contributed roles keep their policies here too.
 		const roleName = session.role || "general";
-		const role = this.roleManager.getRole(roleName);
+		const role = this.resolveSessionRole(roleName, undefined, session.projectId);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(role).map(e => e.name);
-		const effectiveSet = new Set(effectiveAllowed.map(t => t.toLowerCase()));
-
-		const newTools: string[] = [];
+		const grantScopeTools: string[] = [];
 		if (scope === "group" && group) {
-			// Add all tools from the group (MCP + non-MCP)
+			// Approving a group covers tools in that group only. Do not use the full
+			// effective role surface here: ask-gated tools are registered there so the
+			// model can attempt them, but they are not approved grants yet.
 			if (this.mcpManager) {
-				const infos = this.mcpManager.getToolInfos();
-				for (const info of infos) {
-					if (info.group === group && !effectiveSet.has(info.name.toLowerCase())) {
-						newTools.push(info.name);
-					}
+				for (const info of this.mcpManager.getToolInfos()) {
+					if (info.group !== group) continue;
+					grantScopeTools.push(info.name);
+
+					// The guard/model-facing MCP surface is the collapsed meta-tool
+					// (`mcp_<server>` / `mcp_<server>__<sub>`), while the MCP manager
+					// stores canonical per-operation names. Group grants must include
+					// both forms: per-op names keep Layer B/internal filtering working,
+					// and the meta name lets the active guard correlate and cache only
+					// the MCP group it is currently unblocking.
+					const parsed = parseMcpToolName(info.name);
+					if (parsed) grantScopeTools.push(makeMetaToolName(parsed.server, parsed.sub));
 				}
 			}
 			if (this.toolManager) {
-				const allTools = this.toolManager.getAvailableTools();
-				for (const tool of allTools) {
-					if (tool.group === group && !effectiveSet.has(tool.name.toLowerCase()) && !newTools.includes(tool.name)) {
-						newTools.push(tool.name);
-					}
+				for (const tool of this.toolManager.getAvailableTools()) {
+					if (tool.group === group) grantScopeTools.push(tool.name);
 				}
 			}
 		} else {
-			// Add just the single tool
-			if (!effectiveSet.has(toolName.toLowerCase())) {
-				newTools.push(toolName);
-			}
+			grantScopeTools.push(toolName);
 		}
+		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
 
-		if (newTools.length === 0) {
-			// Tool is already effectively allowed — still resolve any pending guard request
-			if (session.pendingGrantRequest) {
-				clearTimeout(session.pendingGrantRequest.timer);
-				const pending = session.pendingGrantRequest;
+		if (session.pendingGrantRequest) {
+			const pending = session.pendingGrantRequest;
+			const requestedToolMatches = pending.toolName.toLowerCase() === toolName.toLowerCase();
+			const requestedGroupMatches = !!group && pending.toolGroup.toLowerCase() === group.toLowerCase();
+			const approvedToolsCoverPending = approvedGrantTools.some(t => t.toLowerCase() === pending.toolName.toLowerCase());
+			const grantCoversPending = scope === "group"
+				? requestedGroupMatches && approvedToolsCoverPending
+				: requestedToolMatches && approvedToolsCoverPending;
+			if (!grantCoversPending) {
+				clearTimeout(pending.timer);
 				session.pendingGrantRequest = undefined;
-				pending.resolve({ granted: true, tools: effectiveAllowed });
+				pending.resolve({
+					granted: false,
+					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
+				});
+				return session.allowedTools ?? [];
 			}
-			return effectiveAllowed;
 		}
 
 		let resultTools: string[];
 
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
-			session.allowedTools = [...(session.allowedTools || []), ...newTools];
-			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
-			await this._restartSessionWithUpdatedRole(session);
+			session.allowedTools = this.mergeToolNames(session.allowedTools, approvedGrantTools) ?? [];
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, approvedGrantTools);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
-			session.allowedTools = [...(session.allowedTools || []), ...newTools];
-			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
-			await this._restartSessionWithUpdatedRole(session);
+			session.allowedTools = this.mergeToolNames(session.allowedTools, approvedGrantTools) ?? [];
+			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			resultTools = session.allowedTools;
 
 		} else {
-			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
+			// Persistent grant (default): update toolPolicies on role YAML when the
+			// role is locally writable. Pack roles are read-only through RoleManager,
+			// so keep the grant effective for this session without writing to the pack.
 			const updatedPolicies = { ...role.toolPolicies };
-			for (const t of newTools) {
+			for (const t of approvedGrantTools) {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
-			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
-			// Re-read role and recompute effective allowed tools
-			const updatedRole = this.roleManager.getRole(role.name);
-			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role).map(e => e.name);
-			session.allowedTools = updatedEffective;
-			await this._restartSessionWithUpdatedRole(session);
-
-			resultTools = updatedEffective;
+			const writableRole = this.roleManager.getRole(role.name);
+			let effectiveRole: Role = { ...role, toolPolicies: updatedPolicies };
+			if (writableRole) {
+				this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
+				effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+			} else {
+				session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
+			}
+			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole).map(e => e.name);
+			session.allowedTools = this.mergeToolNames(updatedEffective, writableRole ? undefined : approvedGrantTools) ?? updatedEffective;
+			resultTools = session.allowedTools;
 		}
 
-		// Resolve pending grant request from guard extension
 		if (session.pendingGrantRequest) {
+			// Single-owner grant resumption: the active guard long-poll receives only
+			// the approved grant scope/delta and lets the original tool call continue.
+			// Returning the full effective surface here would let unrelated ask-gated
+			// tools bypass future prompts in the active process.
 			clearTimeout(session.pendingGrantRequest.timer);
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
-			pending.resolve({ granted: true, tools: session.allowedTools });
+			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			return resultTools;
 		}
 
+		await this._restartSessionWithUpdatedRole(session);
 		return resultTools;
 	}
 
@@ -3730,7 +4426,7 @@ export class SessionManager {
 	 * grant request, broadcasts to UI clients, and returns a promise that
 	 * resolves when the user grants/denies or after a 5-minute timeout.
 	 */
-	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<{ granted: boolean; tools?: string[] }> {
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<ToolGrantResolution> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
@@ -3751,7 +4447,7 @@ export class SessionManager {
 		const { seq, ts } = session.eventBuffer.pushFrame();
 
 		// Create promise that will be resolved by grantToolPermission
-		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
+		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
@@ -3829,10 +4525,14 @@ export class SessionManager {
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		// One-time grants authorize only the currently blocked invocation; do not
+		// pre-populate the guard's process-local cache across respawn/refresh.
+		const overrideGrantedTools = savedSessionOnlyGrantedTools;
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
 				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
 		});
 
@@ -3899,6 +4599,7 @@ export class SessionManager {
 			} finally {
 				delete (ps as any)._restartFrameOfReference;
 				delete (ps as any)._overrideAllowedTools;
+				delete (ps as any)._overrideGrantedTools;
 			}
 			const restored = this.sessions.get(session.id);
 			if (restored) {
@@ -3926,11 +4627,9 @@ export class SessionManager {
 		if (!ps) throw new Error("No persisted session data");
 
 		// Zombie-archive guard: a record with neither an agent session file nor a role
-		// can't be bootstrapped by `_respawnAgentInPlace`. Claude Code sessions resume
-		// from their persisted Claude session id instead of a Pi JSONL transcript.
-		// Archive unrecoverable records surface-side instead of throwing opaquely on
-		// every Restart click.
-		if (!ps.agentSessionFile && !ps.role && !canResumeClaudeCodeSession(ps)) {
+		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
+		// instead of throwing opaquely on every Restart click.
+		if (!ps.agentSessionFile && !ps.role) {
 			console.warn(
 				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
 				`(no agentSessionFile, no role) — archiving instead of restarting.`,
@@ -3951,10 +4650,14 @@ export class SessionManager {
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+		// One-time grants authorize only the currently blocked invocation; do not
+		// pre-populate the guard's process-local cache across respawn/refresh.
+		const overrideGrantedTools = savedSessionOnlyGrantedTools;
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
 				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
 		});
 
@@ -4074,7 +4777,7 @@ export class SessionManager {
 		// in restoreSession() — no delegate-specific registry.
 		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
-			if (!ps.agentSessionFile && !canResumeClaudeCodeSession(ps)) {
+			if (!ps.agentSessionFile) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -4110,12 +4813,12 @@ export class SessionManager {
 		// already-persisted link fields (delegateOf / parentSessionId+childKind)
 		// — no new persisted registry — then remind any owner with live restored
 		// children to re-collect them via team_wait (restart survival, no
-		// transparent tool-call resumption). Team-managed children (childKind
-		// "team") are skipped here; team-manager nudges those in resubscribeTeamEvents.
+		// transparent tool-call resumption). Non-collectable child kinds (for
+		// example team-managed and PR Walkthrough children) are skipped here.
 		if (this.orchestrationCore) {
 			try {
 				this.orchestrationCore.rebuildIndexFromPersisted(persisted);
-				await this.orchestrationCore.remindOwnersWithLiveChildren(h => h.childKind !== "team");
+				await this.orchestrationCore.remindOwnersWithLiveChildren(shouldSendRestartCollectionReminder);
 			} catch (err) {
 				console.warn("[session-manager] OrchestrationCore boot index/reminder failed:", err);
 			}
@@ -4156,7 +4859,7 @@ export class SessionManager {
 		// Scan for orphaned agent-CLI transcripts — surface a banner if the
 		// session-metadata index has diverged from the on-disk JSONLs.
 		try {
-			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const agentSessionsRoot = activeAgentSessionsDir();
 			const tracked = new Set<string>();
 			let mostRecent = 0;
 			const allPersisted = this.projectContextManager
@@ -4245,13 +4948,7 @@ export class SessionManager {
 				return;
 			}
 		}
-		const psRuntime = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider });
-		if (psRuntime === "claude-code" && ps.sandboxed) {
-			console.warn(`[session-manager] Archiving ${ps.id} — Claude Code local runtime is host-only in the MVP and cannot restore sandboxed sessions`);
-			sessionStore.archive(ps.id);
-			return;
-		}
-		if (!ps.agentSessionFile && !(psRuntime === "claude-code" && ps.claudeCodeSessionId)) {
+		if (!ps.agentSessionFile) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
 			const recovered = this.recoverSessionFile(ps);
@@ -4279,10 +4976,9 @@ export class SessionManager {
 				return;
 			}
 		}
-		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-		const fileFound = psRuntime === "claude-code" && !ps.agentSessionFile
-			? true
-			: await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
+		trustPersistedAgentSessionFile(ps.agentSessionFile);
+		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
 			// `agentSessionFile` is set (persistSessionMetadata only records it after a
 			// live getState) but no transcript exists on disk. Pi (>=0.77) creates the
@@ -4354,7 +5050,7 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
-		const bridgeOptions: SessionBridgeOptions = { cwd: ps.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
@@ -4465,6 +5161,7 @@ export class SessionManager {
 		// Restore tool activation. Roleless normal sessions still use the general
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
+		const overrideGrantedTools: string[] | undefined = (ps as any)._overrideGrantedTools;
 		// Preserve a persisted EXPLICIT empty allowlist (`[]` = NO tools) as distinct
 		// from absent (`undefined` = fall back to role defaults). Only a missing /
 		// non-array value falls back; `[]` must survive restore so a restricted
@@ -4502,8 +5199,10 @@ export class SessionManager {
 		const restoredAllowedTools: EffectiveTool[] | undefined =
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId);
+		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
@@ -4543,31 +5242,19 @@ export class SessionManager {
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else if (ps.delegateOf && !ps.goalId) {
-			// Delegate restore: rebuild the system prompt from the durable task fields
-			// (instructions + context) — the delegate's equivalent of a worker's goal
-			// spec. Mirrors session-setup.ts::_resolvePrompt mode === "delegate" so a
-			// revived delegate carries its original task, not an empty goal/role prompt.
-			let taskSpec = ps.instructions || "";
-			if (ps.context && Object.keys(ps.context).length > 0) {
-				taskSpec += "\n\n## Context";
-				for (const [key, value] of Object.entries(ps.context)) {
-					taskSpec += `\n- **${key}**: ${value}`;
-				}
-			}
-			const promptPath = this.assemblePrompt(ps.id, {
-				baseSystemPromptPath: this.systemPromptPath,
+			// Delegate restore: rebuild the system prompt from durable instructions +
+			// context — the delegate's equivalent of a worker task spec. Use the Task
+			// fields so restored delegates and prompt-section reconstruction agree.
+			const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
 				cwd: ps.cwd,
-				// Mirror the spawn path (session-setup.ts::_resolvePrompt mode ===
-				// "delegate") so AGENTS.md / project config dirs are readable for
-				// sandbox or multi-repo delegates whose cwd is container-internal.
+				// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
+				// delegates whose cwd is container-internal.
 				projectRoot: ps.repoPath,
-				goalSpec: taskSpec,
-				goalTitle: "Delegate Task",
-				goalState: "active",
+				instructions: ps.instructions || "",
+				context: ps.context,
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
-			});
+			}));
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
@@ -4612,20 +5299,9 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed);
+		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, ps.modelProvider);
 
-		const runtime = resolveSessionRuntime({ runtime: ps.runtime, initialModel: bridgeOptions.initialModel, modelProvider: ps.modelProvider });
-		assertRuntimeAllowedForSession(runtime, ps.sandboxed);
-		Object.assign(bridgeOptions, hydrateRuntimeOptions({
-			...bridgeOptions,
-			runtime,
-			claudeCodeSessionId: ps.claudeCodeSessionId,
-			claudeCodeExecutable: ps.claudeCodeExecutable,
-			claudeCodePermissionMode: ps.claudeCodePermissionMode,
-			claudeCodeModelAlias: ps.claudeCodeModelAlias,
-		}, this.readClaudeCodeConfigForProject(ps.projectId)));
-
-		const rpcClient = createSessionBridge(bridgeOptions);
+		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
 		// stash the previous session's streaming frame-of-reference on `ps` so the
@@ -4675,10 +5351,15 @@ export class SessionManager {
 			allowedTools: restoredAllowedNames,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
+			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
+			spawnPinnedModel: bridgeOptions.initialModel,
+			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
+			worktreePushPolicy: ps.worktreePushPolicy,
+			remotePublicationPolicy: ps.remotePublicationPolicy,
 			repoWorktrees: ps.repoWorktrees && ps.repoPath
 				? Object.entries(ps.repoWorktrees).map(([repo, worktreePath]) => ({
 					repo,
@@ -4714,35 +5395,41 @@ export class SessionManager {
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
 
-		if (runtime === "claude-code") {
-			restoring = false;
-		} else {
-			// Resume the agent's previous session file
-			// Session files are now stored on the host via bind-mounted state dir.
-			// No path translation needed — the agent session file is always a host path.
-			const switchSessionPath = ps.agentSessionFile;
-			// Un-poison any blank-text user messages persisted before the
-			// attachment-only fix, so the agent doesn't re-send an invalid blank
-			// ContentBlock on resume (best-effort, non-fatal).
-			await sanitizeAgentTranscriptFile(
-				{ sandboxed: ps.sandboxed, projectId: ps.projectId },
-				switchSessionPath,
-				this.sandboxManager,
-			);
-			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchSessionPath },
-				switchTimeout,
-			);
-			restoring = false;
-			if (!switchResp.success) {
-				await rpcClient.stop();
-				throw new Error(`switch_session failed: ${switchResp.error}`);
-			}
+		// Resume the agent's previous session file. Persisted host paths are still
+		// readable by Bobbit; sandboxed agents receive the active mount's container
+		// path when the host path maps to the active sessions mount.
+		trustPersistedAgentSessionFile(ps.agentSessionFile);
+		const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+		const switchSessionPath = switchSessionPathForAgent(ps);
+		// Un-poison any blank-text user messages persisted before the
+		// attachment-only fix, so the agent doesn't re-send an invalid blank
+		// ContentBlock on resume (best-effort, non-fatal).
+		await sanitizeAgentTranscriptFile(
+			transcriptFileCtx,
+			ps.agentSessionFile,
+			this.sandboxManager,
+		);
+		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: switchSessionPath },
+			switchTimeout,
+		);
+		restoring = false;
+		if (!switchResp.success) {
+			await rpcClient.stop();
+			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+
+		try {
+			await this.tryAutoSelectModel(session);
+		} catch (err) {
+			await rpcClient.stop();
+			throw err;
 		}
 
 		broadcastStatus(session, "idle");
@@ -4808,7 +5495,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: import("./session-store.js").SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; claudeCodeSessionId?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4818,10 +5505,8 @@ export class SessionManager {
 			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
-		const ctx = this.buildPipelineContext(projectId);
-		const requestedInitialModel = opts?.initialModel ?? (!opts?.skipAutoModel ? this.resolveInitialModel(opts?.role ?? opts?.roleName, projectId) : undefined);
-		const requestedRuntime = opts?.runtime ?? runtimeFromModelString(requestedInitialModel) ?? "pi";
-		assertRuntimeAllowedForSession(requestedRuntime, opts?.sandboxed);
+		await this.ensureMcpManagerForContext(projectId, cwd);
+		const ctx = this.buildPipelineContext(projectId, cwd);
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
 		// (`host.agents.spawn` → OrchestrationCore.spawn → createSession) threads only
@@ -4888,6 +5573,8 @@ export class SessionManager {
 				isCompacting: false,
 				titleGenerated: false,
 				goalId,
+				teamGoalId: opts?.teamGoalId,
+				teamLeadSessionId: opts?.teamLeadSessionId,
 				assistantType,
 				taskId: opts?.taskId,
 				parentSessionId: opts?.parentSessionId,
@@ -4900,7 +5587,9 @@ export class SessionManager {
 				// keys off the right role id during the worktree-prep window.
 				role: opts?.role ?? opts?.roleName,
 				accessory: opts?.accessory,
+				nonInteractive: opts?.nonInteractive,
 				worktreePath,
+				worktreePushPolicy: opts?.worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -4927,6 +5616,8 @@ export class SessionManager {
 				title: opts?.title || "New session",
 				cwd,
 				goalId,
+				teamGoalId: opts?.teamGoalId,
+				teamLeadSessionId: opts?.teamLeadSessionId,
 				assistantType,
 				taskId: opts?.taskId,
 				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
@@ -4938,11 +5629,13 @@ export class SessionManager {
 				readOnly: opts?.readOnly,
 				sessionScopedAllowedTools,
 				worktreePath,
+				worktreePushPolicy: opts?.worktreePushPolicy,
 				repoPath,
 				branch,
 				sandboxed: opts?.sandboxed,
 				role: opts?.role,
 				accessory: opts?.accessory,
+				nonInteractive: opts?.nonInteractive,
 				agentArgs,
 				env: opts?.env,
 				rolePrompt: resolvedRolePrompt,
@@ -4955,11 +5648,9 @@ export class SessionManager {
 				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
-				runtime: requestedRuntime,
 				initialModel: opts?.initialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
-				claudeCodeSessionId: opts?.claudeCodeSessionId,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
 			};
@@ -5015,11 +5706,14 @@ export class SessionManager {
 			title: opts?.title || "New session",
 			cwd,
 			goalId,
+			teamGoalId: opts?.teamGoalId,
+			teamLeadSessionId: opts?.teamLeadSessionId,
 			assistantType,
 			taskId: opts?.taskId,
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
+			worktreePushPolicy: opts?.worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
@@ -5027,6 +5721,7 @@ export class SessionManager {
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
+			nonInteractive: opts?.nonInteractive,
 			agentArgs,
 			env: opts?.env,
 			rolePrompt: resolvedRolePrompt,
@@ -5040,11 +5735,9 @@ export class SessionManager {
 			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
-			runtime: requestedRuntime,
 			initialModel: opts?.initialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
-			claudeCodeSessionId: opts?.claudeCodeSessionId,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
 		};
@@ -5116,14 +5809,12 @@ export class SessionManager {
 		// Resolve projectId from parent session
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
 			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
-		const ctx = this.buildPipelineContext(parentProjectId);
+		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
+		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
 
 		// ── Sandbox propagation from parent ──
 		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
 		let delegateSandboxed = false;
-		if (runtimeFromModelString(opts.initialModel) === "claude-code" && parentMeta?.sandboxed) {
-			throw new Error("Claude Code local runtime is host-only in the MVP and cannot run inside Bobbit Docker sandboxes.");
-		}
 		if (parentMeta?.sandboxed) {
 			// Always use the parent's validated host-side cwd — never trust the
 			// cwd from the container.  The agent sends process.cwd() which is a
@@ -5171,7 +5862,6 @@ export class SessionManager {
 		const plan: SessionSetupPlan = {
 			id,
 			mode: "delegate",
-			runtime: runtimeFromModelString(opts.initialModel) ?? "pi",
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
@@ -5366,16 +6056,21 @@ export class SessionManager {
 		return texts.join("\n\n");
 	}
 
-	private async getPersistedSessionMessages(sessionId: string, opts?: { claudeCodeOnly?: boolean; archivedOnly?: boolean }): Promise<unknown[]> {
+	/**
+	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
+	 * transcript file. Used as the H1 fallback so a child that completed before a
+	 * restart can still be collected via team_wait without a live process.
+	 */
+	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
 		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-		if (!ps?.agentSessionFile) return [];
-		if (opts?.archivedOnly && !ps.archived) return [];
-		const isClaudeCode = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
-		if (opts?.claudeCodeOnly && !isClaudeCode) return [];
+		if (!ps?.agentSessionFile) return "";
 		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
-			if (!content) return [];
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return "";
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
+			if (!content) return "";
 			const messages: unknown[] = [];
 			for (const line of content.split(/\r?\n/)) {
 				if (!line.trim()) continue;
@@ -5384,39 +6079,10 @@ export class SessionManager {
 					if (entry.type === "message" && entry.message) messages.push(entry.message);
 				} catch { /* skip malformed line */ }
 			}
-			return isClaudeCode ? normalizePersistedClaudeCodeAskMessages(messages) : messages;
+			return this.extractAssistantText(messages);
 		} catch {
-			return [];
+			return "";
 		}
-	}
-
-	/**
-	 * Claude Code resumes from Claude's session id instead of replaying Bobbit's
-	 * JSONL into the bridge, so immediately after gateway restart the live bridge
-	 * can have an empty/new-only in-memory snapshot. Prefer the persisted Claude
-	 * transcript fallback when it contains more complete history.
-	 */
-	async hydrateClaudeCodeSnapshotMessages(sessionId: string, liveData: unknown): Promise<unknown> {
-		const persisted = await this.getPersistedSessionMessages(sessionId, { claudeCodeOnly: true });
-		if (persisted.length === 0) return liveData;
-		const liveMessages = Array.isArray(liveData)
-			? liveData
-			: (liveData && typeof liveData === "object" && Array.isArray((liveData as any).messages) ? (liveData as any).messages : []);
-		if (persisted.length <= liveMessages.length) return liveData;
-		const messages = truncateLargeToolContentInMessages(persisted) as unknown[];
-		if (Array.isArray(liveData)) return messages;
-		if (liveData && typeof liveData === "object") return { ...(liveData as Record<string, unknown>), messages };
-		return { messages };
-	}
-
-	/**
-	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
-	 * transcript file. Used as the H1 fallback so a child that completed before a
-	 * restart can still be collected via team_wait without a live process.
-	 */
-	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
-		const messages = await this.getPersistedSessionMessages(sessionId);
-		return this.extractAssistantText(messages);
 	}
 
 	/**
@@ -5449,7 +6115,7 @@ export class SessionManager {
 
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = msgs.data;
+				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
 				let data: any = raw;
 				if (Array.isArray(raw)) {
 					const spliced = spliceInFlightSteers(
@@ -5510,14 +6176,39 @@ export class SessionManager {
 	 * best-ranked model when gateway is configured, otherwise does nothing
 	 * (pi-coding-agent uses its own built-in default).
 	 */
-	/** Resolve a role-level model override for the session, if any. */
-	private resolveRoleModel(session: SessionInfo): string | undefined {
-		if (!session.role || !this.configCascade) return undefined;
+	private readRoleStringField(role: Role | undefined, field: "model" | "thinkingLevel"): string | undefined {
+		const value = role?.[field];
+		if (typeof value !== "string") return undefined;
+		return value.trim().length > 0 ? value : undefined;
+	}
+
+	private resolveRoleModelValue(roleName: string | undefined, projectId: string | undefined): string | undefined {
+		if (!roleName) return undefined;
+		const cascadeValue = this.readRoleStringField(this.resolveSessionRole(roleName, undefined, projectId), "model");
+		if (cascadeValue) return cascadeValue;
+		if (!this.configCascade) return undefined;
 		try {
-			return this.configCascade.resolveRoleModel(session.role, session.projectId);
+			return this.configCascade.resolveRoleModel(roleName, projectId);
 		} catch {
 			return undefined;
 		}
+	}
+
+	private resolveRoleThinkingLevelValue(roleName: string | undefined, projectId: string | undefined): string | undefined {
+		if (!roleName) return undefined;
+		const cascadeValue = this.readRoleStringField(this.resolveSessionRole(roleName, undefined, projectId), "thinkingLevel");
+		if (cascadeValue) return cascadeValue;
+		if (!this.configCascade) return undefined;
+		try {
+			return this.configCascade.resolveRoleThinkingLevel(roleName, projectId);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Resolve a role-level model override for the session, if any. */
+	private resolveRoleModel(session: SessionInfo): string | undefined {
+		return this.resolveRoleModelValue(session.role, session.projectId);
 	}
 
 	/**
@@ -5548,70 +6239,7 @@ export class SessionManager {
 
 	/** Resolve a role-level thinkingLevel override for the session, if any. */
 	private resolveRoleThinkingLevel(session: SessionInfo): string | undefined {
-		if (!session.role || !this.configCascade) return undefined;
-		try {
-			return this.configCascade.resolveRoleThinkingLevel(session.role, session.projectId);
-		} catch {
-			return undefined;
-		}
-	}
-
-	private isClaudeCodeRuntimeSession(session: SessionInfo): boolean {
-		try {
-			const persisted = this.resolveStoreForSession(session.id).get(session.id);
-			if (persisted?.runtime === "claude-code") return true;
-			if (runtimeFromProvider(persisted?.modelProvider) === "claude-code") return true;
-		} catch { /* best-effort; fall through to spawn metadata */ }
-		return runtimeFromModelString(session.spawnPinnedModel) === "claude-code";
-	}
-
-	private async tryAutoSelectClaudeCodeModel(session: SessionInfo, spawnPinned: boolean): Promise<void> {
-		const roleModel = this.resolveRoleModel(session);
-		if (roleModel) {
-			await this.applyClaudeCodeAutoModelCandidate(session, roleModel, `role.${session.role}.model`, spawnPinned);
-			return;
-		}
-
-		const sessionModelPref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref) {
-			await this.applyClaudeCodeAutoModelCandidate(session, sessionModelPref, "default.sessionModel", spawnPinned);
-		}
-	}
-
-	private async applyClaudeCodeAutoModelCandidate(session: SessionInfo, modelString: string, contextLabel: string, spawnPinned: boolean): Promise<void> {
-		const slash = modelString.indexOf("/");
-		if (slash <= 0 || slash === modelString.length - 1) {
-			console.warn(`[session-manager] Malformed ${contextLabel} preference for Claude Code session ${session.id}: "${modelString}", ignoring`);
-			return;
-		}
-		const provider = modelString.slice(0, slash);
-		if (provider !== "claude-code") {
-			console.warn(`[session-manager] ${contextLabel} "${modelString}" targets the Pi runtime; skipping for Claude Code session ${session.id}.`);
-			return;
-		}
-		if (!isSessionSelectableModelString(modelString)) {
-			console.warn(`[session-manager] ${contextLabel} "${modelString}" is not session-selectable for Claude Code session ${session.id}; skipping.`);
-			return;
-		}
-		const modelId = modelString.slice(slash + 1);
-		const skipSetModel = spawnPinned && session.spawnPinnedModel === modelString;
-		try {
-			await applyModelString(session.rpcClient, modelString, {
-				sessionManager: this,
-				sessionId: session.id,
-				contextLabel,
-				skipSetModel,
-			});
-			this._writeModelNameFile(session.id, modelString);
-			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-			broadcast(session.clients, {
-				type: "state",
-				data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-			});
-			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Confirmed Claude Code model "${modelString}" for session ${session.id}${skipSetModel ? " (spawn-pinned)" : ""}`);
-		} catch (err) {
-			console.warn(`[session-manager] Claude Code model "${modelString}" was not applied for ${session.id}:`, err);
-		}
+		return this.resolveRoleThinkingLevelValue(session.role, session.projectId);
 	}
 
 	/**
@@ -5625,13 +6253,11 @@ export class SessionManager {
 	 */
 	resolveInitialModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		// Role override
-		if (role && this.configCascade) {
-			try {
-				const m = this.configCascade.resolveRoleModel(role, projectId);
-				// Skip models that can't run in an agent session (e.g. google-gemini-cli
-				// Code Assist) so a role override doesn't pin an unrunnable provider.
-				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
-			} catch { /* fall through */ }
+		if (role) {
+			const m = this.resolveRoleModelValue(role, projectId);
+			// Skip models that can't run in an agent session (e.g. google-gemini-cli
+			// Code Assist) so a role override doesn't pin an unrunnable provider.
+			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
@@ -5647,12 +6273,10 @@ export class SessionManager {
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
 		let candidate: string | undefined;
-		if (role && this.configCascade) {
-			try {
-				const t = this.configCascade.resolveRoleThinkingLevel(role, projectId);
-				const known = isKnownThinkingLevel(t);
-				if (known) candidate = known;
-			} catch { /* fall through */ }
+		if (role) {
+			const t = this.resolveRoleThinkingLevelValue(role, projectId);
+			const known = isKnownThinkingLevel(t);
+			if (known) candidate = known;
 		}
 		if (!candidate) {
 			const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
@@ -5670,8 +6294,7 @@ export class SessionManager {
 			if (slash > 0) {
 				const provider = initialModelStr.slice(0, slash);
 				const modelId = initialModelStr.slice(slash + 1);
-				const meta = inferMeta(modelId);
-				return clampThinkingLevel(candidate, { id: modelId, provider, reasoning: meta.reasoning });
+				return clampThinkingLevelForModel(candidate, provider, modelId);
 			}
 		}
 		return candidate;
@@ -5682,11 +6305,9 @@ export class SessionManager {
 	 * verification-harness precedence: role override → `default.reviewModel`.
 	 */
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
-		if (role && this.configCascade) {
-			try {
-				const m = this.configCascade.resolveRoleModel(role, projectId);
-				if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
-			} catch { /* fall through */ }
+		if (role) {
+			const m = this.resolveRoleModelValue(role, projectId);
+			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
 		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
@@ -5698,88 +6319,207 @@ export class SessionManager {
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
+		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
+		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 
-		if (this.isClaudeCodeRuntimeSession(session)) {
-			await this.tryAutoSelectClaudeCodeModel(session, spawnPinned);
-			return;
-		}
-
-		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
-		// matching the contract used for review/QA sessions: if a user explicitly
-		// pinned a model on a role and it cannot be bound, surface the failure.
-		const roleModel = this.resolveRoleModel(session);
-		if (roleModel && !isSessionSelectableModelString(roleModel)) {
-			// A role pinned a model that can't run in an agent session (e.g.
-			// google-gemini-cli Code Assist). Binding it would hard-fail the session,
-			// so skip it and fall through to the default/aigw selection instead.
-			console.warn(`[session-manager] Role model "${roleModel}" is not session-selectable for ${session.id} (role=${session.role}); skipping role override.`);
-		} else if (roleModel) {
-			try {
-				await applyModelString(session.rpcClient, roleModel, {
-					sessionManager: this,
-					sessionId: session.id,
-					contextLabel: `role.${session.role}.model`,
-					skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
-				});
-				this._writeModelNameFile(session.id, roleModel);
-				const slash = roleModel.indexOf("/");
-				const provider = roleModel.slice(0, slash);
-				const modelId = roleModel.slice(slash + 1);
-				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-				broadcast(session.clients, {
-					type: "state",
-					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-				});
-				console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
-				return;
-			} catch (err) {
-				console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, err);
-				throw err;
-			}
-		}
-
-		if (!this.preferencesStore) return;
-
-		// Check explicit preference first (works for both aigw and public providers)
-		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref && !isSessionSelectableModelString(sessionModelPref)) {
-			// A stale/restored preference points at a not-session-runnable model
-			// (e.g. google-gemini-cli Code Assist). Skip it and fall through to aigw
-			// auto-selection rather than attempting an unrunnable bind.
-			console.warn(`[session-manager] default.sessionModel "${sessionModelPref}" is not session-selectable for ${session.id}; falling back.`);
-		} else if (sessionModelPref) {
-			const slash = sessionModelPref.indexOf("/");
-			if (slash > 0 && slash < sessionModelPref.length - 1) {
-				const provider = sessionModelPref.slice(0, slash);
-				const modelId = sessionModelPref.slice(slash + 1);
-				const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+		// Spawn-pinned models are explicit selections too (restore/respawn persisted
+		// model, role/default pin from initial setup, or caller-supplied initialModel).
+		// Verify the actual bound model before the session becomes idle/live. If the
+		// pinned model is stale or unavailable, never fall through to role/default
+		// resolution, AIGW discovery, or SDK/provider defaults; with the opt-in policy
+		// try only default.sessionModel.
+		const pinnedModel = session.spawnPinnedModel;
+		if (pinnedModel) {
+			const safePinnedModel = sanitizeModelErrorText(pinnedModel);
+			let pinnedModelError;
+			if (!isSessionSelectableModelString(pinnedModel)) {
+				pinnedModelError = new Error(`spawn-pinned model "${safePinnedModel}" is not session-selectable`);
+			} else {
 				try {
-					// Route through applyModelString to preserve the hard-fail-on-mismatch
-					// contract (read-back via getState()) regardless of whether we skipped
-					// the redundant setModel RPC because the spawn already pinned the same model.
-					await applyModelString(session.rpcClient, sessionModelPref, {
+					await applyModelString(session.rpcClient, pinnedModel, {
 						sessionManager: this,
 						sessionId: session.id,
-						contextLabel: "default.sessionModel",
-						skipSetModel: preSpawnPinned,
+						contextLabel: "spawn-pinned model",
+						skipSetModel: true,
 					});
-					this._writeModelNameFile(session.id, sessionModelPref);
+					this._writeModelNameFile(session.id, pinnedModel);
+					const slash = pinnedModel.indexOf("/");
+					const provider = pinnedModel.slice(0, slash);
+					const modelId = pinnedModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
 					broadcast(session.clients, {
 						type: "state",
 						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
 					});
+					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Verified spawn-pinned model "${pinnedModel}" for session ${session.id}`);
 					return;
 				} catch (err) {
-					console.warn(`[session-manager] Preferred model "${sessionModelPref}" failed, falling back:`, err);
+					pinnedModelError = err;
 				}
+			}
+
+			if (allowSessionModelFallback) {
+				let controlledFallbackError;
+				if (!fallbackSessionModel) {
+					controlledFallbackError = new Error("controlled model fallback is enabled but default.sessionModel is unset");
+				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
+				} else if (fallbackSessionModel === pinnedModel) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed spawn-pinned model "${safePinnedModel}"`);
+				}
+				if (!controlledFallbackError && fallbackSessionModel) {
+					try {
+						const pinnedMsg = sanitizeModelErrorText(pinnedModelError);
+						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						console.warn(`[session-manager] Spawn-pinned model "${safePinnedModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${pinnedMsg}`);
+						await applyModelString(session.rpcClient, fallbackSessionModel, {
+							sessionManager: this,
+							sessionId: session.id,
+							contextLabel: "default.sessionModel fallback",
+						});
+						this._writeModelNameFile(session.id, fallbackSessionModel);
+						const slash = fallbackSessionModel.indexOf("/");
+						const provider = fallbackSessionModel.slice(0, slash);
+						const modelId = fallbackSessionModel.slice(slash + 1);
+						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+						broadcast(session.clients, {
+							type: "state",
+							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+						});
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
+						return;
+					} catch (fallbackErr) {
+						controlledFallbackError = fallbackErr;
+					}
+				}
+				const originalMsg = sanitizeModelErrorText(pinnedModelError);
+				const fallbackMsg = sanitizeModelErrorText(controlledFallbackError);
+				throw new Error(`spawn-pinned model "${safePinnedModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+			}
+
+			console.error(`[session-manager] Spawn-pinned model "${safePinnedModel}" failed for ${session.id}: ${sanitizeModelErrorForLog(pinnedModelError)}`);
+			throw (pinnedModelError instanceof Error && pinnedModelError.message === sanitizeModelErrorText(pinnedModelError)) ? pinnedModelError : new Error(sanitizeModelErrorText(pinnedModelError));
+		}
+
+		// 0. Role override (highest explicit precedence). If it fails, never fall
+		// through to discovery/provider defaults. With the opt-in policy, try only
+		// default.sessionModel as the controlled fallback target.
+		const roleModel = this.resolveRoleModel(session);
+		if (roleModel) {
+			const safeRoleModel = sanitizeModelErrorText(roleModel);
+			let roleModelError;
+			if (!isSessionSelectableModelString(roleModel)) {
+				roleModelError = new Error(`role.${session.role}.model "${safeRoleModel}" is not session-selectable`);
 			} else {
-				console.warn(`[session-manager] Malformed default.sessionModel preference: "${sessionModelPref}", ignoring`);
+				try {
+					await applyModelString(session.rpcClient, roleModel, {
+						sessionManager: this,
+						sessionId: session.id,
+						contextLabel: `role.${session.role}.model`,
+						skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
+					});
+					this._writeModelNameFile(session.id, roleModel);
+					const slash = roleModel.indexOf("/");
+					const provider = roleModel.slice(0, slash);
+					const modelId = roleModel.slice(slash + 1);
+					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+					broadcast(session.clients, {
+						type: "state",
+						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+					});
+					console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
+					return;
+				} catch (err) {
+					roleModelError = err;
+				}
+			}
+
+			if (allowSessionModelFallback) {
+				let controlledFallbackError;
+				if (!fallbackSessionModel) {
+					controlledFallbackError = new Error("controlled model fallback is enabled but default.sessionModel is unset");
+				} else if (!isSessionSelectableModelString(fallbackSessionModel)) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel="${fallbackSessionModel}" is not session-selectable`);
+				} else if (fallbackSessionModel === roleModel) {
+					controlledFallbackError = new Error(`controlled model fallback target default.sessionModel is the same as failed role model "${safeRoleModel}"`);
+				}
+				if (!controlledFallbackError && fallbackSessionModel) {
+					try {
+						const roleMsg = sanitizeModelErrorText(roleModelError);
+						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						console.warn(`[session-manager] Role model "${safeRoleModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${roleMsg}`);
+						await applyModelString(session.rpcClient, fallbackSessionModel, {
+							sessionManager: this,
+							sessionId: session.id,
+							contextLabel: "default.sessionModel fallback",
+							skipSetModel: spawnPinned && session.spawnPinnedModel === fallbackSessionModel,
+						});
+						this._writeModelNameFile(session.id, fallbackSessionModel);
+						const slash = fallbackSessionModel.indexOf("/");
+						const provider = fallbackSessionModel.slice(0, slash);
+						const modelId = fallbackSessionModel.slice(slash + 1);
+						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+						broadcast(session.clients, {
+							type: "state",
+							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+						});
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
+						return;
+					} catch (fallbackErr) {
+						controlledFallbackError = fallbackErr;
+					}
+				}
+				const originalMsg = sanitizeModelErrorText(roleModelError);
+				const fallbackMsg = sanitizeModelErrorText(controlledFallbackError);
+				throw new Error(`role model "${safeRoleModel}" failed and controlled fallback did not bind; original error: ${originalMsg}; fallback error: ${fallbackMsg}`);
+			}
+
+			console.error(`[session-manager] Role model "${safeRoleModel}" failed for ${session.id}: ${sanitizeModelErrorForLog(roleModelError)}`);
+			throw (roleModelError instanceof Error && roleModelError.message === sanitizeModelErrorText(roleModelError)) ? roleModelError : new Error(sanitizeModelErrorText(roleModelError));
+		}
+
+		if (!this.preferencesStore) return;
+
+		// Check explicit preference first (works for both aigw and public providers).
+		// default.sessionModel itself is not fallback-eligible: any malformed,
+		// non-session-selectable, unavailable, or read-back-mismatched value fails
+		// loudly and never falls through to AIGW or provider defaults.
+		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		if (sessionModelPref) {
+			const safeSessionModelPref = sanitizeModelErrorText(sessionModelPref);
+			if (!isSessionSelectableModelString(sessionModelPref)) {
+				throw new Error(`default.sessionModel "${safeSessionModelPref}" is not session-selectable`);
+			}
+			const slash = sessionModelPref.indexOf("/");
+			const provider = sessionModelPref.slice(0, slash);
+			const modelId = sessionModelPref.slice(slash + 1);
+			const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+			try {
+				// Route through applyModelString to preserve the hard-fail-on-mismatch
+				// contract (read-back via getState()) regardless of whether we skipped
+				// the redundant setModel RPC because the spawn already pinned the same model.
+				await applyModelString(session.rpcClient, sessionModelPref, {
+					sessionManager: this,
+					sessionId: session.id,
+					contextLabel: "default.sessionModel",
+					skipSetModel: preSpawnPinned,
+				});
+				this._writeModelNameFile(session.id, sessionModelPref);
+				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
+				broadcast(session.clients, {
+					type: "state",
+					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+				});
+				return;
+			} catch (err) {
+				console.error(`[session-manager] default.sessionModel "${safeSessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model: ${sanitizeModelErrorForLog(err)}`);
+				throw (err instanceof Error && err.message === sanitizeModelErrorText(err)) ? err : new Error(sanitizeModelErrorText(err));
 			}
 		}
 
-		// Fall back to aigw best-ranked model when gateway is configured
+		// Fall back to aigw best-ranked model only when no explicit role/default
+		// session model was selected.
 		const aigwUrl = getAigwUrl(this.preferencesStore);
 		if (!aigwUrl) return;
 
@@ -5854,12 +6594,7 @@ export class SessionManager {
 		try {
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
 			if (persisted?.modelId) {
-				const meta = inferMeta(persisted.modelId);
-				const clamped = clampThinkingLevel(level, {
-					id: persisted.modelId,
-					provider: persisted.modelProvider,
-					reasoning: meta.reasoning,
-				});
+				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
 				if (clamped) level = clamped;
 			}
 		} catch { /* best-effort */ }
@@ -5882,22 +6617,6 @@ export class SessionManager {
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
 				const stateResp = await session.rpcClient.getState();
-				const stateRuntime = stateResp.data?.runtime as string | undefined;
-				const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
-				if (stateResp.success && (stateRuntime === "claude-code" || claudeCodeSessionId)) {
-					const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
-					const ps = this.resolveStoreForSession(session.id).get(session.id);
-					this.resolveStoreForSession(session.id).update(session.id, {
-						runtime: "claude-code",
-						modelProvider: "claude-code",
-						modelId,
-						claudeCodeSessionId,
-						claudeCodeExecutable: ps?.claudeCodeExecutable,
-						claudeCodePermissionMode: ps?.claudeCodePermissionMode,
-						claudeCodeModelAlias: modelId ?? ps?.claudeCodeModelAlias,
-					});
-					return;
-				}
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
@@ -6127,13 +6846,11 @@ export class SessionManager {
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
-		runtime?: import("./session-store.js").SessionRuntime;
-		claudeCodeSessionId?: string;
-		claudeCodeExecutable?: string;
-		claudeCodePermissionMode?: import("./session-store.js").ClaudeCodePermissionMode;
-		claudeCodeModelAlias?: string;
-		modelProvider?: string;
-		modelId?: string;
+		spawnPinnedModel?: string;
+		spawnPinnedThinkingLevel?: string;
+		repoPath?: string;
+		branch?: string;
+		repoWorktrees?: Record<string, string>;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -6174,13 +6891,11 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
-				runtime: ps?.runtime ?? "pi",
-				claudeCodeSessionId: ps?.claudeCodeSessionId,
-				claudeCodeExecutable: ps?.claudeCodeExecutable,
-				claudeCodePermissionMode: ps?.claudeCodePermissionMode,
-				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
-				modelProvider: ps?.modelProvider,
-				modelId: ps?.modelId,
+				spawnPinnedModel: s.spawnPinnedModel,
+				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
+				repoPath: ps?.repoPath || s.repoPath,
+				branch: ps?.branch || s.branch,
+				repoWorktrees: ps?.repoWorktrees || (s.repoWorktrees ? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined),
 			};
 		});
 	}
@@ -6382,8 +7097,9 @@ export class SessionManager {
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
-		// Look up the full role (with toolPolicies) from roleManager if available
-		const fullRole = this.roleManager?.getRole(role.name);
+		// Look up the full role (with toolPolicies) cascade-first so pack-contributed
+		// roles keep their policies during role reassignment.
+		const fullRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? (role as Role);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
 		// session's effective goal so the reassembled prompt, the activation args,
 		// and the persisted allowedTools all agree after a role reassignment.
@@ -6425,7 +7141,7 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -6456,8 +7172,10 @@ export class SessionManager {
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId);
+		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
@@ -6470,19 +7188,9 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
-		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
-		assertRuntimeAllowedForSession(runtime, session.sandboxed);
-		Object.assign(bridgeOptions, hydrateRuntimeOptions({
-			...bridgeOptions,
-			runtime,
-			claudeCodeSessionId: respawnPersisted?.claudeCodeSessionId,
-			claudeCodeExecutable: respawnPersisted?.claudeCodeExecutable,
-			claudeCodePermissionMode: respawnPersisted?.claudeCodePermissionMode,
-			claudeCodeModelAlias: respawnPersisted?.claudeCodeModelAlias,
-		}, this.readClaudeCodeConfigForProject(session.projectId)));
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
-		const rpcClient = createSessionBridge(bridgeOptions);
+		const rpcClient = new RpcBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		let switchingSession = true;
@@ -6498,14 +7206,17 @@ export class SessionManager {
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
+		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		await rpcClient.start();
 
-		// Restore conversation from session file — path is already in agent coordinate system.
-		const roleFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
-		if (runtime !== "claude-code" && agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+		// Restore conversation from session file.
+		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
+		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
+		if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
+		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
+				{ type: "switch_session", sessionPath: switchSessionPathForAgent(rolePs) },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -6523,13 +7234,20 @@ export class SessionManager {
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory });
 
+		try {
+			await this.tryAutoSelectModel(session);
+		} catch (err) {
+			await rpcClient.stop();
+			throw err;
+		}
+
 		broadcastStatus(session, "idle");
 
 		// Refresh messages and state for connected clients
 		try {
 			const msgs = await rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = msgs.data;
+				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
 				let data: any = raw;
 				if (Array.isArray(raw)) {
 					data = spliceInFlightSteers(
@@ -6615,8 +7333,11 @@ export class SessionManager {
 		if (!ps || !ps.agentSessionFile) return null;
 		let messages: unknown[] = [];
 		try {
-			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return null;
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (content) {
 				for (const line of content.trim().split("\n")) {
 					if (!line.trim()) continue;
@@ -6701,13 +7422,7 @@ export class SessionManager {
 
 	/** Persist model provider/id so archived sessions can display model info. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
-		const runtime = runtimeFromProvider(provider);
-		this.resolveStoreForSession(sessionId).update(sessionId, {
-			modelProvider: provider,
-			modelId,
-			runtime,
-			claudeCodeModelAlias: runtime === "claude-code" ? modelId : undefined,
-		});
+		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
 	}
 
 	/** Persist per-session image generation model override. Validates against the
@@ -6834,6 +7549,8 @@ export class SessionManager {
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
 
+		await this.closeExtensionChannelsForSession(id, "session-terminated");
+
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
@@ -6857,18 +7574,7 @@ export class SessionManager {
 		// the conversation may still be empty. This ensures the latest messages
 		// are written before we archive.
 		try {
-			const stateResp = await session.rpcClient.getState();
-			const claudeCodeSessionId = extractClaudeCodeSessionId(stateResp);
-			const persistedRuntime = resolveSessionRuntime(this.resolveStoreForSession(id).get(id) ?? {});
-			if (persistedRuntime === "claude-code" && stateResp?.success && claudeCodeSessionId) {
-				const modelId = typeof stateResp.data?.model?.id === "string" ? stateResp.data.model.id : undefined;
-				this.resolveStoreForSession(id).update(id, {
-					runtime: "claude-code",
-					modelProvider: "claude-code",
-					...(modelId ? { modelId, claudeCodeModelAlias: modelId } : {}),
-					claudeCodeSessionId,
-				});
-			}
+			await session.rpcClient.getState();
 		} catch {
 			// Agent may already be stopped — best-effort flush
 		}
@@ -6940,7 +7646,9 @@ export class SessionManager {
 		// Resolve the store BEFORE removing from in-memory map, so
 		// resolveStoreForSession can look up the session's projectId.
 		const terminateStore = this.resolveStoreForSession(id);
+		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
+		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
 		// archives directly (bypassing archiveWithCascade), so the dispatch
@@ -7045,8 +7753,32 @@ export class SessionManager {
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
-		const messages = await this.getPersistedSessionMessages(id, { archivedOnly: true });
-		return truncateLargeToolContentInMessages(messages) as unknown[];
+		const ps = this.resolveStoreForId(id)?.get(id);
+		if (!ps?.archived || !ps.agentSessionFile) return [];
+		try {
+			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+			if (!safeFile) return [];
+			trustPersistedAgentSessionFile(safeFile);
+			const ctx = sessionFsContextForAgentFile(ps, safeFile);
+			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
+			if (!content) return [];
+			const lines = content.trim().split("\n");
+			const messages: unknown[] = [];
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				try {
+					const entry = JSON.parse(line);
+					if (entry.type === "message" && entry.message) {
+						messages.push(entry.message);
+					}
+				} catch {
+					// Skip malformed lines
+				}
+			}
+			return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
+		} catch {
+			return [];
+		}
 	}
 
 	/** List archived sessions in the same format as listSessions(). */
@@ -7140,6 +7872,717 @@ export class SessionManager {
 		}
 	}
 
+	async listArchivedSessionWorktrees(includeAlreadyCleaned = false): Promise<ArchivedSessionWorktreeScanResponse> {
+		const ctx = this.buildArchivedWorktreeScanContext();
+		const sessions: ArchivedSessionWorktreeSession[] = [];
+		const allItems: ArchivedSessionWorktreeItem[] = [];
+		const counts: ArchivedSessionWorktreeScanResponse["counts"] = {
+			archivedSessions: 0,
+			sessionsWithWorktrees: 0,
+			removableWorktrees: 0,
+			skippedWorktrees: 0,
+			alreadyCleanedWorktrees: 0,
+			totalItems: 0,
+			readyToClean: 0,
+			defaultSelected: 0,
+			alreadyCleaned: 0,
+			ineligible: 0,
+			needsAttention: 0,
+			failed: 0,
+			byDisposition: {},
+			byReason: {},
+			bySelectionCategory: {},
+		};
+
+		const archivedRows: Array<{ ps: PersistedSession; projectName?: string }> = [];
+		if (this.projectContextManager) {
+			for (const projectCtx of ctx.candidateContexts) {
+				for (const ps of projectCtx.sessionStore.getArchived()) {
+					archivedRows.push({ ps, projectName: projectCtx.project.name });
+				}
+			}
+		} else {
+			for (const ps of this._testStore?.getArchived() ?? []) archivedRows.push({ ps });
+		}
+
+		counts.archivedSessions = archivedRows.length;
+		for (const { ps, projectName } of archivedRows) {
+			const worktrees = await this.archivedSessionWorktreeItems(ps, ctx, projectName);
+			allItems.push(...worktrees);
+			for (const item of worktrees) {
+				if (item.status === "removable") counts.removableWorktrees++;
+				else if (item.status === "already-cleaned") counts.alreadyCleanedWorktrees++;
+				else counts.skippedWorktrees++;
+			}
+			if (worktrees.some(item => item.status !== "already-cleaned" && item.reason !== "no-worktree-path")) counts.sessionsWithWorktrees++;
+			if (!includeAlreadyCleaned && worktrees.every(item => item.status === "already-cleaned")) continue;
+			sessions.push({
+				id: ps.id,
+				title: ps.title,
+				archivedAt: ps.archivedAt,
+				projectId: ps.projectId,
+				projectName,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				delegateOf: ps.delegateOf,
+				parentSessionId: ps.parentSessionId,
+				childKind: ps.childKind,
+				sandboxed: ps.sandboxed,
+				branch: ps.branch,
+				repoPath: ps.repoPath,
+				worktreePath: ps.worktreePath,
+				worktrees,
+			});
+		}
+
+		const responseItems = sessions.flatMap(session => session.worktrees);
+		this.populateArchivedWorktreeUxCounts(counts, allItems);
+		return {
+			sessions,
+			items: responseItems,
+			counts,
+			groups: this.buildArchivedWorktreeGroups(allItems),
+			selectionPresets: this.buildArchivedWorktreeSelectionPresets(responseItems),
+			generatedAt: Date.now(),
+		};
+	}
+
+	async cleanupArchivedSessionWorktrees(request: CleanupArchivedSessionWorktreesRequest): Promise<CleanupArchivedSessionWorktreesResponse> {
+		const zeroCounts = (): CleanupArchivedSessionWorktreesResponse["counts"] => ({
+			requested: 0,
+			cleaned: 0,
+			branchDeleted: 0,
+			skipped: 0,
+			alreadyCleaned: 0,
+			failed: 0,
+			worktreeRemoved: 0,
+			invalidSelection: 0,
+			notActionable: 0,
+			byStatus: {},
+			byReason: {},
+		});
+		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [], generatedAt: Date.now() };
+		const scan = await this.listArchivedSessionWorktrees(true);
+		const sessionById = new Map(scan.sessions.map(session => [session.id, session]));
+		const rows = scan.items.map(item => ({ session: sessionById.get(item.sessionId), item }));
+
+		let selected: Array<{ session?: ArchivedSessionWorktreeSession; item: ArchivedSessionWorktreeItem }> = [];
+		const invalidSelections: ArchivedSessionWorktreeCleanupResult[] = [];
+		if (request.mode === "all") {
+			selected = rows.filter(row => row.item.status === "removable");
+		} else if (request.mode === "selected" && request.sessionIds) {
+			const ids = new Set(request.sessionIds);
+			selected = rows.filter(row => ids.has(row.item.sessionId));
+			for (const id of ids) {
+				if (!rows.some(row => row.item.sessionId === id)) {
+					invalidSelections.push({ key: id, sessionId: id, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+				}
+			}
+		} else if (request.mode === "selected" && request.worktrees) {
+			for (const selector of request.worktrees) {
+				const match = rows.find(row => {
+					if (row.item.sessionId !== selector.sessionId) return false;
+					if (selector.key) return row.item.key === selector.key;
+					if (selector.repo !== undefined && row.item.repo !== selector.repo) return false;
+					if (selector.path !== undefined && normalizeWorktreeHostPath(row.item.path) !== normalizeWorktreeHostPath(selector.path)) return false;
+					return selector.repo !== undefined || selector.path !== undefined;
+				});
+				if (match) {
+					selected.push(match);
+				} else {
+					const key = selector.key ?? `${selector.sessionId}:${selector.repo ?? ""}:${selector.path ?? ""}`;
+					invalidSelections.push({ key, sessionId: selector.sessionId, repo: selector.repo, path: selector.path, status: "skipped", reason: "invalid-selection", worktreeRemoved: false, branchDeleted: false });
+				}
+			}
+		} else if (request.mode === "selected") {
+			selected = [];
+		} else if (request.mode === "category") {
+			const categories = new Set(request.categories);
+			const repoFilter = normalizeWorktreeHostPath(request.repoPath);
+			selected = rows.filter(row => {
+				if (row.item.status !== "removable") return false;
+				if (!row.item.selectionCategories.some(category => categories.has(category))) return false;
+				if (request.projectId && row.item.projectId !== request.projectId) return false;
+				if (repoFilter && normalizeWorktreeHostPath(row.item.repoPath) !== repoFilter) return false;
+				return true;
+			});
+		} else if (request.mode === "preset") {
+			const preset = scan.selectionPresets.find(candidate => candidate.id === request.presetId);
+			if (!preset) throw new CleanupArchivedSessionWorktreesRequestError("Invalid cleanup preset");
+			const keys = new Set(preset.worktreeKeys);
+			selected = rows.filter(row => row.item.status === "removable" && keys.has(row.item.key));
+		}
+
+		const seen = new Set<string>();
+		selected = selected.filter(row => {
+			if (seen.has(row.item.key)) return false;
+			seen.add(row.item.key);
+			return true;
+		});
+		response.counts.requested = selected.length + invalidSelections.length;
+
+		const recordResult = (result: ArchivedSessionWorktreeCleanupResult) => {
+			response.results.push(result);
+			response.counts.byStatus[result.status] = (response.counts.byStatus[result.status] ?? 0) + 1;
+			if (result.reason) response.counts.byReason[result.reason] = (response.counts.byReason[result.reason] ?? 0) + 1;
+			if (result.worktreeRemoved) response.counts.worktreeRemoved++;
+			if (result.reason === "invalid-selection") response.counts.invalidSelection++;
+			if (result.status === "skipped" && result.reason !== "invalid-selection") response.counts.notActionable++;
+		};
+
+		for (const invalid of invalidSelections) {
+			recordResult(invalid);
+			response.counts.skipped++;
+		}
+
+		for (const { session, item } of selected) {
+			const base: Omit<ArchivedSessionWorktreeCleanupResult, "status" | "worktreeRemoved" | "branchDeleted"> = {
+				key: item.key,
+				sessionId: item.sessionId,
+				title: session?.title ?? item.title,
+				repo: item.repo,
+				repoPath: item.repoPath,
+				path: item.path,
+				branch: item.branch,
+			};
+			if (item.status === "already-cleaned") {
+				recordResult({ ...base, status: "already-cleaned", reason: "already-cleaned", detail: item.detail, worktreeRemoved: false, branchDeleted: false });
+				response.counts.alreadyCleaned++;
+				continue;
+			}
+			if (item.status !== "removable") {
+				recordResult({ ...base, status: "skipped", reason: item.reason, detail: item.detail, worktreeRemoved: false, branchDeleted: false });
+				response.counts.skipped++;
+				continue;
+			}
+
+			try {
+				const { cleanupWorktree } = await import("../skills/git.js");
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+
+				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
+				if (!worktreeRemoved) {
+					recordResult({ ...base, status: "failed", reason: "scan-error", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
+					response.counts.failed++;
+					continue;
+				}
+
+				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
+				recordResult({
+					...base,
+					status: "cleaned",
+					reason: branchDeleted ? "worktree-and-branch-cleaned" : "worktree-cleaned",
+					worktreeRemoved: true,
+					branchDeleted,
+				});
+				response.counts.cleaned++;
+				if (branchDeleted) response.counts.branchDeleted++;
+			} catch (err) {
+				recordResult({ ...base, status: "failed", reason: "scan-error", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
+				response.counts.failed++;
+			}
+		}
+
+		return response;
+	}
+
+	private populateArchivedWorktreeUxCounts(counts: ArchivedSessionWorktreeScanResponse["counts"], items: ArchivedSessionWorktreeItem[]): void {
+		counts.totalItems = items.length;
+		for (const item of items) {
+			counts.byDisposition[item.disposition] = (counts.byDisposition[item.disposition] ?? 0) + 1;
+			counts.byReason[item.reason] = (counts.byReason[item.reason] ?? 0) + 1;
+			for (const category of item.selectionCategories) counts.bySelectionCategory[category] = (counts.bySelectionCategory[category] ?? 0) + 1;
+			if (item.disposition === "ready-to-clean") counts.readyToClean++;
+			if (item.defaultSelected) counts.defaultSelected++;
+			if (item.disposition === "already-cleaned") counts.alreadyCleaned++;
+			if (item.disposition === "ineligible") counts.ineligible++;
+			if (item.disposition === "failed") counts.failed++;
+			if (item.disposition === "needs-attention" || item.disposition === "failed") counts.needsAttention++;
+		}
+	}
+
+	private buildArchivedWorktreeGroups(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeGroup[] {
+		const groupSpecs: Array<{ key: string; label: string; description: string; disposition: ArchivedWorktreeDisposition; reason?: ArchivedWorktreeReason }> = [
+			{ key: "ready-to-clean", label: "Ready to clean", description: "Archived-session worktrees that are safe to remove now.", disposition: "ready-to-clean", reason: "safe-archived-session-worktree" },
+			{ key: "already-cleaned", label: "Already cleaned", description: "Archived sessions whose recorded git worktree is already gone.", disposition: "already-cleaned", reason: "already-cleaned" },
+			{ key: "reason:no-worktree-path", label: "Missing worktree path", description: "Archived sessions without a recorded host worktree path.", disposition: "ineligible", reason: "no-worktree-path" },
+			{ key: "reason:missing-repo-path", label: "Missing repository path", description: "Archived sessions without enough repository metadata to evaluate cleanup.", disposition: "ineligible", reason: "missing-repo-path" },
+			{ key: "reason:sandbox-container-path", label: "Sandbox/container path", description: "Recorded paths are container-internal and do not identify a host worktree.", disposition: "ineligible", reason: "sandbox-container-path" },
+			{ key: "reason:delegate-shared-worktree", label: "Shared delegate worktree", description: "Archived delegates that appear to share a parent worktree.", disposition: "ineligible", reason: "delegate-shared-worktree" },
+			{ key: "reason:stale-worktree-directory", label: "Stale worktree directory", description: "A path remains on disk without matching git worktree metadata; manual inspection may be needed.", disposition: "needs-attention", reason: "stale-worktree-directory" },
+			{ key: "reason:referenced-by-live-session", label: "Referenced by live session", description: "A non-archived or runtime session still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-session" },
+			{ key: "reason:referenced-by-live-goal", label: "Referenced by live goal", description: "A persisted goal still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-goal" },
+			{ key: "reason:referenced-by-live-team", label: "Referenced by live team", description: "A team entry or team agent still references the worktree.", disposition: "ineligible", reason: "referenced-by-live-team" },
+			{ key: "reason:referenced-by-staff", label: "Referenced by staff", description: "A staff record still references the worktree.", disposition: "ineligible", reason: "referenced-by-staff" },
+			{ key: "reason:scan-error", label: "Scan errors", description: "Worktrees that could not be evaluated safely.", disposition: "failed", reason: "scan-error" },
+		];
+		return groupSpecs.flatMap(spec => {
+			const matches = spec.key === "ready-to-clean"
+				? items.filter(item => item.disposition === "ready-to-clean")
+				: items.filter(item => item.reason === spec.reason);
+			if (matches.length === 0) return [];
+			const sampleItems = matches.slice(0, 5);
+			return [{
+				key: spec.key,
+				label: spec.label,
+				description: spec.description,
+				disposition: spec.disposition,
+				reason: spec.reason,
+				reasonCategory: spec.reason ? this.archivedWorktreeReasonCategory(spec.reason) : undefined,
+				count: matches.length,
+				sampleKeys: sampleItems.map(item => item.key),
+				sampleItems,
+				hasMore: matches.length > 5,
+				actionable: spec.disposition === "ready-to-clean",
+			}];
+		});
+	}
+
+	private buildArchivedWorktreeSelectionPresets(items: ArchivedSessionWorktreeItem[]): ArchivedSessionWorktreeSelectionPreset[] {
+		const actionable = items.filter(item => item.actionable);
+		const makePreset = (id: string, label: string, description: string, matches: ArchivedSessionWorktreeItem[], cleanupRequest: CleanupArchivedSessionWorktreesRequest): ArchivedSessionWorktreeSelectionPreset => ({
+			id,
+			label,
+			description,
+			enabled: matches.length > 0,
+			count: matches.length,
+			worktreeKeys: matches.map(item => item.key),
+			cleanupRequest,
+		});
+		const presets: ArchivedSessionWorktreeSelectionPreset[] = [
+			makePreset("all-removable", "Select all removable", "Select every archived-session worktree that is safe to clean.", actionable, { mode: "all" }),
+			makePreset("category:archived-session", "Archived sessions only", "Select all actionable archived-session worktrees.", actionable.filter(item => item.selectionCategories.includes("archived-session")), { mode: "category", categories: ["archived-session"] }),
+		];
+		const categoryLabels: Partial<Record<ArchivedWorktreeSelectionCategory, string>> = {
+			"goal-session": "Goal sessions",
+			"team-session": "Goal/team worktrees",
+			"delegate-session": "Delegate worktrees",
+		};
+		for (const category of ["goal-session", "team-session", "delegate-session"] as const) {
+			const matches = actionable.filter(item => item.selectionCategories.includes(category));
+			if (matches.length > 0) presets.push(makePreset(`category:${category}`, categoryLabels[category] ?? category, `Select actionable ${category.replace(/-/g, " ")} worktrees.`, matches, { mode: "category", categories: [category] }));
+		}
+		const projects = new Map<string, ArchivedSessionWorktreeItem[]>();
+		const repos = new Map<string, ArchivedSessionWorktreeItem[]>();
+		for (const item of actionable) {
+			if (item.projectId) {
+				const existing = projects.get(item.projectId) ?? [];
+				existing.push(item);
+				projects.set(item.projectId, existing);
+			}
+			const repoKey = normalizeWorktreeHostPath(item.repoPath);
+			if (repoKey) {
+				const existing = repos.get(repoKey) ?? [];
+				existing.push(item);
+				repos.set(repoKey, existing);
+			}
+		}
+		for (const [projectId, matches] of projects) {
+			const label = matches[0]?.projectName ? `Current project: ${matches[0].projectName}` : "Current project";
+			presets.push(makePreset(`project:${projectId}`, label, "Select actionable archived worktrees in this project.", matches, { mode: "category", categories: ["archived-session"], projectId }));
+		}
+		for (const [repoPath, matches] of repos) {
+			const label = matches[0]?.repoDisplayName ? `Repository: ${matches[0].repoDisplayName}` : "Repository";
+			presets.push(makePreset(`repo:${repoPath}`, label, "Select actionable archived worktrees in this repository.", matches, { mode: "category", categories: ["archived-session"], repoPath }));
+		}
+		return presets;
+	}
+
+	private archivedWorktreeDisposition(status: ArchivedWorktreeLegacyStatus, reason: ArchivedWorktreeReason): ArchivedWorktreeDisposition {
+		if (status === "removable") return "ready-to-clean";
+		if (status === "already-cleaned") return "already-cleaned";
+		if (reason === "stale-worktree-directory") return "needs-attention";
+		if (reason === "scan-error") return "failed";
+		return "ineligible";
+	}
+
+	private archivedWorktreeReasonCategory(reason: ArchivedWorktreeReason): ArchivedWorktreeReasonCategory {
+		switch (reason) {
+			case "safe-archived-session-worktree": return "safe";
+			case "already-cleaned": return "already-cleaned";
+			case "no-worktree-path":
+			case "missing-repo-path": return "missing-metadata";
+			case "sandbox-container-path": return "container-path";
+			case "delegate-shared-worktree": return "shared-delegate";
+			case "stale-worktree-directory": return "stale-path";
+			case "referenced-by-live-session":
+			case "referenced-by-live-goal":
+			case "referenced-by-live-team":
+			case "referenced-by-staff": return "referenced-record";
+			case "scan-error": return "error";
+		}
+	}
+
+	private archivedWorktreeSelectionCategories(ps: PersistedSession, source: "repoWorktrees" | "sessionWorktree"): ArchivedWorktreeSelectionCategory[] {
+		const categories: ArchivedWorktreeSelectionCategory[] = ["archived-session"];
+		if (ps.goalId) categories.push("goal-session");
+		if (ps.teamGoalId) categories.push("team-session");
+		if (ps.delegateOf) categories.push("delegate-session");
+		if (ps.parentSessionId || ps.childKind) categories.push("child-session");
+		categories.push(source === "repoWorktrees" ? "multi-repo" : "single-repo");
+		return categories;
+	}
+
+	private buildArchivedWorktreeScanContext(): ArchivedWorktreeScanContext {
+		const candidateContexts = this.projectContextManager ? [...this.projectContextManager.visible()] : [];
+		const allContexts = this.projectContextManager ? [...this.projectContextManager.all()] : [];
+		const sessionPathRecords: WorktreeReferenceRecord[] = [];
+		const goalRefs: ArchivedWorktreeGuardRef[] = [];
+		const teamRefs: ArchivedWorktreeGuardRef[] = [];
+		const staffRefs: ArchivedWorktreeGuardRef[] = [];
+		const branchGuardsByRepo = new Map<string, Set<string>>();
+		const archivedBranchGuardsByRepo = new Map<string, Map<string, Set<string>>>();
+		const addBranchGuard = (repoPath: string | undefined, branch: string | undefined) => {
+			const repoKey = normalizeWorktreeHostPath(repoPath);
+			if (!repoKey || !branch) return;
+			let set = branchGuardsByRepo.get(repoKey);
+			if (!set) {
+				set = new Set<string>();
+				branchGuardsByRepo.set(repoKey, set);
+			}
+			set.add(branch);
+		};
+		const addArchivedBranchGuard = (repoPath: string | undefined, branch: string | undefined, itemKey: string) => {
+			const repoKey = normalizeWorktreeHostPath(repoPath);
+			if (!repoKey || !branch) return;
+			let branches = archivedBranchGuardsByRepo.get(repoKey);
+			if (!branches) {
+				branches = new Map<string, Set<string>>();
+				archivedBranchGuardsByRepo.set(repoKey, branches);
+			}
+			let keys = branches.get(branch);
+			if (!keys) {
+				keys = new Set<string>();
+				branches.set(branch, keys);
+			}
+			keys.add(itemKey);
+		};
+		const addRepoBranches = (repoPath: string | undefined, branch: string | undefined, repoWorktrees?: Record<string, string>) => {
+			if (repoWorktrees && repoPath) {
+				for (const repo of Object.keys(repoWorktrees)) addBranchGuard(repo === "." ? repoPath : path.join(repoPath, repo), branch);
+			} else {
+				addBranchGuard(repoPath, branch);
+			}
+		};
+
+		const persistedSessions = this.projectContextManager
+			? allContexts.flatMap(ctx => ctx.sessionStore.getLive())
+			: (this._testStore?.getLive() ?? []);
+		for (const ps of persistedSessions) {
+			sessionPathRecords.push(ps);
+			addRepoBranches(ps.repoPath, ps.branch, ps.repoWorktrees);
+		}
+		for (const session of this.sessions.values()) {
+			const repoWorktrees = session.repoWorktrees ? Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined;
+			sessionPathRecords.push({ id: session.id, worktreePath: session.worktreePath, cwd: session.cwd, repoWorktrees });
+			if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+				for (const wt of session.repoWorktrees) addBranchGuard(wt.repoPath, session.branch);
+			} else {
+				addBranchGuard(session.repoPath, session.branch);
+			}
+		}
+
+		const archivedSessions = this.projectContextManager
+			? allContexts.flatMap(ctx => ctx.sessionStore.getArchived())
+			: (this._testStore?.getArchived() ?? []);
+		for (const ps of archivedSessions) {
+			if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0 && ps.repoPath) {
+				for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
+					const repoPath = repo === "." ? ps.repoPath : path.join(ps.repoPath, repo);
+					addArchivedBranchGuard(repoPath, ps.branch, this.archivedWorktreeKey(ps.id, repo, wt));
+				}
+			} else {
+				addArchivedBranchGuard(ps.repoPath, ps.branch, this.archivedWorktreeKey(ps.id, ".", ps.worktreePath));
+			}
+		}
+
+		for (const projectCtx of allContexts) {
+			const goalsById = new Map(projectCtx.goalStore.getAll().map(goal => [goal.id, goal]));
+			for (const goal of projectCtx.goalStore.getAll()) {
+				goalRefs.push({ id: goal.id, repoPath: goal.repoPath, worktreePath: goal.worktreePath, cwd: goal.cwd, branch: goal.branch, repoWorktrees: goal.repoWorktrees });
+				addRepoBranches(goal.repoPath, goal.branch, goal.repoWorktrees);
+			}
+			for (const team of projectCtx.teamStore.getAll()) {
+				const ownerGoal = goalsById.get(team.goalId);
+				for (const agent of team.agents) {
+					teamRefs.push({ id: agent.sessionId, repoPath: ownerGoal?.repoPath ?? projectCtx.project.rootPath, worktreePath: agent.worktreePath, branch: agent.branch });
+					addBranchGuard(ownerGoal?.repoPath ?? projectCtx.project.rootPath, agent.branch);
+				}
+				const lead = team.teamLeadSessionId ? projectCtx.sessionStore.get(team.teamLeadSessionId) : undefined;
+				if (lead) {
+					teamRefs.push({ id: lead.id, repoPath: lead.repoPath, worktreePath: lead.worktreePath, cwd: lead.cwd, branch: lead.branch, repoWorktrees: lead.repoWorktrees });
+					addRepoBranches(lead.repoPath, lead.branch, lead.repoWorktrees);
+				}
+			}
+			for (const staff of projectCtx.staffStore.getAll()) {
+				staffRefs.push({ id: staff.id, repoPath: staff.repoPath, worktreePath: staff.worktreePath, cwd: staff.cwd, branch: staff.branch, repoWorktrees: staff.repoWorktrees });
+				addRepoBranches(staff.repoPath, staff.branch, staff.repoWorktrees);
+			}
+		}
+
+		return {
+			candidateContexts,
+			sessionPathRecords,
+			goalRefs,
+			teamRefs,
+			staffRefs,
+			branchGuardsByRepo,
+			archivedBranchGuardsByRepo,
+			gitRefsCache: new Map(),
+			branchExistsCache: new Map(),
+		};
+	}
+
+	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext, projectName?: string): Promise<ArchivedSessionWorktreeItem[]> {
+		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }> = [];
+		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
+			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
+				specs.push({ repo, repoPath: ps.repoPath ? (repo === "." ? ps.repoPath : path.join(ps.repoPath, repo)) : undefined, worktreePath: wt, branch: ps.branch, source: "repoWorktrees" });
+			}
+		} else {
+			specs.push({ repo: ".", repoPath: ps.repoPath, worktreePath: ps.worktreePath, branch: ps.branch, source: "sessionWorktree" });
+		}
+
+		const items: ArchivedSessionWorktreeItem[] = [];
+		for (const spec of specs) {
+			const item = await this.archivedSessionWorktreeItem(ps, spec, ctx, projectName);
+			items.push(item);
+		}
+		return items;
+	}
+
+	private async archivedSessionWorktreeItem(
+		ps: PersistedSession,
+		spec: { repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" },
+		ctx: ArchivedWorktreeScanContext,
+		projectName?: string,
+	): Promise<ArchivedSessionWorktreeItem> {
+		const key = this.archivedWorktreeKey(ps.id, spec.repo, spec.worktreePath);
+		const repoDisplayName = spec.repo === "." ? (projectName ?? (spec.repoPath ? path.basename(spec.repoPath) : ".")) : spec.repo;
+		const base = (overrides: Partial<ArchivedSessionWorktreeItem>): ArchivedSessionWorktreeItem => {
+			const raw = {
+				key,
+				sessionId: ps.id,
+				title: ps.title,
+				archivedAt: ps.archivedAt,
+				projectId: ps.projectId,
+				projectName,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				delegateOf: ps.delegateOf,
+				parentSessionId: ps.parentSessionId,
+				childKind: ps.childKind,
+				sandboxed: ps.sandboxed,
+				repo: spec.repo,
+				repoPath: spec.repoPath ?? "",
+				repoDisplayName,
+				path: spec.worktreePath ?? "",
+				branch: spec.branch,
+				source: spec.source,
+				pathExists: false,
+				gitWorktreeMetadataExists: false,
+				localBranchExists: false,
+				status: "skipped" as ArchivedWorktreeLegacyStatus,
+				reason: "scan-error" as ArchivedWorktreeReason,
+				detail: "Not evaluated.",
+				willDeleteBranch: false,
+				selectionCategories: this.archivedWorktreeSelectionCategories(ps, spec.source),
+				...overrides,
+			};
+			const status = raw.status ?? "skipped";
+			const reason = raw.reason ?? "scan-error";
+			const disposition = raw.disposition ?? this.archivedWorktreeDisposition(status, reason);
+			const actionable = raw.actionable ?? disposition === "ready-to-clean";
+			return {
+				...raw,
+				status,
+				reason,
+				disposition,
+				reasonCategory: raw.reasonCategory ?? this.archivedWorktreeReasonCategory(reason),
+				actionable,
+				selectable: raw.selectable ?? actionable,
+				defaultSelected: raw.defaultSelected ?? actionable,
+			};
+		};
+
+		if (!spec.worktreePath) return base({ status: "skipped", reason: "no-worktree-path", detail: "Archived session has no recorded worktree path." });
+		if (!spec.repoPath) return base({ status: "skipped", reason: "missing-repo-path", detail: "Archived session has no recorded repository path for this worktree." });
+		if (this.isContainerInternalWorktreePath(spec.worktreePath)) return base({ status: "skipped", reason: "sandbox-container-path", detail: "Recorded worktree path is container-internal and has no host worktree to remove." });
+		if (ps.delegateOf && !ps.branch && (!ps.repoWorktrees || Object.keys(ps.repoWorktrees).length === 0)) {
+			return base({ status: "skipped", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree." });
+		}
+
+		let pathExists = false;
+		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
+		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
+		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
+		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
+		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
+		if (sessionReferenced) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.goalRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-goal", detail: "A persisted goal still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.teamRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-team", detail: "A persisted team entry or team agent still references this worktree." });
+		}
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.staffRefs)) {
+			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-staff", detail: "A staff record still references this worktree." });
+		}
+		if (!gitWorktreeMetadataExists) {
+			return base({
+				pathExists,
+				gitWorktreeMetadataExists,
+				localBranchExists,
+				status: pathExists ? "skipped" : "already-cleaned",
+				reason: pathExists ? "stale-worktree-directory" : "already-cleaned",
+				detail: pathExists
+					? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories."
+					: "No worktree directory or git worktree metadata remains; any branch-only residue is out of scope for archived-session worktree cleanup.",
+			});
+		}
+
+		const branchDeleteBlockedReason = localBranchExists
+			? this.branchDeleteBlockedReason(spec.branch, spec.repoPath, ctx, key)
+			: undefined;
+		const willDeleteBranch = localBranchExists && !branchDeleteBlockedReason;
+		return base({
+			pathExists,
+			gitWorktreeMetadataExists,
+			localBranchExists,
+			status: "removable",
+			reason: "safe-archived-session-worktree",
+			detail: branchDeleteBlockedReason === "branch-referenced-by-archived-record"
+				? "Archived session worktree is safe to remove; branch deletion is blocked because another archived record still references the branch."
+				: branchDeleteBlockedReason
+					? "Archived session worktree is safe to remove; branch deletion is blocked because another live record still references the branch."
+					: "Archived session worktree is safe to remove.",
+			willDeleteBranch,
+			branchDeleteBlockedReason,
+		});
+	}
+
+	private archivedWorktreeKey(sessionId: string, repo: string, worktreePath: string | undefined): string {
+		return `${sessionId}:${repo}:${normalizeWorktreeHostPath(worktreePath) ?? ""}`;
+	}
+
+	private isContainerInternalWorktreePath(candidatePath: string): boolean {
+		const normalized = candidatePath.replace(/\\/g, "/");
+		return normalized === "/workspace" || normalized.startsWith("/workspace/") || normalized === "/workspace-wt" || normalized.startsWith("/workspace-wt/");
+	}
+
+	private isWorktreeReferencedByRefs(candidatePath: string | undefined, refs: ArchivedWorktreeGuardRef[]): boolean {
+		const candidate = normalizeWorktreeHostPath(candidatePath);
+		if (!candidate) return false;
+		for (const ref of refs) {
+			if (normalizeWorktreeHostPath(ref.worktreePath) === candidate) return true;
+			const cwd = normalizeWorktreeHostPath(ref.cwd);
+			if (cwd && (cwd === candidate || cwd.startsWith(`${candidate}/`))) return true;
+			if (ref.repoWorktrees) {
+				for (const wt of Object.values(ref.repoWorktrees)) {
+					if (normalizeWorktreeHostPath(wt) === candidate) return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private branchDeleteBlockedReason(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): ArchivedSessionWorktreeItem["branchDeleteBlockedReason"] | undefined {
+		if (!branch) return "branch-referenced-by-live-record";
+		const repoKey = normalizeWorktreeHostPath(repoPath);
+		if (!repoKey) return "branch-referenced-by-live-record";
+		if (ctx.branchGuardsByRepo.get(repoKey)?.has(branch)) return "branch-referenced-by-live-record";
+		const archivedKeys = ctx.archivedBranchGuardsByRepo.get(repoKey)?.get(branch);
+		if (archivedKeys && [...archivedKeys].some(key => key !== ownKey)) return "branch-referenced-by-archived-record";
+		return undefined;
+	}
+
+	private branchDeletionAllowed(branch: string | undefined, repoPath: string, ctx: ArchivedWorktreeScanContext, ownKey?: string): boolean {
+		return !this.branchDeleteBlockedReason(branch, repoPath, ctx, ownKey);
+	}
+
+	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
+		let pathExists = false;
+		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
+		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
+		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
+		return !pathExists && !gitWorktreeMetadataExists;
+	}
+
+	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
+		if (!item.willDeleteBranch || !item.branch || !item.localBranchExists) return false;
+		const ctx = this.buildArchivedWorktreeScanContext();
+		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx, item.key)) return false;
+		try {
+			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
+		} catch {
+			// Verify below before reporting success; branch deletion may have raced or been blocked.
+		}
+		const branchDeleted = !(await this.localBranchExistsUncached(item.repoPath, item.branch));
+		if (!branchDeleted) return false;
+		if (!(await shouldSkipRemotePushForTests(item.repoPath))) {
+			try {
+				await execFileAsync("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
+			} catch {
+				// Best effort: remote may be missing, unreachable, or already deleted.
+			}
+		}
+		return true;
+	}
+
+	private gitWorktreeMetadataMatches(gitRefs: GitWorktreeRefs, normalizedCandidate: string | undefined, branch: string | undefined): boolean {
+		if (!normalizedCandidate) return false;
+		return gitRefs.entries.some(entry => entry.path === normalizedCandidate && (!branch || entry.branch === branch));
+	}
+
+	private readGitWorktreeRefs(repoPath: string, ctx: ArchivedWorktreeScanContext): Promise<GitWorktreeRefs> {
+		const repoKey = normalizeWorktreeHostPath(repoPath) ?? repoPath;
+		let cached = ctx.gitRefsCache.get(repoKey);
+		if (!cached) {
+			cached = this.readGitWorktreeRefsUncached(repoPath);
+			ctx.gitRefsCache.set(repoKey, cached);
+		}
+		return cached;
+	}
+
+	private async readGitWorktreeRefsUncached(repoPath: string): Promise<GitWorktreeRefs> {
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const entries: GitWorktreeRef[] = [];
+			for (const block of stdout.split("\n\n")) {
+				const pathMatch = block.match(/^worktree (.+)$/m);
+				const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
+				const normalizedPath = normalizeWorktreeHostPath(pathMatch?.[1]);
+				if (!normalizedPath) continue;
+				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
+			}
+			return { entries };
+		} catch {
+			return { entries: [] };
+		}
+	}
+
+	private localBranchExists(repoPath: string, branch: string | undefined, ctx: ArchivedWorktreeScanContext): Promise<boolean> {
+		if (!branch) return Promise.resolve(false);
+		const repoKey = normalizeWorktreeHostPath(repoPath) ?? repoPath;
+		const key = `${repoKey}:${branch}`;
+		let cached = ctx.branchExistsCache.get(key);
+		if (!cached) {
+			cached = this.localBranchExistsUncached(repoPath, branch);
+			ctx.branchExistsCache.set(key, cached);
+		}
+		return cached;
+	}
+
+	private localBranchExistsUncached(repoPath: string, branch: string): Promise<boolean> {
+		return execFileAsync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
+			.then(() => true)
+			.catch(() => false);
+	}
+
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
 		// SAFETY: refuse to destroy a team-lead session that the team-store
@@ -7191,22 +8634,30 @@ export class SessionManager {
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
-		// Delete .jsonl file
+		// Delete .jsonl file. Exact persisted paths outside trusted sessions
+		// roots are read-compatible only; never purge/delete them or sidecars.
 		if (ps.agentSessionFile) {
-			const purgeCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
-			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
-				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
-			});
+			const safeFile = isHostAbsoluteAgentSessionPath(ps.agentSessionFile)
+				? resolveSafeSessionsPath(ps.agentSessionFile)
+				: ps.agentSessionFile;
+			if (safeFile) {
+				const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
+				await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
+					console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+				});
+			}
 			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
 			// host-side path lookup (sidecars are bobbit-owned, never written
 			// by sandboxed agents). Missing file is fine.
-			try {
-				const sidecarPath = sidecarPathFor(ps.agentSessionFile);
-				if (fs.existsSync(sidecarPath)) {
-					fs.unlinkSync(sidecarPath);
+			if (safeFile) {
+				try {
+					const sidecarPath = sidecarPathFor(safeFile);
+					if (fs.existsSync(sidecarPath)) {
+						fs.unlinkSync(sidecarPath);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 				}
-			} catch (err) {
-				console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 			}
 		}
 
@@ -7292,6 +8743,8 @@ export class SessionManager {
 			}
 		}
 
+		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
+
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.
 		for (const listener of this._terminationListeners) {
@@ -7328,40 +8781,68 @@ export class SessionManager {
 	 */
 	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
-			const sessionsDir = path.join(globalAgentDir(), "sessions");
-			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
-			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
-			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
-			const cwdDir = path.join(sessionsDir, cwdSlug);
-			if (!fs.existsSync(cwdDir)) return null;
-
-			const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
-			if (files.length === 0) return null;
-
-			// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
-			// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt
-			const TOLERANCE_MS = 60_000;
-			let bestFile: string | null = null;
-			let bestDelta = Infinity;
-
-			for (const file of files) {
-				const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
-				if (!tsMatch) continue;
-				// Convert filename timestamp back to ISO: replace hyphens in time part with colons
-				const isoStr = tsMatch[1]
-					.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
-				const fileTime = new Date(isoStr).getTime();
-				if (isNaN(fileTime)) continue;
-
-				const delta = Math.abs(fileTime - ps.createdAt);
-				if (delta < TOLERANCE_MS && delta < bestDelta) {
-					bestDelta = delta;
-					bestFile = file;
+			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
+				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+				if (safePath) {
+					trustPersistedAgentSessionFile(safePath);
+					return safePath.replace(/\\/g, "/");
 				}
 			}
 
-			if (bestFile) {
-				return path.join(cwdDir, bestFile).replace(/\\/g, "/");
+			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
+			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
+			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
+			const TOLERANCE_MS = 60_000;
+
+			const sessionRoots = trustedAgentSessionsRoots();
+
+			// Prefer an exact filename/session-id match across all known roots before
+			// falling back to timestamp proximity. This preserves historical-root
+			// recovery when another root has a different session with the same createdAt.
+			for (const sessionsDir of sessionRoots) {
+				const cwdDir = path.join(sessionsDir, cwdSlug);
+				if (!fs.existsSync(cwdDir)) continue;
+				const exactFile = fs.readdirSync(cwdDir).find(f => f.endsWith(`_${ps.id}.jsonl`));
+				if (exactFile) {
+					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
+					trustPersistedAgentSessionFile(recovered);
+					return recovered;
+				}
+			}
+
+			for (const sessionsDir of sessionRoots) {
+				const cwdDir = path.join(sessionsDir, cwdSlug);
+				if (!fs.existsSync(cwdDir)) continue;
+
+				const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
+				if (files.length === 0) continue;
+
+				// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
+				// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt.
+				let bestFile: string | null = null;
+				let bestDelta = Infinity;
+
+				for (const file of files) {
+					const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
+					if (!tsMatch) continue;
+					// Convert filename timestamp back to ISO: replace hyphens in time part with colons.
+					const isoStr = tsMatch[1]
+						.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
+					const fileTime = new Date(isoStr).getTime();
+					if (isNaN(fileTime)) continue;
+
+					const delta = Math.abs(fileTime - ps.createdAt);
+					if (delta < TOLERANCE_MS && delta < bestDelta) {
+						bestDelta = delta;
+						bestFile = file;
+					}
+				}
+
+				if (bestFile) {
+					const recovered = path.join(cwdDir, bestFile).replace(/\\/g, "/");
+					trustPersistedAgentSessionFile(recovered);
+					return recovered;
+				}
 			}
 		} catch {
 			// Recovery is best-effort — don't break restore flow
@@ -7572,7 +9053,7 @@ export class SessionManager {
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && (ps.agentSessionFile || canResumeClaudeCodeSession(ps))) {
+			if (ps && ps.agentSessionFile) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this._restoreSessionCoalesced(ps)
 					.then(() => {
@@ -7715,7 +9196,7 @@ export class SessionManager {
 		try {
 			await this._coalesceRestore(id, async (generation) => {
 				session.lifecycleGeneration = generation;
-				const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
+				const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -7774,8 +9255,10 @@ export class SessionManager {
 			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 				? effective
 				: (effective.length > 0 ? effective : undefined);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId);
+			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
@@ -7788,19 +9271,9 @@ export class SessionManager {
 			}
 			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed);
-			const runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: forceRespawnPersisted?.modelProvider });
-			assertRuntimeAllowedForSession(runtime, session.sandboxed);
-			Object.assign(bridgeOptions, hydrateRuntimeOptions({
-				...bridgeOptions,
-				runtime,
-				claudeCodeSessionId: forceRespawnPersisted?.claudeCodeSessionId,
-				claudeCodeExecutable: forceRespawnPersisted?.claudeCodeExecutable,
-				claudeCodePermissionMode: forceRespawnPersisted?.claudeCodePermissionMode,
-				claudeCodeModelAlias: forceRespawnPersisted?.claudeCodeModelAlias,
-			}, this.readClaudeCodeConfigForProject(session.projectId)));
+			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
 
-			const rpcClient = createSessionBridge(bridgeOptions);
+			const rpcClient = new RpcBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;
@@ -7818,17 +9291,20 @@ export class SessionManager {
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
+			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			await rpcClient.start();
 
-			// Resume session if we have the session file — path in agent coordinate system
-			const abortFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
-			if (runtime !== "claude-code" && agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+			// Resume session if we have the session file.
+			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
+			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
+			if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
+			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 				// Un-poison blank-text user messages before rehydrating — this is
 				// the route a live already-stuck session takes (forceAbort →
 				// respawn), so the re-spawned agent reads a sanitized transcript.
 				await sanitizeAgentTranscriptFile(abortFileCtx, agentSessionFile, this.sandboxManager);
 				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: agentSessionFile },
+					{ type: "switch_session", sessionPath: switchSessionPathForAgent(abortPs) },
 					15_000,
 				);
 				if (!switchResp.success) {
@@ -7840,6 +9316,13 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+
+			try {
+				await this.tryAutoSelectModel(session);
+			} catch (err) {
+				await rpcClient.stop();
+				throw err;
+			}
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
@@ -7880,18 +9363,26 @@ export class SessionManager {
 		}
 
 		// Don't remove from store on shutdown — sessions should survive restart.
-		// Persist the streaming state for each session so interrupted agents
-		// can be re-prompted on the next startup.
+		// Persist the active/busy state for each session so interrupted agents
+		// can be re-driven on the next startup. The durable field is still named
+		// `wasStreaming` for store compatibility, but it means "restart re-drive
+		// needed" for every non-idle, non-terminal session status.
 		const ids = Array.from(this.sessions.keys());
 		for (const id of ids) {
 			const session = this.sessions.get(id);
 			if (!session) continue;
 
-			// Snapshot the current streaming state before we kill the process.
+			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
+
+			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
 			// and we write it here to handle the case where shutdown() races
-			// with a pending agent_end that hasn't flushed to disk yet.
-			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
+			// with a pending lifecycle event that hasn't flushed to disk yet.
+			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
+			this.resolveStoreForSession(id).update(id, {
+				wasStreaming: needsRestartRedrive,
+				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? Date.now()) : undefined,
+			});
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are
@@ -7938,7 +9429,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

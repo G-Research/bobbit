@@ -1,0 +1,209 @@
+/**
+ * Reproducing tests for Restart-Safe Gate Commands.
+ *
+ * These tests pin two restart-resume invariants for command verification:
+ *   1. gone/no-status command recovery must not fabricate a command failure;
+ *   2. after a real recovered command failure, never-run later phases are
+ *      explicit skipped rows and are omitted from failure notifications.
+ *
+ * Assertion messages include RESTART_SAFE_GATE_COMMANDS_REPRO so the
+ * reproducing-test gate can match the intended failure.
+ */
+
+import { test, type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+
+import { makeTmpDir } from "./helpers/tmp.ts";
+import { VerificationHarness, type ActiveVerification } from "../src/server/agent/verification-harness.js";
+
+const MARKER = "RESTART_SAFE_GATE_COMMANDS_REPRO";
+const GOAL_ID = "goal-restart-safe-commands";
+const GATE_ID = "implementation";
+
+type GateStoreCall =
+	| { kind: "updateSignalVerification"; signalId: string; update: any }
+	| { kind: "updateGateStatus"; goalId: string; gateId: string; status: string };
+
+function makeHarness(t: TestContext) {
+	const root = makeTmpDir("verif-command-restart-repro-");
+	const stateDir = path.join(root, "state");
+	fs.mkdirSync(stateDir, { recursive: true });
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+	const gateStoreCalls: GateStoreCall[] = [];
+	const notifications: Array<{ goalId: string; message: string }> = [];
+	const broadcasts: Array<{ goalId: string; event: any }> = [];
+
+	const gateStore = {
+		updateSignalVerification: (signalId: string, update: any) => {
+			gateStoreCalls.push({ kind: "updateSignalVerification", signalId, update });
+		},
+		updateGateStatus: (goalId: string, gateId: string, status: string) => {
+			gateStoreCalls.push({ kind: "updateGateStatus", goalId, gateId, status });
+		},
+		getGate: () => undefined,
+	} as any;
+	const roleStore = { get: () => undefined, getAll: () => [] } as any;
+
+	const harness = new VerificationHarness(
+		stateDir,
+		gateStore,
+		(goalId, event) => broadcasts.push({ goalId, event }),
+		roleStore,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+	);
+	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
+
+	return { stateDir, harness, gateStoreCalls, notifications, broadcasts };
+}
+
+function persistActive(stateDir: string, verification: ActiveVerification): void {
+	fs.writeFileSync(
+		path.join(stateDir, "active-verifications.json"),
+		JSON.stringify({ verifications: [verification] }, null, 2),
+	);
+}
+
+function latestSignalUpdate(calls: GateStoreCall[]): any {
+	return [...calls].reverse().find((call): call is Extract<GateStoreCall, { kind: "updateSignalVerification" }> => call.kind === "updateSignalVerification")?.update;
+}
+
+function latestGateStatus(calls: GateStoreCall[]): string | undefined {
+	return [...calls].reverse().find((call): call is Extract<GateStoreCall, { kind: "updateGateStatus" }> => call.kind === "updateGateStatus")?.status;
+}
+
+test("restart recovery with no durable command verdict does not fabricate a failed command result", async (t) => {
+	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
+	const startedAt = Date.now() - 1_000;
+
+	persistActive(stateDir, {
+		goalId: GOAL_ID,
+		gateId: GATE_ID,
+		signalId: "sig-no-command-verdict",
+		overallStatus: "running",
+		startedAt,
+		currentPhase: 0,
+		steps: [
+			{
+				name: "Restart probe",
+				type: "command",
+				status: "running",
+				phase: 0,
+				startedAt,
+				pid: 987_654_321,
+				startTimeMs: startedAt,
+				timeoutSec: 300,
+			},
+		],
+	});
+
+	await harness.resumeInterruptedVerifications();
+
+	const signalUpdate = latestSignalUpdate(gateStoreCalls);
+	const commandStep = signalUpdate?.steps?.find((step: any) => step.name === "Restart probe");
+
+	assert.notEqual(
+		latestGateStatus(gateStoreCalls),
+		"failed",
+		`${MARKER}: gone/no-status command recovery should leave the gate pending or retryable, not mark it failed as though a command verdict was obtained.`,
+	);
+	assert.notEqual(
+		commandStep?.status,
+		"failed",
+		`${MARKER}: gone/no-status command recovery should not persist a failed command step when no durable exit code/status exists.`,
+	);
+	assert.doesNotMatch(
+		`${commandStep?.output ?? ""}\n${notifications.map(n => n.message).join("\n")}`,
+		/Verification command process died during gateway restart before producing an exit code/,
+		`${MARKER}: restart/no-verdict recovery must not fabricate the legacy command-failure message.`,
+	);
+});
+
+test("real recovered command failure skips later phases and omits skipped rows from notifications", async (t) => {
+	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
+	const startedAt = Date.now() - 2_000;
+	const diagDir = path.join(stateDir, "verifications", "sig-real-command-failure");
+	fs.mkdirSync(diagDir, { recursive: true });
+	const outFile = path.join(diagDir, "restart-probe.out.log");
+	const errFile = path.join(diagDir, "restart-probe.err.log");
+	const exitFile = path.join(diagDir, "restart-probe.exit");
+	fs.writeFileSync(outFile, "probe:started\nprobe:after-restart\n");
+	fs.writeFileSync(errFile, "");
+	fs.writeFileSync(exitFile, "7\n");
+
+	persistActive(stateDir, {
+		goalId: GOAL_ID,
+		gateId: GATE_ID,
+		signalId: "sig-real-command-failure",
+		overallStatus: "running",
+		startedAt,
+		currentPhase: 0,
+		steps: [
+			{
+				name: "Restart probe",
+				type: "command",
+				status: "running",
+				phase: 0,
+				startedAt,
+				outFile,
+				errFile,
+				exitFile,
+				commandCwd: stateDir,
+			},
+			{
+				name: "Downstream review",
+				type: "llm-review",
+				status: "waiting",
+				phase: 1,
+				startedAt,
+			},
+			{
+				name: "Downstream QA",
+				type: "agent-qa",
+				status: "waiting",
+				phase: 1,
+				startedAt,
+			},
+		],
+	});
+
+	await harness.resumeInterruptedVerifications();
+
+	const signalUpdate = latestSignalUpdate(gateStoreCalls);
+	const commandStep = signalUpdate?.steps?.find((step: any) => step.name === "Restart probe");
+	const reviewStep = signalUpdate?.steps?.find((step: any) => step.name === "Downstream review");
+	const qaStep = signalUpdate?.steps?.find((step: any) => step.name === "Downstream QA");
+	const notificationText = notifications.map(n => n.message).join("\n---\n");
+
+	assert.equal(commandStep?.status, "failed", `${MARKER}: precondition — recovered exit code 7 should be a real failed command step.`);
+	assert.match(commandStep?.output ?? "", /probe:after-restart/, `${MARKER}: precondition — recovered command output should include post-restart diagnostics.`);
+
+	for (const step of [reviewStep, qaStep]) {
+		assert.equal(
+			step?.status,
+			"skipped",
+			`${MARKER}: never-run later phase step ${step?.name ?? "<missing>"} should be status=skipped after a real recovered command failure.`,
+		);
+		assert.equal(
+			step?.skipped,
+			true,
+			`${MARKER}: never-run later phase step ${step?.name ?? "<missing>"} should carry skipped=true.`,
+		);
+		assert.equal(
+			step?.output,
+			"Skipped — earlier phase failed",
+			`${MARKER}: never-run later phase step ${step?.name ?? "<missing>"} should explain that an earlier phase failed.`,
+		);
+	}
+
+	assert.match(notificationText, /step="Restart probe"/, `${MARKER}: notification should include an inspect command for the real failed command step.`);
+	assert.doesNotMatch(notificationText, /step="Downstream review"/, `${MARKER}: notification must not include inspect commands for skipped downstream review rows.`);
+	assert.doesNotMatch(notificationText, /step="Downstream QA"/, `${MARKER}: notification must not include inspect commands for skipped downstream QA rows.`);
+});

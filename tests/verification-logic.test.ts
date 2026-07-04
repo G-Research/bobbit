@@ -29,6 +29,8 @@ import {
 	// Classifier for restart-induced resume errors (cold-agent RPC timeout, agent
 	// process not yet up) that must leave the gate pending, not failed.
 	isRestartInterruptError,
+	isRetryableGenericAgentError,
+	shouldRetryVerificationStep,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -213,6 +215,167 @@ describe("isTransientReviewError", () => {
 				`Expected '${pattern}' to be detected as transient`,
 			);
 		}
+	});
+
+	it("treats socket/WebSocket/process runtime variants as transient", () => {
+		const variants = [
+			"LLM review failed: WebSocket error: connection closed before response completed",
+			"LLM review failed: socket error while reading from reviewer agent",
+			"LLM review failed: write ENOTCONN",
+			"LLM review failed: read ECONNRESET",
+			"LLM review failed: write EPIPE",
+			"LLM review failed: socket hang up",
+			"LLM review failed: Agent process not running",
+			"LLM review failed: process exited with code 1",
+			"LLM review failed: connect ECONNREFUSED 127.0.0.1:3001",
+		];
+
+		const missed = variants.filter(v => !isTransientReviewError(v));
+		assert.deepEqual(
+			missed,
+			[],
+			`Expected socket/runtime variants transient: ${missed.join(" | ")}`,
+		);
+	});
+
+	it("treats fetch failed and undici transport variants as transient", () => {
+		const variants = [
+			{
+				output: "LLM review failed: fetch failed",
+				message: "fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed",
+				message: "TypeError: fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_SOCKET other side closed",
+				message: "UND_ERR_SOCKET should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_HEADERS_TIMEOUT headers timeout",
+				message: "UND_ERR_HEADERS_TIMEOUT should be classified as transient",
+			},
+		];
+
+		for (const { output, message } of variants) {
+			assert.equal(isTransientReviewError(output), true, message);
+		}
+	});
+});
+
+// ===================================================================
+// llm-review retry decisions
+// ===================================================================
+
+describe("llm-review retry decisions", () => {
+	it("retries generic unexpected agent/runtime errors with the ordinary bounded policy", () => {
+		const genericRuntimeErrors = [
+			"LLM review failed: The system encountered an unexpected error. Please try again.",
+			"LLM review failed: An unexpected agent error occurred while processing the turn.",
+			"LLM review failed: internal server error from agent runtime",
+		];
+
+		const notClassified = genericRuntimeErrors.filter(v => !isRetryableGenericAgentError(v));
+		assert.deepEqual(
+			notClassified,
+			[],
+			`Expected generic runtime errors retryable: ${notClassified.join(" | ")}`,
+		);
+
+		for (const output of genericRuntimeErrors) {
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					// Mirrors the current llm-review harness retry predicate. Generic
+					// retryable runtime errors must be included in this decision path.
+					isTransient: isTransientReviewError,
+				}),
+				"retry",
+				`Expected llm-review retry decision to retry generic runtime error: ${output}`,
+			);
+		}
+	});
+
+	it("retries fetch failed and undici transport failures through the llm-review decision path", () => {
+		const transportFailures = [
+			{
+				output: "LLM review failed: fetch failed",
+				message: "fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed",
+				message: "TypeError: fetch failed should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_SOCKET other side closed",
+				message: "UND_ERR_SOCKET should be classified as transient",
+			},
+			{
+				output: "LLM review failed: TypeError: fetch failed: UND_ERR_HEADERS_TIMEOUT headers timeout",
+				message: "UND_ERR_HEADERS_TIMEOUT should be classified as transient",
+			},
+		];
+
+		for (const { output, message } of transportFailures) {
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient: isTransientReviewError,
+				}),
+				"retry",
+				message,
+			);
+		}
+	});
+
+	it("does not retry deterministic auth/config/API-key/policy/unsupported provider failures", () => {
+		const deterministicFailures = [
+			"LLM review failed: missing API key for provider",
+			"LLM review failed: configuration error: review model is not configured",
+			"LLM review failed: unsupported provider bobbit-llm",
+			"LLM review failed: unsupported model bobbit-preview-404",
+			"LLM review failed: content policy violation blocked the request",
+			"LLM review failed: schema validation failed for invalid request",
+			"LLM review failed: user aborted the turn",
+		];
+
+		for (const output of deterministicFailures) {
+			assert.equal(isRetryableGenericAgentError(output), false, `Expected deterministic failure not generic-retryable: ${output}`);
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient: (text) => isTransientReviewError(text) || isRetryableGenericAgentError(text),
+				}),
+				"break",
+				`Expected deterministic failure not to retry: ${output}`,
+			);
+		}
+	});
+
+	it("does not treat unknown internal model errors as unsupported model configuration", () => {
+		const output = "LLM review failed: model returned an unknown internal error";
+
+		assert.equal(isRetryableGenericAgentError(output), true);
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false,
+				output,
+				attempt: 1,
+				maxBoundedAttempts: 3,
+				isTransient: (text) => isTransientReviewError(text) || isRetryableGenericAgentError(text),
+			}),
+			"retry",
+		);
 	});
 });
 

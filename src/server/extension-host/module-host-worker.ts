@@ -119,9 +119,7 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// agents through these six poll-based verbs ONLY (no blocking `wait`); the live
 	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
 	// services the proxied calls over the same channel.
-	// `spawnGoal` (experiment-runner seam) is the 7th verb — launches a child GOAL
-	// carrying a per-arm treatment; rides the same `agents` capability.
-	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status", "spawnGoal"]),
+	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
 };
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
@@ -216,14 +214,7 @@ export class ModuleHost {
 				// The calling session's project id (when resolvable) so a route handler
 				// can scope to the real project instead of fabricating one.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
-				// Trusted session context for route-owned auto tags (e.g. Hindsight manual retain).
-				goalId: (req.ctx as { goalId?: unknown } | undefined)?.goalId,
-				roleName: (req.ctx as { roleName?: unknown } | undefined)?.roleName,
-				// P3/P4 — the managed-runtime linkage the route endpoint resolved for a
-				// managed-mode pack (`{ baseUrl, headers, status }`). A plain serializable
-				// object, so it crosses the MessagePort intact; absent in external mode and
-				// whenever no managed runtime is running, so the route stays dormant.
-				runtime: (req.ctx as { runtime?: unknown } | undefined)?.runtime,
+				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,

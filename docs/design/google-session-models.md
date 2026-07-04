@@ -346,7 +346,7 @@ absent/unselectable).
   redacted). Quota/rate-limit (429) bubbles up as an error event with the provider message.
 - **Project selection / paid tiers**: `ensureCodeAssistProject` already resolves and caches the
   free-tier project; honor `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` env (and a persisted
-  override in `~/.bobbit/agent/google-code-assist.json`) when present, so paid Code Assist / GCA
+  override in the active `<agentDir>/google-code-assist.json`) when present, so paid Code Assist / GCA
   subscriptions route under the user's chosen project.
 
 ---

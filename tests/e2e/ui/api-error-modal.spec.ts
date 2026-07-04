@@ -13,6 +13,7 @@
  * real "Create Goal" click triggers `createGoal()` in production code.
  */
 import { test, expect } from "../gateway-harness.js";
+import { defaultProjectId } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 const FAKE_STACK =
@@ -42,9 +43,20 @@ test.describe("descriptive API error modal", () => {
 			});
 		});
 
-		await openApp(page);
+		const targetProjectId = await defaultProjectId();
+		expect(targetProjectId, "harness default project must be available for goal-assistant creation").toBeTruthy();
 
-		// Drive the goal-assistant flow (same path as goal-creation.spec.ts).
+		await openApp(page);
+		await page.waitForFunction(
+			(projectId) => (window as any).bobbitState?.projects?.some((p: { id?: string }) => p.id === projectId),
+			targetProjectId,
+			{ timeout: 15_000 },
+		);
+		const visibleProjectCount = await page.evaluate(() => (window as any).bobbitState?.projects?.length ?? 0);
+
+		// Drive the current goal-assistant entrypoint. With Headquarters plus the
+		// harness default project visible, the toolbar button opens a project picker;
+		// in single-visible-project states it still opens the assistant directly.
 		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 		await expect(newGoalBtn).toBeVisible({ timeout: 15_000 });
 		await expect(newGoalBtn).toBeEnabled({ timeout: 15_000 });
@@ -57,7 +69,14 @@ test.describe("descriptive API error modal", () => {
 			{ timeout: 60_000 },
 		);
 		await newGoalBtn.click();
-		await sessionCreated;
+		if (visibleProjectCount > 1) {
+			const picker = page.locator("project-picker-popover").first();
+			await expect(picker, "multi-project +New Goal should open the project picker").toBeVisible({ timeout: 10_000 });
+			await picker.locator(`button[data-project-id="${targetProjectId}"]`).click();
+		}
+		const sessionResp = await sessionCreated;
+		const sessionReqBody = sessionResp.request().postDataJSON?.() ?? JSON.parse(sessionResp.request().postData() || "{}");
+		expect(sessionReqBody.projectId).toBe(targetProjectId);
 		await page.waitForURL(/#\/session\//, { timeout: 15_000 });
 
 		const textarea = page.locator("textarea").first();

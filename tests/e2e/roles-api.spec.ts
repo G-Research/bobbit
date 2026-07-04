@@ -9,6 +9,16 @@ import { test, expect } from "./in-process-harness.js";
 import { apiFetch, base } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+
+async function findRoleInList(name: string, projectId?: string): Promise<any | undefined> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	const resp = await apiFetch(`/api/roles${qs}`);
+	expect(resp.status).toBe(200);
+	const data = await resp.json();
+	return data.roles.find((role: any) => role.name === name);
+}
+
 // Clean up any test roles after each test
 test.afterEach(async () => {
 	for (const name of ["test-role", "another-role", "a", "my-role-123"]) {
@@ -337,6 +347,87 @@ test.describe("Role persistence", () => {
 		const created = roles.find((r: any) => r.name === "test-role");
 		expect(created).toBeDefined();
 		expect(created.label).toBe("Persistent Role");
+	});
+});
+
+test.describe("Headquarters role mutation aliasing", () => {
+	test("projectId=headquarters creates, rejects duplicates, updates, and deletes as server scope", async () => {
+		const roleName = `hq-role-mutation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			const create = await apiFetch("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({
+					name: roleName,
+					label: "HQ Role Mutation",
+					promptTemplate: "Headquarters role mutation test",
+					projectId: HEADQUARTERS_PROJECT_ID,
+				}),
+			});
+			expect(create.status).toBe(201);
+
+			const serverRole = await findRoleInList(roleName);
+			expect(serverRole).toMatchObject({ name: roleName, origin: "server" });
+			const hqRole = await findRoleInList(roleName, HEADQUARTERS_PROJECT_ID);
+			expect(hqRole).toMatchObject({ name: roleName, origin: "server" });
+
+			const duplicate = await apiFetch("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({
+					name: roleName,
+					label: "Duplicate HQ Role Mutation",
+					projectId: HEADQUARTERS_PROJECT_ID,
+				}),
+			});
+			expect(duplicate.status).toBe(400);
+			expect((await duplicate.json()).error).toContain("already exists");
+
+			const update = await apiFetch(`/api/roles/${encodeURIComponent(roleName)}?projectId=${HEADQUARTERS_PROJECT_ID}`, {
+				method: "PUT",
+				body: JSON.stringify({
+					label: "Updated HQ Role Mutation",
+					promptTemplate: "Updated Headquarters role mutation test",
+					toolPolicies: { Read: "allow" },
+				}),
+			});
+			expect(update.status).toBe(200);
+
+			const updated = await findRoleInList(roleName);
+			expect(updated).toMatchObject({
+				name: roleName,
+				label: "Updated HQ Role Mutation",
+				promptTemplate: "Updated Headquarters role mutation test",
+				toolPolicies: { Read: "allow" },
+				origin: "server",
+			});
+
+			const remove = await apiFetch(`/api/roles/${encodeURIComponent(roleName)}?projectId=${HEADQUARTERS_PROJECT_ID}`, { method: "DELETE" });
+			expect(remove.status).toBe(200);
+			expect(await findRoleInList(roleName)).toBeUndefined();
+			expect(await findRoleInList(roleName, HEADQUARTERS_PROJECT_ID)).toBeUndefined();
+		} finally {
+			await apiFetch(`/api/roles/${encodeURIComponent(roleName)}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	test("scope=project Headquarters customize and override target server roles", async () => {
+		const roleName = `hq-role-customize-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			const create = await apiFetch("/api/roles", {
+				method: "POST",
+				body: JSON.stringify({ name: roleName, label: "HQ Customize Source", promptTemplate: "customize source" }),
+			});
+			expect(create.status).toBe(201);
+
+			const customize = await apiFetch(`/api/roles/${encodeURIComponent(roleName)}/customize?scope=project&projectId=${HEADQUARTERS_PROJECT_ID}`, { method: "POST" });
+			expect(customize.status).toBe(201);
+			expect(await findRoleInList(roleName, HEADQUARTERS_PROJECT_ID)).toMatchObject({ name: roleName, origin: "server" });
+
+			const removeOverride = await apiFetch(`/api/roles/${encodeURIComponent(roleName)}/override?scope=project&projectId=${HEADQUARTERS_PROJECT_ID}`, { method: "DELETE" });
+			expect(removeOverride.status).toBe(200);
+			expect(await findRoleInList(roleName)).toBeUndefined();
+		} finally {
+			await apiFetch(`/api/roles/${encodeURIComponent(roleName)}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 });
 

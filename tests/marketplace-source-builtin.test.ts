@@ -55,6 +55,14 @@ describe("built-in source guards (§11.1)", () => {
 		assert.throws(() => store.add({ url: "/abs/path/builtin" }), /built-in source cannot be added/);
 	});
 
+	it("defaults newly-added marketplace sources to trusted for executable pi-extension discovery", () => {
+		const store = new MarketplaceSourceStore(dir);
+		const source = store.add({ url: "https://example.com/trusted-repo.git" });
+		assert.ok(source.trustedAt, "new sources should persist source-level trust acceptance");
+		const reloaded = new MarketplaceSourceStore(dir).get(source.id);
+		assert.equal(reloaded?.trustedAt, source.trustedAt);
+	});
+
 	it("does NOT persist a builtin source across a simulated restart", () => {
 		const store = new MarketplaceSourceStore(dir);
 		// A normal source persists fine.
@@ -118,6 +126,8 @@ describe("built-in source guards (§11.1)", () => {
 		assert.ok(baseEntrypoints.some((e) => (e as any).kind === "session-menu"), "session-menu entrypoint enabled by default");
 		assert.ok(entrypointListNames.includes("pr-walkthrough-open"), "slash entrypoint enabled by default");
 		assert.ok(entrypointListNames.includes("pr-walkthrough-route"), "route entrypoint enabled by default");
+		assert.equal((baseEntrypoints.find((e) => e.listName === "pr-walkthrough-open") as any)?.icon, "git-pull-request");
+		assert.equal((baseEntrypoints.find((e) => e.listName === "pr-walkthrough-session-menu") as any)?.icon, "git-pull-request");
 		assert.ok(!entrypointListNames.includes("pr-walkthrough-git-widget"), "old git-widget entrypoint absent");
 		assert.ok(!entrypointListNames.includes("pr-walkthrough-palette"), "old palette entrypoint absent");
 

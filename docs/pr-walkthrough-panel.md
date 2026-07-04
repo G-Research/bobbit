@@ -487,11 +487,15 @@ reaps it automatically.
 - **Restart survival.** Because no `childTerminal` marker is stamped, a finalized
   reviewer **survives a gateway restart** like any other session. Its durable
   progress is review-scoped in the pack store, and the lifecycle provider injects
-  a bounded chunk/finalization summary before prompts. It is reaped only by the
-  standard `host.agents` **owner-gone** rule (`shouldReapChildOnBoot` in
-  `OrchestrationCore` removes it when its owner is archived/gone) — never by a
-  PR-walkthrough terminal marker. See
-  [docs/orchestration.md](orchestration.md#hostagents--orchestration-for-extension-packs).
+  a bounded chunk/finalization summary before prompts. The reviewer is a
+  `host-agents` child (`role: "pr-reviewer"`, title `PR Walkthrough`), so it is
+  polled and managed by the extension workflow; the owner does **not** receive the
+  generic post-restart `team_wait` collection reminder for it. Restoration,
+  binding, submission, and visibility behavior are otherwise unchanged. It is
+  reaped only by the standard `host.agents` **owner-gone** rule
+  (`shouldReapChildOnBoot` in `OrchestrationCore` removes it when its owner is
+  archived/gone) — never by a PR-walkthrough terminal marker. See
+  [docs/orchestration.md](orchestration.md#restart-survival).
 - **Termination is the user's call.** The user terminates the reviewer through the
   existing per-session terminate/dismiss control in the sidebar (the same archive
   action exposed for `host.agents` child sessions). On reviewer shutdown/archive,
@@ -507,9 +511,10 @@ workspace. It uses the same shared controls as every side panel: fullscreen,
 collapse/restore, split view, and popout. There is no walkthrough-specific resize
 code path, and no preview-specific localStorage collapse key; size mode persists
 as `sidePanelWorkspace.sizeMode` on the reviewer session and syncs across reloads
-and browser contexts. The shared keyboard shortcuts expand one level
-(`collapsed → split → fullscreen`), collapse one level (`fullscreen → split → collapsed`),
-and toggle fullscreen/collapsed.
+and browser contexts. Shared visible controls and shortcuts expand one level
+(`collapsed → split → fullscreen`) or collapse one level (`fullscreen → split → collapsed`).
+The explicit `Ctrl+#` fullscreen toggle is the only shared control that jumps
+between fullscreen and collapsed.
 
 The panel **never auto-enters fullscreen**. Fullscreen is strictly user-initiated,
 via a toolbar button or one of those shortcuts. This matches the preview panel and
@@ -552,9 +557,8 @@ and the user-terminate control are pinned in the API spec
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
 Preview panel sizing through the shared side-panel controls is independently pinned by
-`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (preview is one workspace
-panel kind using the same sizing logic as pack, proposal, review, and inbox
-panels). See
+`tests/ui-fixtures/preview-panel.spec.ts` (preview is one workspace panel kind
+using the same sizing logic as pack, proposal, review, and inbox panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
 
@@ -674,6 +678,13 @@ together.
 Deleted old-side lines and added new-side lines each have their own suggestions,
 saved comments, and active editor below the row. Context rows share a single detail
 area because both columns represent the same logical line.
+
+In paired add/delete rows, `.diff-word` is reserved for meaningful intraline
+changes: the renderer highlights only the computed changed span when an unchanged
+prefix or suffix remains. If the changed span covers the entire displayed line,
+the row keeps normal syntax-token rendering with no `.diff-word` wrapper. The
+line-level add/delete background, gutters, line numbers, comment cues, suggestions,
+and editors remain unchanged in both split and inline modes.
 
 Diff rendering is defensive at two layers so a single malformed block can never
 blank the whole pane:
@@ -1047,7 +1058,7 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - the agent-side resolve/export routes;
 - the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the PR Walkthrough tools and its system prompt carries the chunk/finalization guidance, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + prompt across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after finalization the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
 - browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards after finalization, surviving reload via the child-self `recover`, and showing bounded draft/missing/quota/schema states; plus explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`, `tests/pr-walkthrough-panel-parity.spec.ts`);
-- pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
+- pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, split/inline diff rendering including meaningful-only `.diff-word` intraline highlights, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 

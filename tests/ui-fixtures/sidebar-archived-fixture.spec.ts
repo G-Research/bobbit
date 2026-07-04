@@ -17,9 +17,13 @@ const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
 const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
 const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
 const SIDEBAR_SPAWNED_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
+const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
+const SIDEBAR_TREE_STATE_SRC = path.resolve("src/app/sidebar-tree-state.ts");
+const SIDEBAR_TREE_LAYOUT_SRC = path.resolve("src/app/sidebar-tree-layout.ts");
 const TEAM_ARCHIVED_BUCKET_SRC = path.resolve("src/app/team-archived-bucket.ts");
 
 const MARK = "SIDEBAR_ARCHIVED_FIXTURE";
+const VERIFIER_MARK = "SIDEBAR_ARCHIVED_VERIFIER";
 
 test.beforeAll(() => {
 	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
@@ -37,6 +41,9 @@ test.beforeAll(() => {
 			SEARCH_STATUS_DOT_SRC,
 			SIDEBAR_NESTING_SRC,
 			SIDEBAR_SPAWNED_SRC,
+			SIDEBAR_TREE_BUILDER_SRC,
+			SIDEBAR_TREE_STATE_SRC,
+			SIDEBAR_TREE_LAYOUT_SRC,
 			TEAM_ARCHIVED_BUCKET_SRC,
 		],
 	});
@@ -69,6 +76,86 @@ function expectIncreasing(indexes: number[], label: string): void {
 		expect(indexes[i], `${MARK}: ${label} selector ${i} missing`).toBeGreaterThanOrEqual(0);
 		if (i > 0) expect(indexes[i], `${MARK}: ${label} order ${i}`).toBeGreaterThan(indexes[i - 1]);
 	}
+}
+
+async function projectStandaloneArchivedPlacement(page: Page, sessionId: string, projectId: string, nextProjectId: string) {
+	return page.evaluate(({ sessionId, projectId, nextProjectId }) => {
+		const all = Array.from(document.querySelectorAll("*"));
+		const row = document.querySelector(`[data-session-id="${sessionId}"]`);
+		const archivedHeader = document.querySelector(`[data-nav-id="archived-header:${projectId}"]`);
+		const nextProject = document.querySelector(`.project-reorder-section[data-project-id="${nextProjectId}"], section[data-project-id="${nextProjectId}"]`);
+		const rowIndex = row ? all.indexOf(row) : -1;
+		const headerIndex = archivedHeader ? all.indexOf(archivedHeader) : -1;
+		const nextProjectIndex = nextProject ? all.indexOf(nextProject) : all.length;
+		const dividerText = all
+			.slice(Math.max(0, headerIndex), Math.max(0, rowIndex))
+			.map(el => el.textContent?.trim())
+			.filter(text => text === "Goals" || text === "Sessions")
+			.at(-1) ?? "";
+		return {
+			rowIndex,
+			headerIndex,
+			nextProjectIndex,
+			dividerText,
+			isStandalone: rowIndex >= 0 && headerIndex >= 0 && rowIndex > headerIndex && rowIndex < nextProjectIndex && dividerText === "Sessions",
+		};
+	}, { sessionId, projectId, nextProjectId });
+}
+
+async function expectProjectStandaloneArchived(page: Page, sessionId: string, projectId: string, nextProjectId: string, label: string): Promise<void> {
+	const placement = await projectStandaloneArchivedPlacement(page, sessionId, projectId, nextProjectId);
+	expect(
+		placement.isStandalone,
+		`${VERIFIER_MARK}: ${label} verifier ${sessionId} did not render as a project-level standalone archived session ${JSON.stringify(placement)}`,
+	).toBe(true);
+}
+
+async function expectNotProjectStandaloneArchived(page: Page, sessionId: string, projectId: string, nextProjectId: string, label: string): Promise<void> {
+	const placement = await projectStandaloneArchivedPlacement(page, sessionId, projectId, nextProjectId);
+	expect(
+		placement.isStandalone,
+		`${VERIFIER_MARK}: ${label} verifier ${sessionId} rendered as a project-level standalone archived session ${JSON.stringify(placement)}`,
+	).toBe(false);
+}
+
+async function expectArchivedSectionPreference(page: Page, projectId: string, preference: "expanded" | "collapsed"): Promise<void> {
+	await expect.poll(() => page.evaluate((id) => {
+		const raw = localStorage.getItem("bobbit-sidebar-tree-state:v1");
+		if (!raw) return undefined;
+		return JSON.parse(raw).expansion?.[`sidebar-tree/v1/project-archived/${encodeURIComponent(id)}`];
+	}, projectId)).toBe(preference);
+}
+
+async function sidebarTreeExpansionSnapshot(page: Page): Promise<Record<string, string>> {
+	return page.evaluate(() => {
+		const raw = localStorage.getItem("bobbit-sidebar-tree-state:v1");
+		return raw ? (JSON.parse(raw).expansion ?? {}) : {};
+	});
+}
+
+function archivedPreferenceKeys(ids: Record<string, string>): string[] {
+	return [
+		`sidebar-tree/v1/project-archived/${encodeURIComponent(ids.projectA)}`,
+		`sidebar-tree/v1/goal/${encodeURIComponent(ids.archivedGoalA1)}`,
+		`sidebar-tree/v1/team-lead/${encodeURIComponent(ids.archivedTeamLead)}`,
+		`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=delegate`,
+		`sidebar-tree/v1/session-children/${encodeURIComponent(ids.archivedDelegate)}?childClass=archived-delegate`,
+	];
+}
+
+function expectArchivedPreferencesPreserved(before: Record<string, string>, after: Record<string, string>, ids: Record<string, string>): void {
+	for (const key of archivedPreferenceKeys(ids)) {
+		expect(before[key], `${MARK}: archived tree preference ${key} is seeded`).toBeDefined();
+		expect(after[key], `${MARK}: archived tree preference ${key} is preserved`).toBe(before[key]);
+	}
+}
+
+async function expandLiveTeamLead(page: Page, teamLeadId: string, teamWorkerId: string): Promise<void> {
+	const lead = page.locator(`[data-session-id="${teamLeadId}"]`).first();
+	await expect(lead, `${VERIFIER_MARK}: live team lead renders`).toBeVisible({ timeout: 10_000 });
+	const expand = lead.locator(`span[title="Expand"]`).first();
+	if (await expand.count()) await expand.click();
+	await expect(page.locator(`[data-session-id="${teamWorkerId}"]`), `${VERIFIER_MARK}: live team lead is expanded`).toBeVisible({ timeout: 5_000 });
 }
 
 async function setShowArchived(page: Page, checked: boolean): Promise<void> {
@@ -127,7 +214,38 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`), `${MARK}: collapsed project B hides archived goal`).toHaveCount(0, { timeout: 5_000 });
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: project A archived section stays expanded`).toHaveCount(1);
-		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+		await expectArchivedSectionPreference(page, ids.projectB, "collapsed");
+	});
+
+	test("legacy verifier sessions stay out of project-level standalone archive rows", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-session-id="${ids.archivedStandaloneA}"]`), `${VERIFIER_MARK}: normal standalone archived session still renders`).toBeVisible({ timeout: 10_000 });
+		await expectNotProjectStandaloneArchived(page, ids.legacyLlmReview, ids.projectA, ids.projectB, "desktop llm-review");
+		await expectNotProjectStandaloneArchived(page, ids.legacyAgentQa, ids.projectA, ids.projectB, "desktop agent-qa");
+	});
+
+	test("missing-goal verifier transcript uses standalone fallback while empty placeholders stay hidden", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expectProjectStandaloneArchived(page, ids.missingGoalReviewTranscript, ids.projectA, ids.projectB, "desktop missing-goal transcript");
+		await expect(page.locator(`[data-session-id="${ids.missingGoalReviewPlaceholder}"]`), `${VERIFIER_MARK}: empty missing-goal placeholder stays hidden`).toHaveCount(0);
+	});
+
+	test("legacy live team-goal verifier nests near the expanded live team lead", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expandLiveTeamLead(page, ids.teamLead, ids.teamWorker);
+		await expect(page.locator(`[data-session-id="${ids.legacyLlmReview}"]`), `${VERIFIER_MARK}: legacy llm-review verifier renders under the live team lead`).toBeVisible({ timeout: 10_000 });
+		expectIncreasing(await domIndexes(page, [
+			`[data-session-id="${ids.teamLead}"]`,
+			`[data-session-id="${ids.legacyLlmReview}"]`,
+			`[data-session-id="${ids.legacyAgentQa}"]`,
+			`[data-nav-id="archived-header:${ids.projectA}"]`,
+		]), `${VERIFIER_MARK}: live team-goal verifier rows are nested before the project archived bucket`);
 	});
 
 	test("archived team leads, members, and delegates nest under their live owners", async ({ page }) => {
@@ -135,8 +253,10 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await loadFixture(page, { showArchived: true });
 		const ids = await fixtureIds(page);
 
-		await expect(page.locator(`[data-session-id="${ids.archivedTeamLead}"]`), `${MARK}: archived team lead renders under live goal`).toBeVisible({ timeout: 10_000 });
-		await page.locator(`[data-session-id="${ids.archivedTeamLead}"] span[title="Expand"]`).click();
+		const archivedLead = page.locator(`[data-session-id="${ids.archivedTeamLead}"]`);
+		await expect(archivedLead, `${MARK}: archived team lead renders under live goal`).toBeVisible({ timeout: 10_000 });
+		const archivedLeadExpand = archivedLead.locator(`span[title="Expand"]`).first();
+		if (await archivedLeadExpand.count()) await archivedLeadExpand.click();
 		await expect(page.locator(`[data-session-id="${ids.archivedTeamWorker}"]`), `${MARK}: archived worker expands under archived team lead`).toBeVisible({ timeout: 5_000 });
 
 		const parent = page.locator(`[data-session-id="${ids.liveSessionParent}"]`).first();
@@ -150,6 +270,53 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate hidden when Show Archived is off`).toHaveCount(0, { timeout: 5_000 });
 		await setShowArchived(page, true);
 		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate survives Show Archived cycle`).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("Show Archived off/on preserves explicit archived tree preferences", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+		await page.evaluate(() => (window as any).__setArchivedSearchPreferenceFixture());
+		const before = await sidebarTreeExpansionSnapshot(page);
+
+		await setShowArchived(page, false);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header hidden while off`).toHaveCount(0, { timeout: 5_000 });
+		await setShowArchived(page, true);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header returns after toggle on`).toBeVisible({ timeout: 10_000 });
+
+		const after = await sidebarTreeExpansionSnapshot(page);
+		expectArchivedPreferencesPreserved(before, after, ids);
+	});
+
+	test("search auto-open clear preserves explicit archived tree preferences", async ({ page }) => {
+		await loadFixture(page, { showArchived: false });
+		const ids = await fixtureIds(page);
+		await page.evaluate(() => (window as any).__setArchivedSearchPreferenceFixture());
+		const before = await sidebarTreeExpansionSnapshot(page);
+
+		await page.evaluate(() => {
+			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-input", { detail: { query: "Alpha Archived" }, bubbles: true, composed: true }));
+		});
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(true);
+		await page.evaluate(() => {
+			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-clear", { bubbles: true, composed: true }));
+		});
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+
+		const after = await sidebarTreeExpansionSnapshot(page);
+		expectArchivedPreferencesPreserved(before, after, ids);
+	});
+
+	test("collapsed sidebar recurses into session child and delegate groups", async ({ page }) => {
+		await loadFixture(page, { showArchived: true, collapsed: true });
+		await expect(page.getByTestId("sidebar-collapsed")).toBeVisible({ timeout: 10_000 });
+		const parent = page.locator(`button[title='Alpha Live Parent Session']`).first();
+		await expect(parent, `${MARK}: collapsed live parent session button visible`).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`button[title='Alpha Archived Delegate']`), `${MARK}: archived delegate starts collapsed`).toHaveCount(0);
+
+		await parent.locator(".sidebar-chevron-glyph").click();
+		await expect(page.locator(`button[title='Alpha Archived Delegate']`), `${MARK}: archived delegate appears under collapsed parent`).toBeVisible({ timeout: 5_000 });
+		await page.locator(`button[title='Alpha Archived Delegate'] .sidebar-chevron-glyph`).click();
+		await expect(page.locator(`button[title='Alpha Archived Nested Delegate']`), `${MARK}: nested archived delegate appears recursively`).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("collapsed sidebar exposes archived goal rows only when Show Archived is on", async ({ page }) => {
@@ -168,6 +335,11 @@ test.describe("Sidebar archived deterministic fixture", () => {
 
 		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: mobile project A archived header`).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`), `${MARK}: mobile project B archived header`).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`[data-session-id="${ids.archivedStandaloneA}"]`), `${VERIFIER_MARK}: mobile normal standalone archived session still renders`).toBeVisible({ timeout: 10_000 });
+		await expectNotProjectStandaloneArchived(page, ids.legacyLlmReview, ids.projectA, ids.projectB, "mobile llm-review");
+		await expectNotProjectStandaloneArchived(page, ids.legacyAgentQa, ids.projectA, ids.projectB, "mobile agent-qa");
+		await expectProjectStandaloneArchived(page, ids.missingGoalReviewTranscript, ids.projectA, ids.projectB, "mobile missing-goal transcript");
+		await expect(page.locator(`[data-session-id="${ids.missingGoalReviewPlaceholder}"]`), `${VERIFIER_MARK}: mobile empty missing-goal placeholder stays hidden`).toHaveCount(0);
 		expectIncreasing(await domIndexes(page, [
 			`section[data-project-id="${ids.projectA}"]`,
 			`[data-nav-id="archived-header:${ids.projectA}"]`,
@@ -179,7 +351,7 @@ test.describe("Sidebar archived deterministic fixture", () => {
 
 		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
 		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`)).toHaveCount(0, { timeout: 5_000 });
-		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+		await expectArchivedSectionPreference(page, ids.projectB, "collapsed");
 
 		await loadFixture(page, { mode: "mobile", showArchived: true });
 		const search = page.locator("input[data-search]");

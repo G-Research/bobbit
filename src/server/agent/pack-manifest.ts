@@ -152,6 +152,7 @@ export function validateManifest(
 	const entrypoints = parseContentsBasenames("entrypoints", c.entrypoints);
 	if (entrypoints === null) return null;
 	let providers: string[] = [];
+	let channels: string[] = [];
 	let hooks: string[] = [];
 	let mcp: string[] = [];
 	let piExtensions: string[] = [];
@@ -161,6 +162,9 @@ export function validateManifest(
 		const parsedProviders = parseContentsBasenames("providers", c.providers);
 		if (parsedProviders === null) return null;
 		providers = parsedProviders;
+		const parsedChannels = parseContentsBasenames("channels", c.channels);
+		if (parsedChannels === null) return null;
+		channels = parsedChannels;
 		const parsedHooks = parseContentsBasenames("hooks", c.hooks);
 		if (parsedHooks === null) return null;
 		hooks = parsedHooks;
@@ -182,7 +186,7 @@ export function validateManifest(
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints, providers, hooks, mcp, piExtensions, runtimes, workflows },
+		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
 	if (provides !== undefined) manifest.provides = provides;

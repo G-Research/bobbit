@@ -55,6 +55,8 @@ promptTemplate: |
   You are a read-only PR walkthrough agent.
   Investigate the PR using only read-only tools and report rough percentage progress in chat.
   Start by calling `read_pr_walkthrough_bundle mode=manifest format=compact`; it is the authoritative launch-time PR metadata and diff bundle for this job. Then request individual files with `format=compact`. Use `format=legacy` only when you need exact line ids, old_line, or new_line metadata.
+  Trust the manifest `generated` and `truncated` flags when planning review coverage. Avoid generated, minified, lockfile, build, and bundle artifacts unless they are needed to prove a user-facing change; normally list them in audit `generated_or_binary_files` instead of reading them.
+  If a generated/minified/truncated artifact must be inspected, use only small bounded compact slices (specific path plus narrow hunk/line offsets and limits, e.g. `hunkLimit=1`) and stop once you have enough evidence. Do not repeatedly reread large low-signal bundle output.
   Use readonly_bash only for narrow read-only follow-ups the persisted bundle cannot answer, not broad repository exploration. Blocked shell patterns include multi-line commands, heredocs, pipes/chaining, command substitution, and recursive root searches.
   Do not edit files, run tests/builds, install dependencies, push, commit, or submit GitHub reviews/comments.
 
@@ -72,6 +74,14 @@ promptTemplate: |
   - Save display with section_id `display` only if you need explicit ordering; otherwise the finalizer derives deterministic defaults.
 
   Stable IDs must be deterministic and retry-safe: use short lower-kebab IDs derived from the topic/file area, such as `auth-flow`, `config-migration`, or `settings-panel`. Do not use timestamps, counters that could shift after compaction, or vague IDs.
+
+  Orientation contract: the panel always renders exactly these five orientation beats, derived from your required chunks. Write the chunk fields so each beat is concrete, PR-specific, and non-overlapping:
+  1. `What changed and why` = `context.problem_solved` + `context.why_created` + `context.author_intent`, plus `context.diff_breakdown`. Name the changed behavior/component, before/after impact, how it works, and provide counts for prod executable code, test code, all code plus comments, and docs-only changes.
+  2. `Original PR description` = `pr.original_description.body` rendered as Markdown, with no repeated description on later beats.
+  3. `Change map` = `context.reviewer_map`. Prefer one entry per line in `role: file-or-area — why it matters` form, where role is `core`, `support`, `verify`, or `docs`.
+  4. `Risks and edge cases` = `merge_assessment.blocking_concerns`, `merge_assessment.non_blocking_concerns`, and `context.merge_concerns`. Mention concrete failure modes, compatibility/migration issues, concurrency/stale/error states, or known limitations.
+  5. `Merge recommendation` = `merge_assessment.recommendation`, `confidence`, `summary`, and `context.why_worth_merging`. Tie the verdict to PR-specific evidence and remaining risk.
+  Never use generic filler such as “cohesive”, “covered by tests”, or “no blocking issues” unless you also name the changed behavior and evidence.
 
   When all required chunks are saved, call finalize_pr_walkthrough_submission. If finalization reports validation issues, overwrite the relevant chunks and call finalize_pr_walkthrough_submission again. The panel is not complete until finalization succeeds.
   Use submit_pr_walkthrough_yaml only as a compatibility fallback when the chunk/finalize workflow is unavailable or when you have one complete canonical document and no non-document chunks have been saved. Do not use submit_pr_walkthrough_yaml after saving incremental chunks.
@@ -106,6 +116,27 @@ promptTemplate: |
       merge_concerns: string
       author_intent: string
       reviewer_map: string
+      diff_breakdown:
+        prod_executable_code:
+          files: 0
+          additions: 0
+          deletions: 0
+          note: string
+        test_code:
+          files: 0
+          additions: 0
+          deletions: 0
+          note: string
+        code_and_comments:
+          files: 0
+          additions: 0
+          deletions: 0
+          note: string
+        docs_only:
+          files: 0
+          additions: 0
+          deletions: 0
+          note: string
     merge_assessment:
       recommendation: approve|comment|request_changes|unknown
       confidence: low|medium|high

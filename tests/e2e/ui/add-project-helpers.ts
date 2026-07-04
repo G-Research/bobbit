@@ -23,6 +23,7 @@ export const ADD_PROJECT = {
 	pickerSuggestions: '[data-testid="directory-picker-suggestions"]',
 	pickerSuggestion: '[data-testid="directory-picker-suggestion"]',
 	statusSlot: '[data-testid="add-project-status-slot"]',
+	inlineCreate: '[data-testid="add-project-inline-create"]',
 	preflightSlot: '[data-testid="add-project-preflight-slot"]',
 	preflightPanel: '[data-testid="preflight-panel"]',
 	footer: '[data-testid="add-project-footer"]',
@@ -42,6 +43,8 @@ export const ADD_PROJECT = {
 		`[data-testid="add-project-scan-checkbox-${id}"]`,
 	scanRowFor: (id: string) => `[data-testid="add-project-scan-row-${id}"]`,
 	continue: '[data-testid="add-project-continue"]',
+	createDirectory: '[data-testid="add-project-create-directory"]',
+	createError: '[data-testid="add-project-create-error"]',
 } as const;
 
 /** Build a unique temp dir under tmpdir(). Caller is responsible for cleanup. */

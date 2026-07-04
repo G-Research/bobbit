@@ -164,18 +164,14 @@ test.describe("QA Seed — API E2E", () => {
 		}
 	});
 
-	test("GET /api/goals/:id/team returns team state (post zombie-reviewer sweep)", async ({ seededGateway }) => {
+	test("GET /api/goals/:id/team returns team state (post zombie-agent sweep)", async ({ seededGateway }) => {
 		const goalId = "qa-seed-goal-0001-0001-0001-000000000001";
 		const resp = await apiFetch(seededGateway, `/api/goals/${goalId}/team`);
 		expect(resp.status).toBe(200);
 		const team = await resp.json();
-		// zombie-reviewer sweep zombie-reviewer sweep (subgoals branch) unregisters
-		// reviewer agents whose underlying session is missing/terminated. The
-		// QA seed marks all sessions terminated, so the reviewer is correctly
-		// reaped on boot. The coder survives because it's role="coder" and
-		// not subject to the sweep. See team-manager.ts::resubscribeTeamEvents.
-		expect(team.agents.length).toBeGreaterThanOrEqual(1);
-		const coder = team.agents.find((a: any) => a.role === "coder");
-		expect(coder).toBeTruthy();
+		// Restart cleanup unregisters stale reviewers and reaps stale workers whose
+		// backing sessions are missing/terminated. The QA seed marks all sessions
+		// terminated, so no role agents should survive boot cleanup.
+		expect(team.agents).toEqual([]);
 	});
 });

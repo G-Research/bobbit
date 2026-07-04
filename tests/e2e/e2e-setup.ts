@@ -11,7 +11,7 @@
 
 import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
 
@@ -26,6 +26,25 @@ export function wsBase(): string { return `ws://127.0.0.1:${port()}`; }
 export function bobbitDir(): string {
 	return process.env.BOBBIT_DIR
 		|| join(import.meta.dirname, "..", "..", ".e2e-bobbit");
+}
+
+/**
+ * Normal harness default project root.
+ *
+ * Headquarters now owns the server workspace (`bobbitDir()` in E2E). The
+ * compatibility "default" project used by older API tests must therefore live
+ * beside the server workspace, not at it, or POST /api/projects resolves to the
+ * immutable Headquarters project and workflow fixtures are seeded into the
+ * wrong scope.
+ */
+export function harnessDefaultProjectRoot(): string {
+	const root = join(dirname(bobbitDir()), `${basename(bobbitDir())}-default-project`);
+	mkdirSync(root, { recursive: true });
+	try { return realpathSync(root); } catch { return root; }
+}
+
+export function projectStateDirForRoot(rootPath: string): string {
+	return join(rootPath, ".bobbit", "state");
 }
 
 /**
@@ -608,10 +627,11 @@ function maybeInjectOrchestrateSecret(path: string, headers: Record<string, stri
  * (mirrors `/orchestrate/*`). In production the team-lead's agent process sends
  * its BOBBIT_SESSION_SECRET (team/extension.ts). An in-process E2E test acts as
  * the team-lead by resolving the goal's team-lead session id and injecting its
- * secret. A test exercising the FOREIGN-caller DENY path supplies its OWN
- * secret (suppresses injection); the NO-secret DENY path uses `rawApiFetch`
- * (which bypasses all injectors). Goal-MEMBER `/team/*` calls are unaffected —
- * the server ignores the secret on the normal path.
+ * secret. Tracked goal-member dismiss also uses this secret for team-lead-only
+ * cleanup before TeamManager runs. A test exercising the FOREIGN-caller DENY
+ * path supplies its OWN secret (suppresses injection); the NO-secret DENY path
+ * uses `rawApiFetch` (which bypasses all injectors). Goal-MEMBER
+ * prompt/steer/abort normal paths are unaffected.
  */
 let _teamLeadResolver: ((goalId: string) => string | undefined) | undefined;
 let _teamLeadSecretStore: { getOrCreateSecret(id: string): string } | undefined;
@@ -814,7 +834,7 @@ async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: str
 
 async function registerHarnessDefaultProject(reason: string): Promise<ProjectSummary> {
 	const p = port();
-	const request = { name: "default", rootPath: bobbitDir(), upsert: true, acceptCanonical: true };
+	const request = { name: "default", rootPath: harnessDefaultProjectRoot(), upsert: true, acceptCanonical: true };
 	let resp: Response;
 	try {
 		resp = await fetch(`${base()}/api/projects`, {
@@ -857,6 +877,7 @@ async function registerHarnessDefaultProject(reason: string): Promise<ProjectSum
 	}
 	_defaultProjectIdCache[p] = project.id;
 	await seedHarnessDefaultProjectWorkflows(project.id, reason);
+	_defaultProjectWorkflowSeededCache[p] = project.id;
 	return project;
 }
 
@@ -885,25 +906,41 @@ async function requestDiagnosticContext(request: Record<string, unknown>): Promi
  * in-memory and dirt cheap.
  */
 const _defaultProjectIdCache: Record<string, string> = {};
+const _defaultProjectWorkflowSeededCache: Record<string, string> = {};
+
+async function ensureHarnessDefaultProjectSeeded(projectId: string, reason: string): Promise<void> {
+	const p = port();
+	if (_defaultProjectWorkflowSeededCache[p] === projectId) return;
+	await seedHarnessDefaultProjectWorkflows(projectId, reason);
+	_defaultProjectWorkflowSeededCache[p] = projectId;
+}
+
 export async function defaultProjectId(): Promise<string | undefined> {
 	const p = port();
 	const state = await readLiveProjectState();
 	if (!state.ok) {
 		delete _defaultProjectIdCache[p];
+		delete _defaultProjectWorkflowSeededCache[p];
 		throw new Error(`defaultProjectId failed to list projects: ${formatLiveProjectState(state)} port=${p} bobbitDir=${bobbitDir()}`);
 	}
 	const visibleProjects = state.projects.filter(pr => !pr.hidden);
 	const cachedId = _defaultProjectIdCache[p];
-	if (cachedId && visibleProjects.some(pr => pr.id === cachedId && pr.name === "default")) return cachedId;
+	if (cachedId && visibleProjects.some(pr => pr.id === cachedId && pr.name === "default")) {
+		await ensureHarnessDefaultProjectSeeded(cachedId, "cached default project found in live list");
+		return cachedId;
+	}
 	if (cachedId && !visibleProjects.some(pr => pr.id === cachedId)) {
+		delete _defaultProjectWorkflowSeededCache[p];
 		return (await registerHarnessDefaultProject(`cached project ${cachedId} missing from live list`)).id;
 	}
 	const match = visibleProjects.find(pr => pr.name === "default");
 	if (match?.id) {
 		_defaultProjectIdCache[p] = match.id;
+		await ensureHarnessDefaultProjectSeeded(match.id, "existing default project found in live list");
 		return match.id;
 	}
 	delete _defaultProjectIdCache[p];
+	delete _defaultProjectWorkflowSeededCache[p];
 	return (await registerHarnessDefaultProject(
 		visibleProjects.length === 0 ? "live visible project list is empty" : "default project missing from live list",
 	)).id;
@@ -925,6 +962,10 @@ export async function defaultProject(): Promise<{ id: string; rootPath: string; 
 
 export async function defaultProjectRootPath(): Promise<string> {
 	return (await defaultProject()).rootPath;
+}
+
+export async function defaultProjectStateDir(): Promise<string> {
+	return projectStateDirForRoot(await defaultProjectRootPath());
 }
 
 /**

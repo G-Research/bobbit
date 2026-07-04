@@ -15,37 +15,23 @@
  * once, a file:// fixture loads it, and we drive the helpers via window globals.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle";
 
 const FIXTURE = path.resolve("tests/fixtures/client-host-api.html");
 const BUNDLE = path.resolve("tests/fixtures/client-host-api-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/client-host-api-entry.ts");
 const HOST_SRC = path.resolve("src/app/host-api.ts");
+const SURFACE_TOKEN_BRIDGE_SRC = path.resolve("src/app/surface-token-bridge.ts");
+const CHANNEL_BRIDGE_SRC = path.resolve("src/app/channel-bridge.ts");
 const SHARED_SRC = path.resolve("src/shared/extension-host/host-api.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(HOST_SRC).mtimeMs,
-		fs.statSync(SHARED_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [ENTRY, HOST_SRC, SURFACE_TOKEN_BRIDGE_SRC, CHANNEL_BRIDGE_SRC, SHARED_SRC],
+	});
 });
 
 const PAGE = `file://${FIXTURE}`;
@@ -61,9 +47,9 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		const caps = await page.evaluate(() => (window as any).__caps());
 
 		expect(caps.version).toBe(1);
-		// Contract v3: additive PanelTarget addressing fields bumped
+		// Contract v4: additive host.channels data contracts bumped
 		// HOST_CONTRACT_VERSION (HOST_API_VERSION stays 1 — purely additive).
-		expect(caps.contractVersion).toBe(3);
+		expect(caps.contractVersion).toBe(4);
 
 		// Phase-1 — implemented.
 		expect(caps.invokeAction).toBe(true);
@@ -97,6 +83,54 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(err.message).toContain("STORE_QUOTA_EXCEEDED");
 		expect(err.message).toContain("Review payload is too large to save.");
 		expect(err.message).toContain("reviews/job/final/payload: maxTotalBytes exceeded");
+	});
+
+	test("pack-bound surface tokens use the trusted app bridge instead of REST", async ({ page }) => {
+		await gotoAndWait(page);
+		await expect(page.evaluate(() => (window as any).__packSurfaceTokenMintUsesTrustedBridge())).resolves.toEqual({
+			bridgeMinted: true,
+			fetchMinted: false,
+		});
+	});
+
+	test("pack-bound surface tokens fall back to a background trusted WebSocket for inactive sessions", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__packSurfaceTokenMintFallsBackToBackgroundWebSocket());
+		expect(result.storeToken).toBe("background-token");
+		expect(result.sentTypes).toEqual(["auth", "ext_surface_token"]);
+		expect(result.mint).toMatchObject({
+			type: "ext_surface_token",
+			surfaceTokenKey: "authority-key",
+			packId: "terminal",
+			contributionKind: "panel",
+			contributionId: "terminal",
+		});
+	});
+
+	test("stale registered surface-token minters fall back to a background trusted WebSocket", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__staleRegisteredSurfaceTokenMinterFallsBackToBackgroundWebSocket());
+		expect(result).toEqual({ storeToken: "background-token", sentTypes: ["auth", "ext_surface_token"] });
+	});
+
+	test("host.channels.open does not require user activation", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__channelOpenWithoutGesture());
+		expect(result).toEqual({
+			id: "chan-1",
+			sentTypes: ["auth", "ext_channel_open_grant", "ext_channel_open"],
+			grant: "grant-1",
+		});
+	});
+
+	test("host.channels.open remints a stale pack surface token once", async ({ page }) => {
+		await gotoAndWait(page);
+		const result = await page.evaluate(() => (window as any).__channelOpenRemintsStaleSurfaceToken());
+		expect(result).toEqual({
+			id: "chan-retry",
+			mintCount: 2,
+			tokens: ["stale-surface-token", "fresh-surface-token"],
+		});
 	});
 
 	test("no Phase-2 member is a frozen 'reserved for Phase 2' stub anymore", async ({ page }) => {

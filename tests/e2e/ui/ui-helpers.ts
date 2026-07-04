@@ -8,6 +8,59 @@ import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { readE2ETokenAsync, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 
+function escapeCssAttr(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+async function preferredProjectIdFromState(page: Page, preferredName = "default"): Promise<string | null> {
+	return page.evaluate((name) => {
+		const projects = (window as any).bobbitState?.projects ?? (window as any).__bobbitState?.projects ?? [];
+		if (!Array.isArray(projects) || projects.length === 0) return null;
+		return projects.find((p: any) => p?.name === name)?.id
+			?? projects.find((p: any) => p?.kind !== "headquarters" && p?.id !== "headquarters")?.id
+			?? projects[0]?.id
+			?? null;
+	}, preferredName);
+}
+
+async function pickProjectFromPopover(page: Page, preferredName = "default", timeout = 10_000): Promise<string> {
+	const picker = page.locator("project-picker-popover").first();
+	await expect(picker, "multi-project New Goal should open the project picker").toBeVisible({ timeout });
+	const projectId = await preferredProjectIdFromState(page, preferredName);
+	if (!projectId) throw new Error("Project picker opened but no project id was available in app state");
+	await picker.locator(`button[data-project-id="${escapeCssAttr(projectId)}"]`).click();
+	await expect(picker).not.toBeVisible({ timeout: 10_000 });
+	return projectId;
+}
+
+async function visibleProjectCountFromState(page: Page): Promise<number> {
+	return page.evaluate(() => {
+		const projects = (window as any).bobbitState?.projects ?? (window as any).__bobbitState?.projects ?? [];
+		return Array.isArray(projects) ? projects.length : 0;
+	});
+}
+
+async function waitForActiveSessionWithTextarea(page: Page, previousSessionId: string | null, timeout = 20_000): Promise<string> {
+	const handle = await page.waitForFunction(
+		(previous: string | null) => {
+			const selected = (window as any).bobbitState?.selectedSessionId ?? (window as any).__bobbitState?.selectedSessionId;
+			if (typeof selected !== "string" || !selected || selected === previous) return null;
+			const routeSession = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? null;
+			if (routeSession !== selected) return null;
+			const textarea = Array.from(document.querySelectorAll("textarea"))
+				.find((el) => {
+					const rect = el.getBoundingClientRect();
+					const style = window.getComputedStyle(el);
+					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+				});
+			return textarea ? selected : null;
+		},
+		previousSessionId,
+		{ timeout },
+	);
+	return await handle.jsonValue() as string;
+}
+
 /**
  * Open the app authenticated via token query param.
  * Waits for the sidebar "New session" button to confirm the app has loaded.
@@ -37,28 +90,37 @@ export async function activeSessionId(page: Page): Promise<string | null> {
  * session to become the active route/session, not just for the already-visible
  * chat textarea from the previous session.
  */
-export async function createSessionViaUI(page: Page): Promise<string> {
+export async function createSessionViaUI(page: Page, opts?: { projectName?: string }): Promise<string> {
 	const previousSessionId = await activeSessionId(page);
-	// In multi-project mode the button title is "New session in <project>"
-	await page.locator("button[title^='New session']").first().click();
-	const handle = await page.waitForFunction(
-		(previous: string | null) => {
-			const selected = (window as any).bobbitState?.selectedSessionId;
-			if (typeof selected !== "string" || !selected || selected === previous) return null;
-			const routeSession = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? null;
-			if (routeSession !== selected) return null;
-			const textarea = Array.from(document.querySelectorAll("textarea"))
-				.find((el) => {
-					const rect = el.getBoundingClientRect();
-					const style = window.getComputedStyle(el);
-					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-				});
-			return textarea ? selected : null;
-		},
-		previousSessionId,
-		{ timeout: 20_000 },
+	// In Headquarters-enabled harnesses, prefer the normal "default" project so
+	// legacy session/proposal tests keep their seeded workflows. Fall back to the
+	// first visible session button for single-project or custom-project tests.
+	const preferredName = opts?.projectName ?? "default";
+	const preferredButton = page.locator(`button[title="New session in ${preferredName}"]`).first();
+	if (await preferredButton.isVisible({ timeout: 1_000 }).catch(() => false)) {
+		await preferredButton.click();
+	} else {
+		await page.locator("button[title^='New session in']").first().click();
+	}
+	return waitForActiveSessionWithTextarea(page, previousSessionId, 20_000);
+}
+
+export async function createGoalAssistantViaUI(page: Page, opts?: { projectName?: string; timeout?: number }): Promise<string> {
+	const previousSessionId = await activeSessionId(page);
+	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
+	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
+	const sessionCreated = page.waitForResponse(
+		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
+		{ timeout: opts?.timeout ?? 60_000 },
 	);
-	return await handle.jsonValue() as string;
+	const visibleProjectCount = await visibleProjectCountFromState(page);
+	await newGoalBtn.click();
+	if (visibleProjectCount > 1) {
+		await pickProjectFromPopover(page, opts?.projectName ?? "default");
+	}
+	await sessionCreated;
+	return waitForActiveSessionWithTextarea(page, previousSessionId, opts?.timeout ?? 20_000);
 }
 
 /**

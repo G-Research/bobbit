@@ -40,14 +40,14 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 	describe("pack_activation (pack-schema-v1 §6.7)", () => {
 		it("round-trips disabled refs by scope + packName and emits native YAML", () => {
 			const store = new ProjectConfigStore(tmpDir);
-			store.setPackActivation("project", "artifacts", { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
-			assert.deepEqual(store.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
+			store.setPackActivation("project", "artifacts", { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"], mcpOperations: { "mcp:abc": ["search", "retired"] } });
+			assert.deepEqual(store.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"], mcpOperations: { "mcp:abc": ["search", "retired"] } });
 			// On-disk native YAML (NOT a JSON string).
 			const onDisk = readYaml().pack_activation as Record<string, unknown>;
-			assert.deepEqual(onDisk, { project: { artifacts: { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] } } });
+			assert.deepEqual(onDisk, { project: { artifacts: { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"], mcpOperations: { "mcp:abc": ["search", "retired"] } } } });
 			// Reload picks it up.
 			const reloaded = new ProjectConfigStore(tmpDir);
-			assert.deepEqual(reloaded.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
+			assert.deepEqual(reloaded.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"], mcpOperations: { "mcp:abc": ["search", "retired"] } });
 		});
 
 		it("an empty disabled set clears the pack override", () => {

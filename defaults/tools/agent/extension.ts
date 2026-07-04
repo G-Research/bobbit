@@ -5,10 +5,11 @@
  * blocking one-shot by default, `non_blocking` opt-in) plus the orchestration
  * verbs (`team_wait`, `team_prompt`, `team_dismiss`, `team_steer`,
  * `team_abort`) that operate over the caller's OWN child sessions. Also
- * registers `read_session` (transcript reader) for every session.
+ * registers `read_session` (transcript reader) and `session_prompt` (explicitly
+ * allowed cross-session prompt/steer) for every session.
  *
  * All verbs are agent-process tools: they call the gateway over authenticated
- * REST using on-disk credentials (`_shared/gateway.ts`) and hit the
+ * REST using on-disk credentials (`agent/gateway.js`) and hit the
  * server-side `/api/sessions/:id/orchestrate/*` routes, which invoke the
  * in-process `OrchestrationCore`. There is NO inlined creds logic and NO
  * client-side spawn/wait loop — the server owns the child lifecycle.
@@ -21,7 +22,7 @@
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──
 
@@ -144,6 +145,15 @@ interface ReadSessionParams {
 	case_sensitive?: boolean;
 	context?: number;
 	verbose?: boolean;
+	include_tool_results?: boolean;
+}
+
+type SessionPromptMode = "prompt" | "steer";
+
+interface SessionPromptParams {
+	session_id: string;
+	message: string;
+	mode?: SessionPromptMode;
 }
 
 async function callReadSessionEndpoint(
@@ -161,6 +171,7 @@ async function callReadSessionEndpoint(
 	if (params.case_sensitive) qs.set("case_sensitive", "1");
 	if (params.context !== undefined) qs.set("context", String(params.context));
 	if (params.verbose) qs.set("verbose", "1");
+	qs.set("include_tool_results", params.include_tool_results ? "1" : "0");
 	const suffix = qs.toString() ? `?${qs.toString()}` : "";
 	const headers: Record<string, string> = {
 		"Authorization": `Bearer ${token}`,
@@ -175,6 +186,26 @@ async function callReadSessionEndpoint(
 	let body: any = undefined;
 	try { body = await resp.json(); } catch { body = undefined; }
 	return { ok: resp.ok, status: resp.status, body };
+}
+
+async function callSessionPromptEndpoint(params: SessionPromptParams): Promise<unknown> {
+	const credsResult = readGatewayCreds();
+	if ("error" in credsResult) {
+		throw new Error(credsResult.error);
+	}
+	const extraHeaders: Record<string, string> = {};
+	const caller = getCallerSessionId();
+	if (caller) extraHeaders["x-bobbit-session-id"] = caller;
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+	if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+	const body: Record<string, unknown> = { message: params.message, mode: params.mode ?? "prompt" };
+	return apiCall(
+		credsResult,
+		"POST",
+		`/api/sessions/${encodeURIComponent(params.session_id)}/prompt`,
+		body,
+		{ extraHeaders },
+	);
 }
 
 // ── Extension registration ──
@@ -201,6 +232,67 @@ const extension: ExtensionFactory = (pi) => {
 		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body, { extraHeaders });
 	}
 
+	async function orchestrateDetailed(method: string, verb: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown }> {
+		const credsResult = readGatewayCreds();
+		if ("error" in credsResult) throw new Error(credsResult.error);
+		const owner = ownerSessionId || "unknown";
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		const { ok, status, body: responseBody } = await apiCallDetailed(
+			credsResult,
+			method,
+			`/api/sessions/${owner}/orchestrate/${verb}`,
+			body,
+			{ extraHeaders },
+		);
+		return { ok, status, body: responseBody };
+	}
+
+	const dismissStatuses = new Set(["dismissed", "already-dismissed", "not-owned", "not-found", "failed"]);
+
+	function isStructuredDismissResult(value: unknown): value is { ok: boolean; status: string; sessionId: string; message: string; retryable: boolean } {
+		if (!value || typeof value !== "object") return false;
+		const v = value as Record<string, unknown>;
+		return typeof v.ok === "boolean"
+			&& typeof v.status === "string"
+			&& dismissStatuses.has(v.status)
+			&& typeof v.sessionId === "string"
+			&& typeof v.message === "string"
+			&& typeof v.retryable === "boolean";
+	}
+
+	function responseErrorText(body: unknown, fallback: string): string {
+		if (body && typeof body === "object" && "error" in body) return String((body as Record<string, unknown>).error);
+		if (typeof body === "string" && body.trim()) return body;
+		return fallback;
+	}
+
+	function normalizeDismissResponse(resp: { ok: boolean; status: number; body: unknown }, sessionId: string) {
+		if (isStructuredDismissResult(resp.body)) return resp.body;
+		const retryable = resp.status === 401 || resp.status === 408 || resp.status === 429 || resp.status >= 500;
+		return {
+			ok: false,
+			status: "failed",
+			sessionId,
+			message: resp.ok
+				? `team_dismiss returned an unstructured response (HTTP ${resp.status}).`
+				: `team_dismiss request failed (HTTP ${resp.status}): ${responseErrorText(resp.body, "unstructured gateway response")}`,
+			retryable,
+			httpStatus: resp.status,
+			response: resp.body,
+		};
+	}
+
+	function dismissText(result: any): string {
+		return [
+			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
+			result?.message ? `message: ${result.message}` : undefined,
+			`retryable: ${result?.retryable === true ? "true" : "false"}`,
+			"",
+			JSON.stringify(result, null, 2),
+		].filter(Boolean).join("\n");
+	}
+
 	function ok(text: string, details?: unknown) {
 		return { content: [{ type: "text" as const, text }], details };
 	}
@@ -217,9 +309,10 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet:
 			"read_session - Read another session's transcript with pagination and regex filtering.",
 		promptGuidelines: [
-			"Default returns compact summaries — use verbose:true only when you need full tool inputs/results",
+			"Default omits tool result bodies; use include_tool_results:true only for narrow, deliberate raw-output reads",
+			"Use verbose:true for full message blocks; it still omits tool results unless include_tool_results:true is also set",
 			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
-			"Find specific events with pattern (regex). Combine with offset:-N, limit:N to get the last N matches.",
+			"Find specific events with pattern (regex). Combine pattern/context/offset/limit first, then opt into include_tool_results:true for the small window you need.",
 			"Use context:1..5 to expand each pattern match by ±N neighbours",
 		],
 		parameters: Type.Object({
@@ -230,6 +323,7 @@ const extension: ExtensionFactory = (pi) => {
 			case_sensitive: Type.Optional(Type.Boolean()),
 			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
 			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of summaries." })),
+			include_tool_results: Type.Optional(Type.Boolean({ description: "Include raw tool result bodies; default false returns metadata placeholders." })),
 		}),
 
 		async execute(_toolCallId, params) {
@@ -263,6 +357,32 @@ const extension: ExtensionFactory = (pi) => {
 					messages: envelope?.messages,
 				},
 			};
+		},
+	});
+
+	// ── session_prompt (registered for every session; grantPolicy: never in YAML) ──
+	pi.registerTool({
+		name: "session_prompt",
+		label: "Prompt Session",
+		description: "Prompt or steer any live agent session by id. Default mode is prompt.",
+		promptSnippet:
+			"session_prompt - Prompt any live session by id, or set mode:'steer' to redirect a running turn. Not exposed unless explicitly allowed.",
+		promptGuidelines: [
+			"Default mode is prompt: starts or queues a normal user prompt for interactive sessions",
+			"Use mode:'steer' to inject into a streaming session, or queue a steered prompt for non-streaming sessions",
+			"Targets any live, non-archived session by id when this tool is explicitly enabled",
+			"Normal prompt mode rejects non-interactive/reviewer sessions; steer mode may redirect them while streaming",
+		],
+		parameters: Type.Object({
+			session_id: Type.String(),
+			message: Type.String(),
+			mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default prompt.", default: "prompt" })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const response = await callSessionPromptEndpoint(params as SessionPromptParams);
+				return ok(JSON.stringify(response, null, 2), response);
+			} catch (e: any) { return fail(e?.message ?? String(e)); }
 		},
 	});
 
@@ -453,15 +573,17 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_prompt",
 			label: "Prompt Child Agent",
-			description: "Prompt one of your child agents. Runs immediately if idle, else queues.",
-			promptSnippet: "team_prompt - Send a prompt to your child agent (immediate if idle, queued if busy).",
+			description: "Prompt or steer one of your child agents. Default mode is steer; use mode:'prompt' for next-turn queue semantics.",
+			promptSnippet: "team_prompt - Prompt/steer your child agent. Default mode:'steer'; use mode:'prompt' to run/queue a normal next-turn prompt.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 				message: Type.String(),
+				mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default steer.", default: "steer" })),
 			}),
 			async execute(_id, params) {
 				try {
-					return ok(JSON.stringify(await orchestrate("POST", "prompt", { childSessionId: params.session_id, message: params.message }), null, 2));
+					const body: Record<string, unknown> = { childSessionId: params.session_id, message: params.message, mode: params.mode ?? "steer" };
+					return ok(JSON.stringify(await orchestrate("POST", "prompt", body), null, 2));
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});
@@ -469,8 +591,8 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_steer",
 			label: "Steer Child Agent",
-			description: "Send an urgent mid-turn redirect to a streaming child. Fails if idle; use team_prompt.",
-			promptSnippet: "team_steer - Steer a running child agent with an urgent message (mid-turn only).",
+			description: "Backward-compatible mid-turn redirect for a streaming child. Fails if idle; prefer team_prompt(mode:'steer') for routine nudges.",
+			promptSnippet: "team_steer - Legacy steer for a running child (mid-turn only); prefer team_prompt(mode:'steer') unless you need compatibility.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 				message: Type.String(),
@@ -500,14 +622,17 @@ const extension: ExtensionFactory = (pi) => {
 		pi.registerTool({
 			name: "team_dismiss",
 			label: "Dismiss Child Agent",
-			description: "Terminate and archive one of your child agents.",
-			promptSnippet: "team_dismiss - Dismiss (terminate + archive) a child agent by session ID.",
+			description: "Dismiss your child agent by session ID; returns structured status/retryable details and treats already-dismissed as idempotent.",
+			promptSnippet: "team_dismiss - Dismiss a child agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 			parameters: Type.Object({
 				session_id: Type.String(),
 			}),
 			async execute(_id, params) {
 				try {
-					return ok(JSON.stringify(await orchestrate("POST", "dismiss", { childSessionId: params.session_id }), null, 2));
+					const targetSessionId = params.session_id;
+					const resp = await orchestrateDetailed("POST", "dismiss", { childSessionId: targetSessionId });
+					const result = normalizeDismissResponse(resp, targetSessionId);
+					return { content: [{ type: "text" as const, text: dismissText(result) }], details: result, isError: result.status === "failed" };
 				} catch (e: any) { return fail(e?.message ?? String(e)); }
 			},
 		});

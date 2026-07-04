@@ -107,6 +107,26 @@ interface InvokeMessage {
 	ctx: SerializableCtx;
 	arg: unknown;
 }
+interface ChannelOpenMessage {
+	kind: "channel-open";
+	url: string;
+	epoch: number;
+	handler: string;
+	ctx: ChannelSerializableCtx;
+}
+interface ChannelControlMessage {
+	kind: "channel-client-frame" | "channel-attach" | "channel-detach" | "channel-close";
+	id: number;
+	frame?: unknown;
+	clientId?: string;
+	reason?: string;
+}
+interface ChannelPtyEventMessage {
+	kind: "channel-pty-data" | "channel-pty-exit";
+	ptyId: string;
+	data?: string;
+	event?: unknown;
+}
 interface HostReplyMessage {
 	kind: "host-reply";
 	id: number;
@@ -114,7 +134,7 @@ interface HostReplyMessage {
 	value?: unknown;
 	error?: string;
 }
-type ParentMessage = InvokeMessage | HostReplyMessage;
+type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | ChannelControlMessage | ChannelPtyEventMessage;
 
 /** The serializable shape of `ActionHandlerCtx` sent across the MessagePort. */
 interface SerializableCtx {
@@ -133,9 +153,22 @@ interface SerializableCtx {
 	 *  absent in external mode and whenever no managed runtime is running. */
 	runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
 	workingDir?: string;
+	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
 	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+}
+
+interface ChannelSerializableCtx {
+	sessionId: string;
+	packId: string;
+	contributionId: string;
+	channelId: string;
+	name: string;
+	protocol?: string;
+	init?: unknown;
+	workingDir?: string;
+	capabilities: { pty?: boolean };
 }
 
 const port = parentPort;
@@ -440,7 +473,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		},
 		store: {
 			get: (key: string) => callHost(["store", "get"], [key]),
-			put: (key: string, value: unknown) => callHost(["store", "put"], [key, value]),
+			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
 		// `session` is READ-ONLY for server modules: `postMessage` is intentionally
@@ -466,6 +499,118 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			spawnGoal: (spawnOpts: unknown) => callHost(["agents", "spawnGoal"], [spawnOpts]),
 		},
 	};
+}
+
+type ChannelFrame = { kind: "text"; data: string } | { kind: "json"; data: unknown };
+type ChannelSession = {
+	onClientFrame?: (frame: ChannelFrame) => unknown;
+	onAttach?: (clientId: string) => unknown;
+	onDetach?: (clientId: string) => unknown;
+	close?: (reason?: string) => unknown;
+};
+
+let channelSession: ChannelSession | undefined;
+const ptyListeners = new Map<string, { data: Set<(data: string) => void>; exit: Set<(event: unknown) => void> }>();
+
+function buildChannelPtyHandle(value: unknown): unknown {
+	const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+	const ptyId = typeof record?.__channelPtyHandleId === "string" ? record.__channelPtyHandleId : undefined;
+	if (!ptyId || !record) return value;
+	const listeners = { data: new Set<(data: string) => void>(), exit: new Set<(event: unknown) => void>() };
+	ptyListeners.set(ptyId, listeners);
+	return {
+		pid: typeof record.pid === "number" ? record.pid : 0,
+		write: (data: string) => callHost(["pty", "write"], [ptyId, data]).then(() => undefined),
+		resize: (cols: number, rows: number) => callHost(["pty", "resize"], [ptyId, cols, rows]).then(() => undefined),
+		kill: (reason?: string) => callHost(["pty", "kill"], [ptyId, reason]).then(() => undefined),
+		onData: (cb: (data: string) => void) => { listeners.data.add(cb); return () => { listeners.data.delete(cb); }; },
+		onExit: (cb: (event: unknown) => void) => { listeners.exit.add(cb); return () => { listeners.exit.delete(cb); }; },
+	};
+}
+
+function buildChannelHostProxy(ctx: ChannelSerializableCtx): unknown {
+	return ctx.capabilities?.pty
+		? { pty: { openTerminal: async (opts?: unknown) => buildChannelPtyHandle(await callHost(["pty", "openTerminal"], [opts])) } }
+		: {};
+}
+
+function resolveChannelHandler(mod: Record<string, unknown>, handlerName: string): ((ctx: unknown) => unknown) | undefined {
+	const defaultExport = mod.default && typeof mod.default === "object" ? mod.default as Record<string, unknown> : undefined;
+	const channelMap = mod.channels && typeof mod.channels === "object"
+		? mod.channels as Record<string, unknown>
+		: defaultExport?.channels && typeof defaultExport.channels === "object"
+			? defaultExport.channels as Record<string, unknown>
+			: undefined;
+	const direct = Object.prototype.hasOwnProperty.call(mod, handlerName) ? mod[handlerName] : undefined;
+	const defaultDirect = defaultExport && Object.prototype.hasOwnProperty.call(defaultExport, handlerName) ? defaultExport[handlerName] : undefined;
+	const fromMap = channelMap && Object.prototype.hasOwnProperty.call(channelMap, handlerName) ? channelMap[handlerName] : undefined;
+	const handler = fromMap ?? direct ?? defaultDirect;
+	return typeof handler === "function" ? handler as (ctx: unknown) => unknown : undefined;
+}
+
+function normalizeChannelSession(value: unknown): ChannelSession {
+	if (value == null) return {};
+	if (typeof value !== "object" || Array.isArray(value)) throw new Error("channel handler must return an object or undefined");
+	const record = value as Record<string, unknown>;
+	return {
+		onClientFrame: typeof record.onClientFrame === "function" ? record.onClientFrame.bind(record) as ChannelSession["onClientFrame"] : undefined,
+		onAttach: typeof record.onAttach === "function" ? record.onAttach.bind(record) as ChannelSession["onAttach"] : undefined,
+		onDetach: typeof record.onDetach === "function" ? record.onDetach.bind(record) as ChannelSession["onDetach"] : undefined,
+		close: typeof record.close === "function" ? record.close.bind(record) as ChannelSession["close"] : undefined,
+	};
+}
+
+async function handleChannelOpen(msg: ChannelOpenMessage): Promise<void> {
+	try {
+		const mod = await import(msg.url) as Record<string, unknown>;
+		const fn = resolveChannelHandler(mod, msg.handler);
+		if (!fn) {
+			port!.postMessage({ kind: "channel-open-result", ok: false, status: 404, code: "channel_handler_not_found", error: `unknown channel handler "${msg.handler}"` });
+			return;
+		}
+		const ctx = {
+			sessionId: msg.ctx.sessionId,
+			packId: msg.ctx.packId,
+			contributionId: msg.ctx.contributionId,
+			channelId: msg.ctx.channelId,
+			name: msg.ctx.name,
+			protocol: msg.ctx.protocol,
+			init: msg.ctx.init,
+			workingDir: msg.ctx.workingDir,
+			host: buildChannelHostProxy(msg.ctx),
+			send: (frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send", frame }); return Promise.resolve(); },
+			sendTo: (clientId: string, frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send-to", clientId, frame }); return Promise.resolve(); },
+			close: (reason?: string) => { port!.postMessage({ kind: "channel-close", reason }); return Promise.resolve(); },
+			audit: (event: unknown) => { port!.postMessage({ kind: "channel-audit", event }); },
+		};
+		channelSession = normalizeChannelSession(await fn(ctx));
+		port!.postMessage({ kind: "channel-open-result", ok: true });
+	} catch (err) {
+		port!.postMessage({ kind: "channel-open-result", ok: false, status: 500, code: "channel_handler_failed", error: err instanceof Error ? err.message : String(err) });
+	}
+}
+
+async function handleChannelControl(msg: ChannelControlMessage): Promise<void> {
+	try {
+		if (!channelSession) throw new Error("channel handler is not open");
+		if (msg.kind === "channel-client-frame") await channelSession.onClientFrame?.(msg.frame as ChannelFrame);
+		else if (msg.kind === "channel-attach") await channelSession.onAttach?.(String(msg.clientId ?? ""));
+		else if (msg.kind === "channel-detach") await channelSession.onDetach?.(String(msg.clientId ?? ""));
+		else if (msg.kind === "channel-close") await channelSession.close?.(msg.reason);
+		port!.postMessage({ kind: "channel-control-result", id: msg.id, ok: true });
+	} catch (err) {
+		port!.postMessage({ kind: "channel-control-result", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+	}
+}
+
+function handleChannelPtyEvent(msg: ChannelPtyEventMessage): void {
+	const listeners = ptyListeners.get(msg.ptyId);
+	if (!listeners) return;
+	if (msg.kind === "channel-pty-data") for (const cb of [...listeners.data]) cb(String(msg.data ?? ""));
+	else {
+		ptyListeners.delete(msg.ptyId);
+		for (const cb of [...listeners.exit]) cb(msg.event);
+	}
 }
 
 async function handleInvoke(msg: InvokeMessage): Promise<void> {
@@ -508,6 +653,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				// ctx.runtime.baseUrl. Absent ⇒ the route stays dormant (no Docker start).
 				...(msg.ctx.runtime ? { runtime: msg.ctx.runtime } : {}),
 				workingDir: msg.ctx.workingDir,
+				sessionArchived: msg.ctx.sessionArchived,
 			};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
@@ -524,6 +670,18 @@ port.on("message", (msg: ParentMessage) => {
 		// until this listener runs; gating here ensures a fast parent `invoke` never
 		// races ahead of confinement.
 		void confinementReady.then(() => handleInvoke(msg));
+		return;
+	}
+	if (msg.kind === "channel-open") {
+		void confinementReady.then(() => handleChannelOpen(msg));
+		return;
+	}
+	if (msg.kind === "channel-client-frame" || msg.kind === "channel-attach" || msg.kind === "channel-detach" || msg.kind === "channel-close") {
+		void handleChannelControl(msg);
+		return;
+	}
+	if (msg.kind === "channel-pty-data" || msg.kind === "channel-pty-exit") {
+		handleChannelPtyEvent(msg);
 		return;
 	}
 	if (msg.kind === "host-reply") {

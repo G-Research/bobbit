@@ -228,6 +228,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 	let project: { id: string; rootPath: string; name: string } | undefined;
 	const createdSessionIds: string[] = [];
 	let liveGoalId: string | undefined;
+	let standaloneSessionId: string | undefined;
 	const createdGoalIds: string[] = [];
 
 	test.beforeAll(async () => {
@@ -243,8 +244,9 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		});
 		liveGoalId = goal.id;
 		createdGoalIds.push(goal.id);
-		createdSessionIds.push(await createSession({ projectId: project.id, goalId: goal.id }));
-		createdSessionIds.push(await createSession({ projectId: project.id }));
+		const goalOwnedSessionId = await createSession({ projectId: project.id, goalId: goal.id });
+		standaloneSessionId = await createSession({ projectId: project.id });
+		createdSessionIds.push(goalOwnedSessionId, standaloneSessionId);
 	});
 
 	test.afterAll(async () => {
@@ -257,7 +259,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		return [
 			`project:${project!.id}`,
 			`goal:${liveGoalId}`,
-			...createdSessionIds.map((id) => `session:${id}`),
+			`session:${standaloneSessionId}`,
 		];
 	}
 
@@ -297,13 +299,13 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		expect(goalSnapshot.id, `${MARK}: goal row must be active before asserting route`).toBe(goalEntry);
 		expect(goalSnapshot.hash, `${MARK}: landing on goal header must route to goal dashboard`).toBe(`#/goal/${liveGoalId}`);
 
-		const nextSessionIndex = domOrder.findIndex((id, idx) => idx > goalIndex && id.startsWith("session:"));
-		expect(nextSessionIndex, `${MARK}: goal journey must expose a following session row`).toBeGreaterThan(goalIndex);
-		const nextSession = domOrder[nextSessionIndex];
-		await walkDownRange(page, domOrder, goalIndex + 1, nextSessionIndex);
-		const sessionId = nextSession.split(":")[1];
+		const standaloneSessionEntry = `session:${standaloneSessionId}`;
+		const standaloneSessionIndex = domOrder.indexOf(standaloneSessionEntry);
+		expect(standaloneSessionIndex, `${MARK}: sidebar must include standalone session row`).toBeGreaterThanOrEqual(0);
+		await resetNavStart(page);
+		await walkDownRange(page, domOrder, 0, standaloneSessionIndex);
 		const sessionSnapshot = await activeNavSnapshot(page);
-		expect(sessionSnapshot.hash, `${MARK}: landing on session row must route to session`).toContain(`#/session/${sessionId}`);
-		expect(sessionSnapshot.selectedSessionId, `${MARK}: landing on session row must select session`).toBe(sessionId);
+		expect(sessionSnapshot.hash, `${MARK}: landing on standalone session row must route to session`).toContain(`#/session/${standaloneSessionId}`);
+		expect(sessionSnapshot.selectedSessionId, `${MARK}: landing on standalone session row must select session`).toBe(standaloneSessionId);
 	});
 });

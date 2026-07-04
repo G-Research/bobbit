@@ -391,18 +391,22 @@ Branch-split rules:
 
 `GET /api/sessions/:id/transcript/before-compaction`
 
-Add next to the existing `GET /api/sessions/:id/transcript` route in
-`src/server/server.ts` (currently lines 6432–6490). Reuse:
+This endpoint lives next to the existing `GET /api/sessions/:id/transcript`
+route in `src/server/server.ts`. The original same-project caller header
+design is superseded. Current policy matches `read_session` and the sibling
+transcript route: after normal bearer/session authentication, any
+authenticated same-gateway caller that can reach the target session may read
+pre-compaction history, even when caller and target `projectId` values differ.
+The `x-bobbit-session-id` header may identify the caller session, but it is
+not a project-matching gate for this endpoint.
 
-* `sessionManager.getPersistedSession(targetId)` for resolution.
+Reuse:
+
+* `sessionManager.getPersistedSession(targetId)` for target resolution.
 * `sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager)`
-  for sandbox-aware reads (see `src/server/agent/session-fs.ts:104`).
-  The `SessionFsContext` is `{ sandboxed: targetPs.sandboxed, projectId:
-  targetPs.projectId }` — same call pattern the existing route uses
-  at line 6476.
-* Caller-project authorisation header check from the existing route
-  (lines 6444–6452). UI-initiated calls go through Bearer auth so the
-  header guard is best-effort.
+  for sandbox-aware reads. The `SessionFsContext` is `{ sandboxed:
+  targetPs.sandboxed, projectId: targetPs.projectId }`. Keep this
+  target-session read path; do not read outside that context.
 
 Query params:
 
@@ -434,14 +438,17 @@ Error cases:
 | Status | `error`                  | Trigger |
 |--------|--------------------------|---------|
 | 400    | `invalid_params`         | bad limit/cursor; missing compactionId |
-| 403    | `permission_denied`      | cross-project caller |
 | 404    | `session_not_found`      | unknown session |
 | 404    | `transcript_unavailable` | `.jsonl` missing/unreadable |
 | 404    | `compaction_not_found`   | sidecar has no entry with that id |
 | 500    | `internal_error`         | catch-all |
 
-Implementation skeleton (drop in below the existing transcript route at
-`server.ts:6432`):
+Normal bearer/session authentication failures are handled before this
+route-specific lookup. A caller/target project mismatch is allowed under the
+same-gateway transcript-read policy.
+
+Implementation sketch (kept as historical design reference; current code
+lives beside the sibling transcript route):
 
 ```ts
 const orphanMatch = url.pathname.match(
@@ -452,7 +459,7 @@ if (orphanMatch && req.method === "GET") {
   const targetPs = sessionManager.getPersistedSession(targetId);
   if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
   if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-  /* …same caller-project guard as the sibling route… */
+  /* no caller-project guard; cross-project same-gateway reads are allowed */
   const compactionId = url.searchParams.get("compactionId");
   if (!compactionId) { json({ error: "invalid_params", detail: "compactionId required" }, 400); return; }
   const entry = findCompactionSidecarEntry(targetId, compactionId);
@@ -629,12 +636,12 @@ with only server text marker is upgraded to a rich synthetic`).
 
 ### 6.2 API E2E (tests/e2e/)
 
-* `transcript-before-compaction.spec.ts` (new). Spins the in-process
-  gateway, seeds a session with two compactions in the sidecar and a
-  hand-crafted `.jsonl`, asserts:
+* `transcript-before-compaction.spec.ts` covers the in-process gateway
+  contract. It seeds a session with two compactions in the sidecar and a
+  hand-crafted `.jsonl`, then asserts:
   - happy path: `total` count, page contents, `nextCursor` semantics.
   - bad compactionId → 404 `compaction_not_found`.
-  - cross-project caller header → 403.
+  - cross-project caller/target mismatch → 200 with expected pre-compaction page contents.
   - missing `agentSessionFile` → 404 `transcript_unavailable`.
 
 ### 6.3 Browser E2E (tests/e2e/ui/)

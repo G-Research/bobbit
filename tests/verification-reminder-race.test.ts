@@ -22,6 +22,10 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { VerificationHarness } from "../src/server/agent/verification-harness.ts";
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -207,5 +211,193 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 		// Cleanup the queued startTurn timer.
 		await new Promise((r) => setTimeout(r, 60));
+	});
+
+	it("reminder failure/termination waits for the reminder turn to actually start", async () => {
+		const session = new FakeSession("rv-6");
+		const calls: string[] = [];
+		const resultPromise = new Promise<any>(() => {});
+		let terminated = false;
+
+		async function reminderThenFailOrTerminate() {
+			calls.push("prompt:reminder");
+			await session.rpcClient.prompt();
+			calls.push("waitForStreaming");
+			await waitForStreaming(session, 1_000).catch(() => {});
+			calls.push("race:start");
+			const outcome = await Promise.race([
+				resultPromise.then((r: any) => ({ type: "result" as const, ...r })),
+				waitForIdle(session, 2_000).then(() => ({ type: "idle" as const })),
+			]);
+			if (outcome.type === "idle") {
+				calls.push("fail:idle-after-reminder");
+				terminated = true;
+				calls.push("terminateSession");
+			}
+		}
+
+		const run = reminderThenFailOrTerminate();
+		setTimeout(() => {
+			calls.push("agent_start");
+			session.startTurn();
+		}, 25);
+
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(
+			calls,
+			["prompt:reminder", "waitForStreaming", "agent_start", "race:start"],
+			`Reminder path must wait for agent_start before starting the idle race. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(
+			terminated,
+			false,
+			`Reviewer must not be failed/terminated while the reminder turn is still streaming. calls=${JSON.stringify(calls)}`,
+		);
+
+		session.endTurn();
+		await run;
+		assert.equal(terminated, true);
+		assert.ok(
+			calls.indexOf("terminateSession") > calls.indexOf("race:start"),
+			`Termination should happen only after the post-reminder idle window. calls=${JSON.stringify(calls)}`,
+		);
+	});
+
+	it("resumed idle reviewers are reminded immediately without waiting for the long busy window", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const start = source.indexOf("private async _tryResumeFromSession");
+		assert.ok(start >= 0, "_tryResumeFromSession should exist");
+		const reminder = source.indexOf("No verification_result from resumed session", start);
+		assert.ok(reminder > start, "resumed reminder path should exist");
+		const preReminder = source.slice(start, reminder);
+
+		assert.match(
+			preReminder,
+			/const idleResult = session\.status === "idle"\s*\? \(\{ type: "idle" as const \}\)\s*:\s*await Promise\.race/,
+			"A restored reviewer that is already idle must go straight to the reminder instead of waiting for the 180s busy-session window.",
+		);
+		assert.match(
+			preReminder,
+			/waitForIdle\(step\.sessionId, 180_000\)/,
+			"Busy resumed reviewers should still wait for actual idle before the reminder; the long wait must be explicit.",
+		);
+	});
+
+	it("resume boot surfaces nonInteractive reviewers with no active verification context", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const resumeStart = source.indexOf("async resumeInterruptedVerifications(): Promise<void>");
+		assert.ok(resumeStart >= 0, "resumeInterruptedVerifications should exist");
+		const findStepStart = source.indexOf("private async _resumeOneVerification", resumeStart);
+		assert.ok(findStepStart > resumeStart, "resumeInterruptedVerifications should be bounded");
+		const resumeBody = source.slice(resumeStart, findStepStart);
+
+		assert.doesNotMatch(
+			resumeBody,
+			/if \(persisted\.length === 0\) return;/,
+			"Boot resume must not silently return when there is no active verification context; orphaned nonInteractive reviewers must be surfaced deterministically.",
+		);
+		assert.match(
+			resumeBody,
+			/await this\._surfaceOrphanedNonInteractiveReviewers\(\);[\s\S]*if \(persisted\.length === 0\)/,
+			"Boot resume must surface orphaned nonInteractive reviewer sessions before any early return.",
+		);
+		assert.match(
+			source,
+			/listOrphanedNonInteractiveSessions\(\)/,
+			"Orphan surfacing should use SessionManager's active-verification-aware orphan detector.",
+		);
+	});
+
+	it("orphan surfacing is not blocked behind unrelated running verification resume", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-orphan-surface-"));
+		try {
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
+				verifications: [{
+					goalId: "goal-1",
+					gateId: "gate-1",
+					signalId: "signal-1",
+					overallStatus: "running",
+					startedAt: Date.now(),
+					steps: [{
+						name: "Busy review",
+						type: "llm-review",
+						status: "running",
+						startedAt: Date.now(),
+						sessionId: "active-reviewer",
+					}],
+				}],
+			}, null, 2));
+
+			let orphanListCalls = 0;
+			const fakeSession = {
+				status: "streaming",
+				rpcClient: { onEvent: () => () => {} },
+			};
+			const sessionManager = {
+				getSession: () => fakeSession,
+				waitForIdle: () => new Promise<void>(() => {}),
+				waitForStreaming: () => Promise.resolve(),
+				terminateSession: () => Promise.resolve(),
+				listOrphanedNonInteractiveSessions: async () => {
+					orphanListCalls += 1;
+					return [{ id: "orphan-reviewer", title: "Orphan reviewer", createdAt: Date.now() }];
+				},
+			} as any;
+			const gateStore = {
+				updateSignalVerification: () => {},
+				updateGateStatus: () => {},
+				getGate: () => undefined,
+				getGatesForGoal: () => [],
+			} as any;
+			const harness = new VerificationHarness(
+				stateDir,
+				gateStore,
+				() => {},
+				{ get: () => undefined, getAll: () => [] } as any,
+				undefined,
+				sessionManager,
+				{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
+			);
+
+			void harness.resumeInterruptedVerifications();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+
+			assert.equal(
+				orphanListCalls,
+				1,
+				"orphan reviewer surfacing must run promptly before an unrelated running verification can block in waitForIdle",
+			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("live llm-review checks errored-turn recovery after post-reminder idle before declaring the reminder ignored", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
+		const livePathStart = source.indexOf("private async runLlmReviewViaSession");
+		assert.ok(livePathStart >= 0, "runLlmReviewViaSession should exist");
+
+		const hardFailure = source.indexOf("output: \"Agent did not call verification_result after reminder.\"", livePathStart);
+		assert.ok(hardFailure >= 0, "live post-reminder ignored-reminder failure should exist");
+
+		const resultRace = source.lastIndexOf("const result2 = await Promise.race", hardFailure);
+		assert.ok(resultRace > livePathStart, "should find live post-reminder result2 race");
+		const postReminderIdlePath = source.slice(resultRace, hardFailure);
+
+		assert.match(
+			postReminderIdlePath,
+			/const postReminderRecovery = await this\.waitForReviewerErroredTurnRecovery\(sessionId, resultPromise, timeoutMs, step\.name\);/,
+			"Post-reminder idle must call errored-turn recovery before ignored-reminder failure.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "result"[\s\S]*postReminderRecovery\.summary/,
+			"Post-reminder recovery must return a verification_result that arrives during auto-retry.",
+		);
+		assert.match(
+			postReminderIdlePath,
+			/postReminderRecovery\.type === "errored"[\s\S]*postReminderRecovery\.output/,
+			"Post-reminder recovery exhaustion must surface the retryable runtime error instead of ignored-reminder text.",
+		);
 	});
 });

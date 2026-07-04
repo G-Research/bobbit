@@ -1,13 +1,13 @@
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { SessionManager, SessionInfo } from "./session-manager.js";
+import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests } from "../skills/git.js";
+import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
@@ -40,13 +40,80 @@ import {
 	writeSessionSidecar,
 	buildSessionSidecar,
 } from "./session-sidecar.js";
+import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 
 const execFile = promisify(execFileCb);
 
 /** Production wrapper around the testable `scanSlugDirForJsonlsAt`. */
 function scanSlugDirForJsonls(worktreePath: string) {
-	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
-	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
+	const out: ReturnType<typeof scanSlugDirForJsonlsAt> = [];
+	const seen = new Set<string>();
+	for (const sessionsRoot of trustedAgentSessionsRoots()) {
+		for (const candidate of scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join)) {
+			const key = path.resolve(candidate.jsonlPath);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(candidate);
+		}
+	}
+	return out;
+}
+
+function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
+	const out: ReturnType<typeof discoverAgentsForGoal> = [];
+	const seen = new Set<string>();
+	for (const sessionsRoot of trustedAgentSessionsRoots()) {
+		for (const agent of discoverAgentsForGoal(
+			sessionsRoot,
+			teamLeadWorktreePath,
+			fs,
+			path.join,
+			path.dirname,
+			path.basename,
+		)) {
+			const key = path.resolve(agent.agentWorktreePath);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(agent);
+		}
+	}
+	return out;
+}
+
+const BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS = 3;
+
+function isErroredIdleAutoRetryEligible(session: SessionInfo): boolean {
+	const errMsg = session.lastTurnErrorMessage || "";
+	if (!errMsg || isNonRetryableAgentError(errMsg)) return false;
+
+	const isBackoff = isProviderBackoffError(errMsg);
+	const isTransient = isTransientReviewError(errMsg);
+	const isGenericRetryable = !isTransient && isRetryableGenericAgentError(errMsg);
+	// OpenAI/Codex reports retryable 5xx failures with a compact `server_error`
+	// code; keep team-manager recovery consistent with the visible Retry path for
+	// that provider code without treating arbitrary unknown errors as retryable.
+	const isRetryableServerErrorCode = /\bserver_error\b/i.test(errMsg);
+	if (!isBackoff && !isTransient && !isGenericRetryable && !isRetryableServerErrorCode) return false;
+	if (isBackoff) return true;
+
+	return (session.transientRetryAttempts ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+		&& (session.consecutiveErrorTurns ?? 0) < BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
+}
+
+async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
+	try {
+		await execFile("git", ["show-ref", "--verify", "--quiet", ref], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function resolveTeamMemberStartPoint(goal: PersistedGoal): Promise<string | undefined> {
+	if (!goal.branch || !goal.repoPath) return undefined;
+	if (await gitRefExists(goal.repoPath, `refs/heads/${goal.branch}`)) return goal.branch;
+	if (await gitRefExists(goal.repoPath, `refs/remotes/origin/${goal.branch}`)) return `origin/${goal.branch}`;
+	return undefined;
 }
 
 function splitWorkerResultSummary(resultSummary: string): { summary?: string; branch?: string; commit?: string; checks?: string } {
@@ -136,7 +203,7 @@ export function formatElapsed(sinceMs: number): string {
 
 // Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
 import { TaskManager } from "./task-manager.js";
-import type { OrchestrationCore } from "./orchestration-core.js";
+import type { DismissResult, OrchestrationCore } from "./orchestration-core.js";
 
 
 export interface TeamAgent {
@@ -149,6 +216,8 @@ export interface TeamAgent {
 	 * Defaults to "worker" if missing on load.
 	 */
 	kind: "worker" | "reviewer";
+	/** In-memory marker for pre-kind reviewer records that need legacy safeguards. */
+	legacyMissingKind?: boolean;
 	worktreePath?: string;
 	branch?: string;
 	baseSha?: string;
@@ -244,6 +313,12 @@ export class TeamManager {
 	private noWorkersNudgeCount = new Map<string, number>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
+	/** goalId → callbacks for an attempted auto-nudge that has not yet started a lead turn. */
+	private pendingNudgeAccounting = new Map<string, { onStarted?: () => void; onNoStart?: () => void }>();
+	/** goalId → consecutive no-workers nudge attempts used only for no-start backoff. */
+	private noWorkersNudgeAttemptCount = new Map<string, number>();
+	/** goalId → consecutive workers-nudge attempts used only for no-start backoff. */
+	private idleNudgeAttemptCount = new Map<string, number>();
 	/** goalId → last spec-edit nudge ms (throttle). */
 	private lastSpecNudgeTs = new Map<string, number>();
 	/** Spec-edit nudge throttle window. */
@@ -275,6 +350,10 @@ export class TeamManager {
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
+	/** sessionId → goalId for idempotent duplicate dismiss classification after live team tracking is removed. */
+	private dismissedSessionToGoal = new Map<string, string>();
+	/** Per-session dismiss mutex. Prevents overlapping duplicate dismisses from mutating stale agent indexes. */
+	private dismissLocks = new Map<string, Promise<void>>();
 
 	/** Track last notification time per worker session to debounce rapid agent_end events. */
 	private lastNotifyTime = new Map<string, number>();
@@ -388,14 +467,8 @@ export class TeamManager {
 			"merge a finished branch, mark a task complete, or signal the next gate.\n" +
 			"If all gates have passed, call `team_complete`.";
 
-		this.nudgePending.set(goalId, true);
+		if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true }, "Stuck-team watchdog")) return;
 		this.lastNudgeAtPerGoal.set(goalId, now);
-		try {
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
-		} catch (err) {
-			console.error(`[team-manager] Stuck-team watchdog enqueuePrompt failed for goal ${goalId}:`, err);
-			return;
-		}
 		console.log(`[team-manager] Stuck-team watchdog fired for goal ${goalId} after ${minutes}m idle`);
 	}
 
@@ -536,8 +609,8 @@ export class TeamManager {
 			//
 			// Recovery policy:
 			//   1. Try to locate the canonical .jsonl in the team-lead's
-			//      worktree slug-dir (`~/.bobbit/agent/sessions/<slug>/`).
-			//      If found → reconstruct a fresh session record pointing
+			//      worktree slug-dir under active, historical, or legacy agent
+			//      sessions roots. If found → reconstruct a fresh session record pointing
 			//      at the surviving .jsonl and write it via sessionStore.put().
 			//      Team-store entry is preserved untouched.
 			//   2. If no .jsonl can be found → there is genuinely nothing
@@ -748,7 +821,7 @@ export class TeamManager {
 			// (e.g. `goal-audit-subg-225e4d3d/` vs `goal-goal-audit-subg-
 			// 225e4d3d-coder-ad801c01/`). The worktree dirs themselves get
 			// cleaned up after the agent merges back, but the agent's .jsonl
-			// transcripts under `~/.bobbit/agent/sessions/<agent-slug>/` are
+			// transcripts under the active/historical/legacy agent sessions roots are
 			// preserved. The user's "Audit subgoals branch" had 14+ agent
 			// slug-dirs surviving with zero session records pointing at them.
 			//
@@ -762,7 +835,6 @@ export class TeamManager {
 			//
 			// Idempotent: each agent worktree path is uniquely keyed; we
 			// skip any agent whose worktreePath already has a session record.
-			const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
 			let agentsRecovered = 0;
 			for (const ctx of this.config.projectContextManager.all()) {
 				for (const goal of ctx.goalStore.getAll()) {
@@ -778,14 +850,7 @@ export class TeamManager {
 							.filter(s => s.teamGoalId === goal.id && s.role !== "team-lead" && s.worktreePath)
 							.map(s => s.worktreePath!),
 					);
-					const discovered = discoverAgentsForGoal(
-						sessionsRoot,
-						goal.worktreePath,
-						fs,
-						path.join,
-						path.dirname,
-						path.basename,
-					);
+					const discovered = discoverAgentsForGoalAcrossSessionRoots(goal.worktreePath);
 					for (const agent of discovered) {
 						if (existingAgentWorktrees.has(agent.agentWorktreePath)) continue;
 						const chosen = pickCanonicalTeamLeadJsonl(agent.candidates);
@@ -813,6 +878,7 @@ export class TeamManager {
 								? reconcileRecoveredSessionWithSidecar(record as unknown as Record<string, unknown>, sidecar)
 								: record;
 							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
+							existingAgentWorktrees.add(agent.agentWorktreePath);
 							agentsRecovered++;
 						} catch (err) {
 							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);
@@ -881,18 +947,22 @@ export class TeamManager {
 			const entry: TeamEntry = {
 				goalId: p.goalId,
 				teamLeadSessionId: p.teamLeadSessionId,
-				agents: p.agents.map((a) => ({
-					sessionId: a.sessionId,
-					role: a.role,
-					// Default to "worker" for back-compat with persisted entries
-					// written before the kind field was introduced.
-					kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
-					worktreePath: a.worktreePath,
-					branch: a.branch,
-					baseSha: a.baseSha,
-					task: a.task,
-					createdAt: a.createdAt,
-				})),
+				agents: p.agents.map((a) => {
+					const hasPersistedKind = a.kind === "reviewer" || a.kind === "worker";
+					return {
+						sessionId: a.sessionId,
+						role: a.role,
+						// Default to "worker" for back-compat with persisted entries
+						// written before the kind field was introduced.
+						kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
+						legacyMissingKind: !hasPersistedKind && a.role === "reviewer" ? true : undefined,
+						worktreePath: a.worktreePath,
+						branch: a.branch,
+						baseSha: a.baseSha,
+						task: a.task,
+						createdAt: a.createdAt,
+					};
+				}),
 				maxConcurrent: p.maxConcurrent,
 			};
 			this.teams.set(p.goalId, entry);
@@ -933,7 +1003,7 @@ export class TeamManager {
 		// indistinguishable from orphan team-store cleanup (endless restart loop) but
 		// triggered later in the boot sequence.
 		for (const [goalId, entry] of this.teams) {
-			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
+			const reviewers = entry.agents.filter((a) => this.isVerificationReviewerAgent(a));
 			for (const reviewer of reviewers) {
 				const session = this.sessionManager.getSession(reviewer.sessionId);
 				if (!session || session.status === "terminated") {
@@ -956,6 +1026,14 @@ export class TeamManager {
 		}
 
 		for (const [goalId, entry] of this.teams) {
+			try {
+				this.reapStaleWorkers(goalId, entry);
+			} catch (err) {
+				console.error(`[team-manager] Stale-worker reap failed for goal=${goalId}:`, err);
+			}
+		}
+
+		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
@@ -969,10 +1047,10 @@ export class TeamManager {
 
 			// Re-subscribe to worker agent events so the team lead is notified
 			// when workers go idle (these subscriptions are lost on restart).
-			// Reviewer sessions are managed by VerificationHarness — never attach
+			// Verification reviewer sessions are managed by VerificationHarness — never attach
 			// the agent_end → notifyTeamLead listener for them.
 			for (const agent of entry.agents) {
-				if (agent.kind === "reviewer" || agent.role === "reviewer") continue;
+				if (this.isVerificationReviewerAgent(agent)) continue;
 				const workerSession = this.sessionManager.getSession(agent.sessionId);
 				if (!workerSession || workerSession.status === "terminated") continue;
 				const { role, sessionId } = agent;
@@ -1032,11 +1110,9 @@ export class TeamManager {
 				"if everything is genuinely done.";
 			// enqueuePrompt drains ASYNCHRONOUSLY: for an idle lead with an empty
 			// queue it awaits dispatchDirectPrompt → rpcClient.prompt(), which on
-			// a cold agent rejects with the cold-start timeout. Dispatch through a
-			// helper that owns (awaits + catches) that rejection so it never
-			// escapes as `[gateway] Unhandled rejection`.
-			void this._dispatchBootResumeNudge(entry.teamLeadSessionId, msg, goalId);
-			this.nudgePending.set(goalId, true);
+			// a cold agent rejects with the cold-start timeout. The helper owns
+			// async rejection handling so it never escapes as `[gateway] Unhandled rejection`.
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId, msg, { isSteered: true, coldStart: true }, "Boot-resume nudge")) continue;
 			this.lastNudgeAtPerGoal.set(goalId, now);
 			resumed++;
 			console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
@@ -1046,18 +1122,125 @@ export class TeamManager {
 		}
 	}
 
-	/**
-	 * Dispatch a boot-resume nudge through enqueuePrompt with cold-start
-	 * handling, owning the async drain's rejection so a cold-start prompt
-	 * timeout is caught and logged here rather than escaping as a process-level
-	 * `[gateway] Unhandled rejection`.
-	 */
-	private async _dispatchBootResumeNudge(sessionId: string, msg: string, goalId: string): Promise<void> {
+	private enqueueAutoNudge(
+		goalId: string,
+		sessionId: string,
+		message: string,
+		opts: { isSteered: true; source?: PromptSource; coldStart?: boolean },
+		label: string,
+		accounting?: { onStarted?: () => void; onNoStart?: () => void },
+	): boolean {
+		if (this.recoverErroredIdleSessionBeforeNudge(goalId, sessionId, label)) return true;
+
+		this.nudgePending.set(goalId, true);
+		if (accounting) this.pendingNudgeAccounting.set(goalId, accounting);
+
+		let delivery: unknown;
 		try {
-			await this.sessionManager.enqueuePrompt(sessionId, msg, { isSteered: true, coldStart: true });
+			delivery = this.sessionManager.enqueuePrompt(sessionId, message, opts);
 		} catch (err) {
-			console.error(`[team-manager] Boot-resume nudge failed for goal=${goalId}:`, err);
+			this.clearPendingNudgeNoStart(goalId);
+			console.error(`[team-manager] ${label} enqueuePrompt failed for goal ${goalId}:`, err);
+			return false;
 		}
+
+		this.handleNudgeDeliveryResult(goalId, delivery);
+		if (this.isThenable(delivery)) {
+			// A parked/capped enqueue returns a resolved promise while the lead stays idle.
+			// Clear on the next macrotask if no agent_start/status transition happened.
+			setTimeout(() => {
+				if (this.isTeamLeadIdle(goalId)) this.clearPendingNudgeNoStart(goalId);
+			}, 0);
+			void delivery.then(
+				(result) => this.handleNudgeDeliveryResult(goalId, result),
+				(err) => {
+					this.clearPendingNudgeNoStart(goalId);
+					console.error(`[team-manager] ${label} failed for goal ${goalId}:`, err);
+				},
+			);
+		}
+
+		return true;
+	}
+
+	private recoverErroredIdleSessionBeforeNudge(goalId: string, sessionId: string, label: string): boolean {
+		const session = this.sessionManager.getSession(sessionId);
+		if (!session || session.status !== "idle" || !session.lastTurnErrored) return false;
+
+		// Treat the errored idle state as handled by the session retry/manual Retry path.
+		// This guard prevents every team-manager watchdog from appending fresh
+		// [AUTO-NUDGE] cards behind the visible error affordance.
+		this.nudgePending.set(goalId, true);
+
+		if (session.pendingAutoRetryTimer) {
+			console.log(`[team-manager] ${label} skipped for goal ${goalId}; session ${sessionId} already has an auto-retry pending`);
+			return true;
+		}
+
+		if (!isErroredIdleAutoRetryEligible(session)) {
+			const errMsg = session.lastTurnErrorMessage || "";
+			const exhausted = (session.consecutiveErrorTurns ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS
+				|| (session.transientRetryAttempts ?? 0) >= BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS;
+			const reason = exhausted
+				? " after exhausted retries"
+				: isNonRetryableAgentError(errMsg)
+					? " for a non-retryable error"
+					: " for an unclassified error";
+			console.log(
+				`[team-manager] ${label} suppressed for errored idle session ${sessionId}; ` +
+				`manual Retry required${reason}`,
+			);
+			return true;
+		}
+
+		try {
+			const retry = this.sessionManager.retryLastPrompt(sessionId, { auto: true });
+			if (this.isThenable(retry)) {
+				void retry.catch((err) => {
+					console.error(`[team-manager] ${label} retryLastPrompt failed for goal ${goalId}:`, err);
+				});
+			}
+			console.log(`[team-manager] ${label} recovered errored idle session ${sessionId} via retryLastPrompt(auto)`);
+		} catch (err) {
+			console.error(`[team-manager] ${label} retryLastPrompt failed for goal ${goalId}:`, err);
+		}
+		return true;
+	}
+
+	private handleNudgeDeliveryResult(goalId: string, delivery: unknown): void {
+		if (!delivery || typeof delivery !== "object") return;
+		const result = delivery as { status?: unknown; parked?: unknown };
+		if (result.status === "dispatched") {
+			this.confirmPendingNudgeStarted(goalId);
+		} else if (result.parked === true || (result.status === "queued" && this.isTeamLeadIdle(goalId))) {
+			this.clearPendingNudgeNoStart(goalId);
+		}
+	}
+
+	private confirmPendingNudgeStarted(goalId: string): void {
+		this.nudgePending.delete(goalId);
+		const accounting = this.pendingNudgeAccounting.get(goalId);
+		if (!accounting) return;
+		this.pendingNudgeAccounting.delete(goalId);
+		accounting.onStarted?.();
+	}
+
+	private clearPendingNudgeNoStart(goalId: string): void {
+		this.nudgePending.delete(goalId);
+		const accounting = this.pendingNudgeAccounting.get(goalId);
+		if (!accounting) return;
+		this.pendingNudgeAccounting.delete(goalId);
+		accounting.onNoStart?.();
+	}
+
+	private isThenable(value: unknown): value is PromiseLike<unknown> {
+		return !!value && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function";
+	}
+
+	private isTeamLeadIdle(goalId: string): boolean {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return false;
+		return this.sessionManager.getSession(entry.teamLeadSessionId)?.status === "idle";
 	}
 
 	/**
@@ -1100,7 +1283,10 @@ export class TeamManager {
 			this.noWorkersNudgeTimers.delete(goalId);
 		}
 		this.noWorkersNudgeCount.delete(goalId);
+		this.noWorkersNudgeAttemptCount.delete(goalId);
+		this.idleNudgeAttemptCount.delete(goalId);
 		this.nudgePending.delete(goalId);
+		this.pendingNudgeAccounting.delete(goalId);
 	}
 
 	private formatElapsed(sinceMs: number): string {
@@ -1134,14 +1320,67 @@ export class TeamManager {
 		return false;
 	}
 
-	/** Get active (non-reviewer, non-terminated) workers for a goal. */
+	private isVerificationReviewerAgent(agent: TeamAgent): boolean {
+		return agent.kind === "reviewer" || (agent.legacyMissingKind === true && agent.role === "reviewer");
+	}
+
+	private hasLiveSession(sessionId: string): boolean {
+		const session = this.sessionManager.getSession(sessionId);
+		return !!session && session.status !== "terminated";
+	}
+
+	private clearReapedWorkerRuntimeState(goalId: string, agent: TeamAgent): void {
+		try {
+			agent.unsubscribeEvent?.();
+		} catch (err) {
+			console.warn(
+				`[team-manager] Failed to unsubscribe stale worker ${agent.sessionId} for goal ${goalId}:`,
+				err,
+			);
+		}
+		agent.unsubscribeEvent = undefined;
+
+		this.sessionToGoal.delete(agent.sessionId);
+		this.lastNotifyTime.delete(agent.sessionId);
+		const pending = this.pendingIdleNotify.get(agent.sessionId);
+		if (pending) {
+			clearTimeout(pending);
+			this.pendingIdleNotify.delete(agent.sessionId);
+		}
+		try { this.config.orchestrationCore?.forgetChild(agent.sessionId); } catch { /* best-effort */ }
+	}
+
+	/**
+	 * Remove non-reviewer worker records whose backing session is missing or terminated.
+	 * This is a passive reap only: it updates tracking state and never terminates,
+	 * archives, broadcasts, or cleans up worktrees for already-dead sessions.
+	 */
+	private reapStaleWorkers(goalId: string, entry: TeamEntry | undefined = this.teams.get(goalId)): number {
+		if (!entry) return 0;
+		let reaped = 0;
+		for (let i = entry.agents.length - 1; i >= 0; i--) {
+			const agent = entry.agents[i];
+			if (this.isVerificationReviewerAgent(agent)) continue;
+			if (this.hasLiveSession(agent.sessionId)) continue;
+
+			this.clearReapedWorkerRuntimeState(goalId, agent);
+			entry.agents.splice(i, 1);
+			reaped++;
+			console.log(
+				`[team-manager] Reaped stale worker ${agent.sessionId} (${agent.role}) from goal ${goalId}`,
+			);
+		}
+		if (reaped > 0) this.persistEntry(goalId);
+		return reaped;
+	}
+
+	/** Get active workers, excluding only VerificationHarness reviewers and terminated sessions. */
 	private getActiveWorkers(goalId: string): TeamAgent[] {
 		const entry = this.teams.get(goalId);
 		if (!entry) return [];
-		return entry.agents.filter((a) => {
-			if (a.role === 'reviewer') return false;
-			const s = this.sessionManager.getSession(a.sessionId);
-			return s && s.status !== "terminated";
+		return entry.agents.filter((agent) => {
+			if (this.isVerificationReviewerAgent(agent)) return false;
+			return this.hasLiveSession(agent.sessionId);
 		});
 	}
 
@@ -1181,7 +1420,9 @@ export class TeamManager {
 	 * the timer fires — the workers-nudge takes over that case.
 	 */
 	private scheduleNoWorkersNudge(goalId: string): void {
-		const count = this.noWorkersNudgeCount.get(goalId) ?? 0;
+		const successCount = this.noWorkersNudgeCount.get(goalId) ?? 0;
+		const attemptCount = this.noWorkersNudgeAttemptCount.get(goalId) ?? successCount;
+		const count = Math.max(successCount, attemptCount);
 		const delay = Math.min(
 			TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count),
 			TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
@@ -1206,19 +1447,25 @@ export class TeamManager {
 				`If there's more work to do, spawn agents or do it yourself. ` +
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
 
-			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
-			this.noWorkersNudgeCount.set(goalId, count + 1);
-			const nextDelay = Math.min(
-				TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count + 1),
-				TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
-			);
-			console.log(
-				`[team-manager] Sent no-workers nudge #${count + 1} to team lead for goal ${goalId}; ` +
-				`next nudge in ${Math.round(nextDelay / 60000)}m`,
-			);
-
-			this.scheduleNoWorkersNudge(goalId);
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "No-workers nudge", {
+				onStarted: () => {
+					const nextSuccess = (this.noWorkersNudgeCount.get(goalId) ?? 0) + 1;
+					this.noWorkersNudgeCount.set(goalId, nextSuccess);
+					this.noWorkersNudgeAttemptCount.set(goalId, Math.max(this.noWorkersNudgeAttemptCount.get(goalId) ?? 0, count + 1));
+					const nextDelay = Math.min(
+						TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, Math.max(nextSuccess, count + 1)),
+						TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
+					);
+					console.log(
+						`[team-manager] Sent no-workers nudge #${nextSuccess} to team lead for goal ${goalId}; ` +
+						`next nudge in ${Math.round(nextDelay / 60000)}m`,
+					);
+				},
+				onNoStart: () => {
+					this.noWorkersNudgeAttemptCount.set(goalId, count + 1);
+					this.scheduleNoWorkersNudge(goalId);
+				},
+			})) return;
 		}, delay);
 
 		this.noWorkersNudgeTimers.set(goalId, timer);
@@ -1229,7 +1476,9 @@ export class TeamManager {
 	 * Delay = IDLE_NUDGE_DELAY_MS * 2^count, capped at MAX_IDLE_NUDGE_DELAY_MS.
 	 */
 	private scheduleWorkersNudge(goalId: string): void {
-		const count = this.idleNudgeCount.get(goalId) ?? 0;
+		const successCount = this.idleNudgeCount.get(goalId) ?? 0;
+		const attemptCount = this.idleNudgeAttemptCount.get(goalId) ?? successCount;
+		const count = Math.max(successCount, attemptCount);
 		const delay = Math.min(
 			TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count),
 			TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
@@ -1290,20 +1539,25 @@ export class TeamManager {
 				`If an agent is idle and their work looks complete, mark their task as done and dismiss them. ` +
 				`If idle agents have more to do, prompt them to continue.`;
 
-			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
-			this.idleNudgeCount.set(goalId, count + 1);
-			const nextDelay = Math.min(
-				TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count + 1),
-				TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
-			);
-			console.log(
-				`[team-manager] Sent idle nudge #${count + 1} to team lead for goal ${goalId}; ` +
-				`next nudge in ${Math.round(nextDelay / 60000)}m`,
-			);
-
-			// Reschedule with the incremented counter
-			this.scheduleWorkersNudge(goalId);
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "Idle nudge", {
+				onStarted: () => {
+					const nextSuccess = (this.idleNudgeCount.get(goalId) ?? 0) + 1;
+					this.idleNudgeCount.set(goalId, nextSuccess);
+					this.idleNudgeAttemptCount.set(goalId, Math.max(this.idleNudgeAttemptCount.get(goalId) ?? 0, count + 1));
+					const nextDelay = Math.min(
+						TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, Math.max(nextSuccess, count + 1)),
+						TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
+					);
+					console.log(
+						`[team-manager] Sent idle nudge #${nextSuccess} to team lead for goal ${goalId}; ` +
+						`next nudge in ${Math.round(nextDelay / 60000)}m`,
+					);
+				},
+				onNoStart: () => {
+					this.idleNudgeAttemptCount.set(goalId, count + 1);
+					this.scheduleWorkersNudge(goalId);
+				},
+			})) return;
 		}, delay);
 
 		this.idleNudgeTimers.set(goalId, timer);
@@ -1381,10 +1635,11 @@ export class TeamManager {
 				this.leadIdleSinceByGoal.set(goalId, Date.now());
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
-				this.nudgePending.delete(goalId);
 				this.leadIdleSinceByGoal.delete(goalId);
 				const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
 				const lastSource = tl?.lastPromptSource ?? "user";
+				if (lastSource !== "user" && lastSource !== "system") this.confirmPendingNudgeStarted(goalId);
+				else this.clearPendingNudgeNoStart(goalId);
 				if (lastSource === "user" || lastSource === "system") {
 					// External signal — fresh idle cycle starts from base delay.
 					this.clearIdleNudgeTimer(goalId);
@@ -1693,10 +1948,12 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Check concurrency limit
-		if (entry.agents.length >= entry.maxConcurrent) {
+		// Check concurrency limit using the same live-worker semantics as sidebar/listing.
+		this.reapStaleWorkers(goalId, entry);
+		const activeWorkerCount = this.getActiveWorkers(goalId).length;
+		if (activeWorkerCount >= entry.maxConcurrent) {
 			throw new Error(
-				`Team for goal ${goalId} already has ${entry.agents.length} agents (max: ${entry.maxConcurrent})`,
+				`Team for goal ${goalId} already has ${activeWorkerCount} agents (active workers; max: ${entry.maxConcurrent})`,
 			);
 		}
 
@@ -1732,19 +1989,14 @@ export class TeamManager {
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
+		let memberStartPoint: string | undefined;
 		const memberSandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
 		if (useWorktree) {
 			const goalId8 = goalId.slice(0, 8);
 			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
-			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point.
-			// Test harnesses may use repos with no origin; never contact real remotes there.
-			try {
-				if (!(await shouldSkipRemoteGitForTests(goal.repoPath!))) {
-					await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
-				}
-			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
+			memberStartPoint = await resolveTeamMemberStartPoint(goal);
 
 			// Compute subdirectory offset from the goal's worktree root to its cwd.
 			// If the project rootPath is a subdirectory of the repo, goal.cwd includes
@@ -1759,8 +2011,10 @@ export class TeamManager {
 				// via ProjectSandbox.createWorktree(). Use goal.cwd as placeholder.
 				agentCwd = goal.cwd; // placeholder — sandbox wiring overrides this
 			} else {
-				// Non-sandboxed: create worktree the traditional way
-				worktreeResult = await createWorktree(goal.repoPath!, branchName, { startPoint: goal.branch ? `origin/${goal.branch}` : undefined });
+				// Non-sandboxed: create a local-only member worktree. Goal branches may be
+				// unpublished, so prefer local refs before falling back to origin refs.
+				const worktreeOptions = { startPoint: memberStartPoint, pushPolicy: "local-only" as const };
+				worktreeResult = await createWorktree(goal.repoPath!, branchName, worktreeOptions);
 				// Apply subdirectory offset to member worktree cwd
 				agentCwd = memberSubdirOffset && memberSubdirOffset !== "."
 					? path.join(worktreeResult.worktreePath, memberSubdirOffset)
@@ -1815,9 +2069,10 @@ export class TeamManager {
 				undefined,
 				{
 					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
-					// Pass branch info so applySandboxWiring creates the worktree inside the container
+					// Pass branch info so applySandboxWiring creates the worktree inside the container.
+					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
-					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,
+					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
 					// Honour role-level model / thinking-level override (cascade-resolved above).
 					// Empty string falls through to undefined → system default.
 					initialModel: storedRoleDef.model || undefined,
@@ -1834,13 +2089,15 @@ export class TeamManager {
 			const roleAccessory = storedRoleDef.accessory;
 			// For sandboxed sessions, the actual worktree is session.cwd (set by ProjectSandbox.createWorktree)
 			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed ? session.cwd : undefined);
-			this.sessionManager.updateSessionMeta(session.id, {
+			const memberSessionMeta = {
 				role,
 				teamGoalId: goalId,
 				worktreePath: actualWorktreePath,
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
-			});
+				worktreePushPolicy: branchName ? "local-only" : undefined,
+			};
+			this.sessionManager.updateSessionMeta(session.id, memberSessionMeta as any);
 
 			// Resolve baseSha from the agent's working directory.
 			// For sandboxed sessions, run git inside the container.
@@ -1955,16 +2212,17 @@ export class TeamManager {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;
 
-		// Defensive guard: never nudge the team lead about a reviewer session.
-		// Reviewer sessions are managed by VerificationHarness; their agent_end
-		// is part of the verification flow, not a worker-finished signal.
+		// Defensive guard: never nudge the team lead about a verification reviewer session.
+		// Reviewer sessions managed by VerificationHarness have kind="reviewer"; legacy
+		// pre-kind reviewer records carry an in-memory marker from restore.
 		const firingAgent = entry.agents.find((a) => a.sessionId === workerSessionId);
-		if (firingAgent && (firingAgent.kind === "reviewer" || firingAgent.role === "reviewer")) {
+		if (firingAgent && this.isVerificationReviewerAgent(firingAgent)) {
 			return;
 		}
 
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+		if (this.recoverErroredIdleSessionBeforeNudge(goalId, entry.teamLeadSessionId, "Worker-idle notification")) return;
 
 		// Debounce: skip if we notified about this worker in the last 30 seconds
 		const now = Date.now();
@@ -1974,12 +2232,6 @@ export class TeamManager {
 			return;
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
-
-		// Note: we no longer suppress notifications when the team lead's last
-		// turn errored. SessionManager.enqueuePrompt / deliverLiveSteer now own
-		// the error-state policy (implicit unstick up to MAX_CONSECUTIVE_ERROR_TURNS,
-		// park afterwards). A single source of truth avoids nudges being
-		// silently dropped on the floor.
 
 		// Look up tasks assigned to the worker
 		const tasks = this.resolveTasksForSession(goalId, workerSessionId);
@@ -2086,28 +2338,70 @@ export class TeamManager {
 	/**
 	 * Dismiss (terminate) a role agent session and clean up its worktree.
 	 */
-	async dismissRole(sessionId: string): Promise<boolean> {
+	async dismissRole(sessionId: string): Promise<DismissResult> {
 		const goalId = this.sessionToGoal.get(sessionId);
 		if (!goalId) {
-			return false;
+			return this.classifyUntrackedDismiss(undefined, sessionId);
+		}
+		return this.dismissRoleForGoal(goalId, sessionId);
+	}
+
+	/** Dismiss a role agent for a specific goal, preserving structured authz/not-found outcomes. */
+	async dismissRoleForGoal(goalId: string, sessionId: string): Promise<DismissResult> {
+		return this.runDismissLocked(sessionId, () => this.dismissRoleForGoalLocked(goalId, sessionId));
+	}
+
+	private async runDismissLocked<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+		for (;;) {
+			const previous = this.dismissLocks.get(sessionId);
+			if (!previous) break;
+			await previous.catch(() => undefined);
+		}
+
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		this.dismissLocks.set(sessionId, current);
+		try {
+			return await action();
+		} finally {
+			if (this.dismissLocks.get(sessionId) === current) {
+				this.dismissLocks.delete(sessionId);
+			}
+			release();
+		}
+	}
+
+	private async dismissRoleForGoalLocked(goalId: string, sessionId: string): Promise<DismissResult> {
+		const mappedGoalId = this.sessionToGoal.get(sessionId);
+		if (mappedGoalId && mappedGoalId !== goalId) {
+			return { ok: false, status: "not-owned", sessionId, message: `Team agent ${sessionId} belongs to a different goal.`, retryable: false };
 		}
 
 		const entry = this.teams.get(goalId);
 		if (!entry) {
-			return false;
+			return this.classifyUntrackedDismiss(goalId, sessionId);
 		}
 
-		// Don't allow dismissing the team lead via this method
+		// Don't allow dismissing the team lead via this method.
 		if (entry.teamLeadSessionId === sessionId) {
-			throw new Error("Cannot dismiss the team lead — use completeTeam() instead");
+			return { ok: false, status: "not-owned", sessionId, message: "Cannot dismiss the team lead — use completeTeam() instead.", retryable: false };
 		}
 
 		const agentIndex = entry.agents.findIndex((a) => a.sessionId === sessionId);
 		if (agentIndex === -1) {
-			return false;
+			return this.classifyUntrackedDismiss(goalId, sessionId);
 		}
 
 		const agent = entry.agents[agentIndex];
+
+		// Stamp durable ownership before terminal/archive cleanup. Duplicate dismiss
+		// classification cannot rely on sessionToGoal because successful dismiss
+		// removes that live index below.
+		this.sessionManager.updateSessionMeta(sessionId, {
+			role: agent.role,
+			teamGoalId: goalId,
+			teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+		} as any);
 
 		// Forget the worker from the OrchestrationCore runtime index (goal adapter).
 		try { this.config.orchestrationCore?.forgetChild(sessionId); } catch { /* best-effort */ }
@@ -2122,23 +2416,40 @@ export class TeamManager {
 		if (goal?.repoPath && agent.worktreePath) {
 			this.sessionManager.updateSessionMeta(sessionId, {
 				worktreePath: agent.worktreePath,
-			});
+				teamGoalId: goalId,
+			} as any);
 			// Store repoPath and branch in the session store for later purge cleanup
 			const projectCtx = goalId && this.config.projectContextManager
 				? this.config.projectContextManager.getContextForGoal(goalId)
 				: null;
 			if (projectCtx) {
-				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
+				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch, teamGoalId: goalId } as any);
 			}
 		}
 
-		// Terminate the session
-		await this.sessionManager.terminateSession(sessionId);
+		let terminated = false;
+		try {
+			(this.sessionManager as any).markChildTerminal?.(sessionId);
+		} catch (err) {
+			console.error(`[team-manager] markChildTerminal failed for ${sessionId}:`, err);
+		}
+		try {
+			terminated = await this.sessionManager.terminateSession(sessionId);
+		} catch (err) {
+			return { ok: false, status: "failed", sessionId, message: `Failed to dismiss team agent ${sessionId}: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
+		}
 
 		// Worktree is preserved for archived session review — cleanup happens at purge time
 
-		// Remove from tracking
-		entry.agents.splice(agentIndex, 1);
+		// Remove from tracking. Re-find by sessionId after awaits so a duplicate or
+		// external cleanup cannot make us splice a stale index and remove another agent.
+		const removalIndex = entry.agents.findIndex((a) => a.sessionId === sessionId);
+		if (removalIndex === -1) {
+			this.dismissedSessionToGoal.set(sessionId, goalId);
+			return this.classifyUntrackedDismiss(goalId, sessionId);
+		}
+		entry.agents.splice(removalIndex, 1);
+		this.dismissedSessionToGoal.set(sessionId, goalId);
 		this.sessionToGoal.delete(sessionId);
 		this.lastNotifyTime.delete(sessionId);
 		// Cancel any pending idle-notify timer so no nudge fires against the
@@ -2172,7 +2483,26 @@ export class TeamManager {
 			type: "team_agent_dismissed", goalId, sessionId, role: agent.role, name: dismissedName,
 		});
 
-		return true;
+		return terminated
+			? { ok: true, status: "dismissed", sessionId, message: `Team agent ${sessionId} dismissed.`, retryable: false }
+			: { ok: true, status: "already-dismissed", sessionId, message: `Team agent ${sessionId} is already dismissed.`, retryable: false };
+	}
+
+	private classifyUntrackedDismiss(goalId: string | undefined, sessionId: string): DismissResult {
+		const live = this.sessionManager.getSession(sessionId) as any;
+		const persisted = (this.sessionManager as any).getPersistedSession?.(sessionId) as any;
+		const rememberedGoalId = this.dismissedSessionToGoal.get(sessionId);
+		const teamGoalId = live?.teamGoalId ?? persisted?.teamGoalId ?? rememberedGoalId;
+		if (goalId && teamGoalId === goalId) {
+			return { ok: true, status: "already-dismissed", sessionId, message: `Team agent ${sessionId} is already dismissed.`, retryable: false };
+		}
+		if (teamGoalId && (!goalId || teamGoalId !== goalId)) {
+			return { ok: false, status: "not-owned", sessionId, message: `Team agent ${sessionId} belongs to a different goal.`, retryable: false };
+		}
+		if (live || persisted) {
+			return { ok: false, status: "not-owned", sessionId, message: `Session ${sessionId} is not a team agent for this goal.`, retryable: false };
+		}
+		return { ok: false, status: "not-found", sessionId, message: `Team agent ${sessionId} was not found.`, retryable: false };
 	}
 
 	/**
@@ -2195,6 +2525,11 @@ export class TeamManager {
 		};
 		entry.agents.push(agent);
 		this.sessionToGoal.set(sessionId, goalId);
+		this.sessionManager.updateSessionMeta(sessionId, {
+			role: agent.role,
+			teamGoalId: goalId,
+			teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+		} as any);
 		this.assignUniqueColor(sessionId);
 		this.persistEntry(goalId);
 	}

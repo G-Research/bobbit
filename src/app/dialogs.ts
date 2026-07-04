@@ -23,6 +23,7 @@ import {
 	fetchRoles,
 	patchSession,
 	browseDirectory,
+	createDirectory,
 	detectProject,
 	fetchProjects,
 	registerProject,
@@ -49,6 +50,7 @@ import "../ui/components/ErrorDetails.js";
 // module-init time — ESM live bindings resolve at call time.
 import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
+import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -427,7 +429,7 @@ function promptArchiveConfirm(opts: {
  *
  * IMPORTANT: a transient HTTP failure (network blip, gateway restart in
  * flight, server overload) must NOT be reported as "not authenticated" —
- * doing so causes `authenticateGateway()` to spuriously open the OAuth
+ * doing so used to cause gateway authentication to spuriously open the OAuth
  * dialog over a perfectly valid session, which is a confusing UX bug in
  * production and a long-tail E2E flake (the dialog steals focus and
  * subsequent assertions on sidebar/page elements time out).
@@ -463,6 +465,70 @@ export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean>
 	return true;
 }
 
+let oauthExpiryModalOpen = false;
+
+export function showOAuthExpiryModal(credentials: readonly ExpiredAccountOAuthCredential[]): void {
+	if (credentials.length === 0 || oauthExpiryModalOpen) return;
+	oauthExpiryModalOpen = true;
+	const container = document.createElement("div");
+	document.body.appendChild(container);
+
+	const names = credentials.map((credential) => credential.label);
+	const namesText = names.length === 1
+		? names[0]
+		: `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+	const title = names.length === 1 ? `${names[0]} login expired` : "OAuth logins expired";
+	const message = names.length === 1
+		? `Your ${names[0]} OAuth login has expired and needs attention.`
+		: `Your OAuth logins for ${namesText} have expired and need attention.`;
+
+	const cleanup = () => {
+		render(html``, container);
+		container.remove();
+		oauthExpiryModalOpen = false;
+	};
+	const dismiss = () => {
+		dismissAccountOAuthExpiryReminders(credentials);
+		cleanup();
+	};
+	const goToAccountSettings = () => {
+		window.location.hash = "#/settings/system/account";
+		cleanup();
+	};
+
+	render(html`
+		<div
+			class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+			@click=${dismiss}
+		>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="oauth-expiry-title"
+				class="w-[min(440px,92vw)] rounded-lg border border-border bg-background text-foreground shadow-lg"
+				@click=${(event: Event) => event.stopPropagation()}
+			>
+				<div class="px-6 pt-6 pb-4">
+					<h2 id="oauth-expiry-title" class="text-lg font-semibold leading-none tracking-tight">${title}</h2>
+					<p class="text-sm text-muted-foreground mt-2">${message}</p>
+				</div>
+				<div class="flex items-center justify-between gap-2 px-6 pb-4">
+					<button
+						type="button"
+						class="inline-flex h-9 items-center justify-center rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-secondary"
+						@click=${dismiss}
+					>Dismiss</button>
+					<button
+						type="button"
+						class="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+						@click=${goToAccountSettings}
+					>Go to Account Settings</button>
+				</div>
+			</div>
+		</div>
+	`, container);
+}
+
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
@@ -481,14 +547,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		const POLL_MAX_DELAY_MS = 8000;
 		const POLL_MAX_TOTAL_MS = 5 * 60 * 1000;
 
-		// Canonical Google account OAuth id is `google-gemini-cli`; `google`/`gemini`
-		// are inbound aliases the server collapses to it. Label all three "Google".
-		const providerName =
-			provider === "google-gemini-cli" || provider === "google" || provider === "gemini"
-				? "Google"
-				: provider === "openai-codex" || provider === "openai"
-					? "OpenAI"
-					: "Anthropic";
+		const providerName = accountOAuthProviderLabel(provider);
 
 		const cleanup = (result: boolean) => {
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
@@ -767,6 +826,8 @@ export function openGatewayDialog(): void {
 									<label class="text-xs text-muted-foreground mb-1 block">Gateway URL</label>
 									${Input({
 										type: "text",
+										name: "bobbit-gateway-url",
+										autocomplete: "off",
 										placeholder: "http://localhost:3001",
 										value: urlValue,
 										onInput: (e: Event) => {
@@ -778,6 +839,8 @@ export function openGatewayDialog(): void {
 									<label class="text-xs text-muted-foreground mb-1 block">Auth Token</label>
 									${Input({
 										type: "password",
+										name: "bobbit-gateway-auth-token",
+										autocomplete: "new-password",
 										placeholder: "Paste token from gateway terminal",
 										value: tokenValue,
 										onInput: (e: Event) => {
@@ -1872,6 +1935,7 @@ export function showProjectDialog(): void {
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
+	let detectionLoading = false;
 	let detectionToken = 0;
 
 	let preflightReport: PreflightReport | null = null;
@@ -1880,6 +1944,8 @@ export function showProjectDialog(): void {
 	let preflightToken = 0;
 	let preflightUnavailable = false;
 	let archiving = false;
+	let creatingDirectory = false;
+	let createErrorMessage: string | null = null;
 
 	let scanItems: ProjectScanItem[] = [];
 	let scanSelection = new Set<string>();
@@ -1918,10 +1984,13 @@ export function showProjectDialog(): void {
 		const trimmed = dirPath.trim();
 		if (!trimmed) {
 			detectionResult = null;
+			detectionLoading = false;
 			renderDialog();
 			return;
 		}
 		const token = ++detectionToken;
+		detectionLoading = true;
+		renderDialog();
 		try {
 			const result = await detectProject(trimmed);
 			if (token !== detectionToken) return;
@@ -1929,8 +1998,12 @@ export function showProjectDialog(): void {
 		} catch {
 			if (token !== detectionToken) return;
 			detectionResult = null;
+		} finally {
+			if (token === detectionToken) {
+				detectionLoading = false;
+				renderDialog();
+			}
 		}
-		renderDialog();
 	};
 
 	const runPreflight = async (dirPath: string) => {
@@ -1985,6 +2058,7 @@ export function showProjectDialog(): void {
 			scanSelection = new Set();
 		}
 		errorMessage = null;
+		createErrorMessage = null;
 		// Bump tokens immediately so stale in-flight responses for the previous
 		// path can't overwrite the new path's state.
 		detectionToken++;
@@ -1995,12 +2069,15 @@ export function showProjectDialog(): void {
 		}
 		if (!next.trim()) {
 			detectionResult = null;
+			detectionLoading = false;
 			preflightReport = null;
 			preflightLoading = false;
 			preflightError = "";
 			renderDialog();
 			return;
 		}
+		detectionResult = null;
+		detectionLoading = true;
 		const run = () => {
 			void runDetection(pathValue);
 			void runPreflight(pathValue);
@@ -2032,10 +2109,19 @@ export function showProjectDialog(): void {
 		cleanup();
 	});
 
+	const setPickerCompletedPath = (completedPath: string): void => {
+		const pickerWithCompleted = pickerEl as DirectoryPickerEl & { setCompletedPath?: (path: string) => void };
+		if (typeof pickerWithCompleted.setCompletedPath === "function") {
+			pickerWithCompleted.setCompletedPath(completedPath);
+		} else {
+			pickerEl.value = completedPath;
+		}
+	};
+
 	const openBrowseModal = async () => {
 		const selected = await openProjectBrowseDialog(pathValue);
 		if (selected != null) {
-			pickerEl.value = selected;
+			setPickerCompletedPath(selected);
 			onEffectivePathChange(selected, true);
 		}
 		// Focus returns to the picker regardless of outcome.
@@ -2076,16 +2162,68 @@ export function showProjectDialog(): void {
 		}
 	};
 
+	const createDirectoryErrorMessage = (err: unknown): string => {
+		const { message, code } = errorDetails(err);
+		switch (code) {
+			case "invalid_path":
+				return "Enter an absolute directory path.";
+			case "parent_not_found":
+				return "The parent directory does not exist.";
+			case "exists_as_file":
+				return "A file already exists at that path.";
+			case "permission_denied":
+				return "Permission denied creating this directory.";
+			case "already_exists":
+				return "That directory already exists; refresh and continue.";
+			default:
+				return `Could not create directory: ${message}`;
+		}
+	};
+
+	const createTypedDirectory = async () => {
+		if (busy || creatingDirectory) return;
+		const trimmed = pathValue.trim();
+		if (!trimmed) return;
+		creatingDirectory = true;
+		createErrorMessage = null;
+		errorMessage = null;
+		renderDialog();
+		try {
+			const created = await createDirectory(trimmed);
+			const createdPath = created.path || trimmed;
+			pathValue = createdPath;
+			setPickerCompletedPath(createdPath);
+			createErrorMessage = null;
+			creatingDirectory = false;
+			onEffectivePathChange(createdPath, true);
+			requestAnimationFrame(() => pickerEl.focusInput());
+		} catch (err) {
+			const { code } = errorDetails(err);
+			creatingDirectory = false;
+			if (code === "already_exists") {
+				pathValue = trimmed;
+				setPickerCompletedPath(trimmed);
+				onEffectivePathChange(trimmed, true);
+				requestAnimationFrame(() => pickerEl.focusInput());
+				return;
+			}
+			createErrorMessage = createDirectoryErrorMessage(err);
+			renderDialog();
+			requestAnimationFrame(() => pickerEl.focusInput());
+		}
+	};
+
 	const doContinue = async () => {
-		if (busy) return;
+		if (busy || creatingDirectory) return;
 		const trimmed = pathValue.trim();
 		if (!trimmed) return;
 		if (step === "scan") {
 			void confirmScanAndContinue();
 			return;
 		}
-		// Block when preflight reports a hard fail (matches legacy behavior).
-		if (preflightReport?.hasFail) return;
+		// Block when preflight reports a hard fail (matches legacy behavior),
+		// and require inline creation before continuing with a missing directory.
+		if (visiblePreflightReport()?.hasFail || shouldShowInlineCreate()) return;
 		busy = true;
 		errorMessage = null;
 		renderDialog();
@@ -2144,6 +2282,14 @@ export function showProjectDialog(): void {
 					}
 					throw e;
 				}
+				return;
+			}
+
+			if (!detection.exists) {
+				detectionResult = detection;
+				detectionLoading = false;
+				busy = false;
+				renderDialog();
 				return;
 			}
 
@@ -2225,17 +2371,55 @@ export function showProjectDialog(): void {
 		renderDialog();
 	};
 
-	// --- detection-status one-liner (reserved height) -----------------------
+	const shouldShowInlineCreate = (): boolean => {
+		const trimmed = pathValue.trim();
+		return !!trimmed && !detectionLoading && detectionResult?.exists === false;
+	};
+
+	const visiblePreflightReport = (): PreflightReport | null => {
+		if (!preflightReport || !shouldShowInlineCreate()) return preflightReport;
+		const checks = preflightReport.checks.filter((check) => check.id !== "path.exists");
+		return {
+			...preflightReport,
+			checks,
+			hasFail: checks.some((check) => check.level === "fail"),
+		};
+	};
+
+	const renderCreateDirectoryButton = () => Button({
+		variant: "default",
+		onClick: createTypedDirectory,
+		disabled: busy || archiving || creatingDirectory,
+		children: html`<span data-testid="add-project-create-directory">${creatingDirectory ? "Creating…" : "Create Directory"}</span>`,
+	});
+
+	// --- detection-status slot (reserved height) ----------------------------
 	const renderStatusLine = () => {
 		const trimmed = pathValue.trim();
 		if (errorMessage) {
 			return html`<span class="text-red-500 text-xs">${errorMessage}</span>`;
 		}
-		if (!trimmed) {
-			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory.</span>`;
+		if (createErrorMessage) {
+			return html`
+				<div class="flex flex-col items-center justify-center gap-2 py-2 text-center">
+					<span class="text-red-500 text-xs" data-testid="add-project-create-error">${createErrorMessage}</span>
+					${shouldShowInlineCreate() ? renderCreateDirectoryButton() : ""}
+				</div>
+			`;
 		}
-		if (!detectionResult) {
+		if (!trimmed) {
+			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory, or type a path of a new directory to create it</span>`;
+		}
+		if (!detectionResult || detectionLoading) {
 			return html`<span class="text-muted-foreground text-xs">Checking directory…</span>`;
+		}
+		if (shouldShowInlineCreate()) {
+			return html`
+				<div class="flex flex-col items-center justify-center gap-2 py-2 text-center" data-testid="add-project-inline-create">
+					<span class="text-muted-foreground text-xs font-medium">Directory doesn't exist</span>
+					${renderCreateDirectoryButton()}
+				</div>
+			`;
 		}
 		if (detectionResult.hasBobbit) {
 			return html`<span class="text-green-600 dark:text-green-400 text-xs">An existing Bobbit project was found. Click <strong>Continue</strong> to register it.</span>`;
@@ -2247,24 +2431,27 @@ export function showProjectDialog(): void {
 	};
 
 	// --- path step body -----------------------------------------------------
-	const renderPathBody = () => html`
-		<div class="flex flex-col gap-3 h-full min-h-0">
-			<label class="text-xs text-muted-foreground block shrink-0">Project Directory</label>
-			<div class="shrink-0">${pickerEl}</div>
-			<div class="shrink-0 min-h-[20px]" data-testid="add-project-status-slot">${renderStatusLine()}</div>
-			<div class="flex-1 min-h-0 overflow-y-auto" data-testid="add-project-preflight-slot">
-				${pathValue.trim() && !preflightUnavailable
-					? renderPreflightPanel({
-						report: preflightReport,
-						loading: preflightLoading,
-						error: preflightError,
-						archiving,
-						onArchive: openArchiveConfirm,
-					})
-					: ""}
+	const renderPathBody = () => {
+		const report = visiblePreflightReport();
+		return html`
+			<div class="flex flex-col gap-3 h-full min-h-0">
+				<label class="text-xs text-muted-foreground block shrink-0">Project Directory</label>
+				<div class="shrink-0">${pickerEl}</div>
+				<div class="shrink-0 min-h-[20px]" data-testid="add-project-status-slot">${renderStatusLine()}</div>
+				<div class="flex-1 min-h-0 overflow-y-auto" data-testid="add-project-preflight-slot">
+					${pathValue.trim() && !preflightUnavailable
+						? renderPreflightPanel({
+							report,
+							loading: preflightLoading,
+							error: preflightError,
+							archiving,
+							onArchive: openArchiveConfirm,
+						})
+						: ""}
+				</div>
 			</div>
-		</div>
-	`;
+		`;
+	};
 
 	// --- scan step body -----------------------------------------------------
 	const renderScanBody = () => {
@@ -2353,11 +2540,11 @@ export function showProjectDialog(): void {
 		}
 		const trimmed = pathValue.trim();
 		const continueDisabled =
-			busy || archiving || !trimmed || (preflightReport?.hasFail === true);
+			busy || archiving || creatingDirectory || !trimmed || shouldShowInlineCreate() || (visiblePreflightReport()?.hasFail === true);
 		const continueLabel = busy ? "Detecting…" : archiving ? "Archiving…" : "Continue";
 		return html`
 			<div class="flex gap-2 justify-end">
-				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel", disabled: creatingDirectory })}
 				${Button({
 					variant: "default",
 					onClick: doContinue,
@@ -2379,7 +2566,7 @@ export function showProjectDialog(): void {
 			pickerEl.browseDirectory = browseDirectory;
 			pickerAny.__browseWired = true;
 		}
-		pickerEl.disabled = busy;
+		pickerEl.disabled = busy || creatingDirectory;
 
 		render(
 			Dialog({

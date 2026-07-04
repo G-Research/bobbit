@@ -58,8 +58,18 @@ export default function(pi) {
   // can still appear in the agent's tool registry — the guard rejects it here.
   const neverPolicies = ${JSON.stringify(neverPolicies)};
 
+  const askPolicyNamesByLower = new Map(Object.keys(askPolicies).map((name) => [name.toLowerCase(), name]));
+  const neverPolicyNamesByLower = new Map(Object.keys(neverPolicies).map((name) => [name.toLowerCase(), name]));
+
+  function policyEntry(map, namesByLower, toolName) {
+    if (map[toolName]) return { canonicalName: toolName, entry: map[toolName] };
+    const canonicalName = namesByLower.get(String(toolName || "").toLowerCase());
+    return canonicalName ? { canonicalName, entry: map[canonicalName] } : undefined;
+  }
+
   // In-memory grant set — tools that have been granted during this session
   const grantedTools = new Set(${JSON.stringify(grantedTools)});
+  const grantedToolsLower = new Set(${JSON.stringify(grantedTools.map((name) => name.toLowerCase()))});
 
   // Read gateway URL and auth token (same pattern as MCP proxy extensions)
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
@@ -73,20 +83,26 @@ export default function(pi) {
     // Hard-block 'never' tools immediately with a clear reason. The agent sees
     // this as a tool error so it can adapt (e.g. reviewers falling back to
     // read-only analysis instead of running bash_bg).
-    if (neverPolicies[toolName]) {
+    const directNeverPolicy = neverPolicies[toolName];
+    const neverPolicy = directNeverPolicy
+      ? { canonicalName: toolName, entry: directNeverPolicy }
+      : policyEntry(neverPolicies, neverPolicyNamesByLower, toolName);
+    if (neverPolicy) {
       return {
         block: true,
         reason: 'Tool "' + toolName + '" is not permitted for this role. Do not call it again — choose a different approach.'
       };
     }
 
+    const askPolicy = policyEntry(askPolicies, askPolicyNamesByLower, toolName);
+
     // If tool is already granted or not in the ask-policies map, pass through
-    if (grantedTools.has(toolName) || !askPolicies[toolName]) {
+    if (grantedTools.has(toolName) || grantedToolsLower.has(String(toolName || "").toLowerCase()) || !askPolicy) {
       return undefined;
     }
 
     // Tool has 'ask' policy and is not yet granted — request permission via gateway
-    const entry = askPolicies[toolName];
+    const entry = askPolicy.entry;
     const body = JSON.stringify({ toolName, toolGroup: entry.group });
     const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
     const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
@@ -115,8 +131,39 @@ export default function(pi) {
 
       const r = result;
       if (r && r.granted) {
-        // Permission granted — add to in-memory set so future calls pass through
-        grantedTools.add(toolName);
+        // Permission granted — only unblock if the server response actually
+        // covers the tool call this guard is currently blocking. A stale or
+        // mismatched permission-card response must not release this invocation.
+        const grantScope = r.scope === "group" ? "group" : (r.scope === "tool" ? "tool" : undefined);
+        const responseTools = Array.isArray(r.tools) ? r.tools : [];
+        const responseToolsLower = new Set(responseTools.map((name) => String(name || "").toLowerCase()));
+        const currentNamesLower = new Set([String(toolName || "").toLowerCase(), String(askPolicy.canonicalName || "").toLowerCase()]);
+        const currentListed = [...currentNamesLower].some((name) => responseToolsLower.has(name));
+        const groupMatches = grantScope === "group" && r.group === entry.group;
+        const coversCurrent = responseTools.length > 0
+          ? currentListed && (grantScope !== "group" || groupMatches)
+          : groupMatches;
+        if (!coversCurrent) {
+          return { block: true, reason: "Permission grant did not cover tool " + toolName };
+        }
+
+        if (r.mode === "one-time") {
+          // One-time grants authorize exactly this blocked invocation. Do not
+          // cache them in this process, or future turns would bypass ask prompts
+          // after the server revokes its oneTimeGrantedTools on agent_end.
+          return { block: false };
+        }
+
+        const newlyGranted = grantScope === "group"
+          ? responseTools.filter((granted) => {
+              const grantedPolicy = policyEntry(askPolicies, askPolicyNamesByLower, granted);
+              return grantedPolicy && grantedPolicy.entry.group === entry.group;
+            })
+          : [askPolicy.canonicalName];
+        for (const granted of (newlyGranted.length > 0 ? newlyGranted : [askPolicy.canonicalName])) {
+          grantedTools.add(granted);
+          grantedToolsLower.add(String(granted || "").toLowerCase());
+        }
         return { block: false };
       } else {
         const reason = (r && r.reason) ? r.reason : "Permission denied by user";

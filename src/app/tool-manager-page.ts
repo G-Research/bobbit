@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo } from "./api.js";
+import { fetchToolDetail, fetchToolsResponse, normalizeToolDiagnostics, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo, type ToolProviderProvenance, type ToolDiagnostic } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError } from "./dialogs.js";
@@ -17,6 +17,40 @@ import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, 
 // ============================================================================
 
 const TOOL_GROUPS = ["File System", "Shell", "Web", "Browser", "Agent", "Team", "Tasks", "Gates", "Other"];
+
+function isConfigOrigin(origin: unknown): origin is ConfigOrigin {
+	return origin === "builtin" || origin === "server" || origin === "user" || origin === "project";
+}
+
+function isPiExtensionTool(tool: ToolInfo | null | undefined): boolean {
+	if (!tool) return false;
+	return tool.providerType === "pi-extension"
+		|| tool.origin === "marketplace-pi-extension"
+		|| (tool.providers ?? []).some((provider) => provider.providerKey?.startsWith("pi-ext:"));
+}
+
+function piProviderSummary(provider: ToolProviderProvenance): string {
+	const pack = provider.packName || "unknown pack";
+	const list = provider.listName ? ` / ${provider.listName}` : "";
+	const scope = provider.scope ? ` (${provider.scope})` : "";
+	return `${pack}${list}${scope}`;
+}
+
+function renderToolOriginBadges(tool: ToolInfo): TemplateResult | string {
+	if (isPiExtensionTool(tool)) {
+		const providers = tool.providers ?? [];
+		const packName = tool.originPackName || providers[0]?.packName || "marketplace";
+		return html`
+			<span class="inline-flex items-center gap-1 shrink-0">
+				<span class="tools-provider-badge tools-provider-badge--pi" data-testid="tool-pi-extension-badge" title="Pi runtime extension tool">Pi extension</span>
+				<span class="config-origin-pack" data-testid="origin-pack-chip" title="From pack: ${packName}">${packName}</span>
+			</span>
+		`;
+	}
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
+	const overrides = isConfigOrigin((tool as any).overrides) ? (tool as any).overrides : undefined;
+	return renderOriginBadge(origin, overrides, tool.originPackName);
+}
 
 /** Build a mock ToolResultMessage with the correct content array format. */
 function mockResult(text: string): any {
@@ -212,6 +246,7 @@ type View = "list" | "edit";
 
 let currentView: View = "list";
 let tools: ToolInfo[] = [];
+let toolDiagnostics: ToolDiagnostic[] = [];
 let roles: RoleData[] = [];
 let groupPolicies: Record<string, string> = {};
 let mcpServers: McpServerInfo[] = [];
@@ -241,39 +276,47 @@ const POLICY_LABELS: Record<string, string> = {
 };
 
 interface McpPolicyKeys {
-	group: string;
-	tool: string;
+	server: string;
+	package?: string;
+	operation?: string;
 }
 
 function mcpPolicyKeysLocal(toolName: string): McpPolicyKeys | undefined {
 	if (!toolName) return undefined;
 	if (toolName.startsWith("mcp__")) {
-		const remainder = toolName.slice(5);
-		const serverSep = remainder.indexOf("__");
-		if (serverSep <= 0) return undefined;
-		const server = remainder.slice(0, serverSep);
-		const afterServer = remainder.slice(serverSep + 2);
-		if (!server || !afterServer) return undefined;
-		const subSep = afterServer.indexOf("__");
-		const group = `mcp__${server}`;
-		const sub = subSep === -1 ? "" : afterServer.slice(0, subSep);
-		return sub ? { group, tool: `mcp__${server}__${sub}` } : { group, tool: group };
+		const parts = toolName.slice(5).split("__").filter(Boolean);
+		if (parts.length === 0) return undefined;
+		const server = `mcp__${parts[0]}`;
+		const packageKey = parts.length >= 3 ? `${server}__${parts[1]}` : undefined;
+		const operation = parts.length >= 2 ? toolName : undefined;
+		return { server, package: packageKey, operation };
 	}
+	// Legacy MCP meta-tool names (`mcp_<server>` or `mcp_<server>__<sub>`) are
+	// controls for the server/package prefix, not individual operations.
 	if (toolName.startsWith("mcp_") && !toolName.startsWith("mcp__")) {
 		const rest = toolName.slice(4);
 		if (!rest) return undefined;
 		const subSep = rest.indexOf("__");
 		if (subSep === -1) {
-			const group = `mcp__${rest}`;
-			return { group, tool: group };
+			const server = `mcp__${rest}`;
+			return { server };
 		}
-		const server = rest.slice(0, subSep);
+		const serverName = rest.slice(0, subSep);
 		const sub = rest.slice(subSep + 2);
-		if (!server || !sub) {
-			const group = `mcp__${rest}`;
-			return { group, tool: group };
+		if (!serverName || !sub) {
+			const server = `mcp__${rest}`;
+			return { server };
 		}
-		return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+		const server = `mcp__${serverName}`;
+		const packageKey = `${server}__${sub}`;
+		return { server, package: packageKey };
+	}
+	return undefined;
+}
+
+function firstPolicyMatch(keys: Array<string | undefined>, policies: Record<string, string>): { policy: string; source: string } | undefined {
+	for (const key of keys) {
+		if (key && policies[key]) return { policy: policies[key], source: key };
 	}
 	return undefined;
 }
@@ -281,53 +324,70 @@ function mcpPolicyKeysLocal(toolName: string): McpPolicyKeys | undefined {
 function mcpGroupPolicyDefault(toolName: string, toolGroup: string): { policy: string; source: string } {
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
 	if (mcpKeys) {
-		if (mcpKeys.tool !== mcpKeys.group && groupPolicies[mcpKeys.tool]) {
-			return { policy: groupPolicies[mcpKeys.tool], source: mcpKeys.tool };
-		}
-		if (groupPolicies[mcpKeys.group]) return { policy: groupPolicies[mcpKeys.group], source: mcpKeys.group };
+		const mcpMatch = firstPolicyMatch([mcpKeys.operation, mcpKeys.package, mcpKeys.server, "mcp__"], groupPolicies);
+		if (mcpMatch) return mcpMatch;
 	}
 	if (groupPolicies[toolGroup]) return { policy: groupPolicies[toolGroup], source: toolGroup };
 	return { policy: "allow", source: "system default" };
 }
 
-/** Resolve effective policy for a tool using the layered resolution order */
+/** Resolve effective policy for a tool using the layered resolution order. */
 function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
-	// 1. Role + tool override
-	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
-	// 2. Role + group override (MCP tool > MCP server > MCP wildcard > display group)
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
+	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
 	if (roleToolPolicies) {
 		if (mcpKeys) {
-			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return roleToolPolicies[mcpKeys.tool];
-			if (roleToolPolicies[mcpKeys.group]) return roleToolPolicies[mcpKeys.group];
-			if (roleToolPolicies["mcp__"]) return roleToolPolicies["mcp__"];
+			const roleMcpMatch = firstPolicyMatch([
+				mcpKeys.operation && mcpKeys.operation !== toolName ? mcpKeys.operation : undefined,
+				mcpKeys.package,
+				mcpKeys.server,
+				"mcp__",
+			], roleToolPolicies);
+			if (roleMcpMatch) return roleMcpMatch.policy;
 		}
-		// Check display group name (e.g. "Browser")
 		if (roleToolPolicies[toolGroup]) return roleToolPolicies[toolGroup];
 	}
-	// 3. Tool default
+
 	const tool = tools.find(t => t.name === toolName);
+	if (mcpKeys) {
+		// Persisted/group MCP prefix policies must be authoritative over tool YAML defaults.
+		const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+		if (groupDefault.source !== "system default") return groupDefault.policy;
+		if (tool?.grantPolicy) return tool.grantPolicy;
+		return "allow";
+	}
+
 	if (tool?.grantPolicy) return tool.grantPolicy;
-	// 4. Group default
 	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
 	if (groupDefault.source !== "system default") return groupDefault.policy;
-	// 5. System fallback
 	return "allow";
 }
 
-/** Describe where a resolved policy came from */
+/** Describe where a resolved policy came from. */
 function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
-	if (roleToolPolicies?.[toolName]) return "tool override";
 	const mcpKeys = mcpPolicyKeysLocal(toolName);
+	if (roleToolPolicies?.[toolName]) return "tool override";
 	if (roleToolPolicies) {
 		if (mcpKeys) {
-			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return `from ${mcpKeys.tool} role override`;
-			if (roleToolPolicies[mcpKeys.group]) return `from ${mcpKeys.group} role override`;
-			if (roleToolPolicies["mcp__"]) return "from mcp__ role override";
+			const roleMcpMatch = firstPolicyMatch([
+				mcpKeys.operation && mcpKeys.operation !== toolName ? mcpKeys.operation : undefined,
+				mcpKeys.package,
+				mcpKeys.server,
+				"mcp__",
+			], roleToolPolicies);
+			if (roleMcpMatch) return `from ${roleMcpMatch.source} role override`;
 		}
 		if (roleToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
 	}
+
 	const tool = tools.find(t => t.name === toolName);
+	if (mcpKeys) {
+		const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+		if (groupDefault.source !== "system default") return `from ${groupDefault.source} group default`;
+		if (tool?.grantPolicy) return "tool default";
+		return "system default";
+	}
+
 	if (tool?.grantPolicy) return "tool default";
 	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
 	if (groupDefault.source !== "system default") return `from ${groupDefault.source} group default`;
@@ -339,20 +399,9 @@ function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Re
 // ============================================================================
 
 async function fetchToolsScoped(): Promise<ToolInfo[]> {
-	const projectId = getConfigProjectId();
-	const url = projectId ? `/api/tools?projectId=${encodeURIComponent(projectId)}` : "/api/tools";
-	try {
-		const res = await gatewayFetch(url);
-		if (!res.ok) return [];
-		const data = await res.json();
-		const toolsList = data.tools || data || [];
-		if (toolsList.length > 0 && typeof toolsList[0] === "string") {
-			return toolsList.map((name: string) => ({ name, description: "", group: "Other" }));
-		}
-		return toolsList;
-	} catch {
-		return [];
-	}
+	const response = await fetchToolsResponse(getConfigProjectId());
+	toolDiagnostics = response.diagnostics;
+	return response.tools;
 }
 
 export async function loadToolPageData(): Promise<void> {
@@ -380,6 +429,7 @@ export async function loadToolPageData(): Promise<void> {
 export function clearToolPageState(): void {
 	currentView = "list";
 	selectedTool = null;
+	toolDiagnostics = [];
 	loading = true;
 	saving = false;
 }
@@ -525,7 +575,7 @@ async function handleSave(): Promise<void> {
 
 	if (ok) {
 		// Refresh tools list and update selectedTool
-		const [t] = await Promise.all([fetchTools()]);
+		const [t] = await Promise.all([fetchToolsScoped()]);
 		tools = t;
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
@@ -588,6 +638,43 @@ function parseMcpNameLocal(serverName: string, opInfo: McpOperationInfo): { sub?
 	return { sub: rest.slice(0, sepIdx), op: rest.slice(sepIdx + 2) };
 }
 
+function stringField(record: unknown, names: string[]): string | undefined {
+	const data = record && typeof record === "object" ? record as Record<string, unknown> : undefined;
+	if (!data) return undefined;
+	const nested = data.policyKeys && typeof data.policyKeys === "object" ? data.policyKeys as Record<string, unknown> : undefined;
+	for (const name of names) {
+		const value = data[name] ?? nested?.[name];
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
+}
+
+function mcpServerPolicyKey(server: McpServerInfo): string {
+	const supplied = stringField(server, ["serverPolicyKey", "policyKey", "mcpPolicyKey", "server"]);
+	return supplied?.startsWith("mcp__") ? supplied : `mcp__${server.name}`;
+}
+
+function mcpPackagePolicyKey(sub: string, ops: McpOperationInfo[], serverPolicyKey: string): string | undefined {
+	if (!sub) return undefined;
+	const supplied = stringField(ops[0], ["packagePolicyKey", "subNamespacePolicyKey", "namespacePolicyKey", "package", "subNamespace"]);
+	return supplied?.startsWith("mcp__") ? supplied : `${serverPolicyKey}__${sub}`;
+}
+
+function mcpOperationPolicyKey(server: McpServerInfo, opInfo: McpOperationInfo, serverPolicyKey: string, packagePolicyKey?: string): string {
+	const supplied = stringField(opInfo, ["operationPolicyKey", "fullPolicyKey", "canonicalPolicyKey", "policyKey", "toolPolicyKey", "operation"]);
+	if (supplied?.startsWith("mcp__")) return supplied;
+	if (opInfo.name?.startsWith("mcp__")) return opInfo.name;
+	const parsed = parseMcpNameLocal(server.name, opInfo);
+	const prefix = packagePolicyKey ?? serverPolicyKey;
+	return `${prefix}__${parsed.op}`;
+}
+
+function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
+	const inherited = firstPolicyMatch(keys, groupPolicies);
+	if (!inherited) return "Allow (default)";
+	return `${POLICY_LABELS[inherited.policy] || inherited.policy} (inherited from ${inherited.source})`;
+}
+
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
 	await updateGroupPolicy(key, value || null);
 	groupPolicies = await fetchGroupPolicies();
@@ -598,6 +685,7 @@ function renderMcpPolicySelect(key: string, current: string, testid: string, emp
 	return html`
 		<select class="tool-group-select"
 			data-testid=${testid}
+			data-policy-key=${key}
 			.value=${current}
 			@click=${(e: Event) => e.stopPropagation()}
 			@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
@@ -611,6 +699,28 @@ function renderMcpPolicySelect(key: string, current: string, testid: string, emp
 			<option value="ask" ?selected=${current === "ask"}>Ask</option>
 			<option value="never" ?selected=${current === "never"}>Never</option>
 		</select>
+	`;
+}
+
+function renderMcpOperationRow(tool: ToolInfo, policyKey: string, emptyPolicyLabel: string): TemplateResult {
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
+	const inherited = isInherited(origin);
+	const currentPolicy = groupPolicies[policyKey] || "";
+	return html`
+		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
+			data-testid="mcp-operation-row" data-tool-name=${tool.name} data-policy-key=${policyKey}
+			@click=${() => showEdit(tool)}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
+			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)}</span>
+			<span class="tool-row-desc">${tool.description}</span>
+			<div class="tool-row-actions">
+				<span class="tool-group-policy-label">Operation Policy:</span>
+				${renderMcpPolicySelect(policyKey, currentPolicy, "mcp-operation-policy", emptyPolicyLabel)}
+				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
+					${icon(Pencil, "sm")}
+				</button>
+			</div>
+		</div>
 	`;
 }
 
@@ -634,12 +744,12 @@ function renderMcpSection(): TemplateResult {
 						: server.status === "error"
 							? "text-red-600"
 							: "text-muted-foreground";
-					const serverPolicyKey = `mcp__${server.name}`;
+					const serverPolicyKey = mcpServerPolicyKey(server);
 					const serverPolicy = groupPolicies[serverPolicyKey] || "";
+					const serverEmptyPolicyLabel = inheritedMcpPolicyLabel(["mcp__"]);
 
-					// Group ops by sub-namespace. Flat servers — ops with no
-					// `subNamespace` — collapse into a single bucket keyed by `""`,
-					// which renders as one tool row whose name = the server.
+					// Group ops by sub-namespace. Flat servers with no
+					// `subNamespace` collapse into a single bucket keyed by `""`.
 					const bySub = new Map<string, McpOperationInfo[]>();
 					for (const op of server.tools) {
 						const parsed = parseMcpNameLocal(server.name, op);
@@ -651,7 +761,7 @@ function renderMcpSection(): TemplateResult {
 					const subKeys = Array.from(bySub.keys()).sort();
 
 					return html`
-						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name}>
+						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name} data-policy-key=${serverPolicyKey}>
 							<div class="tool-group-header"
 								data-testid="mcp-server-toggle"
 								tabindex="0" role="button"
@@ -662,8 +772,8 @@ function renderMcpSection(): TemplateResult {
 								<span class="tool-group-name">${server.name}</span>
 								<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
 								<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
-								<span class="tool-group-policy-label">Group Policy:</span>
-								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy")}
+								<span class="tool-group-policy-label">Server Policy:</span>
+								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
 							</div>
 							${server.status === "error" && server.error
 								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
@@ -675,17 +785,17 @@ function renderMcpSection(): TemplateResult {
 											: subKeys.map((sub) => {
 													const ops = bySub.get(sub)!;
 													const hasSub = sub.length > 0;
-													const toolPolicyKey = hasSub ? `mcp__${server.name}__${sub}` : `mcp__${server.name}`;
-													const toolPolicy = groupPolicies[toolPolicyKey] || "";
-													const inheritedPolicy = hasSub && !toolPolicy ? groupPolicies[serverPolicyKey] : "";
-													const emptyPolicyLabel = inheritedPolicy
-														? `${POLICY_LABELS[inheritedPolicy] || inheritedPolicy} (inherited from ${serverPolicyKey})`
-														: "Allow (default)";
+													const packagePolicyKey = mcpPackagePolicyKey(sub, ops, serverPolicyKey);
+													const packagePolicy = packagePolicyKey ? groupPolicies[packagePolicyKey] || "" : "";
+													const packageEmptyPolicyLabel = inheritedMcpPolicyLabel([serverPolicyKey, "mcp__"]);
+													const toolPolicyKey = packagePolicyKey ?? serverPolicyKey;
+													const toolPolicy = packagePolicyKey ? packagePolicy : serverPolicy;
+													const toolEmptyPolicyLabel = packagePolicyKey ? packageEmptyPolicyLabel : serverEmptyPolicyLabel;
 													const toolKey = `${server.name}::${sub}`;
 													const toolExpanded = expandedMcpTools.has(toolKey);
 													const toolLabel = hasSub ? sub : server.name;
 													return html`
-														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel}>
+														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel} data-policy-key=${toolPolicyKey}>
 															<div class="tool-group-header"
 																data-testid="mcp-tool-toggle"
 																tabindex="0" role="button"
@@ -695,14 +805,16 @@ function renderMcpSection(): TemplateResult {
 																<span style="display:inline-flex;transform:rotate(${toolExpanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
 																<span class="tool-group-name">${toolLabel}</span>
 																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
-																<span class="tool-group-policy-label">Tool Policy:</span>
-																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", emptyPolicyLabel)}
+																<span class="tool-group-policy-label">${hasSub ? "Package" : "Tool"} Policy:</span>
+																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel)}
 															</div>
 															${toolExpanded
 																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
 																		${ops.map((op) => {
+																			const operationPolicyKey = mcpOperationPolicyKey(server, op, serverPolicyKey, packagePolicyKey);
+																			const operationEmptyPolicyLabel = inheritedMcpPolicyLabel([packagePolicyKey, serverPolicyKey, "mcp__"]);
 																			const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
-																			return renderToolRow(tool);
+																			return renderMcpOperationRow(tool, operationPolicyKey, operationEmptyPolicyLabel);
 																		})}
 																	</div>`
 																: nothing}
@@ -800,15 +912,112 @@ async function handleScopeChange(scope: string): Promise<void> {
 	renderApp();
 }
 
+function firstDiagnosticString(diagnostic: ToolDiagnostic, keys: string[]): string | undefined {
+	for (const key of keys) {
+		const value = diagnostic[key];
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	return undefined;
+}
+
+function shortDiagnosticText(text: string, max = 360): string {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function diagnosticMessage(diagnostic: ToolDiagnostic): string {
+	const message = firstDiagnosticString(diagnostic, ["message", "reason", "invalidReason", "error", "detail", "details"]);
+	if (message) return shortDiagnosticText(message);
+	try {
+		return shortDiagnosticText(JSON.stringify(diagnostic));
+	} catch {
+		return "Tool override was reported invalid.";
+	}
+}
+
+function diagnosticSeverity(diagnostic: ToolDiagnostic): "error" | "warning" | "info" {
+	const raw = firstDiagnosticString(diagnostic, ["severity", "level", "type"])?.toLowerCase() ?? "";
+	if (raw.includes("error") || raw.includes("fail") || raw.includes("invalid")) return "error";
+	if (raw.includes("info") || raw.includes("ok")) return "info";
+	return "warning";
+}
+
+function diagnosticTitle(diagnostic: ToolDiagnostic): string {
+	const subject = firstDiagnosticString(diagnostic, ["toolName", "tool", "name", "groupDir", "group", "providerKey"]);
+	const status = firstDiagnosticString(diagnostic, ["status", "action"])?.toLowerCase() ?? "";
+	const skipped = diagnostic.skipped === true || status.includes("skip");
+	const label = skipped ? "Skipped tool override" : diagnosticSeverity(diagnostic) === "error" ? "Invalid tool override" : "Tool diagnostic";
+	return subject ? `${label}: ${subject}` : label;
+}
+
+function toolDiagnosticEntries(tool: ToolInfo): ToolDiagnostic[] {
+	const diagnostics = [
+		...normalizeToolDiagnostics(tool.invalidReason),
+		...normalizeToolDiagnostics(tool.diagnostics),
+	];
+	if ((tool.invalid === true || tool.valid === false) && diagnostics.length === 0) {
+		diagnostics.push({ severity: "error", message: "This tool was reported invalid by /api/tools." });
+	}
+	return diagnostics;
+}
+
+function renderDiagnosticChips(diagnostic: ToolDiagnostic): TemplateResult | typeof nothing {
+	const chips: Array<[string, string | undefined]> = [
+		["Code", firstDiagnosticString(diagnostic, ["code", "type"])],
+		["Group", firstDiagnosticString(diagnostic, ["groupDir", "group"])],
+		["Tool", firstDiagnosticString(diagnostic, ["toolName", "tool", "name"])],
+		["Source", firstDiagnosticString(diagnostic, ["sourcePath", "path", "file"])],
+		["Fallback", firstDiagnosticString(diagnostic, ["fallbackTool", "fallbackProvider", "fallback"])],
+	];
+	const visible = chips.filter(([, value]) => Boolean(value));
+	if (!visible.length) return nothing;
+	return html`
+		<div class="flex flex-wrap gap-1 mt-2">
+			${visible.map(([label, value]) => html`
+				<span class="text-[11px] px-1.5 py-0.5 rounded border border-border text-muted-foreground" title=${value!}>${label}: ${shortDiagnosticText(value!, 90)}</span>
+			`)}
+		</div>
+	`;
+}
+
+function renderToolDiagnosticsPanel(diagnostics: ToolDiagnostic[], title = "Tool diagnostics"): TemplateResult | typeof nothing {
+	if (!diagnostics.length) return nothing;
+	return html`
+		<div class="tools-section" data-testid="tool-diagnostics" style="max-width:900px;margin:0 auto 16px;border-color:color-mix(in oklch, var(--warning) 55%, var(--border));background:color-mix(in oklch, var(--warning) 10%, transparent);">
+			<h2 class="tools-section-title">${title}</h2>
+			<p class="tools-note">Invalid config-level tool overrides are skipped before agent launch. Bobbit will use a lower-priority fallback when one is available.</p>
+			<div class="flex flex-col gap-2 mt-3">
+				${diagnostics.map((diagnostic) => {
+					const severity = diagnosticSeverity(diagnostic);
+					return html`
+						<div data-testid="tool-diagnostic" class="rounded border border-border bg-card px-3 py-2">
+							<div class="flex items-center gap-2 text-sm font-semibold">
+								<span class="uppercase text-[10px] tracking-wide text-muted-foreground">${severity}</span>
+								<span>${diagnosticTitle(diagnostic)}</span>
+							</div>
+							<div class="tools-note mt-1">${diagnosticMessage(diagnostic)}</div>
+							${renderDiagnosticChips(diagnostic)}
+						</div>
+					`;
+				})}
+			</div>
+		</div>
+	`;
+}
+
+function renderToolDiagnosticBadge(tool: ToolInfo): TemplateResult | typeof nothing {
+	const diagnostics = toolDiagnosticEntries(tool);
+	if (!diagnostics.length) return nothing;
+	return html`<span class="config-readonly-note" data-testid="tool-diagnostic-badge" title=${diagnostics.map(diagnosticMessage).join("\n")}>Diagnostic</span>`;
+}
+
 function renderToolRow(tool: ToolInfo): TemplateResult {
-	const origin = (tool as any).origin as ConfigOrigin | undefined;
-	const overrides = (tool as any).overrides as ConfigOrigin | undefined;
+	const origin = isConfigOrigin(tool.origin) ? tool.origin : undefined;
 	const inherited = isInherited(origin);
 	return html`
 		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides, (tool as any).originPackName)}</span>
+			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)} ${renderToolDiagnosticBadge(tool)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -831,8 +1040,11 @@ function renderListView(): TemplateResult {
 		`;
 	}
 
+	const diagnosticsPanel = renderToolDiagnosticsPanel(toolDiagnostics);
+
 	if (tools.length === 0) {
 		return html`
+			${diagnosticsPanel}
 			<div class="tools-empty">
 				<p class="tools-empty-title">No tools found</p>
 				<p class="tools-empty-desc">Tools are registered by the agent runtime and appear here automatically.</p>
@@ -862,6 +1074,7 @@ function renderListView(): TemplateResult {
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 
 	return html`
+		${diagnosticsPanel}
 		<p class="text-sm text-muted-foreground mb-6" style="max-width: 700px; margin-inline: auto;">Tools are the capabilities available to agents \u2014 file editing, shell commands, web search, and more. This page lets you view and document them.</p>
 		<div class="tools-list">
 			${sortedGroups.map((groupName) => {
@@ -1005,6 +1218,33 @@ function renderContextTab(): TemplateResult {
 	`;
 }
 
+function renderPiExtensionProvenance(tool: ToolInfo): TemplateResult | string {
+	if (!isPiExtensionTool(tool)) return "";
+	const providers = tool.providers ?? [];
+	const hasCollision = providers.length > 1;
+	return html`
+		<div class="tools-pi-extension-card" data-testid="tool-pi-extension-provenance">
+			<div class="tools-pi-extension-title">Pi extension runtime tool</div>
+			<div class="tools-pi-extension-copy">This tool is registered by a standalone pi extension at session runtime. Bobbit policy is enforced by runtime tool name.</div>
+			${hasCollision ? html`
+				<div class="tools-pi-extension-warning" data-testid="tool-pi-extension-collision">
+					Multiple providers share this runtime tool name; policy applies to all calls named <code>${tool.name}</code>.
+				</div>
+			` : ""}
+			${providers.length ? html`
+				<div class="tools-pi-extension-providers">
+					${providers.map((provider) => html`
+						<div class="tools-pi-extension-provider" data-testid="tool-pi-extension-provider" title=${provider.sourcePath ?? provider.providerKey}>
+							<span>${piProviderSummary(provider)}</span>
+							${provider.sourcePath ? html`<code>${provider.sourcePath}</code>` : ""}
+						</div>
+					`)}
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
 function renderRendererTab(): TemplateResult {
 	if (!selectedTool) return html``;
 
@@ -1041,7 +1281,9 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
-					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides, (selectedTool as any).originPackName)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${selectedTool.origin || isPiExtensionTool(selectedTool) ? html`<div class="mb-1 inline-flex items-center gap-2">${renderToolOriginBadges(selectedTool)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${renderPiExtensionProvenance(selectedTool)}
+					${renderToolDiagnosticsPanel(toolDiagnosticEntries(selectedTool), "Tool diagnostics")}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
@@ -1086,19 +1328,20 @@ function renderEditView(): TemplateResult {
 
 function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!selectedTool) return "";
-	const origin = (selectedTool as any).origin as ConfigOrigin | undefined;
-	if (!origin) return "";
+	const origin = isConfigOrigin(selectedTool.origin) ? selectedTool.origin : undefined;
+	const providers = selectedTool.providers ?? [];
 
 	// Market-pack entities are read-only — managed via the Marketplace (install/
 	// uninstall), NOT the legacy customize/override endpoints (which can't remove
 	// an installed pack). Gate the actions off when the entity carries a pack tag.
 	// See docs/design/pack-based-marketplace.md §3.2 / finding #2.
-	const originPackName = (selectedTool as any).originPackName as string | null | undefined;
-	const originPackId = (selectedTool as any).originPackId as string | null | undefined;
-	if (originPackName || originPackId) {
+	const originPackName = selectedTool.originPackName || providers[0]?.packName || null;
+	const originPackId = selectedTool.originPackId || null;
+	if (originPackName || originPackId || isPiExtensionTool(selectedTool)) {
 		return html`<span class="config-readonly-note" data-testid="market-readonly-note"
-			title="Installed from pack '${originPackName ?? originPackId}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
+			title="Installed from pack '${originPackName ?? originPackId ?? "pi extension"}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
 	}
+	if (!origin) return "";
 
 	const scope = getConfigScope();
 	const projectId = getConfigProjectId();
@@ -1111,7 +1354,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
 				}
-			}}>Customize at Server Level</button>`;
+			}}>Customize in Headquarters</button>`;
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
@@ -1139,7 +1382,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
 				}
-			}}>Revert to Inherited</button>`;
+			}}>Revert to Headquarters</button>`;
 		}
 	}
 	return "";

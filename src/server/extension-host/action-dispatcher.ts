@@ -52,6 +52,9 @@ export interface ActionHandlerCtx {
 	 *  from the persisted session. Absent for sessions with no resolvable cwd (the
 	 *  worker then keeps its real startup cwd). */
 	workingDir?: string;
+	/** True when the verified calling session is already archived; route handlers
+	 *  use this lifecycle fact to stop stale restored panels and polling loops. */
+	sessionArchived?: boolean;
 }
 
 export type ActionHandler = (ctx: ActionHandlerCtx, args: unknown) => Promise<unknown> | unknown;

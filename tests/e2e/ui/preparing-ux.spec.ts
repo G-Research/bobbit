@@ -78,6 +78,13 @@ test.describe("Preparing UX (worktree-backed session)", () => {
 		const banner = page.getByText("Setting up worktree…");
 		await expect(banner).toBeVisible({ timeout: 2000 });
 
+		// While preparing, the sidebar row replaces the transient "New session"
+		// title with "preparing…" instead of appending a suffix that can wrap.
+		const preparingRow = page.locator("[data-session-id]").filter({ has: page.getByTestId("sidebar-session-title-text").filter({ hasText: "preparing…" }) }).first();
+		await expect(preparingRow).toBeVisible({ timeout: 2000 });
+		await expect(preparingRow.getByTestId("sidebar-session-title-text")).toHaveText("preparing…");
+		await expect(preparingRow).not.toContainText("New session");
+
 		// Editor is hidden while preparing — the AgentInterface gate at line
 		// 1642 hides <message-editor> when state.isPreparing.
 		await expect(page.locator("message-editor")).toHaveCount(0);

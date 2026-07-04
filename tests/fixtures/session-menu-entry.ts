@@ -40,10 +40,10 @@ function registerSessionMenu(): void {
 	registerPackEntrypoints(
 		[
 			{ id: "tp.route", packId: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
-			{ id: "sm.route", packId: "tp", kind: "session-menu", label: "Open Demo", target: { route: "demo.route", params: { itemId: "x1" } } },
+			{ id: "sm.route", packId: "tp", kind: "session-menu", label: "Open Demo", icon: "terminal", target: { route: "demo.route", params: { itemId: "x1" } } },
 			{ id: "sm.missing", packId: "tp", kind: "session-menu", label: "Missing Route", target: { route: "missing.route" } },
-			{ id: "sm.spawn", packId: "tp", kind: "session-menu", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
-			{ id: "sm.fail", packId: "tp", kind: "session-menu", label: "Broken Walkthrough", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
+			{ id: "sm.spawn", packId: "tp", kind: "session-menu", label: "PR Walkthrough", icon: "git-pull-request", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
+			{ id: "sm.fail", packId: "tp", kind: "session-menu", label: "Broken Walkthrough", icon: "no-such-icon", target: { action: "spawn", route: "run", panelId: "demo.viewer" } },
 		] as any,
 		"proj1",
 	);
@@ -160,6 +160,27 @@ function menuLabels(): string[] {
 	return [...document.querySelectorAll("sidebar-actions-popover [role='menuitem']")].map((el) => normalizeLabel(el.textContent));
 }
 
+function menuIconSignaturesByLabel(): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	for (const row of document.querySelectorAll<HTMLElement>("sidebar-actions-popover [role='menuitem']")) {
+		const label = normalizeLabel(row.querySelector("[data-sidebar-actions-label]")?.textContent);
+		if (!label) continue;
+		const svg = row.querySelector<SVGElement>("[data-sidebar-actions-popover-icon] svg");
+		out[label] = svg
+			? Array.from(svg.children).map((child) => {
+				const el = child as Element;
+				const attrs = ["d", "points", "cx", "cy", "r", "x1", "x2", "y1", "y2"]
+					.map((name) => [name, el.getAttribute(name)] as const)
+					.filter(([, value]) => value !== null)
+					.map(([name, value]) => `[${name}=${JSON.stringify(value)}]`)
+					.join("");
+				return `${el.tagName.toLowerCase()}${attrs}`;
+			})
+			: [];
+	}
+	return out;
+}
+
 function launcherEntryIdsFromActions(): string[] {
 	const launchers = listLauncherEntrypoints("session-menu" as any);
 	return launchers
@@ -224,6 +245,7 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 (window as any).__closeMenu = closeMenu;
 (window as any).__menuOpen = menuOpen;
 (window as any).__menuLabels = menuLabels;
+(window as any).__menuIconSignaturesByLabel = menuIconSignaturesByLabel;
 (window as any).__launcherEntryIdsFromMenu = launcherEntryIdsFromActions;
 (window as any).__clickMenuEntry = clickMenuEntry;
 (window as any).__launchers = (kind?: any) => listLauncherEntrypoints(kind).map((l) => l.id);

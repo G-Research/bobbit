@@ -1,8 +1,6 @@
 # REST API
 
-Most REST routes require `Authorization: Bearer <token>`; general API calls may also pass the token as `?token=`.
-
-Host-sensitive operator flows are stricter. Claude Code preference confirmation must be minted and consumed by the same operator browser session, and bearer/query-token traffic alone is intentionally insufficient.
+All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
 
 ### Error response shape
 
@@ -47,7 +45,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
-| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Accepts `runtime: "claude-code"` or `model: "claude-code/<alias>"` for local Claude Code runtime sessions. |
+| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
@@ -55,11 +53,14 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new session from an archived source. Pi sessions rehydrate from a cloned `.jsonl`; Claude Code sessions preserve `claudeCodeSessionId` and resume through the local CLI. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
+| `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
+| `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
@@ -70,23 +71,18 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
-| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
-| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
+| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400). See [Transcript reads and tool-result redaction](read-session.md). |
+| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
 
-### Session runtime metadata
+### Transcript reader and `read_session`
 
-`POST /api/sessions` selects the runtime from `runtime` or `model`: `runtime: "claude-code"` and `model: "claude-code/<alias>"` create a host-local Claude Code session; omitted runtime and API-backed models keep the Pi runtime. The Claude Code runtime is host-only and uses the configured local CLI/login; see [Claude Code local runtime](claude-code-runtime.md).
+`GET /api/sessions/:id/transcript` and the `read_session` tool share the same transcript reader but use different defaults. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted. Pass `include_tool_results=false`, `includeToolResults=false`, or `0` to get the redacted shape. The agent-facing `read_session` tool always sends the include flag and defaults it to false, so tool result bodies are omitted unless the agent passes `include_tool_results: true`.
 
-`GET /api/sessions`, `GET /api/sessions/:id`, and archived rows include runtime metadata when present. Create-session responses include the runtime and Claude Code fields needed for immediate UI hydration.
-
-- `runtime` — `"pi"` or `"claude-code"`; missing legacy rows are treated as Pi.
-- `modelProvider` / `modelId` — persisted model provider and id in list/detail/archive responses. Claude Code rows use `modelProvider: "claude-code"` and the selected alias as `modelId`.
-- `claudeCodeSessionId` — Claude Code CLI session id, separate from Bobbit's session id.
-- `claudeCodeExecutable`, `claudeCodePermissionMode`, `claudeCodeModelAlias` — local runtime command/config metadata persisted for restore and UI state.
+`verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then run a narrow opt-in read. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
 
 ### Archived session list and query search
 
@@ -155,7 +151,7 @@ Success returns `200`:
 { "ok": true, "sessionId": "session-id" }
 ```
 
-Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, and reattaches clients. Pi-backed sessions switch the new process back to the existing transcript file; Claude Code sessions restart the local `claude` process and resume with `--resume <claudeCodeSessionId>` when available. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
+Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, reattaches clients, and switches the new process back to the existing transcript file. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
 
 For normal role-derived sessions, restart recomputes allowed tools from the current role/tool/group/MCP policy cascade instead of reusing the previous live allow-list. This is why an MCP group changed from `never` to `ask` or `allow` takes effect after `Refresh agent`. Persisted session allow-list constraints and live `session-only` / `one-time` grants are still carried across where appropriate, and explicit role-level `never` policies still take precedence over group defaults.
 
@@ -174,7 +170,7 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from the source's conversation history**. Pi-backed sessions use the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint); Claude Code sessions preserve `claudeCodeSessionId` and resume through Claude Code's `--resume` path. It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
 
 Request body (optional):
 
@@ -200,7 +196,7 @@ Success returns `201`:
 
 `goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
 
-The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, selected model, and runtime metadata. For Claude Code, that metadata includes the source `claudeCodeSessionId`; Pi `switch_session` is not used for Claude Code runtime sessions.
+The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
 
 Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
 
@@ -248,7 +244,7 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
-| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. A rejected goal workflow seed writes no draft, creates no rev, emits no `__proposal_rev_v1__` success marker, and broadcasts no `proposal_update`; the real `propose_goal` tool call must persist/broadcast an errored tool result (`isError: true`) so the UI can render/open the failed attempt from the transcript tool-call input plus the validation result. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
@@ -283,13 +279,16 @@ Structured proposal validation failures share this JSON shape across seed, edit,
 | `FRONTMATTER_MALFORMED` | `400` | edit, seed | `goal.md` frontmatter fence is broken or unparseable. |
 | `YAML_PARSE_ERROR` | `400` | edit, seed | Post-edit YAML body fails to parse. |
 | `MISSING_REQUIRED_FIELD` | `400` | edit, seed | Per-type required-field whitelist failed (`field` set). |
+| `MISSING_WORKFLOW` | `400` | goal seed | Project workflows exist but `propose_goal.workflow` was omitted, empty, or whitespace-only. Response includes `availableWorkflows` when known. |
+| `UNKNOWN_WORKFLOW` | `400` | goal seed | `propose_goal.workflow` is not one of the linked project's workflow IDs. Response includes `availableWorkflows` when known. |
+| `UNKNOWN_OPTIONAL_STEP` | `400` | goal seed | `propose_goal.options` names a step that is not an optional verify step on the selected workflow. Response includes `validOptionalSteps` when known. |
 | `STRUCTURAL_VALIDATION_FAILED` | `400` | edit, seed | Project YAML fails the structural validator shared with `PUT /api/projects/:id/config`. |
 
 **Atomic rollback.** Any failure in `edit` or `seed` after the per-type parse step leaves the file on disk byte-for-byte identical to its pre-call state — the implementation writes to `<file>.tmp` and `fs.rename`s only after parse + validate succeed. A failed edit followed by `GET` returns the original body unchanged.
 
 **Path safety.** `:id` is validated against `/^[A-Za-z0-9_-]+$/` and `:type` against the union literal; invalid values return `400 {error:"Unknown proposal type: ..."}` before any disk access.
 
-**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate", rev}` per surviving file (where `rev` is computed from the highest integer in the `<type>.history/` dir, or `0` for legacy sessions predating the snapshot system), so reloading a browser or restarting the server mid-edit yields the same proposal content without a separate content persistence layer. Rehydrate does not open tabs; the side-panel workspace remains authoritative for whether `proposal:<type>` is present.
+**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate", rev}` per surviving file (where `rev` is computed from the highest integer in the `<type>.history/` dir, or `0` for legacy sessions predating the snapshot system), so reloading a browser or restarting the server mid-edit yields the same proposal content without a separate content persistence layer. Rehydrate does not open tabs; the side-panel workspace remains authoritative for whether `proposal:<type>` is present. Failed goal workflow-validation attempts are the exception: because no file/rev exists, their reopen metadata is recovered from the persisted transcript tool call/result rather than from this endpoint.
 
 **Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
@@ -312,17 +311,68 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. See [Hierarchical goal metadata](design/goal-metadata.md). |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
-| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
-| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
+| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
+| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
-| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
-| `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
+| `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+
+### Git commit lists and commit-scoped diffs
+
+The git-status widget uses the commit endpoints to explain what changed on a branch before a push, pull, or merge action. The same response shape is used for session-scoped and goal-scoped commit modals so the UI can render expandable commit rows without issuing one request per commit.
+
+`GET /api/sessions/:id/commits` returns commits for the session branch. By default it lists unpushed commits relative to the upstream branch, falls back to recent `HEAD` commits when no upstream exists, supports `direction=behind` for incoming commits, and supports `vs=primary` to compare against the resolved primary ref. `GET /api/goals/:id/commits` returns commits on the goal branch relative to the primary branch when that comparison is available. Goal requests also accept `limit` clamped to the server's safe range.
+
+Response envelope:
+
+```json
+{
+  "commits": [
+    {
+      "sha": "9f3c1a8d4e...",
+      "shortSha": "9f3c1a8",
+      "message": "Add commit file diffs",
+      "author": "Ada Developer",
+      "timestamp": "2026-06-25T12:34:56.000Z",
+      "filesChanged": 2,
+      "insertions": 18,
+      "deletions": 4,
+      "files": [
+        { "path": "src/ui/components/GitStatusWidget.ts", "status": "M", "statusLabel": "modified" },
+        { "oldPath": "docs/old.md", "path": "docs/new.md", "status": "R", "statusLabel": "renamed" }
+      ]
+    }
+  ]
+}
+```
+
+`files[]` comes from name-status git output with rename detection enabled. Known status labels are `modified`, `added`, `deleted`, and `renamed`; unknown statuses are preserved and lowercased for display. For renamed files, `oldPath` is the source path and `path` is the destination path. Click targets should request the destination `path`; the diff endpoint includes rename metadata when Git reports it.
+
+`GET /api/{sessions|goals}/:id/git-diff?file=<path>` keeps the existing working-tree diff behavior. Adding `commit=<sha>` switches the endpoint to a commit-scoped diff for that file:
+
+```http
+GET /api/sessions/:id/git-diff?commit=9f3c1a8&file=src%2Fui%2Fcomponents%2FGitStatusWidget.ts
+GET /api/goals/:id/git-diff?commit=9f3c1a8&file=docs%2Fnew.md
+```
+
+The response is `{ "diff": "...unified diff..." }` and uses the same truncation behavior as working-tree diffs, including the truncation marker when the payload exceeds the configured diff size limit. Multi-repo callers may pass `repo=<repoName>` to route the diff to a specific repo worktree when one is registered. The Git status modal parses this raw string client-side with the shared unified-diff parser; see [Git status rich diff viewer](git-status-diff-viewer.md).
+
+Validation and errors:
+
+- `commit` is optional. When present, it must be a 4- to 40-character hexadecimal SHA that resolves to a commit object; otherwise the endpoint returns `400 { "error": "Invalid commit" }`.
+- `file` is required for commit-scoped diffs. File paths that are empty, contain traversal (`..`), are POSIX/Windows absolute paths, or start with a Windows drive prefix are rejected with `400 { "error": "Invalid file path" }`.
+- If the selected commit/file pair has no diff, the endpoint returns `404 { "error": "No diff found" }`.
+- No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE", goalId, projectId, branch: null, worktreePath: null }` for git-dependent goal endpoints instead of falling back to the server checkout. Headquarters responses use copy explaining that the goal runs in the server directory without a git worktree.
+- Unknown sessions/goals and missing worktrees use the same not-found responses as the existing git-status and git-diff endpoints.
+
+Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, the rich diff viewer opens, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
 
 ### Archived goal list and query search
 
@@ -361,7 +411,7 @@ Success or unavailability both return `200` with a discriminated response:
 ```ts
 type GoalGithubLinkResponse =
   | { available: true; url: string; kind: "pr" | "branch" }
-  | { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+  | { available: false; reason: "no-branch" | "no-worktree" | "no-github-remote" | "goal-not-found"; message?: string };
 ```
 
 Resolution order:
@@ -370,7 +420,7 @@ Resolution order:
 2. Otherwise look up PR status for the goal branch using `gh` through `execFile` argument arrays, not shell command strings.
 3. If no PR URL exists, read `origin` with `git remote get-url origin` through `execFile`.
 4. Strip embedded credentials, accept only GitHub remotes, and build an encoded branch tree URL.
-5. Return `available: false` for missing goals, goals without branches, missing/non-GitHub remotes, or git lookup failures.
+5. Return `available: false` for missing goals, goals without branches/worktrees, missing/non-GitHub remotes, or git lookup failures.
 
 Branch names are never interpolated into a shell command; PR lookup and remote resolution both go through `execFile` argument arrays. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for how the menu item mirrors the PR badge rather than calling this endpoint.
 
@@ -403,10 +453,10 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
 | `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
-| `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/steer` | Steer a team agent mid-turn (`{ sessionId, message }`) |
+| `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
+| `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
+| `POST` | `/api/goals/:id/team/prompt` | Prompt or steer a team agent, owned helper child, or direct-child goal team lead. Body `{ sessionId, message, mode?: "prompt" | "steer", workflowGateId?, inputGateIds? }`; default mode is `"steer"`. See [Session prompt tools](session-prompt-tools.md). |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
@@ -426,12 +476,42 @@ client-trusted). All call the shared `OrchestrationCore` in-process. See
 | `GET` | `/api/sessions/:id/orchestrate/children` | List the owner's tracked child agents |
 | `POST` | `/api/sessions/:id/orchestrate/spawn` | Non-blocking spawn (single or `parallel`); child inherits the owner's current model unless overridden |
 | `POST` | `/api/sessions/:id/orchestrate/delegate` | Blocking one-shot: spawn → wait for **all** → auto-dismiss; drop-in `delegate` parity. Always 2xx; per-child `status` carries success/timeout/failure |
-| `POST` | `/api/sessions/:id/orchestrate/prompt` | Run-if-idle / queue a prompt to an owned child (`{ childSessionId, message }`) |
-| `POST` | `/api/sessions/:id/orchestrate/steer` | Mid-turn steer an owned child (`409` if the child is not streaming) |
+| `POST` | `/api/sessions/:id/orchestrate/prompt` | Prompt or steer an owned child (`{ childSessionId, message, mode?: "prompt" | "steer" }`); default mode is `"steer"` for current tool callers |
+| `POST` | `/api/sessions/:id/orchestrate/steer` | Backward-compatible mid-turn steer for an owned child (`409` if the child is not streaming) |
 | `POST` | `/api/sessions/:id/orchestrate/abort` | Force-abort an owned child |
 | `POST` | `/api/sessions/:id/orchestrate/wait` | Wait for the **first** awaited child to settle (chunked heartbeat, like `/wait`) |
-| `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child |
+| `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child; returns the structured dismiss result documented below |
 | `GET` | `/api/sessions/:id/children-count` | Count + list (`{ count, children: [{ id, title }] }`) the session's live **and dormant/persisted** child agents, using the same predicate as the archive cascade. Backs the non-goal archive confirmation modal's child-agent enumeration |
+
+#### Dismiss response shape
+
+Both dismiss routes return the same structured shape for valid dismiss requests:
+
+```json
+{
+  "ok": true,
+  "status": "dismissed",
+  "sessionId": "child-session-id",
+  "message": "Child session child-session-id dismissed.",
+  "retryable": false
+}
+```
+
+| `status` | HTTP | Semantics |
+|---|---:|---|
+| `dismissed` | `200` | Owned live target was terminated and archived. |
+| `already-dismissed` | `200` | Owned target is already not live or archived; this is idempotent success and should not be retried. |
+| `not-owned` | `403` | Target exists but is not owned by the caller/goal, the caller is not the authentic owner/team lead, or the target is the team lead itself. |
+| `not-found` | `404` | No live, persisted, or remembered target exists for that session id. |
+| `failed` | `500` | Real termination/archive failure; check `message` and `retryable`. |
+
+For `/api/sessions/:id/orchestrate/dismiss`, the authenticated per-session secret must
+resolve to `:id`; otherwise the route returns structured `not-owned`. For
+`/api/goals/:id/team/dismiss`, tracked team-agent cleanup is team-lead-only. The same goal
+route also supports a team lead's own non-team helper child as a fallback, but only when the
+per-session secret resolves to that team lead. See [orchestration.md — `team_dismiss`
+outcomes](orchestration.md#team_dismiss-outcomes) for duplicate-dismiss, retry, and UI/tool
+semantics.
 
 ### Tasks
 
@@ -476,11 +556,13 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/roles` | List all roles. Response roles include the resolved `modelResolution` field-level source and inheritance metadata. |
+| `GET` | `/api/roles` | List all roles |
 | `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory?, model?, thinkingLevel? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. `model` is `"<provider>/<modelId>"` format and overrides `default.sessionModel` / `default.reviewModel` for sessions of this role. `thinkingLevel` is one of `"off" | "minimal" | "low" | "medium" | "high" | "xhigh"` (clamped to the role's model capability at write time when `model` is set; see [docs/thinking-levels.md](thinking-levels.md)). |
-| `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies`, derived `allowedTools`, and resolved `modelResolution` field-level source and inheritance metadata) |
+| `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies` and derived `allowedTools`) |
 | `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, clamped to the role's model capability when `model` is set). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
+
+Role list/mutation routes that accept `projectId` treat `projectId=headquarters` as server/Headquarters scope for non-workflow config. Created or customized roles are stored in server config and appear with origin `server` (labelled Headquarters in the UI), not as a duplicate project override.
 
 ### Tool Group Policies
 
@@ -489,12 +571,16 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | `GET` | `/api/tool-group-policies` | Get all group default policies as `Record<string, GrantPolicy>` |
 | `PUT` | `/api/tool-group-policies/:group` | Set or clear a group default policy (`{ policy: GrantPolicy \| null }`). Valid values: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Pass `null` to clear. |
 
+Tool and tool-policy resolution follows the same Headquarters alias rule as roles: `projectId=headquarters` resolves server/Headquarters scope.
+
 ### Slash Skills
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
 | `GET` | `/api/slash-skills/details` | Full slash skill details including content, file paths, and `directories` array listing all scanned directories (default + custom) |
+
+Slash-skill discovery normalizes `projectId=headquarters` to server/Headquarters config while using the server run directory as the discovery cwd.
 
 ### Assistant Prompts
 
@@ -531,23 +617,65 @@ Staff records include a persisted `accessory` string as part of the staff identi
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List visible registered projects in persisted project order. Hidden projects, including the synthetic `system` project, are excluded. |
-| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
-| `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
-| `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. |
-| `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). See [add-project-preflight.md](add-project-preflight.md). |
-| `GET` | `/api/projects/:id` | Get a single project. |
+| `GET` | `/api/projects` | List visible registered projects in persisted project order. Headquarters appears first by default unless `showHeadquartersInProjectLists === false`. Hidden projects, including the synthetic `system` project, are excluded. |
+| `POST` | `/api/projects` | Register a normal project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`; an upsert for the server workspace returns the existing Headquarters project. Without upsert, the server workspace returns `409 { code: "HEADQUARTERS_ALREADY_EXISTS", projectId: "headquarters" }`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
+| `PUT` | `/api/projects/order` | Persist the full normal-project ID order for sidebar project drag reorder. Headquarters is anchored first and must not be included. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
+| `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. For the server workspace, remediation that would archive gateway-owned `.bobbit` state is removed and the report explains that Headquarters already owns the path. |
+| `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). Returns 403 `HEADQUARTERS_IMMUTABLE` for the server/Headquarters-owned `.bobbit` state. See [add-project-preflight.md](add-project-preflight.md). |
+| `GET` | `/api/browse-directory?path=&prefix=&limit=` | Directory-only listing used by Add Project Browse and typeahead. See [Add Project directory helpers](#add-project-directory-helpers). |
+| `POST` | `/api/create-directory` | Create the typed Add Project directory's final path segment. See [Add Project directory helpers](#add-project-directory-helpers). |
+| `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
-| `PUT` | `/api/projects/:id` | Update name/color. |
-| `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk). Any project may be removed, including the last visible one — when zero non-hidden projects remain, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow. |
+| `PUT` | `/api/projects/:id` | Update normal-project name/color/root/palette. Headquarters and hidden/system projects are immutable. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk). The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+
+#### Add Project directory helpers
+
+`GET /api/browse-directory` powers the Browse modal and directory-picker typeahead.
+It accepts optional query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `path` | Directory to list. Defaults to the gateway's configured CWD. |
+| `prefix` | Case-insensitive basename prefix. Applied before per-entry stat calls. |
+| `limit` | Positive integer maximum number of directory entries to return, clamped server-side. When more entries match, the response includes `truncated: true`. |
+
+Success returns:
+
+```json
+{ "current": "/repo", "parent": "/", "entries": [{ "name": "app", "path": "/repo/app" }], "truncated": false }
+```
+
+Only visible directories are returned; files, hidden directories, `node_modules`,
+and symlinks are skipped. Missing paths return `404`; non-directories or
+inaccessible paths return `400`; unreadable directories return `500`.
+
+`POST /api/create-directory` creates exactly one final path segment for the Add
+Project flow:
+
+```json
+{ "path": "/absolute/new-project" }
+```
+
+Success returns `200 { "path": "/resolved/new-project" }`. The endpoint does
+not create missing parents recursively.
+
+| Status | Code | Meaning |
+|---|---|---|
+| `400` | `invalid_path` | Missing, non-string, empty, or non-absolute `path`. |
+| `404` | `parent_not_found` | Parent is missing or not a directory. |
+| `403` | `permission_denied` | Stat or mkdir failed with a permission error. |
+| `409` | `already_exists` | Target already exists as a directory. The UI treats this as recoverable by refreshing detection/preflight. |
+| `409` | `exists_as_file` | Target exists but is not a directory. |
+| `500` | `create_failed` | Unexpected stat or mkdir failure. |
 
 #### Project order
 
-`GET /api/projects` returns only visible, non-system projects in the server-persisted order. Use the returned array order as the source of truth for sidebar grouping; visible project records may include a `position` field, but clients should not need to sort by it.
+`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is anchored first when visible and has no `position`; normal project records may include a `position` field, but clients should not need to sort by it.
 
 `PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
 
-`PUT /api/projects/order` saves a new global order for visible projects:
+`PUT /api/projects/order` saves a new global order for normal visible projects. Do not include Headquarters:
 
 ```http
 PUT /api/projects/order
@@ -556,13 +684,14 @@ Content-Type: application/json
 { "projectIds": ["project-c", "project-a", "project-b"] }
 ```
 
-`projectIds` must be the complete current list of visible, non-system project IDs in the requested order. On success, the server stores contiguous positions, returns `200` with the visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+`projectIds` must be the complete current list of normal visible project IDs in the requested order. Headquarters, hidden projects, and `system` are excluded. On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
 
 Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
 
 ```json
 {
   "projects": [
+    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server" },
     { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 0 },
     { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 1 },
     { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 2 }
@@ -576,7 +705,7 @@ Invalid requests return `400` and do not mutate the registry:
 { "error": "projectIds must be an array of strings", "code": "invalid_project_order" }
 ```
 
-`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, hidden project IDs, and the synthetic `system` project ID. Hidden/system projects do not participate in ordering and are never returned by `GET /api/projects`.
+`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, hidden project IDs, and the synthetic `system` project ID. Headquarters/system/hidden projects do not participate in user ordering; `system` is never returned by `GET /api/projects`.
 
 Stale complete-order mismatches return `409` and do not mutate the registry:
 
@@ -595,7 +724,7 @@ For the user-facing sidebar behavior, see [Sidebar project drag reorder](sidebar
 
 ### Project resolution contract
 
-`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Resolution order (no silent fallback):
+`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Headquarters satisfies this contract like any other registered project: pass `projectId: "headquarters"`, or a `cwd` inside the server run directory while Headquarters is registered. Resolution order (no silent fallback to an arbitrary normal project):
 
 1. If `body.projectId` is a non-empty string matching a registered project → use it.
 2. Else if `body.cwd` is a non-empty string inside some registered project's `rootPath` → use that project.
@@ -624,19 +753,19 @@ Why: `role` / `tool` assistants edit server-level config (custom roles, custom t
 
 ### Project Config
 
-Per-project overrides (recommended — scoped to a registered project):
+Per-project overrides are scoped to a registered project. Headquarters is special: `/api/projects/headquarters/config` is an alias over the server `ProjectConfigStore`, not a duplicate project config tree.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). |
+| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). For `:id=headquarters`, returns the server/Headquarters config file. |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults for all known config keys. |
-| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. |
-| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. |
+| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. Headquarters values resolve from the aliased server config. |
+| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. For `:id=headquarters`, writes server/Headquarters config. |
 | `GET` | `/api/projects/:id/qa-testing-config` | Returns `{ configured: boolean }` — `true` iff at least one component has a non-empty `config.qa_start_command`. Drives the UI toggle on the `agent-qa` optional verify step. Detailed per-key values are not surfaced here; the `/qa-test` skill reads them directly from `project.yaml`. |
 
 `PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, `base_ref`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. `base_ref` carries extra rules: tags, SHAs, non-`origin` remote prefixes, and (for `sandbox = docker` projects) local refs are rejected with 400 and a structured `{ field: "base_ref", error, details? }` payload; multi-repo saves additionally `git rev-parse --verify` the ref in every component repo and return per-component bullets in `details[]` when missing. Validation only runs when `base_ref` is present in the body. See [design/base-ref.md](design/base-ref.md). Two fields (`config_directories`, `sandbox_tokens`) are sent as structured native types (arrays of mappings); legacy JSON-string payloads for these keys are rejected with 400. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 — they live on `components[<name>].config[<key>]` now (see [internals.md — Multi-repo & components](internals.md#multi-repo--components)). Inline env vars directly into `qa_start_command`. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
 
-Server-level fallback (applied when no project override is set):
+Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 
 | Method | Path | Description |
 |---|---|---|
@@ -683,7 +812,7 @@ This is the explicit opt-in path for customising the global system prompt. The s
 
 ### Workflows
 
-Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
+Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). Use `projectId=headquarters` for Headquarters workflows; they live in the aliased server `project.yaml::workflows` and are still reported as project-scoped workflows. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
 
 | Method | Path | Description |
 |---|---|---|
@@ -694,7 +823,7 @@ Workflows are **project-scoped only** — there is no cascade and no system-scop
 | `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals). **Requires `projectId`** — 400 otherwise. |
 | `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID. **Requires `projectId`** — 400 otherwise. |
 
-There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated.
+There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated. Use `projectId=headquarters` for the visible server workspace workflow scope.
 
 ### Preferences
 
@@ -702,19 +831,65 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 |---|---|---|
 | `GET` | `/api/preferences` | Get all preferences |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
-| `POST` | `/api/preferences/claude-code/confirmation` | Mint a short-lived operator confirmation token required before sensitive Claude Code preference writes, such as executable-path changes or permission bypass. |
 
-`POST /api/preferences/claude-code/confirmation` accepts the same preference patch shape the caller intends to pass to `PUT /api/preferences`. It returns `{ confirmationRequired: false, sensitiveKeys: [] }` for non-sensitive patches, or `{ confirmationRequired: true, confirmationToken, expiresAt, sensitiveKeys }` for host-runtime changes.
+Model-related preference keys include `default.sessionModel`, `default.reviewModel`, `default.imageModel`, and `allowSessionModelFallback`. The fallback setting defaults to off when absent; see [Controlled session model fallback](session-model-fallback.md).
 
-Sensitive writes must then call `PUT /api/preferences` from the same operator browser session with header `X-Bobbit-Operator-Confirmation: <confirmationToken>`. Without that confirmation, or if the confirmation is expired/mismatched, `PUT /api/preferences` returns `403` with `{ confirmationRequired: true, sensitiveKeys }`. The confirmation route and the follow-up sensitive write reject bearer/query-token-only traffic; do not send `Authorization`, `?token=`, or session-bound agent headers for this operator-browser flow.
+`showHeadquartersInProjectLists` controls only whether Headquarters appears in normal project lists/sidebar/pickers. It defaults to visible when absent. Setting it to `false` does not delete or archive Headquarters sessions, goals, staff, config, or persisted state; explicit `projectId: "headquarters"` remains resolvable.
+
+`agentDir` and `agentDirHistory` are managed by the dedicated agent-directory workflow, not generic preferences. `PUT /api/preferences` rejects those keys with `400 { code: "AGENT_DIR_PREFERENCE_FORBIDDEN", use: "/api/agent-dir/pending" }` so callers cannot bypass validation, copy guidance, or restart-gated semantics.
+
+### Agent directory
+
+These endpoints back Settings → Maintenance → Agent Directory. They are restart-gated: they expose the active startup directory and save only the next-start preference. See [Configurable agent directory](configurable-agent-directory.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/agent-dir` | Return active, default, persisted/pending, next-start, restart, env override, and history state. |
+| `POST` | `/api/agent-dir/validate` | Validate/probe a candidate target path. Body `{ path }`. May create the directory to prove access. |
+| `PUT` | `/api/agent-dir/pending` | Save or clear the persisted next-start agent dir. Body `{ path }`, where `null` or empty clears. |
+| `POST` | `/api/agent-dir/migrate` | Explicitly copy allowlisted data from an active/historical configured source to the pending destination. Body `{ sourcePath, destinationPath, overwrite? }`. |
+
+`GET /api/agent-dir` returns:
+
+```ts
+type AgentDirSource = "BOBBIT_AGENT_DIR" | "persisted" | "default";
+
+interface AgentDirResolution {
+  dir: string;
+  source: AgentDirSource;
+  raw?: string;
+  projectRoot: string;
+  defaultDir: string;
+}
+
+interface AgentDirApiState {
+  activePath: string;
+  activeSource: AgentDirSource;
+  startup: AgentDirResolution;
+  defaultPath: string;
+  persistedPath?: string;
+  pendingPath?: string;
+  nextStart: AgentDirResolution;
+  restartRequired: boolean;
+  envOverride?: {
+    active: true;
+    source: "BOBBIT_AGENT_DIR";
+    value: string;
+    savedPathIgnored: boolean;
+  };
+  history: string[];
+}
+```
+
+`PUT /api/agent-dir/pending` returns the same state plus `guidance`. Non-empty paths are validated with the same rules as `POST /api/agent-dir/validate`: `~` expansion, relative-to-project resolution, git-worktree exclusion except `<projectRoot>/.bobbit/agent/`, symlink/realpath checks, `mkdir`, and read/write probe. Validation failures return `{ ok:false, error:{ code, message, rawInput, resolvedPath? } }` with HTTP 400 on save.
+
+`POST /api/agent-dir/migrate` is the Settings **Copy data** action. It accepts only user-selected sources known from the active or historical configured agent-directory set and destinations equal to the pending next-start directory. It does not auto-discover or special-case `~/.pi/agent`. It copies only `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`; existing files are skipped unless `overwrite:true`. The response is an `AgentDirMigrationReport` with `copied`, `skipped`, `overwritten`, `missing`, `warnings`, `errors`, and `guidance`. Relationship/symlink violations return HTTP 400 with a report-level `error.code`.
 
 ### Models
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/models` | List currently available models (`ApiModel[]`), including synthetic `claude-code/*` local-runtime rows. |
-| `GET` | `/api/claude-code/status` | Probe local Claude Code CLI readiness. Optional project scoping validates project config; the executable remains user/admin preference only. |
-| `POST` | `/api/claude-code/status/refresh` | Invalidate Claude Code status/model caches and re-probe readiness. |
+| `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
 | `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
 | `GET` | `/api/pi-ai/providers` | List built-in pi-ai provider IDs through a browser-safe server boundary |
 | `POST` | `/api/pi-ai/provider-key-test` | Test a built-in provider API key without persisting it |
@@ -722,10 +897,6 @@ Sensitive writes must then call `PUT /api/preferences` from the same operator br
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
 `GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`. For AI Gateway models, Bobbit derives this from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
-
-Claude Code rows are synthetic `ApiModel` entries, not API-billed model catalog rows. They use `provider: "claude-code"`, `api: "claude-code-runtime"`, `runtime: "claude-code"`, `localRuntime: true`, `runtimeLabel: "Claude Code (local)"`, `sessionSelectable`, and optional `sessionUnavailableReason`. Cost/context fields are compatibility metadata only; the UI labels limits and billing as Claude Code managed.
-
-`GET /api/claude-code/status`, `POST /api/claude-code/status/refresh`, and `GET /api/models` accept optional `projectId` or `cwd` query parameters to resolve project-scoped Claude Code default alias/permission config. Status responses include `{ available, authenticated, ready, executablePath, version?, reason?, message?, authenticationStatus?, modelAliases? }`. A normal installed CLI can be `ready: true` with `authenticationStatus: "unknown"`; login failures may still surface at session start.
 
 `GET /api/pi-ai/providers` and `POST /api/pi-ai/provider-key-test` are an internal browser-safe pi-ai boundary. Browser UI uses them instead of runtime bare value imports from `@earendil-works/pi-ai`, because the package index traverses Node-only exports such as environment API-key probing and causes browser builds to externalize `node:fs`. Keep provider catalog reads and key tests behind these server endpoints unless pi-ai exposes a browser-safe package export.
 
@@ -790,12 +961,25 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 **`GET /api/oauth/status?provider=<id>`** responses:
 
 - `200 { provider: "anthropic", authenticated: true, expires: 1775812345000 }` — credential present and not expired.
-- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or the stored credential is expired.
+- `200 { provider: "anthropic", authenticated: false, expires: 1700000000000 }` — a stored credential exists, but its expiry timestamp is in the past.
+- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or no confident expiry timestamp is available.
 - `400 { error: "<message>" }` — provider value rejected by `normalizeProvider`.
 
 The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
 
 The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`); it is never a token.
+
+#### Client expiry reminders
+
+After remote gateway authentication succeeds, the web client checks the Account-tab OAuth providers neutrally: `anthropic` (Anthropic), `openai-codex` (OpenAI), and `google-gemini-cli` (Google). The reminder exists to send users to the shared Account re-login surface instead of automatically launching an Anthropic-only OAuth flow.
+
+A provider is considered confidently expired only when `/api/oauth/status?provider=<id>` returns `authenticated: false` with a finite `expires` value earlier than the client clock. Missing credentials, never-authenticated rows, missing/non-finite `expires`, non-2xx responses, network errors, and invalid JSON are treated as indeterminate and do not show a reminder for that provider.
+
+When one or more providers are expired, the modal names the affected providers with their friendly labels. Its secondary left button is **Dismiss**; its primary right button is **Go to Account Settings**, which closes the modal and navigates to `#/settings/system/account` so the user can re-authenticate from Settings → Account. Dismissal never blocks normal app use.
+
+Dismissed reminders persist client-side by stable identity: `provider + expires` (stored as `${provider}:${expires}`). The same expired credential stays suppressed across rechecks and reloads, but a different provider or a later expiry timestamp resurfaces the modal. Successful Account-tab re-authentication clears dismissed reminder state for that provider so future distinct expiries can be shown.
+
+Only provider ids, friendly labels, and expiry timestamps participate in this client state. OAuth access tokens, refresh tokens, API keys, and other token material remain server-side and are never exposed by the status response or the reminder modal.
 
 **`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" | "google-gemini-cli" }`. Returns:
 
@@ -960,6 +1144,121 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 | `POST` | `/api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | Restore a previously captured immutable preview artifact into the session's live mount and broadcast `preview-changed`. The artifact must belong to `<sid>`; cross-session ids return `404`. Returns the same shape as the mount `POST` (`{ url, path, relPath, entry, mtime, contentHash, artifactId }`). Used by the preview-renderer Open button on historical `preview_open` tool cards. Equivalent to `POST /api/preview/mount` with `{ artifactId }` body; this dedicated route keeps the URL self-describing for the client restore path. |
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
 | `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
+
+### Maintenance
+
+Maintenance endpoints back Settings → Maintenance. They are preview-first and return structured counts so the UI can show cleaned, skipped, already-cleaned, and failed work. See [maintenance.md](maintenance.md) for the user/developer overview.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/maintenance/worktrees` | Canonical unified worktree inventory. Optional `?include=all|actionable|troubleshooting`; default is `all`. |
+| `POST` | `/api/maintenance/cleanup-worktrees` | Canonical cleanup for all safe or selected unified worktree inventory items. Also accepts legacy orphan cleanup bodies. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
+| `GET` | `/api/maintenance/archived-session-worktrees` | Legacy compatibility view of archived-session worktree candidates. `?includeAlreadyCleaned=1` includes disabled diagnostic rows whose worktree path and git metadata are already gone. |
+| `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Legacy compatibility cleanup for archived-session worktree candidates. |
+| `GET` | `/api/maintenance/orphaned-sessions` | List orphaned non-interactive sessions. |
+| `POST` | `/api/maintenance/cleanup-sessions` | Terminate selected orphaned sessions. |
+| `GET` | `/api/maintenance/expired-archives` | Return expired archive purge counts and bytes. |
+| `POST` | `/api/maintenance/purge-archives` | Purge expired archives. |
+| `GET` | `/api/maintenance/orphaned-index-rows` | List search index rows whose parent records are gone (`?projectId=`). |
+| `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows (`{ projectId }`). |
+
+**`GET /api/maintenance/worktrees`** returns the canonical inventory used by the unified Worktree Cleanup card. The inventory reconciles live runtime sessions, persisted live and archived sessions, goals, teams, delegates/child sessions, staff records, in-memory pool entries, git worktree metadata, and directories under each visible project's resolved worktree root.
+
+```ts
+type WorktreeInventoryClassification =
+  | "ready-to-clean"
+  | "protected-in-use"
+  | "archived-owned"
+  | "unowned-git-worktree"
+  | "pool-entry"
+  | "already-cleaned"
+  | "stale-filesystem-only"
+  | "scan-error";
+
+interface WorktreeInventoryReport {
+  items: WorktreeInventoryItem[];
+  counts: {
+    total: number;
+    readyToClean: number;
+    protectedInUse: number;
+    archivedOwned: number;
+    unownedGitWorktrees: number;
+    poolEntries: number;
+    alreadyCleaned: number;
+    needsAttention: number;
+    scanErrors: number;
+    defaultSelected: number;
+    byClassification: Record<string, number>;
+    byReason: Record<string, number>;
+    bySource: Record<string, number>;
+  };
+  generatedAt: number;
+}
+```
+
+Each item includes project/repo/component provenance, `repoPath`, resolved `worktreeRoot`, `path`, optional `branch`, source list, owners, classification/disposition, machine-readable `reason`, human-readable `detail`, booleans for actionability/selection/default selection, path/git metadata state, and branch-deletion hints.
+
+Use `?include=actionable` to return only cleanup candidates. Use `?include=troubleshooting` to return non-actionable diagnostic rows. Invalid `include` values return `400`.
+
+**`POST /api/maintenance/cleanup-worktrees`** accepts the canonical bodies:
+
+```json
+{ "mode": "all-safe" }
+```
+
+```json
+{ "mode": "selected", "itemIds": ["worktree-item-id"] }
+```
+
+`mode: "all-safe"` rejects selectors. `mode: "selected"` requires `itemIds` as an array of strings. If `itemIds` is present without `mode`, the request returns `400`. Non-object bodies are rejected.
+
+The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
+
+```ts
+interface CleanupWorktreeInventoryResponse {
+  counts: {
+    requested: number;
+    cleaned: number;
+    skipped: number;
+    failed: number;
+    branchDeleted: number;
+    worktreeRemoved: number;
+    notActionable: number;
+    byStatus: Record<string, number>;
+    byReason: Record<string, number>;
+  };
+  results: Array<{
+    itemId: string;
+    path?: string;
+    repoPath?: string;
+    branch?: string;
+    status: "cleaned" | "skipped" | "already-cleaned" | "failed";
+    reason?: string;
+    detail?: string;
+    worktreeRemoved: boolean;
+    branchDeleted: boolean;
+    error?: string;
+  }>;
+  generatedAt: number;
+}
+```
+
+Legacy orphan cleanup bodies are still supported for compatibility. `{}` cleans all currently safe legacy orphan candidates and `{ worktrees: [{ path, branch, repoPath }] }` cleans matching safe candidates. Legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
+
+**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape. It is a filtered view of the unified inventory containing only actionable unowned Bobbit `session/*` git worktrees with `{ path, branch, repoPath }`.
+
+**`GET /api/maintenance/archived-session-worktrees`** returns the existing archived-session compatibility shape: `sessions`, flattened `items`, `groups`, `selectionPresets`, additive `counts`, and `generatedAt`. It is backed by the unified inventory. Default scans omit sessions whose rows are all `already-cleaned`; use `?includeAlreadyCleaned=1` for diagnostics.
+
+**`POST /api/maintenance/cleanup-archived-session-worktrees`** accepts the legacy archived-session modes:
+
+- `{ "mode": "all" }`;
+- `{ "mode": "selected", "sessionIds": [...] }`;
+- `{ "mode": "selected", "worktrees": [{ "sessionId": "...", "key": "...", "repo": ".", "path": "..." }] }`;
+- `{ "mode": "category", "categories": [...], "projectId"?: "...", "repoPath"?: "..." }`;
+- `{ "mode": "preset", "presetId": "..." }`.
+
+These modes are compatibility filters over the fresh unified scan; they do not bypass safety checks. Archived-session worktree cleanup preserves archived session metadata, transcripts, proposals, prompts, search records, and archive visibility.
 
 ### Search
 
@@ -1499,9 +1798,9 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new session from an archived, non-goal, non-delegate source. Pi-backed sources rehydrate from a clone of the archived `.jsonl`; Claude Code sources preserve `claudeCodeSessionId` and use Claude Code's own `--resume` support instead of Pi `switch_session`. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. Pi sessions rehydrate the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions. Claude Code sessions pass the persisted `claudeCodeSessionId` to the local CLI and let Claude Code own resume. See [Claude Code local runtime](claude-code-runtime.md#continue-fork-restart-and-resume).
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless user-visible transcript content, no byte budget, no system-prompt injection.
 
 For archived worktree-backed sources, the persisted `worktreePath` is only a provenance marker that enables worktree mode for the continued session. The endpoint does not require that path or the archived `branch` to exist, and it does not reuse them. The continued session gets its own `session/<new-id8>` branch/worktree from the currently registered project repo and configured base ref. Archived cwd/worktree values may be used only as old values when rebasing runtime-only Pi cwd metadata in the cloned transcript.
 
@@ -1525,7 +1824,7 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over. If the source was worktree-backed, the returned `cwd` points at the newly claimed or cold-created worktree path, not the archived source path.
 
-For Pi-backed sessions, before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Claude Code sessions do not use `switch_session`; they carry `claudeCodeSessionId` into the new session and resume through the CLI. Message content and user-visible transcript text are preserved losslessly where the runtime supports resume.
+Before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
 
 **Error responses**:
 

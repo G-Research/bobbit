@@ -89,18 +89,15 @@ type ResolverCtx = {
 	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 };
 
+const RUNNABLE_RESOLVER_BLOCK = `
+const fallbackProviderAllowlistFromPrefs = () => undefined;
+const mergeHostAgentProviderEnv = (env) => env;
+${RESOLVER_BLOCK}
+`;
+
 const runResolver: (plan: ResolverPlan, ctx: ResolverCtx) => void = new Function(
 	"plan", "ctx",
-	[
-		// The extracted production block now continues through runtime hydration.
-		// This test is intentionally scoped to the model/thinking role fallback,
-		// so provide inert runtime helpers matching the Pi/default path.
-		"const resolveSessionRuntime = () => 'pi';",
-		"const assertRuntimeAllowedForSession = () => {};",
-		"const hydrateRuntimeOptions = (options) => options;",
-		"const readClaudeCodeConfig = () => undefined;",
-		RESOLVER_BLOCK,
-	].join("\n"),
+	RUNNABLE_RESOLVER_BLOCK,
 ) as any;
 
 // ── Test fixtures ─────────────────────────────────────────────────────────

@@ -40,9 +40,54 @@ read_pr_walkthrough_bundle mode=manifest format=compact limit=50
 read_pr_walkthrough_bundle mode=file path=src/example.ts format=compact hunkOffset=0 hunkLimit=20
 ```
 
-Compact output is lossless for the diff content the legacy bundle returned: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators are preserved. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
+For non-windowed content, compact output preserves the diff information reviewers need: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
 
 The compact manifest remains the authoritative envelope read: target metadata, SHAs, stats, warnings, limits, export metadata, and file summaries appear there. Compact follow-up reads (`summary`, `files`, and `file`) include only a short bundle reference plus the requested file or hunk data, so repeated target/changeset/limits blocks do not re-enter the model context.
+
+### Compact file read bounds
+
+`mode=file format=compact` is bounded in two layers so a reviewer cannot accidentally paste a generated bundle into its context window:
+
+1. **Server-side bundle read windowing.** The bundle store first applies the requested `hunkOffset`/`hunkLimit`, then windows the selected hunk bodies by bytes and lines before returning JSON to the tool. Long hunk headers and diff lines are clipped with inline markers; very large hunks stop after the read window is exhausted.
+2. **Compact formatter hard cap.** The extension formatter renders that windowed JSON to unified-diff-like text and enforces a final **64KiB** hard cap before returning model-facing text. It also caps individual compact diff lines and hunk line counts as defense in depth.
+
+Windowing is explicit in the response:
+
+- `truncated=true` means either the hunk page was partial or the read window changed the returned file body.
+- `hunk_truncated=true` is only hunk pagination (`hunkOffset`/`hunkLimit`), so callers can distinguish pagination from byte/line clipping.
+- `read_window` reports whether windowing applied, the configured budgets, returned/omitted line and byte counts, reasons such as `line-bytes`, `line-window`, or `content-bytes`, and guidance for a narrower follow-up read.
+- Windowed files, hunks, and long lines carry `is_truncated` / `truncated` markers plus inline text such as `bundle-store read window` or `bytes omitted`.
+- Manifest and file-list summaries surface the same state: `is_truncated` becomes true when either source truncation or read-window truncation applies, while `source_is_truncated` preserves whether the original parsed diff was already truncated.
+
+If a file needs more inspection, request a more specific slice instead of rereading a broad range:
+
+```text
+read_pr_walkthrough_bundle mode=file path=market-packs/terminal/lib/terminal-panel.js format=compact hunkOffset=0 hunkLimit=1
+```
+
+Use `format="legacy"` only for exact line ids or `old_line` / `new_line` fields; it is not the normal review path.
+
+### Generated and minified artifacts
+
+PR Walkthrough marks generated or low-signal files before they reach reviewer prompts. The generated-path classifier includes:
+
+- built marketplace pack output such as `market-packs/<pack>/lib/**`, including `market-packs/terminal/lib/terminal-panel.js`;
+- minified filenames containing `.min.` across extensions;
+- lockfiles such as npm, pnpm, Yarn, Bun, Cargo, Composer, Gem, Poetry, and similar ecosystem locks;
+- common build/output/generated directories such as `dist`, `build`, `coverage`, `.next`, `generated`, `__generated__`, and snapshots;
+- source names that conventionally indicate generated code, such as protobuf, grpc, designer, generated, or source-map files.
+
+Generated files get `is_generated=true` in manifest/file summaries and a warning that they may be low-signal for review. Path classification is separate from read-window truncation: a normal source file can be `is_truncated=true` because it is too large to return safely, and a generated file can also be windowed if it contains long minified lines.
+
+### Reviewer guidance for low-signal files
+
+Reviewer agents should spend context on source changes that can affect behavior:
+
+- Start with `read_pr_walkthrough_bundle mode=manifest format=compact` and use manifest `generated` / `truncated` flags to plan coverage.
+- Avoid generated, minified, lockfile, build, and bundle artifacts unless they are necessary to prove a user-facing change.
+- Prefer listing those files in the audit `generated_or_binary_files` section over reading their contents.
+- If inspection is necessary, use a path-specific compact read with a very small hunk window, usually `hunkLimit=1`, and stop once there is enough evidence.
+- Do not repeatedly reread large generated/truncated output. Treat `read_window` guidance and inline truncation markers as instructions to narrow the slice, not as a reason to request a broader one.
 
 ### Chunk saves and status
 
@@ -107,15 +152,30 @@ Scoped quota writes keep old reviews from blocking new ones:
 - Per-value and global key-count limits still apply.
 - An emergency per-pack byte ceiling still applies to all scoped writes, so a pack cannot shard prefixes indefinitely.
 
+The broad legacy per-pack quota is unchanged. A scoped write bypasses only that legacy
+cumulative cap; it still goes through `PackStore.put` validation, prefix/profile checks,
+per-value/key limits, and the emergency per-pack ceiling. A later generic unscoped write
+can still fail with `STORE_QUOTA_EXCEEDED` if the total pack directory is over the legacy
+cap; PR Walkthrough avoids that for first-party durable review state by supplying scoped
+quota options on those writes.
+
 PR Walkthrough uses these scoped profiles:
 
-| Data | Prefix | Profile |
+| Data | Key or prefix | Profile |
 |---|---|---|
 | Draft chunks, status, checkpoints | `reviews/<jobId>/draft/` | `review-draft` |
-| Final payload | `reviews/<jobId>/final/` | `review-final` |
-| Review binding/index metadata | exact review/index prefix | `default` |
+| Final payload | `reviews/<jobId>/final/` via `FINAL_QUOTA(jobId)` | `review-final` |
+| Reviewer index | exact `reviewers/<childSessionId>` key | `default` |
+| Review-scoped binding | `reviews/<jobId>/` via `REVIEW_BINDING_QUOTA(jobId)` | `default` |
+| Panel interaction state | exact `review-state/<panel>/<job>` key | `default` |
+| Finalize legacy binding marker | exact `binding/<childSessionId>` key | `default` |
+| Legacy publish artifacts | exact `cards/<base64url(changesetId)>` and `job/<jobId>` keys | `default` |
 
-Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured quota error, and existing chunks remain intact because `put` rejects before replacing the previous value.
+Exact-key default scopes are for small first-party metadata that should remain writable
+after draft and final review payloads push total pack bytes over the legacy unscoped cap.
+They do not raise the draft/final review limits or remove disk-exhaustion protection.
+
+Draft and final scopes are intentionally separate. A review can finalize while the final payload temporarily duplicates draft data, then draft cleanup frees the draft scope. An oversized single review is still rejected with a structured `STORE_QUOTA_EXCEEDED` error, and existing chunks remain intact because `put` rejects before replacing the previous value. Because finalization runs inside a `ModuleHost` worker, the worker proxy preserves the third `host.store.put` argument so `FINAL_QUOTA(jobId)` reaches the parent pack store.
 
 ## Incremental chunk submission
 
@@ -183,7 +243,8 @@ Finalization is commit-record atomic:
 
 1. Validate the YAML.
 2. Build the final record, including canonical YAML, job/change metadata, synthesized changeset/cards, warnings, `persistedAt`, `finalizedAt`, and `cardCount`.
-3. Write `reviews/<jobId>/final/payload` last with the `review-final` quota scope.
+3. Write `reviews/<jobId>/final/payload` last with `FINAL_QUOTA(jobId)`, where the
+   quota scope prefix is `reviews/<jobId>/final/` and the profile is `review-final`.
 4. Best-effort delete `reviews/<jobId>/staging/` and `reviews/<jobId>/draft/`.
 
 Readers treat only `reviews/<jobId>/final/payload` as submitted/finalized. Staging and draft data are invisible to `bundle`, `status`, and `recover` until that commit record exists.
@@ -197,7 +258,7 @@ Readers treat only `reviews/<jobId>/final/payload` as submitted/finalized. Stagi
 3. Save the full YAML as the `document` chunk.
 4. Finalize through the same path as `finalize_pr_walkthrough_submission()`.
 
-The `publish` route is compatibility-only for panel and legacy callers. When called by an authorized review-scoped caller, it writes the same final payload. When called without an authorized scoped binding, it falls back to legacy `cards/<changesetId>` and `job/<jobId>` artifacts so older direct flows continue to work, but it does not overwrite a review-scoped final payload.
+The `publish` route is compatibility-only for panel and legacy callers. When called by an authorized review-scoped caller, it writes the same final payload. When called without an authorized scoped binding, it falls back to legacy `cards/<changesetId>` and `job/<jobId>` artifacts so older direct flows continue to work, but it does not overwrite a review-scoped final payload. Those legacy artifact writes use exact-key `default` quota scopes because they are still first-party durable review metadata.
 
 ## Route and panel states
 
@@ -207,6 +268,8 @@ The pack panel calls routes through `host.callRoute`, never raw `fetch`.
 - `status` returns `running`, `draft`, `submitted`, or `error`. It reports `submitted` only when a final payload exists, with legacy `submitted/<jobId>` as a migration fallback. If chunks exist but no final payload exists, it returns `draft` with chunk summary.
 - `recover` is child-self reload recovery. It reads the caller's binding, returns finalized YAML when present, returns bounded draft state when chunks exist, and returns `PRW_REVIEW_MISSING` when data expired or was cleaned up.
 - `bundle` prefers `reviews/<jobId>/final/payload`. If no final payload exists, it can fall back to live diff plus legacy card artifacts where authorized.
+
+The panel persists interaction state such as completed cards, comments, collapsed files, and context expansions under `review-state/<panel>/<job>`. It writes both localStorage and best-effort host-store copies; the host-store copy uses an exact-key `default` quota scope so normal interaction state can persist even when review-scoped payloads have already pushed total pack bytes over the legacy unscoped cap. If host persistence fails, localStorage remains the fallback.
 
 Known route failures return structured data with `code`, `error`, and optional `details`. Client `host.callRoute` preserves JSON error bodies on non-2xx responses, and the panel renders actionable messages for schema, quota, missing/expired, unauthorized, and incomplete-finalization states instead of a bare `callRoute publish HTTP 500`.
 
@@ -224,6 +287,20 @@ Common codes include:
 - `STORE_QUOTA_EXCEEDED`
 - `STORE_QUOTA_PROFILE_INVALID`
 - `STORE_QUOTA_SCOPE_INVALID`
+
+## Operational recovery for draft-saved reviewers
+
+After deploying or restarting a gateway that includes the `ModuleHost` proxy fix, a reviewer
+that previously saved all chunks but failed final publication can retry from the same reviewer
+session if it still exists:
+
+1. Call `read_pr_walkthrough_submission_status()` to confirm saved chunks and missing sections.
+2. Call `finalize_pr_walkthrough_submission()` again, or use the panel's submit action if it
+   routes through the same reviewer session.
+
+The panel has no finalized UI state until `reviews/<jobId>/final/payload` exists. If the
+reviewer was archived or shutdown cleanup already removed the review prefix, start a new
+walkthrough.
 
 ## Lifecycle provider behavior
 
@@ -276,8 +353,9 @@ These fallbacks exist for already-running or restored reviewers. New code should
 
 Durable behavior is pinned by focused unit and browser tests:
 
-- `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
+- `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, PR Walkthrough panel state after scoped review payloads exceed the legacy cap, unscoped-write rejection, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
 - `tests/extension-host-server-host-api.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
+- `tests/extension-host-module-isolation.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
 - `tests/client-host-api.spec.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
 - `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum.
 - `tests/pr-walkthrough-lifecycle-provider.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.

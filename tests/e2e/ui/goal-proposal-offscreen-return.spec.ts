@@ -29,7 +29,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, createSessionViaUI, navigateToHash } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
 import {
 	apiFetch,
 	connectWs,
@@ -88,12 +88,7 @@ async function reloadToLandingWithoutRestoringLastSession(page: Page): Promise<v
 
 /** Open a fresh goal-assistant session via the "+ New Goal" button. */
 async function openGoalAssistantSession(page: Page): Promise<string> {
-	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
-	await newGoalBtn.click();
-	await page.waitForURL(/#\/session\//, { timeout: 15_000 });
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	return activeSessionId(page);
 }
 
@@ -162,17 +157,45 @@ async function setupOffscreen(page: Page): Promise<{ sidA: string; sidB: string 
 	return { sidA, sidB };
 }
 
-/** Assert the goal-assistant panel is populated with the off-screen proposal. */
-async function expectGoalPanelPopulated(page: Page): Promise<void> {
+/**
+ * Assert the goal-assistant panel is populated with the off-screen proposal.
+ *
+ * Fresh-connect restore has two async producers: the WS-auth proposal rehydrate
+ * and the goal-draft restore. First wait for the session-scoped proposal to be
+ * mirrored into the form state, then assert the rendered input. This avoids
+ * sampling the still-empty first paint under slow CI load.
+ */
+async function expectGoalPanelPopulated(page: Page, sid?: string): Promise<void> {
+	await expect(async () => {
+		const snapshot = await page.evaluate(() => {
+			const state = (window as any).bobbitState;
+			const slot = state?.activeProposals?.goal;
+			return {
+				selectedSessionId: state?.selectedSessionId ?? null,
+				assistantType: state?.assistantType ?? null,
+				slotSessionId: slot?.sessionId ?? null,
+				slotTitle: slot?.fields?.title ?? "",
+				previewTitle: state?.previewTitle ?? "",
+				previewSpec: state?.previewSpec ?? "",
+			};
+		});
+		if (sid) expect(snapshot.selectedSessionId, "active session must match before checking proposal state").toBe(sid);
+		expect(snapshot.assistantType, "goal assistant must be active before checking proposal state").toBe("goal");
+		if (sid) expect(snapshot.slotSessionId, "proposal slot must belong to the active goal session").toBe(sid);
+		expect(snapshot.slotTitle, "off-screen proposal slot must be restored on return").toBe(GOAL_TITLE);
+		expect(snapshot.previewTitle, "off-screen proposal title must be mirrored into the form state").toBe(GOAL_TITLE);
+		expect(snapshot.previewSpec, "off-screen proposal spec must be mirrored into the form state").toContain(GOAL_SPEC_TAIL);
+	}).toPass({ timeout: 30_000, intervals: [250, 500, 1000, 2000] });
+
+	// Let the Lit render scheduled by the final state update commit before
+	// sampling the DOM input value.
+	await page.evaluate(() => new Promise<void>((resolve) => {
+		requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+	}));
+
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toBeVisible({ timeout: 20_000 });
-	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 15_000 });
-	await expect(async () => {
-		const spec = await page.evaluate(
-			() => ((window as any).bobbitState?.previewSpec as string) ?? "",
-		);
-		expect(spec, "off-screen proposal spec must be restored on return").toContain(GOAL_SPEC_TAIL);
-	}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
+	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 10_000 });
 }
 
 test.describe("Goal proposal off-screen return @repro", () => {
@@ -187,7 +210,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		// rehydrates via REST. CURRENTLY FAILS on master: panel stays empty.
 		await navigateToHash(page, `#/session/${sidA}`);
 		await waitForGoalSessionReady(page, sidA);
-		await expectGoalPanelPopulated(page);
+		await expectGoalPanelPopulated(page, sidA);
 	});
 
 	test("(b) slow-path fresh WS connect surfaces the off-screen proposal", async ({ page }) => {
@@ -199,7 +222,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await reloadToLandingWithoutRestoringLastSession(page);
 		await navigateToHash(page, `#/session/${sidA}`);
 		await waitForGoalSessionReady(page, sidA);
-		await expectGoalPanelPopulated(page);
+		await expectGoalPanelPopulated(page, sidA);
 	});
 
 	test("(c) reload directly into the session surfaces the off-screen proposal", async ({ page }) => {
@@ -213,7 +236,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 20_000 });
 		await waitForGoalSessionReady(page, sidA);
-		await expectGoalPanelPopulated(page);
+		await expectGoalPanelPopulated(page, sidA);
 	});
 
 	// ── Finding 2 (Gap Analysis, HIGH) — fast-path switch-back stale-draft race.
@@ -290,7 +313,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 			);
 			expect(slotTitle, "the rehydrated slot must NOT be deleted by the stale-draft restore").toBe(GOAL_TITLE);
 		}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
-		await expectGoalPanelPopulated(page);
+		await expectGoalPanelPopulated(page, sidA);
 		await page.unroute(`**/api/sessions/${sidA}/draft?type=goal`);
 		await page.unroute(`**/api/sessions/${sidA}/proposals`);
 	});

@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Info, Sparkles } from "lucide";
+import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -44,10 +44,11 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
-import { state as appState, renderApp } from "../../app/state.js";
+import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
+import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
@@ -73,10 +74,6 @@ export class AgentInterface extends LitElement {
 	@property() delegateOf?: string;
 	@property() teamGoalId?: string;
 	@property() assistantType?: string;
-	@property() sessionRuntime?: "pi" | "claude-code";
-	@property() runtimeLabel?: string;
-	@property() claudeCodeSessionId?: string;
-	@property() claudeCodeModelAlias?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget
@@ -111,6 +108,7 @@ export class AgentInterface extends LitElement {
 	@property() prTitle?: string;
 	@property() prMergeable?: string;
 	@property({ type: Boolean }) viewerIsAdmin?: boolean;
+	@property({ type: Boolean }) viewerCanMergeAsAdmin?: boolean;
 	@property() reviewDecision?: string;
 	@property() headRefName?: string;
 	// Background processes for this session
@@ -145,15 +143,31 @@ export class AgentInterface extends LitElement {
 	 * same rules; this is defence-in-depth UX.
 	 */
 	private get canContinueArchived(): boolean {
-		if (!this.readOnly) return false;
-		// These fields live on the REST PersistedSession — threaded via
-		// session-manager's connectToSession, not on the remote-agent _state.
-		if (this.goalId) return false;
-		if (this.delegateOf) return false;
-		if (this.teamGoalId) return false;
-		if (!this.projectId) return false;
-		const known = appState?.projects?.some((p: any) => p.id === this.projectId);
-		return !!known;
+		const record = this._archivedSessionRecord();
+		return !!record && canContinueArchivedSession(record);
+	}
+
+	private _archivedSessionRecord(): GatewaySession | null {
+		const sid = this.session?.sessionId;
+		if (!sid) return null;
+		const fromState = appState.archivedSessions.find((s) => s.id === sid)
+			|| appState.gatewaySessions.find((s) => s.id === sid);
+		if (fromState) return { ...fromState, readOnly: fromState.readOnly || this.readOnly };
+		return {
+			id: sid,
+			title: (this.session as any)?.title || "Archived session",
+			cwd: this.cwd || "",
+			projectId: this.projectId,
+			status: "archived",
+			createdAt: 0,
+			lastActivity: 0,
+			clientCount: 0,
+			goalId: this.goalId,
+			delegateOf: this.delegateOf,
+			teamGoalId: this.teamGoalId,
+			readOnly: this.readOnly,
+			nonInteractive: this.nonInteractive,
+		};
 	}
 
 	/**
@@ -165,8 +179,6 @@ export class AgentInterface extends LitElement {
 	 * "Continue in new session" button.
 	 */
 	@state() private _archivedProposalTypes: string[] = [];
-	@state() private _runtimeSwitchNotice = "";
-	@state() private _claudeCodeNoticeExpanded = false;
 	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
 	private _archivedProposalsFetchedFor: string | null = null;
 
@@ -206,96 +218,6 @@ export class AgentInterface extends LitElement {
 		void this._refreshArchivedProposalTypes(sid);
 	}
 
-	private _modelRuntime(model: any): "pi" | "claude-code" {
-		return model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
-	}
-
-	private _currentRuntime(): "pi" | "claude-code" {
-		if (this.sessionRuntime === "claude-code" || this.sessionRuntime === "pi") return this.sessionRuntime;
-		const stateRuntime = (this.session?.state as any)?.runtime;
-		if (stateRuntime === "claude-code" || stateRuntime === "pi") return stateRuntime;
-		return this._modelRuntime(this.session?.state?.model);
-	}
-
-	private _runtimeDisplay(runtime: "pi" | "claude-code"): string {
-		return runtime === "claude-code" ? "Claude Code" : "standard Bobbit";
-	}
-
-	private _claudeCodeCapabilityNoticeKey(sessionId = this.session?.sessionId): string | null {
-		return sessionId ? `bobbit-claude-code-capability-notice-dismissed-${sessionId}` : null;
-	}
-
-	private _isClaudeCodeCapabilityNoticeDismissed(): boolean {
-		const key = this._claudeCodeCapabilityNoticeKey();
-		if (!key || typeof localStorage === "undefined") return false;
-		try { return localStorage.getItem(key) === "true"; } catch { return false; }
-	}
-
-	private _dismissClaudeCodeCapabilityNotice(): void {
-		const key = this._claudeCodeCapabilityNoticeKey();
-		try { if (key && typeof localStorage !== "undefined") localStorage.setItem(key, "true"); } catch { /* ignore storage failures */ }
-		this._claudeCodeNoticeExpanded = false;
-		this.requestUpdate();
-	}
-
-	private _openClaudeCodeRuntimeDocs(): void {
-		const opened = window.open("/docs/claude-code-runtime.md", "_blank", "noopener");
-		try { if (opened) opened.opener = null; } catch { /* ignore */ }
-		if (!opened) window.open("https://github.com/SuuBro/bobbit/blob/master/docs/claude-code-runtime.md", "_blank", "noopener");
-	}
-
-	private _applySelectedModel(model: any): void {
-		const session = this.session;
-		if (!session) return;
-		if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
-		else session.state.model = model;
-		const current = session.state?.thinkingLevel as string | undefined;
-		if (current) {
-			const clamped = clampThinkingLevel(current, model as any);
-			if (clamped && clamped !== current) {
-				if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
-				else session.state.thinkingLevel = clamped as any;
-			}
-		}
-	}
-
-	private async _handleModelSelected(model: any): Promise<void> {
-		const currentRuntime = this._currentRuntime();
-		const nextRuntime = this._modelRuntime(model);
-		if (currentRuntime === nextRuntime) {
-			this._runtimeSwitchNotice = "";
-			this._applySelectedModel(model);
-			return;
-		}
-
-		const nextLabel = this._runtimeDisplay(nextRuntime);
-		const currentLabel = this._runtimeDisplay(currentRuntime);
-		const title = nextRuntime === "claude-code" ? "Start a Claude Code session?" : "Start a standard Bobbit session?";
-		const body = `This session is running on the ${currentLabel} runtime. ${nextLabel} uses a different runtime, so Bobbit will start a new top-level session from this working directory. The current session will stay unchanged.`;
-		const { confirmAction } = await import("../../app/dialogs-lazy.js");
-		const confirmed = await confirmAction(title, body, "Start new session");
-		if (!confirmed) return;
-
-		try {
-			const res = await gatewayFetch("/api/sessions", {
-				method: "POST",
-				body: JSON.stringify({
-					cwd: this.cwd,
-					projectId: this.projectId,
-					runtime: nextRuntime,
-					model: `${model.provider}/${model.id}`,
-				}),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok || !data?.id) throw new Error(data?.error || `Failed to start session (${res.status})`);
-			const { connectToSession } = await import("../../app/session-manager.js");
-			await connectToSession(data.id, false);
-		} catch (err) {
-			this._runtimeSwitchNotice = err instanceof Error ? err.message : String(err);
-			this.requestUpdate();
-		}
-	}
-
 	/**
 	 * Path A — surface the existing proposal panel in the preview pane without
 	 * spawning a new session. Drafts have already been rehydrated into
@@ -318,58 +240,12 @@ export class AgentInterface extends LitElement {
 	}
 
 	private async _openContinueChooser() {
-		const chooser = document.createElement("continue-session-chooser") as any;
-		chooser.sessionId = this.session?.sessionId ?? "";
-		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
-		chooser.proposalTypes = [...this._archivedProposalTypes];
-		document.body.appendChild(chooser);
-
-		const cleanup = () => {
-			if (chooser.parentElement) chooser.parentElement.removeChild(chooser);
-		};
-
-		chooser.addEventListener("cancel", () => cleanup());
-		chooser.addEventListener("continue", async () => {
-			cleanup();
-			const archivedId = this.session?.sessionId;
-			if (!archivedId) return;
-			try {
-				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({}),
-				});
-				if (!resp.ok) {
-					const text = await resp.text().catch(() => "");
-					console.error("Continue in new session failed:", resp.status, text);
-					this._showContinueError(`Failed to continue (${resp.status}): ${text || resp.statusText}`);
-					return;
-				}
-				const data = await resp.json();
-				const id = data?.id;
-				if (!id) {
-					this._showContinueError("Server returned no session id");
-					return;
-				}
-				setHashRoute("session", id);
-				window.dispatchEvent(new CustomEvent("focus-editor"));
-			} catch (err) {
-				console.error("Continue in new session threw:", err);
-				this._showContinueError(String(err));
-			}
+		const record = this._archivedSessionRecord();
+		if (!record) return;
+		await continueArchivedSession(record, {
+			messageCount: this.session?.state?.messages?.length ?? 0,
+			proposalTypes: [...this._archivedProposalTypes],
 		});
-	}
-
-	private _showContinueError(message: string) {
-		const host = document.createElement("div");
-		host.setAttribute("data-continue-error", "");
-		host.style.cssText =
-			"position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;padding:10px 14px;border-radius:6px;font-size:13px;max-width:90vw;background:var(--destructive,#b91c1c);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.2);";
-		host.textContent = message;
-		document.body.appendChild(host);
-		setTimeout(() => {
-			if (host.parentElement) host.parentElement.removeChild(host);
-		}, 5000);
 	}
 
 	// References
@@ -1638,8 +1514,8 @@ export class AgentInterface extends LitElement {
 
 		const isStreaming = session.state.isStreaming;
 
-		// Check if API key exists for API-backed providers (skip local runtime sessions and queued messages).
-		if (!isStreaming && this._currentRuntime() !== "claude-code") {
+		// Check if API key exists for the provider (only needed in direct mode, skip for queued messages)
+		if (!isStreaming) {
 			const provider = session.state.model.provider;
 			const apiKey = await getAppStorage().providerKeys.get(provider);
 
@@ -1830,7 +1706,6 @@ export class AgentInterface extends LitElement {
 		});
 		return html`
 			<div class="flex flex-col gap-3">
-				${this._renderClaudeCodeCapabilityNotice()}
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
@@ -1924,128 +1799,21 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	private _renderClaudeCodeCapabilityNotice() {
-		const sessionId = this.session?.sessionId;
-		if (!sessionId || this._currentRuntime() !== "claude-code" || this._isClaudeCodeCapabilityNoticeDismissed()) return nothing;
-		const detailsId = `claude-code-capability-details-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-		const detailsGroup = (title: string, items: string[]) => html`
-			<div class="rounded-md border border-border bg-background/40 p-2" data-testid="claude-code-capability-detail-group">
-				<div class="font-medium text-foreground mb-1">${title}</div>
-				<ul class="m-0 pl-4 text-muted-foreground">
-					${items.map((item) => html`<li>${item}</li>`)}
-				</ul>
-			</div>
-		`;
-		return html`
-			<section
-				role="note"
-				data-testid="claude-code-capability-notice"
-				class="mx-4 my-3 p-3 rounded-lg border border-border bg-card text-card-foreground text-sm"
-			>
-				<div class="flex items-start gap-3">
-					<span class="text-primary shrink-0 mt-0.5" aria-hidden="true">${icon(Info, "sm")}</span>
-					<div class="min-w-0 flex-1">
-						<div class="flex items-center gap-2 flex-wrap">
-							<div class="font-semibold text-foreground">Claude Code local runtime</div>
-							<span class="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">Claude Code (local)</span>
-						</div>
-						<p class="m-0 mt-1 text-muted-foreground">
-							This session runs through your local Claude Code CLI. Bobbit provides the chat shell, transcript, session metadata, alias switching, best-effort stop/abort, and mapped tool rendering.
-						</p>
-						${this._claudeCodeNoticeExpanded ? html`
-							<div id=${detailsId} class="grid gap-2 mt-3 sm:grid-cols-3 text-xs" data-testid="claude-code-capability-details">
-								${detailsGroup("Claude Code handles", [
-									"Login and account state",
-									"Available models and exact context behavior",
-									"Tool execution and permission prompts",
-									"Claude Code's own resume/context semantics",
-								])}
-								${detailsGroup("Bobbit handles", [
-									"Chat UI, transcript hydration, and session metadata",
-									"claude-code/* alias selection and same-runtime alias switching",
-									"Best-effort stop/abort",
-									"Rendering mapped tool use/results when Claude Code emits them structurally",
-								])}
-								${detailsGroup("Still standard Bobbit runtime", [
-									"Workflow gates, reviewers, and verification agents",
-									"Team/staff agents unless explicitly moved to Claude Code later",
-									"Bobbit-native tools that are not part of Claude Code's local tool run",
-								])}
-							</div>
-						` : html`<div id=${detailsId} hidden></div>`}
-						<div class="flex items-center gap-2 mt-3 flex-wrap">
-							<button
-								type="button"
-								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
-								aria-expanded=${String(this._claudeCodeNoticeExpanded)}
-								aria-controls=${detailsId}
-								data-testid="claude-code-capability-details-toggle"
-								@click=${() => { this._claudeCodeNoticeExpanded = !this._claudeCodeNoticeExpanded; }}
-							>${this._claudeCodeNoticeExpanded ? "Hide details" : "View details"}</button>
-							<button
-								type="button"
-								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
-								aria-label="Dismiss Claude Code runtime note for this session"
-								data-testid="claude-code-capability-dismiss"
-								@click=${() => this._dismissClaudeCodeCapabilityNotice()}
-							>Got it for this session</button>
-							<button
-								type="button"
-								class="text-xs rounded-md px-2 py-1 text-primary hover:bg-secondary"
-								data-testid="claude-code-capability-learn-more"
-								@click=${() => this._openClaudeCodeRuntimeDocs()}
-							>Learn more</button>
-						</div>
-					</div>
-				</div>
-			</section>
-		`;
-	}
-
-	private _usageNumber(value: unknown): number {
-		return typeof value === "number" && Number.isFinite(value) ? value : 0;
-	}
-
-	private _usageTotalTokens(usage: any): number {
-		return this._usageNumber(usage?.totalTokens)
-			|| (this._usageNumber(usage?.input) + this._usageNumber(usage?.output) + this._usageNumber(usage?.cacheRead) + this._usageNumber(usage?.cacheWrite));
-	}
-
-	private _usageCostTotal(usage: any): number {
-		return typeof usage?.cost === "number"
-			? this._usageNumber(usage.cost)
-			: this._usageNumber(usage?.cost?.total);
-	}
-
-	private _messageDurationMs(msg: any): number | undefined {
-		const value = msg?.durationMs ?? msg?.duration_ms ?? msg?.timing?.durationMs ?? msg?.timing?.duration_ms;
-		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-	}
-
-	private _formatDurationMs(ms: number): string {
-		if (ms < 1000) return `${Math.round(ms)}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		const minutes = Math.floor(ms / 60_000);
-		const seconds = Math.round((ms % 60_000) / 1000);
-		return `${minutes}m ${seconds}s`;
-	}
-
 	private renderStats() {
 		if (!this.session) return html`<div class="text-xs h-5"></div>`;
 
 		const state = this.session.state;
-		const messages = Array.isArray(state.messages) ? state.messages : [];
-		const totals = messages
+		const totals = state.messages
 			.filter((m) => m.role === "assistant")
 			.reduce(
 				(acc, msg: any) => {
 					const usage = msg.usage;
 					if (usage) {
-						acc.input += this._usageNumber(usage.input);
-						acc.output += this._usageNumber(usage.output);
-						acc.cacheRead += this._usageNumber(usage.cacheRead);
-						acc.cacheWrite += this._usageNumber(usage.cacheWrite);
-						acc.cost.total += this._usageCostTotal(usage);
+						acc.input += usage.input;
+						acc.output += usage.output;
+						acc.cacheRead += usage.cacheRead;
+						acc.cacheWrite += usage.cacheWrite;
+						acc.cost.total += usage.cost.total;
 					}
 					return acc;
 				},
@@ -2066,19 +1834,6 @@ export class AgentInterface extends LitElement {
 			? serverCost.totalCost
 			: undefined;
 		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
-
-		let lastAssistantWithTiming: any | undefined;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i] as any;
-			if (msg.role === "assistant" && this._messageDurationMs(msg) !== undefined) {
-				lastAssistantWithTiming = msg;
-				break;
-			}
-		}
-		const lastTurnDurationMs = this._messageDurationMs(lastAssistantWithTiming);
-		const durationHtml = lastTurnDurationMs !== undefined
-			? html`<span title="Last turn duration" class="tabular-nums">${this._formatDurationMs(lastTurnDurationMs)}</span>`
-			: html``;
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
@@ -2112,8 +1867,8 @@ export class AgentInterface extends LitElement {
 			} else {
 				// Find last assistant message with usage (skip aborted/error)
 				let lastUsage: Usage | undefined;
-				for (let i = messages.length - 1; i >= 0; i--) {
-					const msg = messages[i] as any;
+				for (let i = state.messages.length - 1; i >= 0; i--) {
+					const msg = state.messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
@@ -2121,7 +1876,7 @@ export class AgentInterface extends LitElement {
 				}
 
 				if (lastUsage) {
-					const contextTokens = this._usageTotalTokens(lastUsage);
+					const contextTokens = lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite);
 					const contextWindow = model.contextWindow;
 					const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
 					const barColor = pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)";
@@ -2174,24 +1929,35 @@ export class AgentInterface extends LitElement {
 			})}</span>`
 			: "";
 
-		const currentRuntime = this._currentRuntime();
-		const modelButtonTitle = currentRuntime === "claude-code" ? `Claude Code (local) · ${state.model?.id ?? this.claudeCodeModelAlias ?? "default"}` : state.model?.id;
 		const modelButton = this.enableModelSelector && state.model
-			? html`<span title=${modelButtonTitle || ""} data-testid="footer-model-button-wrapper">${Button({
+			? Button({
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); }, { projectId: this.projectId });
+					void openModelSelector(state.model, (m) => {
+						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
+						else session.state.model = m;
+						// After model change, clamp the current thinking level to one
+						// supported by the new model. The server boundary re-clamps
+						// defensively, but doing it here keeps the UI in sync.
+						const current = session.state?.thinkingLevel as string | undefined;
+						if (current) {
+							const clamped = clampThinkingLevel(current, m as any);
+							if (clamped && clamped !== current) {
+								if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
+								else session.state.thinkingLevel = clamped as any;
+							}
+						}
+					});
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id" aria-hidden=${currentRuntime === "claude-code" ? "true" : "false"}>${state.model.id}</span>
-					${currentRuntime === "claude-code" ? html`<span class="sr-only" data-testid="footer-runtime-label">Claude Code (local) · ${state.model.id}</span>` : ""}
+					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id">${state.model.id}</span>
 				`,
 				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
 				// icon sits closer to the model name. ! beats Button's defaults.
 				className: "h-6 text-xs truncate !gap-1 sm:!gap-2 !px-1.5 sm:!px-3",
-			})}</span>`
+			})
 			: "";
 
 		const imageModel = (state as any).imageGenerationModel;
@@ -2225,23 +1991,22 @@ export class AgentInterface extends LitElement {
 		// Build context popover content
 		const popoverContent = this._contextPopoverOpen ? (() => {
 			const m = model as any;
-			const isClaudeCodeModel = this._currentRuntime() === "claude-code" || m?.runtime === "claude-code" || m?.provider === "claude-code";
 			// Find last assistant usage (same logic as above)
 			let lastUsage: Usage | undefined;
 			if (!usageStale) {
-				for (let i = messages.length - 1; i >= 0; i--) {
-					const msg = messages[i] as any;
+				for (let i = state.messages.length - 1; i >= 0; i--) {
+					const msg = state.messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
 					}
 				}
 			}
-			const contextTokens = lastUsage ? this._usageTotalTokens(lastUsage) : 0;
+			const contextTokens = lastUsage ? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite)) : 0;
 			const contextWindow = m?.contextWindow || 0;
 			const pct = contextWindow ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
-			const msgCount = messages.length;
-			const turnCount = messages.filter((msg: any) => msg.role === "assistant").length;
+			const msgCount = state.messages.length;
+			const turnCount = state.messages.filter((msg: any) => msg.role === "assistant").length;
 
 			const row = (label: string, value: any) => html`
 				<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
@@ -2259,25 +2024,14 @@ export class AgentInterface extends LitElement {
 				">
 					${m ? html`
 						<div style="font-weight:600;font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-							${icon(Sparkles, "sm")} ${isClaudeCodeModel ? "Claude Code local runtime" : m.id}
+							${icon(Sparkles, "sm")} ${m.id}
 						</div>
-						${isClaudeCodeModel ? html`
-							<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;" data-testid="claude-code-runtime-popover-section">
-								<div style="color:var(--muted-foreground);margin-bottom:6px;">This session is backed by the local Claude Code CLI and your existing Claude Code login.</div>
-								${row("Alias", m.id)}
-								${row("Runtime owner", "Claude Code handles auth, models, context, tools, and permissions.")}
-								${row("Bobbit support", "Chat, transcript hydration, metadata, alias switching, best-effort stop/abort, mapped tool rendering.")}
-								${row("Automation note", "Some Bobbit gates, reviewers, team agents, and native tools still use the standard runtime.")}
-								<button type="button" class="mt-2 text-primary hover:underline" @click=${() => this._openClaudeCodeRuntimeDocs()}>Learn more about Claude Code runtime</button>
-							</div>
-						` : html`
-							<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
-								${row("Provider", m.provider)}
-								${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
-								${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
-								${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
-							</div>
-						`}
+						<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
+							${row("Provider", m.provider)}
+							${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
+							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
+							${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
+						</div>
 					` : nothing}
 
 					<div style="font-weight:600;margin-bottom:6px;">Context Usage</div>
@@ -2293,16 +2047,13 @@ export class AgentInterface extends LitElement {
 						` : usageStale ? html`<div style="color:var(--muted-foreground)">Updating after compaction…</div>` : nothing}
 					</div>
 
-					${lastUsage || lastTurnDurationMs !== undefined ? html`
+					${lastUsage ? html`
 						<div style="border-top:1px solid var(--border);padding-top:8px;">
 							<div style="font-weight:600;margin-bottom:6px;">Last Turn</div>
-							${lastTurnDurationMs !== undefined ? row("Duration", this._formatDurationMs(lastTurnDurationMs)) : nothing}
-							${lastUsage ? html`
-								${row("Input tokens", formatTokenCount(this._usageNumber(lastUsage.input)))}
-								${row("Output tokens", formatTokenCount(this._usageNumber(lastUsage.output)))}
-								${this._usageNumber(lastUsage.cacheRead) ? row("Cache read", formatTokenCount(this._usageNumber(lastUsage.cacheRead))) : nothing}
-								${this._usageNumber(lastUsage.cacheWrite) ? row("Cache write", formatTokenCount(this._usageNumber(lastUsage.cacheWrite))) : nothing}
-							` : nothing}
+							${row("Input tokens", formatTokenCount(lastUsage.input))}
+							${row("Output tokens", formatTokenCount(lastUsage.output))}
+							${lastUsage.cacheRead ? row("Cache read", formatTokenCount(lastUsage.cacheRead)) : nothing}
+							${lastUsage.cacheWrite ? row("Cache write", formatTokenCount(lastUsage.cacheWrite)) : nothing}
 						</div>
 					` : nothing}
 
@@ -2345,9 +2096,9 @@ export class AgentInterface extends LitElement {
 				${cwdHtml && !this._isNarrow ? html`<div class="flex items-center pl-4">${cwdHtml}</div>` : ""}
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
-					<span class="cursor-pointer hover:text-foreground transition-colors flex items-center gap-2"
+					<span class="cursor-pointer hover:text-foreground transition-colors"
 						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
-						${contextHtml}${durationHtml}
+						${contextHtml}
 					</span>
 					${costText ? html`
 						<span style="position:relative;">
@@ -2442,6 +2193,7 @@ export class AgentInterface extends LitElement {
 								.deletionsVsPrimary=${this.gitStatus?.deletionsVsPrimary ?? 0}
 								.mergedIntoPrimary=${this.gitStatus?.mergedIntoPrimary ?? false}
 								.unpushed=${this.gitStatus?.unpushed ?? false}
+								.remotePublication=${(this.gitStatus as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 								.statusFiles=${this.gitStatus?.status ?? []}
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
@@ -2452,6 +2204,7 @@ export class AgentInterface extends LitElement {
 								.prTitle=${this.prTitle}
 								.prMergeable=${this.prMergeable}
 								.viewerIsAdmin=${this.viewerIsAdmin ?? false}
+								.viewerCanMergeAsAdmin=${this.viewerCanMergeAsAdmin ?? false}
 								.reviewDecision=${this.reviewDecision}
 								.headRefName=${this.headRefName}
 								@pr-merge=${this._handlePrMerge}
@@ -2466,10 +2219,6 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : ''}
-						${this._runtimeSwitchNotice ? html`
-						<div class="mx-2 mb-2 px-3 py-2 rounded-md border border-destructive/20 bg-destructive/10 text-destructive text-xs" data-testid="runtime-switch-notice">
-							${this._runtimeSwitchNotice}
-						</div>` : nothing}
 						${(this.session as any)?.isAborting ? html`
 						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm">
 							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2548,7 +2297,19 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); }, { projectId: this.projectId });
+								void openModelSelector(state.model, (model) => {
+								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
+								else session.state.model = model;
+								// Clamp thinking-level against the newly selected model.
+								const current = session.state?.thinkingLevel as string | undefined;
+								if (current) {
+									const clamped = clampThinkingLevel(current, model as any);
+									if (clamped && clamped !== current) {
+										if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
+										else session.state.thinkingLevel = clamped as any;
+									}
+								}
+							});
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector

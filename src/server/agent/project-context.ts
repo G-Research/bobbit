@@ -1,5 +1,6 @@
 import path from "node:path";
-import type { RegisteredProject } from "./project-registry.js";
+import { bobbitConfigDir, bobbitDir, bobbitStateDir } from "../bobbit-dir.js";
+import { HEADQUARTERS_PROJECT_ID, type RegisteredProject } from "./project-registry.js";
 import { GoalStore } from "./goal-store.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
@@ -26,6 +27,8 @@ import { PlanMutationStore } from "./plan-mutation-store.js";
  *
  * Each registered project gets its own ProjectContext with stores pointing
  * at `<project-root>/.bobbit/state/` and `<project-root>/.bobbit/config/`.
+ * Headquarters is the exception: it aliases the server `bobbitStateDir()` /
+ * `bobbitConfigDir()` so BOBBIT_DIR redirects do not create a second scope.
  *
  * NOTE: Store constructors are being updated in parallel to accept
  * stateDir/configDir parameters. This file will compile once those
@@ -68,11 +71,18 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore } = {}) {
     this.project = project;
-    this.bobbitDir = path.join(project.rootPath, ".bobbit");
-    this.stateDir = path.join(this.bobbitDir, "state");
-    this.configDir = path.join(this.bobbitDir, "config");
+    const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
+    if (isHeadquarters) {
+      this.bobbitDir = bobbitDir();
+      this.stateDir = bobbitStateDir();
+      this.configDir = bobbitConfigDir();
+    } else {
+      this.bobbitDir = path.join(project.rootPath, ".bobbit");
+      this.stateDir = path.join(this.bobbitDir, "state");
+      this.configDir = path.join(this.bobbitDir, "config");
+    }
 
     // Instantiate state stores with project-scoped state directory
     this.goalStore = new GoalStore(this.stateDir);
@@ -97,7 +107,9 @@ export class ProjectContext {
     // through every createGoal call (WorkflowStore-required invariant — see
     // docs/_phase-1-notes.md).
     this.roleStore = new RoleStore(this.configDir);
-    this.projectConfigStore = new ProjectConfigStore(this.configDir);
+    this.projectConfigStore = isHeadquarters && opts.headquartersProjectConfigStore
+      ? opts.headquartersProjectConfigStore
+      : new ProjectConfigStore(this.configDir);
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);

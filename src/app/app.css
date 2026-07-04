@@ -19,6 +19,222 @@ bell-toggle button {
 	color: var(--color-muted-foreground) !important;
 }
 
+/* Sidebar icon affordances that opt in here scale from .sidebar-root font-size.
+ * Keep selectors narrow so compound plus overlays are never clipped by generic
+ * sidebar SVG/span rules. */
+.sidebar-root {
+	--sidebar-tree-base-indent-default: 6px;
+	--sidebar-tree-nested-goal-indent-default: 6px;
+	--sidebar-tree-collapsed-indent-default: 2px;
+	--sidebar-tree-half-indent: calc(var(--sidebar-tree-base-indent, var(--sidebar-tree-base-indent-default)) / 2);
+	--sidebar-scale-icon-size: 1em;
+	--sidebar-compound-icon-size: 1em;
+	--sidebar-compound-icon-size-lg: 1.1429em;
+	--sidebar-compound-plus-size: 0.58em;
+	--sidebar-compound-plus-size-lg: 0.6429em;
+	--sidebar-chevron-w: 1.25em;
+	--sidebar-header-chevron-w: 1.7em;
+	--sidebar-inline-chevron-w: 1.25em;
+	--sidebar-collapsed-chevron-w: 1.2em;
+	--sidebar-chevron-glyph-size: 1.2em;
+	--sidebar-chevron-glyph-size-sm: 1.1em;
+	--sidebar-action-gap: 0.125em;
+	--sidebar-top-action-gap: 0.2em;
+}
+
+.sidebar-root .sidebar-top-action-row {
+	display: flex;
+	align-items: stretch;
+	gap: var(--sidebar-top-action-gap);
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-top-action-btn {
+	flex: 1 1 0;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	gap: min(0.25em, 0.375rem);
+	padding-left: min(0.375em, 0.5rem);
+	padding-right: min(0.375em, 0.5rem);
+}
+
+.sidebar-root .sidebar-top-action-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-scale-icon,
+.sidebar-root .sidebar-compound-icon,
+.sidebar-root .sidebar-chevron-slot {
+	box-sizing: border-box;
+}
+
+.sidebar-root .sidebar-scale-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--sidebar-scale-icon-size);
+	height: var(--sidebar-scale-icon-size);
+	min-width: var(--sidebar-scale-icon-size);
+	line-height: 1;
+	vertical-align: -0.125em;
+}
+
+.sidebar-root .sidebar-scale-icon > svg,
+.sidebar-root svg.sidebar-scale-icon {
+	width: 100% !important;
+	height: 100% !important;
+}
+
+.sidebar-root .sidebar-compound-icon {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--sidebar-compound-icon-size);
+	height: var(--sidebar-compound-icon-size);
+	min-width: var(--sidebar-compound-icon-size);
+	line-height: 1;
+	overflow: visible;
+	vertical-align: -0.125em;
+}
+
+.sidebar-root .sidebar-compound-icon--lg {
+	width: var(--sidebar-compound-icon-size-lg);
+	height: var(--sidebar-compound-icon-size-lg);
+	min-width: var(--sidebar-compound-icon-size-lg);
+}
+
+.sidebar-root .sidebar-compound-base {
+	width: 100% !important;
+	height: 100% !important;
+	min-width: 0 !important;
+}
+
+.sidebar-root .sidebar-compound-plus {
+	position: absolute;
+	right: -0.08em;
+	bottom: -0.02em;
+	width: var(--sidebar-compound-plus-size);
+	height: var(--sidebar-compound-plus-size);
+	overflow: visible;
+	pointer-events: none;
+	filter: drop-shadow(0 0 1.5px var(--background));
+}
+
+.sidebar-root .sidebar-compound-icon--lg .sidebar-compound-plus {
+	width: var(--sidebar-compound-plus-size-lg);
+	height: var(--sidebar-compound-plus-size-lg);
+}
+
+.sidebar-root .sidebar-chevron-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--sidebar-chevron-w);
+	min-width: var(--sidebar-chevron-w);
+	flex: 0 0 var(--sidebar-chevron-w);
+	line-height: 1;
+	text-align: center;
+}
+
+.sidebar-root .sidebar-chevron-slot--header {
+	width: var(--sidebar-header-chevron-w);
+	min-width: var(--sidebar-header-chevron-w);
+	flex-basis: var(--sidebar-header-chevron-w);
+}
+
+.sidebar-root .sidebar-chevron-slot--inline {
+	width: var(--sidebar-inline-chevron-w);
+	min-width: var(--sidebar-inline-chevron-w);
+	flex-basis: var(--sidebar-inline-chevron-w);
+}
+
+.sidebar-root .sidebar-chevron-slot--collapsed {
+	width: var(--sidebar-collapsed-chevron-w);
+	min-width: var(--sidebar-collapsed-chevron-w);
+	flex-basis: var(--sidebar-collapsed-chevron-w);
+}
+
+.sidebar-root .sidebar-chevron-slot--absolute {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+}
+
+.sidebar-root .sidebar-chevron-glyph {
+	font-size: var(--sidebar-chevron-glyph-size);
+	line-height: 1;
+}
+
+.sidebar-root .sidebar-chevron-slot--collapsed .sidebar-chevron-glyph {
+	font-size: var(--sidebar-chevron-glyph-size-sm);
+}
+
+@media (max-width: 767px) {
+	.sidebar-root {
+		--sidebar-chevron-glyph-size: 1.45em;
+	}
+}
+
+.sidebar-root .sidebar-action-cluster {
+	gap: var(--sidebar-action-gap);
+}
+
+.sidebar-root[data-testid="sidebar-collapsed"] {
+	width: max(3.5rem, 3.75em);
+}
+
+.sidebar-root .sidebar-collapsed-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.sidebar-root [data-session-id] .truncate,
+.sidebar-root [data-nav-id^="session:"] .truncate {
+	display: block;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-bottom-actions {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.sidebar-root .sidebar-bottom-actions > button {
+	min-width: 0;
+	overflow: hidden;
+	gap: min(0.25em, 0.375rem);
+	padding-left: min(0.5em, 0.75rem);
+	padding-right: min(0.5em, 0.75rem);
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"],
+.sidebar-root .sidebar-bottom-action-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"] {
+	flex: 1 1 0;
+}
+
+.sidebar-root .sidebar-bottom-actions [data-testid="sidebar-filters-button"] > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 /*
  * Mobile header: when [data-mobile-header] is on the root container,
  * add top padding to the message scroll area so the first message
@@ -146,10 +362,10 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * overlap — unlike the previous `::after` inflation attempt (reverted in
  * dd428416) where adjacent buttons ate into each other.
  *
- * Excluded: `.flex-1` tab buttons in the top tab strip (Roles / Tools /
- * Skills / Workflows / New Goal) — they already fill their row.
+ * Excluded: top tab strip buttons (Roles / Tools / Skills / Workflows /
+ * New Goal) — they already fill their row.
  */
-.sidebar-root button:not(.flex-1) {
+.sidebar-root button:not(.flex-1):not(.sidebar-top-action-btn) {
 	border: 0.5px solid transparent;
 }
 

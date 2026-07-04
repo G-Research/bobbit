@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
@@ -103,10 +103,196 @@ async function prefs(page: Page): Promise<Record<string, any>> {
 	return await page.evaluate(() => (window as any).__getSettingsAdminPrefs());
 }
 
+type WorktreeItemFixture = {
+	id: string;
+	title?: string;
+	classification: "ready-to-clean" | "protected-in-use" | "archived-owned" | "unowned-git-worktree" | "pool-entry" | "already-cleaned" | "stale-filesystem-only" | "scan-error";
+	disposition: "ready-to-clean" | "protected" | "already-cleaned" | "needs-attention" | "failed";
+	reason: string;
+	projectId?: string;
+	projectName?: string;
+	repo?: string;
+	repoPath?: string;
+	path?: string;
+	branch?: string;
+	detail?: string;
+	actionable?: boolean;
+	selectable?: boolean;
+	defaultSelected?: boolean;
+	sources?: string[];
+	owners?: Array<{ type: string; id: string; title?: string; archived?: boolean }>;
+	willDeleteBranch?: boolean;
+	branchDeleteBlockedReason?: string;
+};
+
+function worktreeItem(overrides: WorktreeItemFixture): WorktreeItemFixture & Record<string, any> {
+	const actionable = overrides.actionable ?? overrides.disposition === "ready-to-clean";
+	return {
+		projectId: "proj-1",
+		projectName: "Scope UI Project",
+		repo: ".",
+		repoPath: "/fixture/project",
+		repoDisplayName: "app",
+		path: `/fixture/worktrees/${overrides.id}`,
+		branch: `session/${overrides.id}`,
+		sources: overrides.sources ?? ["git-worktree"],
+		owners: overrides.owners ?? [],
+		detail: actionable ? "Server classified this worktree as safe to remove." : "Not removable in this fixture category.",
+		actionable,
+		selectable: actionable,
+		defaultSelected: actionable,
+		pathExists: actionable,
+		gitWorktreeMetadataExists: actionable,
+		localBranchExists: actionable,
+		willDeleteBranch: overrides.willDeleteBranch ?? actionable,
+		...overrides,
+	};
+}
+
+function worktreeInventory(items: Array<WorktreeItemFixture & Record<string, any>>) {
+	const counts: Record<string, any> = {
+		total: items.length,
+		readyToClean: items.filter((item) => item.disposition === "ready-to-clean").length,
+		protectedInUse: items.filter((item) => item.disposition === "protected" || item.classification === "protected-in-use" || item.classification === "pool-entry").length,
+		archivedOwned: items.filter((item) => item.classification === "archived-owned").length,
+		unownedGitWorktrees: items.filter((item) => item.classification === "unowned-git-worktree").length,
+		poolEntries: items.filter((item) => item.classification === "pool-entry").length,
+		alreadyCleaned: items.filter((item) => item.disposition === "already-cleaned").length,
+		needsAttention: items.filter((item) => item.disposition === "needs-attention" || item.disposition === "failed").length,
+		scanErrors: items.filter((item) => item.classification === "scan-error").length,
+		defaultSelected: items.filter((item) => item.defaultSelected !== false && item.disposition === "ready-to-clean").length,
+		byClassification: {},
+		byReason: {},
+		bySource: {},
+	};
+	for (const item of items) {
+		counts.byClassification[item.classification] = (counts.byClassification[item.classification] || 0) + 1;
+		counts.byReason[item.reason] = (counts.byReason[item.reason] || 0) + 1;
+		for (const source of item.sources || []) counts.bySource[source] = (counts.bySource[source] || 0) + 1;
+	}
+	return { items, counts, generatedAt: Date.now(), scanned: { projects: 1, repos: 2, worktreeRoots: 1 } };
+}
+
+function cleanupResponse(counts: Partial<Record<"requested" | "cleaned" | "branchDeleted" | "skipped" | "alreadyCleaned" | "failed", number>>, results: any[] = []) {
+	return {
+		counts: { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0, ...counts },
+		results,
+	};
+}
+
+async function setWorktreeInventory(page: Page, scan: any): Promise<void> {
+	await page.evaluate((payload) => (window as any).__setWorktreeInventory(payload), scan);
+}
+
+async function setWorktreeCleanup(page: Page, cleanup: any, nextScan?: any): Promise<void> {
+	await page.evaluate(({ response, next }) => (window as any).__setWorktreeCleanup(response, next), { response: cleanup, next: nextScan });
+}
+
+async function scanWorktrees(page: Page) {
+	const card = page.getByTestId("worktree-cleanup-maintenance");
+	await expect(card).toBeVisible();
+	await card.getByTestId("worktree-cleanup-scan").click();
+	await expect(card.getByTestId("worktree-cleanup-summary-ready")).toBeVisible();
+	return card;
+}
+
+function visibleWorktreeRows(page: Page): Locator {
+	return page.locator('[data-testid="worktree-cleanup-row"]:visible');
+}
+
+async function clickWorktreeRowCheckbox(page: Page, id: string): Promise<void> {
+	const row = page.locator(`[data-testid="worktree-cleanup-row"][data-worktree-id="${id}"]`).first();
+	await expect(row).toBeVisible();
+	await row.locator('input[type="checkbox"]').click();
+}
+
 test.describe("Settings/admin UI fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
 		await resetFixture(page);
+	});
+
+	test("worktree cleanup defaults to actionable rows and exposes diagnostics", async ({ page }) => {
+		const scan = worktreeInventory([
+			worktreeItem({ id: "ready-arch", title: "Ready archived", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session", "git-worktree"], owners: [{ type: "archived-session", id: "arch-1", title: "Ready archived", archived: true }] }),
+			worktreeItem({ id: "ready-git", title: "Ready Git orphan", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree" }),
+			...Array.from({ length: 6 }, (_, i) => worktreeItem({ id: `fs-${i}`, title: `Filesystem only ${i}`, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", actionable: false, selectable: false, defaultSelected: false, sources: ["filesystem"], branch: undefined, willDeleteBranch: false })),
+			worktreeItem({ id: "pool-1", title: "Pool diagnostic", classification: "pool-entry", disposition: "protected", reason: "safe-pool-entry", actionable: false, selectable: false, defaultSelected: false, sources: ["pool", "filesystem"] }),
+			worktreeItem({ id: "already-1", title: "Already cleaned", classification: "already-cleaned", disposition: "already-cleaned", reason: "already-cleaned", actionable: false, selectable: false, defaultSelected: false, willDeleteBranch: false }),
+		]);
+		await setWorktreeInventory(page, scan);
+		await renderSettings(page, "#/settings/system/maintenance");
+
+		const card = await scanWorktrees(page);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*2/);
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*2/);
+		await expect(card.getByTestId("worktree-cleanup-summary-already-cleaned")).toContainText(/Already cleaned:\s*1/);
+		await expect(card.getByTestId("worktree-cleanup-summary-needs-attention")).toContainText(/Needs attention:\s*6/);
+		await expect(card).toContainText(/Pool entries:\s*1/);
+		await expect(visibleWorktreeRows(page)).toHaveCount(2);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-disposition="ready-to-clean"]:visible')).toHaveCount(2);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-classification="pool-entry"]:visible')).toHaveCount(0);
+		await expect(card).not.toContainText("filesystem-only-needs-attention");
+		await expect(card.getByTestId("worktree-cleanup-clean-all")).toBeEnabled();
+		await expect(card.getByTestId("worktree-cleanup-clean-selected")).toBeEnabled();
+
+		await card.getByTestId("worktree-cleanup-show-diagnostics").click();
+		const fsGroup = card.getByTestId("worktree-cleanup-group-filesystem-only-needs-attention");
+		await expect(fsGroup.locator('[data-testid="worktree-cleanup-row"]:visible')).toHaveCount(5);
+		await card.getByTestId("worktree-cleanup-show-all-filesystem-only-needs-attention").click();
+		await expect(fsGroup.locator('[data-testid="worktree-cleanup-row"]:visible')).toHaveCount(6);
+		await expect(card.getByTestId("worktree-cleanup-group-pool-entry")).toBeVisible();
+		await expect(card.getByTestId("worktree-cleanup-group-already-cleaned")).toBeVisible();
+	});
+
+	test("worktree cleanup selection presets and selected cleanup use item ids", async ({ page }) => {
+		const readyArch = worktreeItem({ id: "ready-arch", title: "Archived session one", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session", "git-worktree"] });
+		const readyGit = worktreeItem({ id: "ready-git", title: "Git orphan", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", projectId: "other-project" });
+		await setWorktreeInventory(page, worktreeInventory([readyArch, readyGit]));
+		await setWorktreeCleanup(page, cleanupResponse({ requested: 1, cleaned: 1 }, [{ itemId: "ready-arch", status: "cleaned", worktreeRemoved: true, branchDeleted: false }]), worktreeInventory([readyGit]));
+		await renderSettings(page, "#/settings/system/maintenance");
+		const card = await scanWorktrees(page);
+
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*2/);
+		await card.getByTestId("worktree-cleanup-clear-selection").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*0/);
+		await card.getByTestId("worktree-cleanup-select-archived-owned").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*1/);
+		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
+		await card.getByTestId("worktree-cleanup-clean-selected").click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-worktrees").at(-1)?.body)).toEqual({
+			mode: "selected",
+			itemIds: ["ready-arch"],
+		});
+		await expect(card).toContainText(/Cleaned:\s*1/i);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*1/);
+		await expect(page.locator('[data-testid="worktree-cleanup-row"][data-worktree-id="ready-arch"]:visible')).toHaveCount(0);
+
+		await card.getByTestId("worktree-cleanup-select-git-orphan").click();
+		await expect(card.getByTestId("worktree-cleanup-summary-selected")).toContainText(/Selected:\s*1/);
+	});
+
+	test("worktree cleanup clean-all posts all-safe and disables after zero rescan", async ({ page }) => {
+		const readyOne = worktreeItem({ id: "ready-1", title: "Clean all one", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session"] });
+		const readyTwo = worktreeItem({ id: "ready-2", title: "Clean all two", classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree" });
+		const protectedItem = worktreeItem({ id: "skip-live", title: "Referenced by live", classification: "protected-in-use", disposition: "protected", reason: "referenced-by-live-session", actionable: false, selectable: false, defaultSelected: false });
+		await setWorktreeInventory(page, worktreeInventory([readyOne, readyTwo, protectedItem]));
+		await setWorktreeCleanup(page, cleanupResponse({ requested: 2, cleaned: 2, branchDeleted: 2 }, [
+			{ itemId: "ready-1", status: "cleaned", worktreeRemoved: true, branchDeleted: true },
+			{ itemId: "ready-2", status: "cleaned", worktreeRemoved: true, branchDeleted: true },
+		]), worktreeInventory([protectedItem]));
+		await renderSettings(page, "#/settings/system/maintenance");
+		const card = await scanWorktrees(page);
+
+		await page.evaluate(() => (window as any).__clearSettingsAdminFetchLog());
+		await card.getByTestId("worktree-cleanup-clean-all").click();
+		await page.getByRole("button", { name: "Clean worktrees" }).evaluate((button: HTMLElement) => button.click());
+		await expect.poll(async () => page.evaluate(() => (window as any).__getSettingsAdminFetchLog().filter((e: any) => e.url === "/api/maintenance/cleanup-worktrees").at(-1)?.body)).toEqual({ mode: "all-safe" });
+		await expect(card).toContainText(/Cleaned:\s*2/i);
+		await expect(card.getByTestId("worktree-cleanup-summary-ready")).toContainText(/Ready to clean:\s*0/);
+		await expect(card.getByTestId("worktree-cleanup-empty-state")).toBeVisible();
+		await expect(card.getByTestId("worktree-cleanup-clean-all")).toBeDisabled();
+		await expect(card.getByTestId("worktree-cleanup-clean-selected")).toBeDisabled();
 	});
 
 	test("settings tabs, account providers, and project scope render without a gateway", async ({ page }) => {
@@ -348,7 +534,8 @@ test.describe("Settings/admin UI fixture", () => {
 
 	test("config scope rows, origin badges, tools, and embedded workflows render from fixtures", async ({ page }) => {
 		await loadRoles(page);
-		await expect(page.locator("button").filter({ hasText: "System" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "Headquarters" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "System" })).toHaveCount(0);
 		await expect(page.locator("button").filter({ hasText: "Scope UI Project" }).first()).toBeVisible();
 		await expect(page.locator(".config-origin-badge").first()).toBeVisible();
 		await expect(page.locator(".config-origin-badge").first()).toHaveText(/builtin|server|project/);
@@ -361,7 +548,8 @@ test.describe("Settings/admin UI fixture", () => {
 		}).toBe(true);
 
 		await loadTools(page);
-		await expect(page.locator("button").filter({ hasText: "System" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "Headquarters" }).first()).toBeVisible();
+		await expect(page.locator("button").filter({ hasText: "System" })).toHaveCount(0);
 		await expect(page.locator(".tool-group-header").first()).toBeVisible();
 		await page.locator(".tool-group-header").first().click();
 		await expect(page.locator(".tool-row").first()).toBeVisible();

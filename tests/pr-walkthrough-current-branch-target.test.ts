@@ -9,9 +9,11 @@ test("PR walkthrough launch uses GitHub's PR baseRefOid instead of the current b
 	const result = await resolveCurrentBranchTarget("/repo", {
 		gh: async (_cwd: string, args: string[]) => {
 			if (args[0] === "pr" && args[1] === "view") {
-				assert.ok(args.includes("number,url,headRefOid,baseRefOid,baseRefName,headRefName"));
+				assert.ok(args.includes("number,title,body,url,headRefOid,baseRefOid,baseRefName,headRefName"));
 				return JSON.stringify({
 					number: 766,
+					title: "Improve PR walkthrough header",
+					body: "## Summary\nPreserve the launch-time PR description.",
 					url: "https://github.com/SuuBro/bobbit/pull/766",
 					headRefOid: "head-pr-branch",
 					baseRefOid: "base-at-pr-comparison",
@@ -34,6 +36,10 @@ test("PR walkthrough launch uses GitHub's PR baseRefOid instead of the current b
 	assert.equal(result.target.baseSha, "base-at-pr-comparison");
 	assert.equal(result.target.headSha, "head-pr-branch");
 	assert.equal(result.target.prNumber, 766);
+	assert.equal(result.target.prTitle, "Improve PR walkthrough header");
+	assert.equal(result.target.prBody, "## Summary\nPreserve the launch-time PR description.");
+	assert.equal(result.target.prBodySource, "gh_cli");
+	assert.match(result.target.prBodyFetchedAt, /^\d{4}-\d{2}-\d{2}T/);
 	assert.equal(result.target.owner, "SuuBro");
 	assert.equal(result.target.repo, "bobbit");
 	assert.deepEqual(gitCalls, [], "current origin/master must not replace GitHub's PR comparison base");

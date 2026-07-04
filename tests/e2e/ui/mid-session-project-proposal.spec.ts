@@ -1,7 +1,7 @@
 /**
  * Mid-session project proposal — browser E2E.
  *
- * A regular (non-assistant) session in a registered project emits a
+ * A regular (non-assistant) session in a registered normal project emits a
  * <project_proposal> tool call via the mock agent. The Project tab should
  * appear in the unified preview panel with a diff rendered against the
  * current config. Accept writes the diffed fields to project.yaml
@@ -15,20 +15,52 @@
  *   4. dismiss/undo — Dismiss clears the tab without writing config
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import type { Page } from "@playwright/test";
+import { apiFetch, createSession, deleteSession, registerProject } from "../e2e-setup.js";
+import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-async function getDefaultProjectId(): Promise<string> {
-	const resp = await apiFetch("/api/projects");
-	const data = await resp.json();
-	const projects = Array.isArray(data) ? data : (data.projects || []);
-	expect(projects.length).toBeGreaterThan(0);
-	return projects[0].id;
+type TestProject = { id: string; rootPath: string; name: string };
+
+const createdProjects = new Set<string>();
+const createdSessions = new Set<string>();
+const createdDirs = new Set<string>();
+
+async function createNormalProject(label: string): Promise<TestProject> {
+	const rootPath = mkdtempSync(join(tmpdir(), `bobbit-mid-proposal-${label}-`));
+	createdDirs.add(rootPath);
+	const project = await registerProject({
+		name: `mid-proposal-${label}-${Date.now()}`,
+		rootPath,
+		components: [{ name: "app", repo: "." }],
+	});
+	createdProjects.add(project.id);
+	return { id: project.id, rootPath, name: String(project.name ?? label) };
+}
+
+async function openProjectSession(page: Page, project: TestProject): Promise<string> {
+	const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
+	createdSessions.add(sessionId);
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	return sessionId;
 }
 
 test.describe("Mid-session project proposal (non-assistant session)", () => {
-	test("propose \u2192 diff rendered \u2192 Accept writes config \u2192 reload persists", async ({ page }) => {
-		const projectId = await getDefaultProjectId();
+	test.afterEach(async () => {
+		for (const id of Array.from(createdSessions).reverse()) await deleteSession(id).catch(() => {});
+		createdSessions.clear();
+		for (const id of Array.from(createdProjects).reverse()) await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		createdProjects.clear();
+		for (const dir of Array.from(createdDirs).reverse()) rmSync(dir, { recursive: true, force: true });
+		createdDirs.clear();
+	});
+
+	test("propose → diff rendered → Accept writes config → reload persists", async ({ page }) => {
+		const project = await createNormalProject("accept");
+		const projectId = project.id;
 
 		// Seed baseline config so the mock proposal has a clear diff.
 		await apiFetch(`/api/projects/${projectId}/config`, {
@@ -37,7 +69,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await createSessionViaUI(page);
+		await openProjectSession(page, project);
 
 		// Mock agent recognizes the "project_proposal" trigger phrase and emits
 		// a propose_project tool call with canned fields (see
@@ -92,7 +124,8 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 	});
 
 	test("Dismiss clears the proposal without writing config", async ({ page }) => {
-		const projectId = await getDefaultProjectId();
+		const project = await createNormalProject("dismiss");
+		const projectId = project.id;
 
 		// Seed baseline — distinct from previous test.
 		await apiFetch(`/api/projects/${projectId}/config`, {
@@ -101,7 +134,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await createSessionViaUI(page);
+		await openProjectSession(page, project);
 		await sendMessage(page, "Please emit a project_proposal for testing");
 
 		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
@@ -124,7 +157,8 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 	});
 
 	test("Settings tab reflects accepted proposal without a hard reload", async ({ page }) => {
-		const projectId = await getDefaultProjectId();
+		const project = await createNormalProject("settings-cache");
+		const projectId = project.id;
 
 		// Seed a baseline so we can verify the change later. The Components tab
 		// is the canonical surface for build/test commands after the multi-repo
@@ -163,7 +197,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("settings-cache-baseline");
 
 		// 2. Open a session, trigger a propose_project, click Apply Changes.
-		await createSessionViaUI(page);
+		await openProjectSession(page, project);
 		await sendMessage(page, "Please emit a project_proposal for testing");
 
 		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();

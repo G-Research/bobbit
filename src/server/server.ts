@@ -9,7 +9,21 @@ import path from "node:path";
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
+import {
+	bobbitStateDir,
+	bobbitConfigDir,
+	bobbitDir,
+	getProjectRoot,
+	globalAgentDir,
+	getAgentDirApiState,
+	validateAgentDirTarget,
+	refreshAgentDirNextStart,
+	migrateAgentDirData,
+	isKnownAgentDir,
+	isPendingAgentDir,
+	buildAgentDirRestartGuidance,
+	normalizeAgentDirInput,
+} from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
@@ -17,7 +31,8 @@ export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
-import { SessionManager } from "./agent/session-manager.js";
+import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -26,9 +41,8 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { OrchestrationCore, OrchestrationCoreError, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
+import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
-import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
@@ -38,11 +52,12 @@ import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-desce
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
+import { deliverSessionPrompt, parseSessionPromptMode, SessionPromptDeliveryError } from "./agent/session-prompt-delivery.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
-import { RoleStore } from "./agent/role-store.js";
+import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -54,21 +69,9 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
-import {
-	PackRuntimeSupervisor,
-	FilePortStore,
-	getOrCreatePackRuntimeServerIdentity,
-	encodePackRuntimeId,
-	decodePackRuntimeId,
-	PackRuntimeNotFoundError,
-	PackRuntimeBadRequestError,
-	PackRuntimeDockerUnavailableError,
-	readRuntimeStartPolicy,
-	type PackRuntimeStatus,
-	type PackRuntimeCapabilitySummary,
-} from "./runtimes/index.js";
-import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
-import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
+import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
+import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -108,7 +111,7 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
+import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
@@ -158,6 +161,192 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
+	const code = (err as { code?: unknown } | null)?.code;
+	const message = err instanceof Error ? err.message : String(err);
+	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
+}
+
+function extensionChannelAuditSink(event: Record<string, unknown>): void {
+	const type = typeof event.type === "string" ? event.type : "unknown";
+	if ((type === "channel.frame.in" || type === "channel.frame.out") && process.env.BOBBIT_DEBUG !== "1") return;
+	const session = typeof event.sessionId === "string" ? event.sessionId : "-";
+	const packId = typeof event.packId === "string" ? event.packId : "-";
+	const channelName = typeof event.channelName === "string" ? event.channelName : "-";
+	const channelId = typeof event.channelId === "string" ? event.channelId : "-";
+	const reason = typeof event.reason === "string" ? event.reason : undefined;
+	const error = typeof event.error === "string" ? event.error : undefined;
+	const quota = typeof event.quota === "string" ? event.quota : undefined;
+	const frameKind = typeof event.frameKind === "string" ? event.frameKind : undefined;
+	const frameBytes = typeof event.frameBytes === "number" ? event.frameBytes : undefined;
+	const extras = [reason && `reason=${reason}`, error && `error=${error}`, quota && `quota=${quota}`, frameKind && `frameKind=${frameKind}`, frameBytes !== undefined && `frameBytes=${frameBytes}`].filter(Boolean).join(" ");
+	console.log(`[ext-channel-audit] type=${type} session=${session} packId=${packId} channel=${channelName} channelId=${channelId}${extras ? ` ${extras}` : ""}`);
+}
+
+async function instantiateExtensionChannelServices(deps: {
+	packContributionRegistry: PackContributionRegistry;
+	sessionManager: SessionManager;
+	projectContextManager: ProjectContextManager;
+	toolManager: ToolManager;
+}): Promise<ExtensionChannelServices | undefined> {
+	try {
+		const [registryModule, grantsModule, channelModuleHostModule, channelPtyModule] = await Promise.all([
+			import("./extension-host/" + "channel-registry.js"),
+			import("./extension-host/" + "channel-open-permits.js"),
+			import("./extension-host/" + "channel-module-host.js"),
+			import("./extension-host/" + "channel-pty-helper.js"),
+		]);
+		const OpenPermitsCtor = (grantsModule as any).ChannelOpenPermitService
+			?? (grantsModule as any).ChannelOpenPermits
+			?? (grantsModule as any).ChannelOpenPermitStore
+			?? (grantsModule as any).OpenGrantStore;
+		const RegistryCtor = (registryModule as any).ChannelRegistry;
+		if (typeof OpenPermitsCtor !== "function" || typeof RegistryCtor !== "function") {
+			throw new Error("Extension channel modules must export ChannelRegistry and a channel open-permit service");
+		}
+		const ChannelModuleHostCtor = (channelModuleHostModule as any).WorkerChannelModuleHost
+			?? (channelModuleHostModule as any).ChannelModuleHost
+			?? (channelModuleHostModule as any).LocalChannelModuleHost;
+		const openPermits = new OpenPermitsCtor({ audit: extensionChannelAuditSink });
+		const ChannelPtyServiceCtor = (channelPtyModule as any).ChannelPtyService;
+		const channelPtyService = typeof ChannelPtyServiceCtor === "function"
+			? new ChannelPtyServiceCtor({ sessionManager: deps.sessionManager, audit: extensionChannelAuditSink })
+			: undefined;
+		const channelModuleHost = typeof ChannelModuleHostCtor === "function" ? new ChannelModuleHostCtor({
+			buildHost: channelPtyService
+				? (contribution: any, ctx: any) => channelPtyService.buildHost(contribution, ctx.sessionId)
+				: undefined,
+		}) : undefined;
+		const registry = new RegistryCtor({
+			openPermits,
+			openPermitService: openPermits,
+			grants: openPermits,
+			packContributionRegistry: deps.packContributionRegistry,
+			contributionRegistry: deps.packContributionRegistry,
+			contributions: deps.packContributionRegistry,
+			moduleHost: channelModuleHost,
+			audit: extensionChannelAuditSink,
+			auditLog: { write: extensionChannelAuditSink },
+			sessionManager: deps.sessionManager,
+			projectContextManager: deps.projectContextManager,
+			toolManager: deps.toolManager,
+			getPackStore,
+		});
+		return { registry, openPermits };
+	} catch (err) {
+		if (isMissingOptionalExtensionChannelModule(err)) return undefined;
+		throw err;
+	}
+}
+
+function resolveChannelContributionForGrant(
+	registry: PackContributionRegistry,
+	projectId: string | undefined,
+	packId: string,
+	name: string,
+): unknown {
+	const direct = (registry as any).getChannel;
+	if (typeof direct === "function") return direct.call(registry, projectId, packId, name);
+	const pack = registry.getPack(projectId, packId) as unknown as { channels?: unknown } | undefined;
+	const channels = Array.isArray(pack?.channels) ? pack.channels : [];
+	return channels.find((channel: any) => channel && channel.name === name);
+}
+
+async function mintExtensionChannelOpenGrant(openPermits: unknown, binding: {
+	sessionId: string;
+	packId: string;
+	contributionId: string;
+	channelName: string;
+	singletonKey?: string;
+}): Promise<string> {
+	const issuer = openPermits as any;
+	const mint = issuer?.mint ?? issuer?.mintGrant ?? issuer?.createGrant ?? issuer?.issue;
+	if (typeof mint !== "function") throw new Error("channel open-permit service is unavailable");
+	const result = await mint.call(issuer, binding);
+	if (typeof result === "string") return result;
+	if (result && typeof result.grant === "string") return result.grant;
+	if (result && typeof result.openGrant === "string") return result.openGrant;
+	if (result && typeof result.token === "string") return result.token;
+	throw new Error("channel open-permit service returned no grant");
+}
+
+function authorizePackBoundScopedChannelOpenRequest(
+	headerSid: string | undefined,
+	bodySid: unknown,
+	resolveSession: (id: string) => ActionGuardSession | undefined,
+): { ok: true; sessionId: string } | { ok: false; status: number; error: string } {
+	if (!headerSid) return { ok: false, status: 403, error: "missing session" };
+	if (bodySid !== undefined && bodySid !== null && bodySid !== headerSid) {
+		return { ok: false, status: 403, error: "session mismatch" };
+	}
+	if (!resolveSession(headerSid)) return { ok: false, status: 403, error: "unknown session" };
+	return { ok: true, sessionId: headerSid };
+}
+
+export type ScopedExtensionChannelOpenPermitResult =
+	| { ok: true; openGrant: string; sessionId: string; packId: string; contributionId: string; channelName: string; singletonKey?: string }
+	| { ok: false; status: number; error: string };
+
+export async function mintScopedExtensionChannelOpenPermit(input: {
+	openPermits: unknown;
+	packContributionRegistry: PackContributionRegistry;
+	projectId?: string;
+	resolver: any;
+	headerSessionId: string | undefined;
+	rawHeaderSessionId?: string | string[] | undefined;
+	bodySessionId?: unknown;
+	surfaceToken: unknown;
+	name: unknown;
+	init?: unknown;
+	singletonKey?: unknown;
+	resolveSession: (id: string) => ActionGuardSession | undefined;
+}): Promise<ScopedExtensionChannelOpenPermitResult> {
+	const surf = resolveSurfaceIdentity({
+		token: input.surfaceToken,
+		headerSessionId: input.headerSessionId,
+		resolver: input.resolver,
+		contributions: input.packContributionRegistry,
+		projectId: input.projectId,
+	});
+	if (!surf.ok) return { ok: false, status: surf.status, error: surf.error };
+	if (surf.tool !== undefined) {
+		return { ok: false, status: 403, error: "channel open permits require a pack-bound surface token" };
+	}
+	const guard = authorizePackBoundScopedChannelOpenRequest(input.headerSessionId, input.bodySessionId, input.resolveSession);
+	if (!guard.ok) return { ok: false, status: guard.status, error: guard.error };
+	const name = typeof input.name === "string" ? input.name.trim() : "";
+	if (!name) return { ok: false, status: 400, error: "missing channel name" };
+	const init = input.init;
+	const singletonKey = init && typeof init === "object" && typeof (init as { singletonKey?: unknown }).singletonKey === "string"
+		? (init as { singletonKey: string }).singletonKey
+		: typeof input.singletonKey === "string" ? input.singletonKey : undefined;
+	if (!resolveChannelContributionForGrant(input.packContributionRegistry, input.projectId, surf.packId, name)) {
+		return { ok: false, status: 404, error: "channel is not declared by this pack" };
+	}
+	try {
+		const openGrant = await mintExtensionChannelOpenGrant(input.openPermits, {
+			sessionId: guard.sessionId,
+			packId: surf.packId,
+			contributionId: surf.contributionId,
+			channelName: name,
+			...(singletonKey !== undefined ? { singletonKey } : {}),
+		});
+		return { ok: true, openGrant, sessionId: guard.sessionId, packId: surf.packId, contributionId: surf.contributionId, channelName: name, ...(singletonKey !== undefined ? { singletonKey } : {}) };
+	} catch (err) {
+		return { ok: false, status: 400, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+async function disposeExtensionChannelServices(services: ExtensionChannelServices | undefined, reason: string): Promise<void> {
+	const dispose = services?.registry?.dispose;
+	if (!dispose) return;
+	try {
+		await dispose.call(services.registry, reason);
+	} catch (err) {
+		console.warn(`[extension-channels] dispose failed:`, err);
+	}
 }
 
 function collectVisibleSessionWorktreeReferences(projectContextManager: ProjectContextManager): WorktreeReferenceRecord[] {
@@ -285,7 +474,9 @@ import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
-import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { clampThinkingLevelForModel } from "./agent/thinking-level-clamp.js";
+import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
 // `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
@@ -294,36 +485,6 @@ import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-lev
 // Entries are also refilled from the transcript check, so survive process
 // restarts via the transcript fallback in findAskResponseAnswers.
 const askSubmittedToolUseIds = new Set<string>();
-
-export async function loadHydratedMessagesForAskSubmit(
-	sessionManager: Pick<SessionManager, "hydrateClaudeCodeSnapshotMessages">,
-	sessionId: string,
-	session: { rpcClient: { getMessages: () => Promise<any> } },
-): Promise<any[]> {
-	const msgsResp = await session.rpcClient.getMessages();
-	const liveData = msgsResp?.data;
-	const hydrated = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, liveData);
-	const raw = Array.isArray(hydrated)
-		? hydrated
-		: (hydrated && typeof hydrated === "object" && Array.isArray((hydrated as any).messages) ? (hydrated as any).messages : undefined);
-	return Array.isArray(raw) ? raw : [];
-}
-
-export function findAskUserChoicesQuestions(messages: any[], toolUseId: string): UserQuestion[] | null {
-	for (const m of messages) {
-		if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
-		for (const b of m.content) {
-			if (!b) continue;
-			const isToolUse = b.type === "toolCall" || b.type === "tool_use";
-			if (!isToolUse) continue;
-			if (b.name !== "ask_user_choices") continue;
-			if (b.id !== toolUseId) continue;
-			const args = b.arguments ?? b.input;
-			if (args && Array.isArray(args.questions)) return args.questions as UserQuestion[];
-		}
-	}
-	return null;
-}
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -333,13 +494,12 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
-import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
+import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
-import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
+import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
@@ -349,21 +509,30 @@ import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
-import { consumeOperatorConfirmation, mintOperatorConfirmation, stableConfirmationBinding } from "./auth/operator-confirmation.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
-import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
-import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
+import {
+	ProjectRegistry,
+	SymlinkProjectRootError,
+	PreflightFailedError,
+	SYSTEM_PROJECT_ID,
+	HEADQUARTERS_PROJECT_ID,
+	ProjectOrderError,
+	SpecialProjectMutationError,
+	assertNormalMutableProject,
+	isHeadquartersProject,
+	isSystemProject,
+	type RegisteredProject,
+} from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -381,14 +550,16 @@ import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
-import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
-import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
+import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
+import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
-import { seedBuiltinPackDefaults } from "./agent/builtin-pack-defaults.js";
-import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
+import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
+import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
+import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -405,6 +576,7 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
+import { validateGoalInlineWorkflow } from "./proposals/proposal-types.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -431,6 +603,59 @@ function readYamlMapping(file: string): Record<string, unknown> | null {
 	} catch {
 		return null;
 	}
+}
+
+function safeString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+type McpOperationMetadataEntry = { name: string; label?: string; description?: string; inputSchema?: unknown };
+
+function normaliseMcpOperationMetadata(raw: unknown): McpOperationMetadataEntry[] {
+	if (!Array.isArray(raw)) return [];
+	const out: McpOperationMetadataEntry[] = [];
+	const seen = new Set<string>();
+	for (const item of raw) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+		const obj = item as Record<string, unknown>;
+		const name = safeString(obj.name ?? obj.operation ?? obj.id);
+		if (!name || seen.has(name)) continue;
+		seen.add(name);
+		out.push({
+			name,
+			...(safeString(obj.label ?? obj.title ?? obj.displayName) ? { label: safeString(obj.label ?? obj.title ?? obj.displayName) } : {}),
+			...(safeString(obj.description) ? { description: safeString(obj.description) } : {}),
+			...(obj.inputSchema !== undefined ? { inputSchema: obj.inputSchema } : {}),
+		});
+	}
+	return out;
+}
+
+function operationMetadataForMcpContribution(
+	mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown },
+	metaDetails: Record<string, unknown>,
+): McpOperationMetadataEntry[] {
+	const gatewayOps = metaDetails.gatewayOperations;
+	if (gatewayOps && typeof gatewayOps === "object" && !Array.isArray(gatewayOps)) {
+		const normalised = normaliseMcpOperationMetadata((gatewayOps as Record<string, unknown>)[mcp.listName]);
+		if (normalised.length > 0) return normalised;
+	}
+	const fromContribution = normaliseMcpOperationMetadata(mcp.operationMetadata);
+	if (fromContribution.length > 0) return fromContribution;
+	const raw = mcp.sourceFile ? readYamlMapping(mcp.sourceFile)?.operations : undefined;
+	return normaliseMcpOperationMetadata(raw);
+}
+
+function activationMcpContributionId(
+	entry: PackEntry,
+	mcp: { listName: string; serverName: string; subNamespace?: string },
+	metaDetails: Record<string, unknown>,
+	fallbackSourceId?: string,
+): string {
+	if (metaDetails.sourceType === "mcp-gateway") {
+		return gatewayMcpActivationContributionId(entry, mcp, metaDetails, fallbackSourceId);
+	}
+	return mcp.listName;
 }
 
 /**
@@ -475,84 +700,6 @@ export function readConcretePackToolsFromGroups(
 	return { tools, descriptions };
 }
 
-// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────────
-// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
-// it lists in the Marketplace built-in band but resolves DORMANT (tools,
-// provider, entrypoints, runtime all absent) on a fresh server until the user
-// enables it OR it is "already configured" (live-setup preservation). The
-// overlay is injected into the SERVER-scope ProjectConfigStore so the single
-// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
-// Marketplace endpoints) all observe the same effective state; it is never
-// persisted, so the dormancy invariant holds and an explicit user toggle (a
-// persisted record, or the force-enabled marker) always wins.
-//
-// These helpers are MODULE-scoped (not closed over createGateway) so the
-// activation PUT inside the top-level handleApiRoute shares them. The static
-// per-pack info is memoized and cleared on any pack-list mutation via
-// clearDefaultDisabledInfoCache(); the live gates (force-enabled marker +
-// persisted provider config) are read each call.
-interface DefaultDisabledInfo { allDisabled: DisabledRefs; packId: string; providerIds: string[] }
-const defaultDisabledInfoCache = new Map<string, DefaultDisabledInfo | null>();
-function clearDefaultDisabledInfoCache(): void { defaultDisabledInfoCache.clear(); }
-/** Resolve + memoize the default-disabled info for a SERVER-scope pack name, or
- *  `null` when the pack is not default-disabled. An installed server market pack
- *  wins over the built-in band (mirrors buildActivationCatalogue's resolution). */
-function getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStore): DefaultDisabledInfo | null {
-	const cached = defaultDisabledInfoCache.get(packName);
-	if (cached !== undefined) return cached;
-	let info: DefaultDisabledInfo | null = null;
-	const base = getProjectRoot();
-	let entry = scopeMarketPackEntries("server" as PackScope, base, serverStore.getPackOrder("server"))
-		.find((e) => e.manifest?.name === packName);
-	if (!entry || !entry.manifest) {
-		entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
-	}
-	if (entry?.manifest?.defaultDisabled === true) {
-		const concrete = readConcretePackToolsFromGroups(entry.path, entry.manifest.contents.tools).tools;
-		let providerIds: string[] = [];
-		try { providerIds = loadPackContributions(entry.path, entry.manifest).providers.map((p) => p.id); }
-		catch { /* contributions optional; configured-check just sees no providers */ }
-		info = {
-			allDisabled: buildAllDisabledRefs(entry.manifest, concrete),
-			packId: packIdFromRoot(entry.path),
-			providerIds,
-		};
-	}
-	defaultDisabledInfoCache.set(packName, info);
-	return info;
-}
-/** Persisted marker key: pack names the user EXPLICITLY enabled. An explicit
- *  enable clears all disabled refs (an empty record, indistinguishable from
- *  "never touched"), so the marker disambiguates it from the default-disabled
- *  baseline and makes the enable survive reboots. */
-const PACK_FORCE_ENABLED_KEY = "pack_force_enabled";
-/** Order-insensitive equality for two DisabledRefs (kinds present with non-empty
- *  arrays must match as SETS). Used to detect when an activation PUT matches the
- *  pack's current default so we persist a deviation only. */
-function disabledRefsEqual(a: DisabledRefs, b: DisabledRefs): boolean {
-	const kindsOf = (r: DisabledRefs): string[] =>
-		Object.keys(r).filter((k) => Array.isArray((r as Record<string, string[]>)[k]) && (r as Record<string, string[]>)[k].length > 0).sort();
-	const ka = kindsOf(a); const kb = kindsOf(b);
-	if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
-	for (const k of ka) {
-		const sa = [...(a as Record<string, string[]>)[k]].sort();
-		const sb = [...(b as Record<string, string[]>)[k]].sort();
-		if (sa.length !== sb.length || sa.some((v, i) => v !== sb[i])) return false;
-	}
-	return true;
-}
-function readForceEnabledPacks(store: ProjectConfigStore): Set<string> {
-	try {
-		const raw = store.get(PACK_FORCE_ENABLED_KEY);
-		const arr = raw ? (JSON.parse(raw) as unknown) : [];
-		return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
-	} catch { return new Set(); }
-}
-function writeForceEnabledPacks(store: ProjectConfigStore, set: Set<string>): void {
-	if (set.size === 0) store.remove(PACK_FORCE_ENABLED_KEY);
-	else store.set(PACK_FORCE_ENABLED_KEY, JSON.stringify([...set].sort()));
-}
-
 export function buildMarketToolRootsForProject(options: {
 	projectId?: string;
 	builtinEntries: readonly PackEntry[];
@@ -580,6 +727,142 @@ export function buildMarketToolRootsForProject(options: {
 	return roots;
 }
 
+function loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: NonNullable<PackEntry["manifest"]>): ResolvedPiExtensionContribution[] {
+	return loadPiExtensionContributions(packRoot, manifest);
+}
+
+function loadPiExtensionContributionsWithDiscoverySyncFromRuntime(
+	packRoot: string,
+	manifest: NonNullable<PackEntry["manifest"]>,
+	opts: { trustAccepted: boolean; origin?: Partial<ResolvedPiExtensionContribution["origin"]>; disabledRefs?: Iterable<string> },
+): ResolvedPiExtensionContribution[] {
+	return loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest, opts);
+}
+
+function piExtensionDiagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic {
+	return { status, code, message, updatedAt: new Date().toISOString() };
+}
+
+export function piExtensionCatalogueRef(entry: string | Record<string, unknown>): string {
+	return typeof entry === "string"
+		? entry
+		: String(entry.ref ?? entry.listName ?? "");
+}
+
+export function normalisePiExtensionCatalogueRefs(entries: readonly (string | Record<string, unknown>)[] | undefined): Set<string> {
+	return new Set((entries ?? []).map(piExtensionCatalogueRef).filter(Boolean));
+}
+
+export function buildPiExtensionToolRows(contributions: readonly ResolvedPiExtensionContribution[]): Array<Record<string, unknown>> {
+	annotatePiExtensionToolNameCollisions(contributions);
+	const byName = new Map<string, Record<string, unknown>>();
+	for (const contribution of contributions) {
+		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
+		for (const tool of contribution.discovery?.tools ?? []) {
+			if (!tool.name) continue;
+			const provider = {
+				providerKey: `pi-ext:${contribution.origin.scope}:${contribution.origin.packId}:${contribution.listName}:${tool.name}`,
+				packName: contribution.origin.packName,
+				listName: contribution.listName,
+				scope: contribution.origin.scope,
+				...(contribution.entryPath ? { sourcePath: contribution.entryPath } : {}),
+			};
+			const existing = byName.get(tool.name);
+			if (existing) {
+				(existing.providers as Array<Record<string, unknown>>).push(provider);
+				continue;
+			}
+			byName.set(tool.name, {
+				name: tool.name,
+				description: tool.description ?? "Pi extension tool",
+				inputSchema: tool.inputSchema,
+				providerType: "pi-extension",
+				origin: "marketplace-pi-extension",
+				originPackName: contribution.origin.packName,
+				originPackId: contribution.origin.packId,
+				group: "Pi Extension",
+				readOnly: true,
+				...(contribution.entryPath ? { sourcePath: contribution.entryPath } : {}),
+				providers: [provider],
+			});
+		}
+	}
+	return [...byName.values()];
+}
+
+export function appendPiExtensionToolRows(tools: Array<Record<string, unknown>>, piRows: readonly Record<string, unknown>[]): void {
+	const byName = new Map(tools.map((tool) => [String(tool.name), tool]));
+	for (const row of piRows) {
+		const name = String(row.name ?? "");
+		if (!name) continue;
+		const existing = byName.get(name);
+		if (!existing) {
+			tools.push({ ...row });
+			byName.set(name, tools[tools.length - 1]);
+			continue;
+		}
+		const providers = Array.isArray(existing.providers) ? existing.providers : [];
+		existing.providers = [...providers, ...((row.providers as Array<Record<string, unknown>> | undefined) ?? [])];
+		existing.piExtensionCollision = true;
+		existing.piExtensionPolicyScope = "name";
+	}
+}
+
+function piExtensionToolScopeContext(scope: { projectId?: string; cwd?: string }): ScopedToolContext {
+	const projectId = normalizeConfigProjectId(scope.projectId);
+	const cwd = scope.projectId === HEADQUARTERS_PROJECT_ID ? undefined : scope.cwd;
+	const scopeKey = projectId ? `project:${projectId}` : cwd ? `cwd:${path.resolve(cwd)}` : "default";
+	return { ...(projectId ? { projectId } : {}), ...(cwd ? { cwd } : {}), scopeKey };
+}
+
+function annotatePiExtensionToolNameCollisions(contributions: readonly ResolvedPiExtensionContribution[]): void {
+	const byName = new Map<string, ResolvedPiExtensionContribution[]>();
+	for (const contribution of contributions) {
+		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
+		for (const tool of contribution.discovery?.tools ?? []) {
+			if (!tool.name) continue;
+			const providers = byName.get(tool.name) ?? [];
+			providers.push(contribution);
+			byName.set(tool.name, providers);
+		}
+	}
+	for (const [name, providers] of byName) {
+		const unique = new Set(providers.map((provider) => `${provider.origin.scope}:${provider.origin.packId}:${provider.listName}`));
+		if (unique.size < 2) continue;
+		for (const contribution of providers) {
+			if (contribution.diagnostic.status !== "ok") continue;
+			contribution.diagnostic = piExtensionDiagnostic("ok", "tool_name_collision", `Multiple pi extensions expose runtime tool name "${name}" in this scope; one name-based policy applies to all providers.`);
+		}
+	}
+}
+
+function piExtensionExternalTools(contributions: readonly ResolvedPiExtensionContribution[]): PiExtensionExternalTool[] {
+	annotatePiExtensionToolNameCollisions(contributions);
+	const out: PiExtensionExternalTool[] = [];
+	for (const contribution of contributions) {
+		if (contribution.diagnostic.status === "disabled" || contribution.diagnostic.status === "unresolved") continue;
+		for (const tool of contribution.discovery?.tools ?? []) {
+			if (!tool.name) continue;
+			out.push({
+				name: tool.name,
+				runtimeName: tool.name,
+				description: tool.description ?? "Pi extension tool",
+				group: "Pi Extensions",
+				inputSchema: tool.inputSchema,
+				providerKey: `pi-ext:${contribution.origin.scope}:${contribution.origin.packId}:${contribution.listName}:${tool.name}`,
+				packName: contribution.origin.packName,
+				packId: contribution.origin.packId,
+				listName: contribution.listName,
+				scope: contribution.origin.scope,
+				...(contribution.entryPath ? { sourcePath: contribution.entryPath } : {}),
+			});
+		}
+	}
+	return out;
+}
+
+const piExtensionDiscoveryCache = new Map<string, { rows?: ResolvedPiExtensionContribution[]; pending?: Promise<ResolvedPiExtensionContribution[]> }>();
+
 /**
  * Clamp a thinking-level token against a role's pinned model (if any).
  * - Validates that the token is in the canonical set; returns undefined otherwise.
@@ -596,8 +879,7 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	if (slash <= 0) return known;
 	const provider = modelStr.slice(0, slash);
 	const modelId = modelStr.slice(slash + 1);
-	const meta = inferMeta(modelId);
-	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
+	return clampThinkingLevelForModel(known, provider, modelId);
 }
 
 export function isMissingRemoteRefDeleteError(err: unknown): boolean {
@@ -618,9 +900,19 @@ export function isMissingRemoteRefDeleteError(err: unknown): boolean {
 	return texts.some(text => /\bremote\s+ref\s+does\s+not\s+exist\b/i.test(text));
 }
 
+export function isIgnorableRemoteBranchDeleteError(err: unknown): boolean {
+	if (isMissingRemoteRefDeleteError(err)) return true;
+	if (!err || typeof err !== "object") return false;
+	const record = err as Record<string, unknown>;
+	return record.code === "ENOENT"
+		&& record.path === "git"
+		&& typeof record.syscall === "string"
+		&& record.syscall.startsWith("spawn");
+}
+
 /**
  * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
+ * Fire-and-forget — idempotent cleanup misses are ignored; other errors are logged but never block the archive flow.
  */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
@@ -650,10 +942,34 @@ async function deleteRemoteGoalBranches(
 			});
 			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
-			if (isMissingRemoteRefDeleteError(err)) return;
+			if (isIgnorableRemoteBranchDeleteError(err)) return;
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
+}
+
+const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {
+	return !!goal.branch && !!goal.worktreePath;
+}
+
+function noWorktreeGoalGitMessage(goal: Pick<PersistedGoal, "projectId">): string {
+	return goal.projectId === HEADQUARTERS_PROJECT_ID
+		? HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE
+		: GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE;
+}
+
+function goalGitUnavailablePayload(goal: Pick<PersistedGoal, "id" | "projectId" | "branch" | "worktreePath">, action: string): Record<string, unknown> {
+	return {
+		error: `${action} is unavailable. ${noWorktreeGoalGitMessage(goal)}`,
+		code: "GOAL_GIT_UNAVAILABLE",
+		goalId: goal.id,
+		projectId: goal.projectId,
+		branch: goal.branch ?? null,
+		worktreePath: goal.worktreePath ?? null,
+	};
 }
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
@@ -663,13 +979,36 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
-const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
+const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
 
 type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
 let _ghExecFileForTests: GhExecFileForTests | undefined;
 
 export function buildGhPrViewArgs(branch?: string): string[] {
 	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
+	return [
+		"api", "graphql",
+		"-f", `query=${PR_MERGE_PERMISSIONS_QUERY}`,
+		"-F", `owner=${owner}`,
+		"-F", `name=${name}`,
+		"-F", `number=${number}`,
+	];
+}
+
+export function buildGhBranchRulesArgs(owner: string, name: string, branch: string): string[] {
+	return ["api", `repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}`];
+}
+
+export function buildGhRulesetArgs(owner: string, name: string, rulesetId: number): string[] {
+	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
+}
+
+export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
+	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
 }
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
@@ -707,6 +1046,79 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
+function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null {
+	if (typeof url !== "string" || !url) return null;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
+		const [owner, name, pull, number] = parsed.pathname.split("/").filter(Boolean);
+		if (!owner || !name || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
+		return { owner, name };
+	} catch {
+		return null;
+	}
+}
+
+async function getViewerMergePermissions(
+	cwd: string,
+	pr: { url?: string; number?: number; baseRefName?: string },
+): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
+	const repo = parseGithubPrRepo(pr.url);
+	if (repo && typeof pr.number === "number") {
+		try {
+			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
+			const parsed = JSON.parse(stdout);
+			const repository = parsed?.data?.repository;
+			const perm = repository?.viewerPermission ?? "";
+			_repoPermCache.set(cwd, { perm, ts: Date.now() });
+
+			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
+			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
+				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, repo, pr.baseRefName);
+			}
+
+			return { viewerIsAdmin: perm === "ADMIN", viewerCanMergeAsAdmin };
+		} catch {
+			// Fall through to legacy permission probe.
+		}
+	}
+	return { viewerIsAdmin: await getViewerIsAdmin(cwd), viewerCanMergeAsAdmin: false };
+}
+
+async function getViewerCanBypassBranchRules(
+	cwd: string,
+	repo: { owner: string; name: string },
+	branch: string,
+): Promise<boolean> {
+	try {
+		const stdout = await execGh(buildGhBranchRulesArgs(repo.owner, repo.name, branch), cwd);
+		const rules = JSON.parse(stdout);
+		if (!Array.isArray(rules)) return false;
+
+		if (rules.some((rule) => isBypassMode(rule?.current_user_can_bypass))) return true;
+
+		const rulesetIds = [
+			...new Set(rules.map((rule) => rule?.ruleset_id).filter((id): id is number => typeof id === "number")),
+		];
+
+		for (const rulesetId of rulesetIds) {
+			try {
+				const detail = JSON.parse(await execGh(buildGhRulesetArgs(repo.owner, repo.name, rulesetId), cwd));
+				if (isBypassMode(detail?.current_user_can_bypass)) return true;
+			} catch {
+				// Continue checking other matching rulesets.
+			}
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+function isBypassMode(mode: unknown): boolean {
+	return mode === "always" || mode === "pull_requests_only";
+}
+
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const args = buildGhPrViewArgs(branch);
@@ -717,8 +1129,19 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 		try {
 			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
-			const viewerIsAdmin = await getViewerIsAdmin(dir);
-			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
+			const { viewerIsAdmin, viewerCanMergeAsAdmin } = await getViewerMergePermissions(dir, pr);
+			const data = {
+				number: pr.number,
+				url: pr.url,
+				title: pr.title,
+				state: pr.state,
+				mergeable: pr.mergeable,
+				headRefName: pr.headRefName,
+				baseRefName: pr.baseRefName,
+				reviewDecision: pr.reviewDecision || null,
+				viewerIsAdmin,
+				viewerCanMergeAsAdmin,
+			};
 			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
 			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 			return data;
@@ -791,11 +1214,16 @@ function branchPublishGitArgs(branch: string): {
 	};
 }
 
+let _publishCurrentBranchToOriginFake: ((cwd: string, branch: string, opts: { containerId?: string; setUpstream?: boolean }) => Promise<string> | string) | undefined;
+export function __setPublishCurrentBranchToOriginFake(fn: typeof _publishCurrentBranchToOriginFake): void { _publishCurrentBranchToOriginFake = fn; }
+export function __clearPublishCurrentBranchToOriginFake(): void { _publishCurrentBranchToOriginFake = undefined; }
+
 async function publishCurrentBranchToOrigin(
 	cwd: string,
 	branch: string,
 	opts: { containerId?: string; setUpstream?: boolean } = {},
 ): Promise<string> {
+	if (_publishCurrentBranchToOriginFake) return _publishCurrentBranchToOriginFake(cwd, branch, opts);
 	const args = branchPublishGitArgs(branch);
 	const output = await execGitArgs(args.push, cwd, 30_000, opts.containerId);
 	if (opts.setUpstream) {
@@ -810,6 +1238,8 @@ async function publishCurrentBranchToOrigin(
 }
 
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
+export type GitStatusRemotePublication = "local-only-policy";
+
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
 	/**
@@ -830,6 +1260,107 @@ export interface GitStatusResult {
 	partial?: boolean;
 	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
 	untrackedIncluded?: boolean;
+	/** Set when status intentionally suppresses default publication by policy. */
+	remotePublication?: GitStatusRemotePublication;
+}
+
+type GitStatusPublicationPolicy = "legacy-auto-publish" | "local-only-policy";
+type WorktreePushPolicy = "local-only" | "publish";
+type SessionGitPublicationMetadata = Partial<Pick<SessionInfo, "teamGoalId" | "teamLeadSessionId" | "role" | "branch">> & {
+	worktreePushPolicy?: WorktreePushPolicy;
+	remotePublicationPolicy?: WorktreePushPolicy;
+};
+
+function normalizeWorktreePushPolicy(value: unknown): WorktreePushPolicy | undefined {
+	return value === "local-only" || value === "publish" ? value : undefined;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readSessionGitPublicationMetadata(sessionManager: unknown, sessionId: string, liveSession: unknown): SessionGitPublicationMetadata {
+	const live = liveSession as SessionGitPublicationMetadata | undefined;
+	const persisted = (sessionManager as { getPersistedSession?: (id: string) => unknown })
+		.getPersistedSession?.(sessionId) as SessionGitPublicationMetadata | undefined;
+	return {
+		teamGoalId: live?.teamGoalId ?? persisted?.teamGoalId,
+		teamLeadSessionId: live?.teamLeadSessionId ?? persisted?.teamLeadSessionId,
+		role: live?.role ?? persisted?.role,
+		branch: live?.branch ?? persisted?.branch,
+		worktreePushPolicy: normalizeWorktreePushPolicy(live?.worktreePushPolicy) ?? normalizeWorktreePushPolicy(persisted?.worktreePushPolicy),
+		remotePublicationPolicy: normalizeWorktreePushPolicy(live?.remotePublicationPolicy) ?? normalizeWorktreePushPolicy(persisted?.remotePublicationPolicy),
+	};
+}
+
+function explicitWorktreePushPolicy(session: SessionGitPublicationMetadata): WorktreePushPolicy | undefined {
+	return normalizeWorktreePushPolicy(session.worktreePushPolicy) ?? normalizeWorktreePushPolicy(session.remotePublicationPolicy);
+}
+
+function isLegacyScopedTeamMemberSession(session: SessionGitPublicationMetadata, branch: string | undefined): boolean {
+	if (!session.teamGoalId || !session.teamLeadSessionId || !session.role || !branch) return false;
+	if (session.role === "team-lead") return false;
+	const goalId8 = session.teamGoalId.slice(0, 8);
+	if (!/^[0-9a-f]{8}$/i.test(goalId8)) return false;
+	const rolePattern = escapeRegExp(session.role);
+	const branchPattern = new RegExp(`^goal/${escapeRegExp(goalId8)}/${rolePattern}-[0-9a-f]{4}$`, "i");
+	return branchPattern.test(branch);
+}
+
+function resolveSessionGitStatusPublicationPolicy(
+	session: SessionGitPublicationMetadata,
+	branch: string | undefined,
+): GitStatusPublicationPolicy {
+	const explicitPolicy = explicitWorktreePushPolicy(session);
+	if (explicitPolicy === "local-only") return "local-only-policy";
+	if (explicitPolicy === "publish") return "legacy-auto-publish";
+	return isLegacyScopedTeamMemberSession(session, branch) ? "local-only-policy" : "legacy-auto-publish";
+}
+
+function sessionGitStatusRemotePublication(
+	sessionManager: unknown,
+	sessionId: string,
+	liveSession: unknown,
+	branch: string | undefined,
+): GitStatusRemotePublication | undefined {
+	const metadata = readSessionGitPublicationMetadata(sessionManager, sessionId, liveSession);
+	return resolveSessionGitStatusPublicationPolicy(metadata, branch) === "local-only-policy"
+		? "local-only-policy"
+		: undefined;
+}
+
+export function sessionGitStatusAutoPublishDecision(
+	result: Pick<GitStatusResult, "isOnPrimary" | "ahead" | "hasUpstream" | "branch"> | null | undefined,
+	remotePublication?: GitStatusRemotePublication,
+): { branch: string; setUpstream?: boolean } | undefined {
+	if (!result || remotePublication) return undefined;
+	if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
+		return { branch: result.branch };
+	}
+	if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+		return { branch: result.branch, setUpstream: true };
+	}
+	return undefined;
+}
+
+export function __resolveSessionGitStatusPublicationPolicyForTests(
+	session: SessionGitPublicationMetadata,
+	branch: string | undefined,
+): GitStatusPublicationPolicy {
+	return resolveSessionGitStatusPublicationPolicy(session, branch);
+}
+
+export function __resolveSessionGitStatusPublicationForTests(
+	session: SessionGitPublicationMetadata,
+	result: GitStatusResult,
+): { policy: GitStatusPublicationPolicy; result: GitStatusResult; autoPublish: boolean } {
+	const policy = resolveSessionGitStatusPublicationPolicy(session, result.branch);
+	const remotePublication = policy === "local-only-policy" ? "local-only-policy" : undefined;
+	return {
+		policy,
+		result: remotePublication ? { ...result, remotePublication } : result,
+		autoPublish: !!sessionGitStatusAutoPublishDecision(result, remotePublication),
+	};
 }
 
 // ── Git status cache + single-flight ──
@@ -953,8 +1484,116 @@ async function runBatchGitStatus(
 	return runBatchGitStatusNative(cwd, { ...opts, containerId });
 }
 
-// ── Git diff helper (shared between session and goal endpoints) ──
+// ── Git diff / commit helpers (shared between session and goal endpoints) ──
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
+const COMMIT_LOG_FORMAT = "%H%x1f%h%x1f%s%x1f%an%x1f%aI";
+const COMMIT_LOG_SEPARATOR = "\x1f";
+
+type CommitChangedFile = {
+	path: string;
+	oldPath?: string;
+	status: string;
+	statusLabel: string;
+};
+
+type CommitInfo = {
+	sha: string;
+	shortSha: string;
+	message: string;
+	author: string;
+	timestamp: string;
+	filesChanged: number;
+	insertions: number;
+	deletions: number;
+	files: CommitChangedFile[];
+};
+
+function isUnsafeGitPath(file: string): boolean {
+	return !file
+		|| file.includes("..")
+		|| path.posix.isAbsolute(file)
+		|| path.win32.isAbsolute(file)
+		|| /^[a-zA-Z]:/.test(file);
+}
+
+function isValidCommitSha(commit: string): boolean {
+	return /^[0-9a-fA-F]{4,40}$/.test(commit);
+}
+
+function statusLabelForCommitFile(status: string): string {
+	switch (status) {
+		case "M": return "modified";
+		case "A": return "added";
+		case "D": return "deleted";
+		case "R": return "renamed";
+		default: return status ? status.toLowerCase() : "unknown";
+	}
+}
+
+function parseCommitChangedFiles(output: string): CommitChangedFile[] {
+	return output.split("\n").map(line => line.trim()).filter(Boolean).flatMap((line): CommitChangedFile[] => {
+		const parts = line.split("\t");
+		const rawStatus = parts[0] || "";
+		const status = rawStatus.startsWith("R") ? "R" : rawStatus;
+		if (status === "R") {
+			const oldPath = parts[1];
+			const newPath = parts[2];
+			if (!oldPath || !newPath) return [];
+			return [{ path: newPath, oldPath, status, statusLabel: statusLabelForCommitFile(status) }];
+		}
+		const filePath = parts[1];
+		if (!filePath) return [];
+		return [{ path: filePath, status, statusLabel: statusLabelForCommitFile(status) }];
+	});
+}
+
+async function assertCommitExists(cwd: string, commit: string, containerId?: string): Promise<void> {
+	if (!isValidCommitSha(commit)) throw new Error("INVALID_COMMIT");
+	try {
+		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId);
+	} catch {
+		throw new Error("INVALID_COMMIT");
+	}
+}
+
+async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string): Promise<CommitChangedFile[]> {
+	await assertCommitExists(cwd, sha, containerId);
+	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId);
+	return parseCommitChangedFiles(out);
+}
+
+function parseCommitLogWithShortstat(output: string): CommitInfo[] {
+	const lines = output.split("\n");
+	const commits: CommitInfo[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (!line.includes(COMMIT_LOG_SEPARATOR)) continue;
+		const parts = line.split(COMMIT_LOG_SEPARATOR);
+		if (parts.length < 5) continue;
+		const [sha, shortSha, message, author, timestamp] = parts;
+		let filesChanged = 0, insertions = 0, deletions = 0;
+		for (let j = i + 1; j < lines.length && !lines[j].includes(COMMIT_LOG_SEPARATOR); j++) {
+			const statLine = lines[j].trim();
+			if (!statLine.includes("changed")) continue;
+			const fm = statLine.match(/(\d+) file/);
+			const im = statLine.match(/(\d+) insertion/);
+			const dm = statLine.match(/(\d+) deletion/);
+			if (fm) filesChanged = parseInt(fm[1], 10);
+			if (im) insertions = parseInt(im[1], 10);
+			if (dm) deletions = parseInt(dm[1], 10);
+			break;
+		}
+		commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions, files: [] });
+	}
+	return commits;
+}
+
+async function attachCommitFiles(commits: CommitInfo[], cwd: string, containerId?: string): Promise<CommitInfo[]> {
+	return Promise.all(commits.map(async commit => ({
+		...commit,
+		files: await getCommitChangedFiles(cwd, commit.sha, containerId),
+	})));
+}
 
 /**
  * The seven legacy top-level QA keys that have moved to per-component
@@ -1005,15 +1644,22 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
+async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string): Promise<string> {
 	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
 
 	let diff = "";
-	if (file) {
+	if (commit) {
+		if (!file || isUnsafeGitPath(file)) throw new Error("INVALID_PATH");
+		await assertCommitExists(cwd, commit, containerId);
+		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId);
+		const renamedFile = changedFiles.find(f => f.status === "R" && (f.path === file || f.oldPath === file));
+		const pathspecs = renamedFile?.oldPath ? [renamedFile.oldPath, renamedFile.path] : [file];
+		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId);
+	} else if (file) {
 		// Sanitize: reject path traversal, absolute paths, drive letters
-		if (file.includes("..") || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) {
+		if (isUnsafeGitPath(file)) {
 			throw new Error("INVALID_PATH");
 		}
 		if (containerId) {
@@ -1093,156 +1739,13 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Pack managed-runtime supervisor seam (P2 — see docs design "P2
-// PackRuntimeSupervisor + REST"). The concrete Docker-backed supervisor + its
-// id encode/decode helpers + error classes live in ./runtimes (imported above).
-// The REST routes depend on the structural seam below so test harnesses can
-// inject a fully-mocked supervisor (no Docker daemon) via
-// registerPackRuntimeSupervisorFactory(); production builds the real
-// PackRuntimeSupervisor in start().
-
-/** The structural contract the REST routes depend on (the concrete
- *  PackRuntimeSupervisor implements a superset). Unknown-runtime failures surface
- *  as {@link PackRuntimeNotFoundError} (→ 404); malformed id/mode/tail as
- *  {@link PackRuntimeBadRequestError} (→ 400); anything else → 500. */
-export interface PackRuntimeSupervisorLike {
-	list(projectId?: string): Promise<PackRuntimeStatus[]>;
-	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
-	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
-	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
-	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
-	down(packId: string, runtimeId: string, opts?: { projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<PackRuntimeStatus>;
-	capabilitySummary(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeCapabilitySummary>;
-	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
-}
-
-export interface PackRuntimeSupervisorDeps {
-	packContributionRegistry: PackContributionRegistry;
-	stateDir: string;
-	defaultCwd: string;
-}
-
-/**
- * Map an effective Hindsight-style deployment config onto a runtime START plan —
- * the SINGLE source of truth shared by the marketplace pack-activation enable
- * path AND the `/api/pack-runtimes/:id/{start,restart}` REST routes, so the two
- * can never diverge on how a deployment config becomes supervisor start args.
- *
- * - `mode` (deployment) maps to a runtime manifest mode: `managed` ⇒
- *   `managed-postgres`, `managed-external-postgres` ⇒ `external-postgres`. The
- *   external (and absent/default) deployment mode is a NON-Docker setup path, so
- *   `start: false` and no container is brought up.
- * - The provider's `externalDatabaseUrl` is remapped onto the manifest's
- *   `HINDSIGHT_API_DATABASE_URL` env key, and `llmApiKey` onto
- *   `HINDSIGHT_API_LLM_API_KEY`, so the supervisor's config overlay satisfies
- *   those user-configured `secret:` env refs without seeding the global secret
- *   store. A value already set directly under the env key wins.
- */
-export function resolveRuntimeStartPlan(
-	deploymentConfig: Record<string, unknown>,
-): { start: boolean; mode?: string; config: Record<string, unknown> } {
-	const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
-	const config: Record<string, unknown> = { ...deploymentConfig };
-	if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0
-		&& !(typeof config.HINDSIGHT_API_DATABASE_URL === "string" && (config.HINDSIGHT_API_DATABASE_URL as string).length > 0)) {
-		config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
-	}
-	if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0
-		&& !(typeof config.HINDSIGHT_API_LLM_API_KEY === "string" && (config.HINDSIGHT_API_LLM_API_KEY as string).length > 0)) {
-		config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
-	}
-	switch (mode) {
-		case "managed": return { start: true, mode: "managed-postgres", config };
-		case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
-		default: return { start: false, config };
-	}
-}
-
-/**
- * Whether a pack exposes a managed-runtime DEPLOYMENT SURFACE — i.e. a provider
- * whose EFFECTIVE config actually carries a deployment `mode` (external / managed
- * / managed-external-postgres), or whose activation links to that mode
- * (`activeWhenConfig.mode`). Merely HAVING a provider is NOT enough: a pack with an
- * unrelated provider (one with no deployment mode) has no external/managed concept,
- * so it must behave EXACTLY like a provider-less runtime pack — its `on-enable`
- * runtime starts in the manifest DEFAULT (Docker) mode and the consent disclosure
- * shows that default, rather than being suppressed to / disclosed as the external
- * (no-Docker) setup path. Shared by the marketplace activation path, the REST
- * `/api/pack-runtimes/:id/start` guard, and the `/capabilities` disclosure so the
- * three can never diverge.
- */
-export function providerCarriesDeploymentMode(
-	provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
-	effectiveConfig?: Record<string, unknown>,
-): boolean {
-	const config = effectiveConfig ?? provider.config ?? {};
-	if (typeof config.mode === "string" && config.mode.length > 0) return true;
-	const activeWhen = provider.activation?.activeWhenConfig;
-	return !!activeWhen && Object.prototype.hasOwnProperty.call(activeWhen, "mode");
-}
-
-/**
- * P3 managed-runtime context resolution — the SINGLE source of truth shared by
- * BOTH the LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE
- * dispatch path (`/api/ext/route/:name`), so a managed provider and its sibling
- * routes always agree on the runtime linkage they receive.
- *
- * For a provider/route in a MANAGED deployment mode (`managed` /
- * `managed-external-postgres`), it READS the supervisor's runtime status + the
- * already-persisted API host port (from the pure capability summary) and builds
- * the `ctx.runtime` linkage `{ baseUrl, headers, status }`. It NEVER starts
- * Docker. External mode / no supervisor / a stopped runtime / an unknown API
- * port ⇒ `undefined`, and the consumer stays dormant via its own gate.
- */
-export async function resolveManagedRuntimeContext(
-	supervisor: PackRuntimeSupervisorLike | undefined,
-	opts: { packId: string; runtimeId: string; projectId?: string; config: Record<string, unknown> },
-): Promise<RuntimeContext | undefined> {
-	const { packId, runtimeId, projectId, config: providerConfig } = opts;
-	const mode = typeof providerConfig.mode === "string" ? providerConfig.mode : "external";
-	if (mode !== "managed" && mode !== "managed-external-postgres") return undefined;
-	if (!supervisor) return undefined;
-	let status: PackRuntimeStatus;
-	try {
-		status = await supervisor.status(packId, runtimeId, projectId);
-	} catch {
-		return undefined;
-	}
-	let apiPort: number | undefined;
-	try {
-		const cap = await supervisor.capabilitySummary(packId, runtimeId, { projectId });
-		const apiSpec =
-			cap.ports.find((p) => /(^|_)API_PORT$/i.test(p.key) || (p.env ? /(^|_)API_PORT$/i.test(p.env) : false)) ??
-			cap.ports[0];
-		if (apiSpec && typeof apiSpec.host === "number") apiPort = apiSpec.host;
-	} catch {
-		return undefined;
-	}
-	if (apiPort === undefined) return undefined;
-	const apiKey = typeof providerConfig.apiKey === "string" && providerConfig.apiKey.length > 0 ? providerConfig.apiKey : undefined;
-	const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-	return { baseUrl: `http://127.0.0.1:${apiPort}`, headers, status: status.status };
-}
-
-export type PackRuntimeSupervisorFactory = (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike | undefined;
-
-let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
-
-/**
- * Register an alternative pack-runtime-supervisor factory. Called by test
- * harnesses to inject a fully-mocked supervisor (no Docker daemon) so the
- * /api/pack-runtimes/* routes can be exercised end-to-end. Pass `null` to clear.
- * When unset, production builds the real PackRuntimeSupervisor in start().
- */
-export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {
-	_packRuntimeSupervisorFactory = factory;
-}
-
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
+	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
+	// they do not enter through cli.ts. This is a no-op after CLI initialization.
+	globalAgentDir();
 	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
 
 	// Initialize module-level caches for parameterized modules
@@ -1251,10 +1754,8 @@ export function createGateway(config: GatewayConfig) {
 	initCompactionSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
-	// Project registry — persisted at server level.
-	// Zero projects is a valid state: a fresh install has no projects.json and the
-	// UI forces the user through "Add Project" before any goal/session work. Bobbit
-	// never registers a project implicitly.
+	// Project registry — persisted at server level. Every server exposes the
+	// built-in Headquarters project as the user-facing server workspace.
 	const projectRegistry = new ProjectRegistry(stateDir);
 
 	// Register the synthetic "system" project so system-scope tool-assistant
@@ -1275,8 +1776,14 @@ export function createGateway(config: GatewayConfig) {
 		console.warn(`[startup] Failed to register system project: ${err}`);
 	}
 
+	try {
+		projectRegistry.ensureHeadquartersProject(getProjectRoot(), { stateDir, configDir });
+	} catch (err) {
+		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
+	}
+
 	// Run one-time migration from centralized to per-project state
-	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
 
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.
@@ -1290,8 +1797,11 @@ export function createGateway(config: GatewayConfig) {
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
 
-	// Initialize per-project contexts
-	const projectContextManager = new ProjectContextManager(projectRegistry);
+	const projectConfigStore = new ProjectConfigStore(configDir);
+
+	// Initialize per-project contexts. Headquarters shares the server-scope
+	// ProjectConfigStore so server/HQ writes cannot stale-read or clobber.
+	const projectContextManager = new ProjectContextManager(projectRegistry, { headquartersProjectConfigStore: projectConfigStore });
 	projectContextManager.initAll();
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
@@ -1337,13 +1847,6 @@ export function createGateway(config: GatewayConfig) {
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
-	const projectConfigStore = new ProjectConfigStore(configDir);
-	// One-time boot seed: first-party built-ins that ship DISABLED by default
-	// (opt-in). Subtractive activation model means built-ins are otherwise
-	// enabled, so we seed a server-scope pack_activation entry disabling all of
-	// the pack's toggleable entities — exactly once, guarded by a durable marker
-	// so enabling via the Market toggle stays sticky. Defensive: never throws.
-	seedBuiltinPackDefaults({ stateDir, store: projectConfigStore });
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -1371,6 +1874,8 @@ export function createGateway(config: GatewayConfig) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
+	let extensionChannelServices: ExtensionChannelServices | undefined;
+	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
@@ -1425,6 +1930,11 @@ export function createGateway(config: GatewayConfig) {
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
+	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
+		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
+		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	(roleManager as RoleManager & { resolveRoleForProject?: typeof resolveRoleForProject }).resolveRoleForProject = resolveRoleForProject;
 
 	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
 	// Sources are global to the server; the cache + sources file live under
@@ -1441,11 +1951,13 @@ export function createGateway(config: GatewayConfig) {
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
 		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
-		// project
-		if (!projectId) return null;
-		const ctx = projectContextManager.getOrCreate(projectId);
+		// project. Headquarters is the user-facing server scope, so it intentionally
+		// has no independent project-scope market pack layer.
+		if (!effectiveProjectId) return null;
+		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 		if (!ctx) return null;
 		return { base: ctx.project.rootPath, store: ctx.projectConfigStore };
 	};
@@ -1471,13 +1983,15 @@ export function createGateway(config: GatewayConfig) {
 	// listing does — no split-brain between `/api/tools` and the renderer/action/
 	// surface-token/prompt-doc paths. `packActivationStore` is the SAME store the
 	// cascade reads (defined just below; referenced lazily at request time).
-	const marketToolRoots = (projectId?: string): MarketToolRoot[] =>
-		buildMarketToolRootsForProject({
-			projectId,
+	const marketToolRoots = (projectId?: string): MarketToolRoot[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		return buildMarketToolRootsForProject({
+			projectId: effectiveProjectId,
 			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir()),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
 		});
+	};
 	// Server-level toolManager (used by GET /api/tools/:name without a project)
 	// sees server + global-user market packs (project scope needs a projectId).
 	toolManager.setMarketToolRootsProvider(() => marketToolRoots(undefined));
@@ -1514,10 +2028,11 @@ export function createGateway(config: GatewayConfig) {
 	// `server`/`global-user` overrides live in the server config; `project` in the
 	// project config (same split as pack_order).
 	const packActivationStore = (scope: PackScope, projectId?: string): ProjectConfigStore | null => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		if (scope === "server" || scope === "global-user") return projectConfigStore;
 		if (scope === "project") {
-			if (!projectId) return null;
-			return projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? null;
+			if (!effectiveProjectId) return null;
+			return projectContextManager.getOrCreate(effectiveProjectId)?.projectConfigStore ?? null;
 		}
 		return null;
 	};
@@ -1526,6 +2041,7 @@ export function createGateway(config: GatewayConfig) {
 	// deduped-on-path) for a project — the registry collapses to the winning pack
 	// per packId before indexing.
 	const marketPackEntriesForProject = (projectId?: string): PackEntry[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		const out: PackEntry[] = [];
 		const seen = new Set<string>();
 		// Built-in first-party band (built-in-first-party-packs §7.5): the shipped
@@ -1541,7 +2057,7 @@ export function createGateway(config: GatewayConfig) {
 			out.push(e);
 		}
 		for (const scope of ["server", "global-user", "project"] as const) {
-			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
+			for (const e of marketPackProvider.marketEntries(scope, effectiveProjectId)) {
 				const key = path.resolve(e.path);
 				if (seen.has(key)) continue;
 				seen.add(key);
@@ -1550,6 +2066,122 @@ export function createGateway(config: GatewayConfig) {
 		}
 		return out;
 	};
+	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
+		const contributions: ResolvedMcpContribution[] = [];
+		const projectId = normalizeConfigProjectId(scope.projectId);
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (entry.scope === "builtin" || !entry.manifest || (entry.manifest.contents.mcp ?? []).length === 0) continue;
+			const store = packActivationStore(entry.scope, projectId);
+			const activation = store?.getPackActivation(entry.scope as PackOrderScope, entry.manifest.name) ?? {};
+			const disabled = new Set(activation.mcp ?? []);
+			const disabledOperations = activation.mcpOperations ?? {};
+			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
+			const fallbackSourceId = entry.meta?.sourceUrl ? marketplaceSourceStore.getByUrl(entry.meta.sourceUrl)?.id : undefined;
+			try {
+				for (const mcp of loadPackContributions(entry.path, entry.manifest).mcp ?? []) {
+					const contributionId = activationMcpContributionId(entry, mcp, metaDetails, fallbackSourceId);
+					if (disabled.has(contributionId) || disabled.has(mcp.listName)) continue;
+					const disabledOps = [...new Set([...(disabledOperations[contributionId] ?? []), ...(disabledOperations[mcp.listName] ?? [])])];
+					const disabledOpsSet = new Set(disabledOps);
+					const operationMetadata = operationMetadataForMcpContribution(mcp, metaDetails);
+					const selectedOperations = metaDetails.sourceType === "mcp-gateway" && operationMetadata.length > 0
+						? operationMetadata.map((op) => op.name).filter((name) => !disabledOpsSet.has(name))
+						: (mcp.selectedOperations ? mcp.selectedOperations.filter((name) => !disabledOpsSet.has(name)) : undefined);
+					contributions.push({
+						listName: mcp.listName,
+						serverName: mcp.serverName,
+						...(metaDetails.sourceType === "mcp-gateway" ? { runtimeServerKey: gatewayMcpRuntimeKey(entry, mcp, metaDetails), contributionId } : (mcp.runtimeServerKey ? { runtimeServerKey: mcp.runtimeServerKey } : {})),
+						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
+						...(selectedOperations !== undefined ? { selectedOperations } : {}),
+						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
+						config: mcp.config,
+						origin: {
+							scope: entry.scope,
+							packName: entry.manifest.name,
+							packId: entry.id,
+							path: mcp.sourceFile,
+							...(entry.meta?.sourceUrl ? { sourceUrl: entry.meta.sourceUrl } : {}),
+						},
+					});
+				}
+			} catch (err) {
+				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
+			}
+		}
+		return contributions;
+	};
+	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
+		if (entry.scope === "builtin") return true;
+		const sourceUrl = entry.meta?.sourceUrl;
+		if (!sourceUrl) return true;
+		const source = marketplaceSourceStore.getByUrl(sourceUrl);
+		return typeof source?.trustedAt === "string" && source.trustedAt.trim().length > 0;
+	};
+	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
+		const contributions: ResolvedPiExtensionContribution[] = [];
+		const projectId = normalizeConfigProjectId(scope.projectId);
+		const scopedContext = piExtensionToolScopeContext(scope);
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
+			const manifest = entry.manifest;
+			const store = packActivationStore(entry.scope, projectId);
+			const disabled = new Set(store?.getPackActivation(entry.scope as PackOrderScope, manifest.name).piExtensions ?? []);
+			const origin = {
+				scope: entry.scope,
+				packName: manifest.name,
+				packId: entry.id,
+				...(entry.meta?.sourceUrl ? { sourceUrl: entry.meta.sourceUrl } : {}),
+			};
+			try {
+				const trustAccepted = marketplacePiExtensionDiscoveryTrusted(entry);
+				const staticRows = loadPiExtensionContributionsFromRuntime(entry.path, manifest).map((piExtension) => {
+					if (disabled.has(piExtension.listName)) {
+						return {
+							...piExtension,
+							origin,
+							diagnostic: piExtensionDiagnostic("disabled", "disabled_by_activation", `Pi extension "${piExtension.listName}" is disabled for pack "${manifest.name}".`),
+						};
+					}
+					return { ...piExtension, origin };
+				});
+				const discoveryKey = [
+					scopedContext.scopeKey,
+					entry.scope,
+					entry.id,
+					path.resolve(entry.path),
+					entry.meta?.updatedAt ?? entry.meta?.installedAt ?? "",
+					entry.meta?.sourceUrl ?? "",
+					trustAccepted ? "trusted" : "untrusted",
+					[...disabled].sort().join(","),
+					staticRows.map((row) => `${row.listName}:${row.entryPath ?? ""}:${row.discovery?.cacheKey ?? ""}:${row.discovery?.diagnostic?.code ?? ""}`).join("|"),
+				].join("\0");
+				let rows = piExtensionDiscoveryCache.get(discoveryKey)?.rows;
+				if (!rows) {
+					const shouldResolveDiscovery = staticRows.some((row) => row.entryPath && row.diagnostic.status !== "disabled" && row.diagnostic.status !== "unresolved" && row.discovery.status !== "failed");
+					rows = shouldResolveDiscovery
+						? loadPiExtensionContributionsWithDiscoverySyncFromRuntime(entry.path, manifest, {
+							trustAccepted,
+							origin,
+							disabledRefs: disabled,
+						})
+						: staticRows;
+					piExtensionDiscoveryCache.set(discoveryKey, { rows });
+				}
+				for (const resolved of rows) {
+					if (!resolved.entryPath || resolved.diagnostic.status === "unresolved") {
+						console.warn(`[pi-extension] Marketplace pi extension ${manifest.name}/${resolved.listName} could not be resolved: ${resolved.diagnostic.message}`);
+					}
+					contributions.push(resolved);
+				}
+			} catch (err) {
+				console.warn(`[pi-extension] failed to load Marketplace pi extension contributions from ${entry.path}:`, (err as Error).message);
+			}
+		}
+		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
+		return contributions;
+	};
+	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
+	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -1565,24 +2197,7 @@ export function createGateway(config: GatewayConfig) {
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
-		// Disabled-runtime activation override (DisabledRefs.runtimes): a runtime
-		// disabled via pack_activation is dropped from the pack's contributions, so the
-		// supervisor's registry lookup 404s and runtime listings omit it.
-		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
-	// P2 pack managed-runtime supervisor handle (Docker-backed). Declared HERE — before
-	// the LifecycleHub — so the hub's runtime-context resolver can consult it lazily at
-	// dispatch time. The production instance is built lazily in start(); a registered
-	// test factory is consulted FRESH per call so registerPackRuntimeSupervisorFactory(null)
-	// reverts cleanly with no stale mock cached. Boot/install/update/list/status never
-	// start Docker (see the design invariants); the runtime resolver only READS status
-	// + the already-persisted API host port to inject ctx.runtime for managed providers.
-	let realPackRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = undefined;
-	const getActivePackRuntimeSupervisor = (): PackRuntimeSupervisorLike | undefined =>
-		_packRuntimeSupervisorFactory
-			? (_packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd }) ?? realPackRuntimeSupervisor)
-			: realPackRuntimeSupervisor;
-
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -1620,26 +2235,24 @@ export function createGateway(config: GatewayConfig) {
 				return { baseUrl: "", token: "" };
 			}
 		},
-		// P3 — managed-runtime context injection. For a provider declaring a `runtime`
-		// linkage in a MANAGED deployment mode, resolve ctx.runtime from the supervisor
-		// WITHOUT starting Docker: read the runtime status + the already-persisted API
-		// host port (from the pure capability summary). External mode / a stopped runtime
-		// / an unknown port ⇒ undefined, and the provider stays dormant via its own gate.
-		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) =>
-			resolveManagedRuntimeContext(getActivePackRuntimeSupervisor(), { packId, runtimeId, projectId, config: providerConfig }),
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
-
-	// P2: pack managed-runtime supervisor (Docker-backed). Built from the same
-	// pack-contribution registry. This closure holds ONLY the production (real)
-	// supervisor; a registered test factory is consulted FRESH per-request below
-	// and never cached here. That way registerPackRuntimeSupervisorFactory(null)
-	// immediately reverts to the production instance (or 503) with no stale mock
-	// left in the closure across in-process E2E tests. The real supervisor is
-	// loaded lazily in start() (dynamic import keeps this wiring compilable even
-	// before the supervisor module is merged — routes then return 503). The handle
-	// itself + the getActivePackRuntimeSupervisor() resolver are declared above (before
-	// the LifecycleHub, which consults the resolver for ctx.runtime injection).
+	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
+		if (extensionChannelServices) return extensionChannelServices;
+		if (!extensionChannelServicesInit) {
+			extensionChannelServicesInit = instantiateExtensionChannelServices({
+				packContributionRegistry,
+				sessionManager,
+				projectContextManager,
+				toolManager,
+			}).then((services) => {
+				extensionChannelServices = services;
+				sessionManager.setExtensionChannelServices(services);
+				return services;
+			});
+		}
+		return extensionChannelServicesInit;
+	};
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
@@ -1647,44 +2260,6 @@ export function createGateway(config: GatewayConfig) {
 		disabled(scope, projectId, packName) {
 			return packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 		},
-	});
-
-	// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────
-	// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
-	// it lists in the Marketplace built-in band but resolves DORMANT (tools,
-	// provider, entrypoints, runtime all absent) on a fresh server until the user
-	// enables it OR it is "already configured" (live-setup preservation). We inject
-	// a READ-TIME overlay into the SERVER-scope activation store so the single
-	// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
-	// Marketplace endpoints) all observe the same effective state. The overlay is
-	// never persisted, so the dormancy invariant holds and an explicit user toggle
-	// (a persisted record, or the force-enabled marker) always wins.
-	//
-	// The static per-pack info + force-enabled marker live in module-scope helpers
-	// (getDefaultDisabledInfo / readForceEnabledPacks / writeForceEnabledPacks) so
-	// the activation PUT in handleApiRoute (a top-level function) shares them. Here
-	// we only INJECT the overlay resolver into the SERVER-scope store: it consults
-	// the memoized static info plus the live gates (force-enabled marker + persisted
-	// provider config) on each call (cheap, and only for default-disabled packs).
-	projectConfigStore.setDefaultActivationResolver((scope, packName, stored): DisabledRefs | undefined => {
-		if (scope !== "server") return undefined;
-		const info = getDefaultDisabledInfo(packName, projectConfigStore);
-		if (!info) return undefined;
-		const isForceEnabled = readForceEnabledPacks(projectConfigStore).has(packName);
-		let isConfigured = false;
-		if (!isForceEnabled && Object.keys(stored).length === 0) {
-			for (const pid of info.providerIds) {
-				const cfg = getPackStore().getSync<Record<string, unknown>>(info.packId, providerConfigStoreKey(pid));
-				if (isProviderConfigConfigured(cfg)) { isConfigured = true; break; }
-			}
-		}
-		return resolveDefaultActivationOverlay({
-			scope, packName, stored,
-			isDefaultDisabled: true,
-			isForceEnabled,
-			isConfigured,
-			allDisabledRefs: info.allDisabled,
-		});
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -1776,9 +2351,11 @@ export function createGateway(config: GatewayConfig) {
 			const ps = sessionManager.getPersistedSession(sessionId);
 			const roleName = session?.role ?? ps?.role
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
-			const role = roleManager.getRole(roleName);
+			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
 			if (!role) return undefined;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+			const mcpManager = sessionManager.getMcpManagerForSession(sessionId)
+				?? ((session?.projectId ?? ps?.projectId ?? session?.cwd ?? ps?.cwd) ? null : sessionManager.getMcpManager());
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
 		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
@@ -1788,10 +2365,10 @@ export function createGateway(config: GatewayConfig) {
 		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
 		// the resolveEffectiveTools grant pipeline above.
 		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
-			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
-			const role = cascadeRole ?? roleManager.getRole(roleName);
+			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
@@ -1801,29 +2378,6 @@ export function createGateway(config: GatewayConfig) {
 		taskManager: new TaskManager(taskStore),
 		roleStore,
 		projectContextManager,
-		goalCompletedDispatcher: async (ctx) => {
-			const hub = sessionManager.lifecycleHub as unknown as {
-				dispatchGoalCompleted?: (c: typeof ctx) => Promise<unknown>;
-			} | undefined;
-			if (hub && typeof hub.dispatchGoalCompleted === "function") {
-				await hub.dispatchGoalCompleted(ctx);
-			}
-		},
-		hasGoalCompletedProviders: (goalId, projectId) => {
-			const hub = sessionManager.lifecycleHub;
-			return !!hub?.hasProvidersForHooks(projectId, ["goalCompleted"], goalId);
-		},
-		resolveGoalPullRequest: (goalId) => {
-			const pr = prStatusStore.get(goalId) as any;
-			if (!pr) return undefined;
-			return {
-				url: typeof pr.url === "string" ? pr.url : undefined,
-				number: typeof pr.number === "string" || typeof pr.number === "number" ? pr.number : undefined,
-				title: typeof pr.title === "string" ? pr.title : undefined,
-				state: typeof pr.state === "string" ? pr.state : undefined,
-				headSha: typeof pr.headSha === "string" ? pr.headSha : undefined,
-			};
-		},
 		toolManager,
 		orchestrationCore,
 	});
@@ -1889,8 +2443,9 @@ export function createGateway(config: GatewayConfig) {
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Operator-Confirmation");
+			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
 			if (req.method === "OPTIONS") {
 				res.writeHead(204);
@@ -1915,18 +2470,6 @@ export function createGateway(config: GatewayConfig) {
 
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
-			const hasAuthorizationHeader = typeof req.headers.authorization === "string" && req.headers.authorization.length > 0;
-			const requestHeader = (value: string | string[] | undefined): string => Array.isArray(value) ? (value[0] || "") : (value || "");
-			const hasSessionBoundAuthHeaders = (): boolean => Boolean(
-				requestHeader(req.headers["x-bobbit-session-id"])
-				|| requestHeader(req.headers["x-bobbit-session-secret"])
-				|| requestHeader(req.headers["x-bobbit-spawning-session"]),
-			);
-			const canMintOperatorCookie = (): boolean => {
-				if (url.pathname !== "/api/health" || req.method !== "GET") return false;
-				if (hasAuthorizationHeader || url.searchParams.has("token") || hasSessionBoundAuthHeaders()) return false;
-				return true;
-			};
 
 			// Cookie auth short-circuit — if the browser presents a known
 			// bobbit_session cookie, treat the request as admin-authenticated
@@ -1964,21 +2507,16 @@ export function createGateway(config: GatewayConfig) {
 					}
 					sandboxScope = scope;
 				} else {
-					// Successful admin Bearer/query-token auth mints only a preview/API
-					// cookie so iframe content origin can authenticate without the token
-					// leaking into URLs. Operator-confirmation-capable cookies must never
-					// be issued to token-authenticated REST traffic.
-					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode, operator: false });
+					// Successful admin Bearer auth — mint session cookie if absent
+					// so subsequent requests (including iframe content origin) can
+					// authenticate without the Bearer token leaking into URLs.
+					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
 				}
 			} else if (!isPublicEndpoint && isLocalhostMode) {
 				// Localhost mode: skip auth check, still mint the cookie so the
 				// browser can use the same cookie auth path on non-localhost
 				// deployments later (and the SSE endpoint below remains uniform).
-				// Requests that carry Authorization or ?token are API/script traffic
-				// and only receive preview/API-capable cookies. Local no-auth browser
-				// bootstrap on /api/health receives the operator-capable cookie used
-				// by human confirmation flows.
-				issueCookieIfMissing(req, res, cookieStore, { localhost: true, operator: canMintOperatorCookie() });
+				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
 			}
 
 			// Enforce sandbox route guard
@@ -1992,14 +2530,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			// P2: a registered pack-runtime-supervisor factory is authoritative — in-
-			// process test harnesses register a (mocked) one AFTER gateway start, so it
-			// must override the real supervisor built in start(). Derived FRESH each
-			// request (never cached), so clearing the factory reverts to the production
-			// instance with no stale mock. No-op in production (factory stays null). Shares
-			// the same resolver the LifecycleHub uses so the route + ctx.runtime paths agree.
-			const packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = getActivePackRuntimeSupervisor();
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2378,7 +2909,9 @@ export function createGateway(config: GatewayConfig) {
 			} else {
 				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true, source: "verification" });
 			}
-			console.log(`[verification] Notified team lead for goal ${goalId}: ${message}`);
+			// The full verification notification is already surfaced in the team lead transcript.
+			// Keep it out of routine server logs unless explicitly debugging.
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Notified team lead for goal ${goalId} (${message.length} chars)`);
 		} catch (err) {
 			console.error(`[verification] Failed to notify team lead for goal ${goalId}:`, err);
 		}
@@ -2405,7 +2938,8 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry);
+			const channels = extensionChannelServices;
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
@@ -2418,40 +2952,15 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
-		/** @internal Exposed for in-process E2E tests that need direct preference seeding. */
-		preferencesStore,
+		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
-			// P2: build the real pack-runtime supervisor unless a test factory already
-			// supplied a (mocked) one. All Docker execution is encapsulated in the
-			// supervisor; rendered env files live under the server state dir.
-			if (!realPackRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
-				try {
-					const { SecretsStore } = await import("./agent/secrets-store.js");
-					const runtimeDataDir = path.join(stateDir, "pack-runtimes");
-					// Production-safe resolver context: declared generated secrets are
-					// created+persisted via SecretsStore and declared host ports via a
-					// file-backed FilePortStore, so real pack runtimes (e.g. Hindsight)
-					// resolve their env refs instead of throwing before Docker starts.
-					realPackRuntimeSupervisor = new PackRuntimeSupervisor({
-						registry: packContributionRegistry,
-						runtimeDataDir,
-						// STABLE across gateway restarts (persisted under the state dir): a
-						// random per-process suffix would change the compose project name on
-						// every restart and orphan the still-running containers.
-						serverIdentitySuffix: getOrCreatePackRuntimeServerIdentity(stateDir),
-						secretsStore: new SecretsStore(stateDir),
-						portStore: new FilePortStore(path.join(runtimeDataDir, "ports.json")),
-					});
-				} catch (err) {
-					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
-				}
-			}
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
+			await initExtensionChannelsOnce();
 
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
@@ -2522,8 +3031,9 @@ export function createGateway(config: GatewayConfig) {
 				// they don't leak into .git/config — the container's credential helper
 				// reads GITHUB_TOKEN from env instead). Without one, the canonical main
 				// repo root (resolved via `resolveSandboxMountRoot`, which handles linked
-				// worktrees) is bind-mounted read-only and cloned via `file://`. A LOCAL
-				// origin throws here — propagating through the awaited bootstrap so
+				// worktrees) is copied into a sanitized git source (excluding `.bobbit/` and
+				// `auth.json`) before that source is bind-mounted read-only and cloned via
+				// `file://`. A LOCAL origin throws here — propagating through the awaited bootstrap so
 				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
@@ -2533,8 +3043,16 @@ export function createGateway(config: GatewayConfig) {
 						return null;
 					}
 				};
-				const mountSourcePath = await resolveSandboxMountRoot(repoPath);
-				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), mountSourcePath });
+				const sandboxStateDir = path.join(projectDir, ".bobbit", "state");
+				const originUrl = await resolveOrigin(repoPath);
+				const mountSourcePath = originUrl
+					? await resolveSandboxMountRoot(repoPath)
+					: prepareSanitizedSandboxCloneSource({
+						repoPath: await resolveSandboxMountRoot(repoPath),
+						stateDir: sandboxStateDir,
+						key: "root",
+					});
+				const cloneSource = resolveSandboxCloneSource({ originUrl, mountSourcePath });
 				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
@@ -2570,13 +3088,22 @@ export function createGateway(config: GatewayConfig) {
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
 						// Same resolution as the single-repo path: never fall back to a
-						// raw host path. Remote-less repos bind-mount their canonical main
-						// repo root (resolved via `resolveSandboxMountRoot`, which handles
-						// linked worktrees) at a per-repo container mount path and clone
-						// via `file://`. A local origin throws (caller's awaited boundary).
-						const perRepoMountSource = await resolveSandboxMountRoot(rp);
+						// raw host path. Remote-less repos copy their canonical main repo
+						// root (resolved via `resolveSandboxMountRoot`, which handles linked
+						// worktrees) into a sanitized git source, then bind-mount that source
+						// at a per-repo container mount path and clone via `file://`. A local
+						// origin throws (caller's awaited boundary).
+						const perRepoOriginUrl = await resolveOrigin(rp);
+						const perRepoMountRoot = await resolveSandboxMountRoot(rp);
+						const perRepoMountSource = perRepoOriginUrl
+							? perRepoMountRoot
+							: prepareSanitizedSandboxCloneSource({
+								repoPath: perRepoMountRoot,
+								stateDir: sandboxStateDir,
+								key: c.repo,
+							});
 						const perRepoSrc = resolveSandboxCloneSource({
-							originUrl: await resolveOrigin(rp),
+							originUrl: perRepoOriginUrl,
 							mountSourcePath: perRepoMountSource,
 							mountPath: `/workspace-src/${c.repo}`,
 						});
@@ -2653,10 +3180,11 @@ export function createGateway(config: GatewayConfig) {
 			// unreachable for many seconds on installs with stale worktrees.
 			//
 			// Concurrency note: the sweeper and the pool init operate on DISJOINT
-			// branch sets — `worktree-sweeper.ts` explicitly skips pool branches
-			// (`isPoolBranch`), and `WorktreePool.reclaimOrphaned` only inspects
-			// pool branches. So the two phases are run concurrently via
-			// `Promise.all`, and project-level pool init is also parallelised
+			// branch sets — `worktree-sweeper.ts` explicitly skips Bobbit pool
+			// branches using the shared inventory classifier helpers, and
+			// `WorktreePool.reclaimOrphaned` only inspects pool branches. So the two
+			// phases are run concurrently via `Promise.all`, and project-level pool
+			// init is also parallelised
 			// across projects (each project's pool is independent). This avoids
 			// the previous serial chain that left the pool empty for minutes on
 			// installs with many stale worktrees, forcing every new session
@@ -2688,18 +3216,26 @@ export function createGateway(config: GatewayConfig) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepTeams: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
 							const repoNames = ctx.projectConfigStore.repoNames();
+							const components = ctx.projectConfigStore.getComponents();
+							const isMultiRepoProject = components.some(c => c.repo !== ".");
+							let sweepRootPath = ctx.project.rootPath;
+							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath).catch(() => false)) {
+								sweepRootPath = await getRepoRoot(ctx.project.rootPath);
+							}
 							sweepProjects.push({
 								id: ctx.project.id,
-								rootPath: ctx.project.rootPath,
+								rootPath: sweepRootPath,
 								repos: repoNames.length > 0 ? repoNames : undefined,
+								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});
 							for (const g of ctx.goalStore.getAll()) {
 								sweepGoals.push({
@@ -2712,6 +3248,25 @@ export function createGateway(config: GatewayConfig) {
 									id: s.id, branch: s.branch, worktreePath: s.worktreePath, cwd: s.cwd, archived: !!s.archived,
 									repoWorktrees: s.repoWorktrees,
 								});
+							}
+							for (const team of ctx.teamStore.getAll()) {
+								for (const agent of team.agents) {
+									sweepTeams.push({
+										id: agent.sessionId,
+										branch: agent.branch,
+										worktreePath: agent.worktreePath,
+									});
+								}
+								const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+								if (lead) {
+									sweepTeams.push({
+										id: lead.id,
+										branch: lead.branch,
+										worktreePath: lead.worktreePath,
+										cwd: lead.cwd,
+										repoWorktrees: lead.repoWorktrees,
+									});
+								}
 							}
 							for (const st of ctx.staffStore.getAll()) {
 								sweepStaff.push({
@@ -2728,6 +3283,7 @@ export function createGateway(config: GatewayConfig) {
 							projects: sweepProjects,
 							goals: sweepGoals,
 							sessions: sweepSessions,
+							teams: sweepTeams,
 							staff: sweepStaff,
 						});
 						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
@@ -2771,7 +3327,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -2861,6 +3417,7 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			inboxNudger.stop();
 			wss.close();
+			await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
 			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
@@ -3024,19 +3581,6 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
-function normalizePostedSessionModel(raw: unknown): string | undefined {
-	if (typeof raw === "string") {
-		const trimmed = raw.trim();
-		return /^[^/\s]+\/[^/\s]+$/.test(trimmed) ? trimmed : undefined;
-	}
-	if (raw && typeof raw === "object") {
-		const provider = typeof (raw as any).provider === "string" ? (raw as any).provider.trim() : "";
-		const id = typeof (raw as any).id === "string" ? (raw as any).id.trim() : "";
-		if (provider && id && !provider.includes("/") && !id.includes("/")) return `${provider}/${id}`;
-	}
-	return undefined;
-}
-
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -3074,7 +3618,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
-	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
+	extensionChannelServices?: ExtensionChannelServices,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -3097,26 +3641,47 @@ async function handleApiRoute(
 		originPackId: r.originPackId ?? null,
 		originPackName: r.originPackName ?? null,
 	});
-	/**
-	 * Serialize a cascade-resolved role with origin metadata PLUS the per-field
-	 * `modelResolution` (model/thinkingLevel source hierarchy + editability) the
-	 * Roles list/detail UI uses to render accurate source badges. Backwards
-	 * compatible: existing top-level fields (model, thinkingLevel, origin…) are
-	 * preserved; `modelResolution` is purely additive.
-	 */
-	const withRoleResolution = (
-		r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null },
-		projectId?: string,
-	): Record<string, unknown> => ({
-		...withOrigin(r),
-		modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),
-	});
+	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
+		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
+		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+	const roleCreateOptions = (role: Role): RoleCreateOptions => {
+		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
+			? role.model
+			: undefined;
+		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
+		return {
+			rolePrompt: role.promptTemplate,
+			roleName: role.name,
+			role: role.name,
+			accessory: role.accessory,
+			...(initialModel ? { initialModel } : {}),
+			...(initialThinkingLevel ? { initialThinkingLevel } : {}),
+		};
+	};
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); clearDefaultDisabledInfoCache(); };
+	const closeUnavailableExtensionChannels = (): void => {
+		const registry = extensionChannelServices?.registry as any;
+		const closeUnavailable = registry?.closeUnavailablePacks;
+		if (typeof closeUnavailable !== "function") return;
+		void Promise.resolve(closeUnavailable.call(registry)).catch((err) => {
+			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
+		});
+	};
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const refreshMcpExternalTools = (): void => {
+		sessionManager.refreshExternalMcpToolRegistrations();
+	};
+	const reloadMcpAfterMarketplaceMutation = async (scope?: InstallScope, projectId?: string): Promise<McpReloadResult | undefined> => {
+		const result = await sessionManager.reloadMcpAfterMarketplaceMutation(scope, projectId);
+		refreshMcpExternalTools();
+		return result;
+	};
 	// Host-owned activation-cache invalidation: a pack persisting provider config
 	// (key `provider-config:*`) must drop the activation-filtered provider index so
 	// a dormant provider (e.g. Hindsight gaining an externalUrl) activates WITHOUT a
@@ -3156,6 +3721,34 @@ async function handleApiRoute(
 		// leaking host paths, source line numbers, and implementation details.
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
+	};
+
+	const canonicalPathForCompare = (inputPath: string): string => {
+		let resolved = path.resolve(inputPath);
+		try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
+		const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const samePath = (a: string, b: string): boolean => canonicalPathForCompare(a) === canonicalPathForCompare(b);
+	const headquartersProject = (): RegisteredProject | undefined => projectRegistry.get(HEADQUARTERS_PROJECT_ID);
+	const bobbitOwnerPath = (): string => path.dirname(bobbitDir());
+	const isHeadquartersOwnedPath = (candidatePath: string): boolean => {
+		const hq = headquartersProject();
+		return (hq ? samePath(candidatePath, hq.rootPath) : samePath(candidatePath, getProjectRoot()))
+			|| samePath(candidatePath, getProjectRoot())
+			|| samePath(candidatePath, bobbitDir())
+			|| samePath(candidatePath, bobbitOwnerPath());
+	};
+	const shouldShowHeadquartersInProjectLists = (): boolean => preferencesStore.get("showHeadquartersInProjectLists") !== false;
+	const listProjectsForApi = (): RegisteredProject[] => projectRegistry.list().filter(project => {
+		if (project.hidden || isSystemProject(project)) return false;
+		if (isHeadquartersProject(project) && !shouldShowHeadquartersInProjectLists()) return false;
+		return true;
+	});
+	const writeSpecialProjectMutationError = (err: unknown): boolean => {
+		if (!(err instanceof SpecialProjectMutationError)) return false;
+		json({ error: err.message, code: err.code }, err.status);
+		return true;
 	};
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
@@ -3217,34 +3810,35 @@ async function handleApiRoute(
 
 	/** Resolve per-project config store, falling back to the default. */
 	function resolveProjectConfigStore(pid: string | null): ProjectConfigStore {
-		if (pid && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(pid);
+		const effectiveProjectId = normalizeConfigProjectId(pid ?? undefined);
+		if (effectiveProjectId && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.projectConfigStore;
 		}
 		return projectConfigStore;
 	}
 
-	function resolveClaudeCodeStatusConfigStore(url: URL): { ok: true; store?: ProjectConfigStore; projectId?: string } | { ok: false; status: number; error: string } {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (projectId) {
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) return { ok: false, status: 404, error: "Project not found" };
-			return { ok: true, store: ctx.projectConfigStore, projectId };
-		}
-		const cwd = url.searchParams.get("cwd") || undefined;
-		if (cwd) {
-			const resolvedCwd = path.resolve(cwd);
-			const matches = projectRegistry.list()
-				.filter(project => !project.hidden)
-				.map(project => ({ project, root: path.resolve(project.rootPath) }))
-				.filter(({ root }) => resolvedCwd === root || resolvedCwd.startsWith(root + path.sep))
-				.sort((a, b) => b.root.length - a.root.length);
-			if (matches[0]) {
-				const ctx = projectContextManager.getOrCreate(matches[0].project.id);
-				if (ctx) return { ok: true, store: ctx.projectConfigStore, projectId: ctx.project.id };
-			}
-		}
-		return { ok: true };
+	type RoleMutationTarget =
+		| { scope: "server"; store: RoleStore; manager: RoleManager }
+		| { scope: "project"; store: RoleStore; projectId: string };
+
+	function roleMutationProjectId(value: unknown): string | undefined {
+		if (typeof value !== "string") return undefined;
+		const trimmed = value.trim();
+		return trimmed ? trimmed : undefined;
+	}
+
+	/**
+	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
+	 * project ids still resolve to that project's role store.
+	 */
+	function resolveRoleMutationTarget(rawProjectId: unknown): RoleMutationTarget | null {
+		const requestedProjectId = roleMutationProjectId(rawProjectId);
+		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
+		if (!effectiveProjectId) return { scope: "server", store: serverRoleStore, manager: roleManager };
+		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
+		if (!ctx) return null;
+		return { scope: "project", store: ctx.roleStore, projectId: effectiveProjectId };
 	}
 
 	/**
@@ -3254,11 +3848,12 @@ async function handleApiRoute(
 	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
 	 */
 	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
-		if (projectId && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(projectId);
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
+		if (effectiveProjectId && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.project.rootPath;
 		}
-		return cwd;
+		return projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : cwd;
 	}
 
 	/**
@@ -3268,11 +3863,12 @@ async function handleApiRoute(
 	 * `pack_order` is read from the SERVER store (not the project store).
 	 */
 	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
-		const ctx = projectId && projectContextManager ? projectContextManager.getOrCreate(projectId) : undefined;
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
+		const ctx = effectiveProjectId && projectContextManager ? projectContextManager.getOrCreate(effectiveProjectId) : undefined;
 		return {
 			serverBase: getProjectRoot(),
 			globalUserBase: os.homedir(),
-			projectBase: ctx?.project.rootPath,
+			projectBase: ctx?.project.rootPath ?? "",
 			serverConfigStore: projectConfigStore,
 			projectConfigStore: ctx?.projectConfigStore,
 			// pack-schema-v1 §7: thread the SAME pack_activation store the roles/tools
@@ -3624,6 +4220,19 @@ async function handleApiRoute(
 					return ctx?.projectConfigStore.get("worktree_root") || undefined;
 				},
 			});
+			if (isHeadquartersOwnedPath(rawPath)) {
+				for (const check of report.checks) {
+					if (check.remediation?.kind === "archive-bobbit") delete check.remediation;
+					if (check.id === "bobbit.existing") {
+						check.title = "Server .bobbit/ belongs to Headquarters";
+						check.detail = "Headquarters already represents this server workspace. Its .bobbit/ state is gateway-owned and cannot be archived from Add Project.";
+					}
+					if (check.id === "bobbit.gateway-owned") {
+						check.title = "Headquarters workspace";
+						check.detail = "Headquarters already represents the running gateway's server workspace.";
+					}
+				}
+			}
 			json(report);
 		} catch (err: any) {
 			jsonError(500, err);
@@ -3648,6 +4257,13 @@ async function handleApiRoute(
 		}
 		if (!fs.existsSync(body.rootPath)) {
 			json({ error: "rootPath does not exist" }, 400);
+			return;
+		}
+		if (isHeadquartersOwnedPath(body.rootPath)) {
+			json({
+				error: "Headquarters owns the server .bobbit state. Hide Headquarters from project lists in Settings instead of archiving it.",
+				code: "HEADQUARTERS_IMMUTABLE",
+			}, 403);
 			return;
 		}
 		// Compute gateway-owned via the same logic as the preflight check.
@@ -3781,9 +4397,76 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/create-directory
+	if (url.pathname === "/api/create-directory" && req.method === "POST") {
+		const body = await readBody(req).catch(() => null);
+		const rawPath = typeof body?.path === "string" ? body.path.trim() : "";
+		if (!rawPath || !path.isAbsolute(rawPath)) {
+			json({ error: "Enter an absolute directory path.", code: "invalid_path" }, 400);
+			return;
+		}
+
+		const targetPath = path.resolve(rawPath);
+		try {
+			const targetStat = fs.statSync(targetPath);
+			if (targetStat.isDirectory()) {
+				json({ error: "Directory already exists", code: "already_exists" }, 409);
+			} else {
+				json({ error: "A file already exists at that path", code: "exists_as_file" }, 409);
+			}
+			return;
+		} catch (err: any) {
+			if (err?.code && err.code !== "ENOENT") {
+				if (err.code === "EACCES" || err.code === "EPERM") {
+					json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+					return;
+				}
+				json({ error: err?.message || "Could not check directory", code: "create_failed" }, 500);
+				return;
+			}
+		}
+
+		const parentPath = path.dirname(targetPath);
+		try {
+			const parentStat = fs.statSync(parentPath);
+			if (!parentStat.isDirectory()) {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+				return;
+			}
+		} catch (err: any) {
+			if (err?.code === "EACCES" || err?.code === "EPERM") {
+				json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+			} else {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+			}
+			return;
+		}
+
+		try {
+			fs.mkdirSync(targetPath, { recursive: false });
+			json({ path: targetPath });
+		} catch (err: any) {
+			if (err?.code === "EEXIST") {
+				json({ error: "Directory already exists", code: "already_exists" }, 409);
+			} else if (err?.code === "EACCES" || err?.code === "EPERM") {
+				json({ error: "Permission denied creating this directory", code: "permission_denied" }, 403);
+			} else if (err?.code === "ENOENT" || err?.code === "ENOTDIR") {
+				json({ error: "The parent directory does not exist", code: "parent_not_found" }, 404);
+			} else {
+				json({ error: err?.message || "Could not create directory", code: "create_failed" }, 500);
+			}
+		}
+		return;
+	}
+
 	// GET /api/browse-directory
 	if (url.pathname === "/api/browse-directory" && req.method === "GET") {
 		const rawPath = url.searchParams.get("path");
+		const rawPrefix = url.searchParams.get("prefix") ?? "";
+		const prefix = rawPrefix.toLowerCase();
+		const rawLimit = url.searchParams.get("limit");
+		const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 0;
+		const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 200) : 0;
 		const dirPath = rawPath ? path.resolve(rawPath) : config.defaultCwd;
 
 		if (!fs.existsSync(dirPath)) {
@@ -3803,16 +4486,25 @@ async function handleApiRoute(
 		}
 
 		const entries: Array<{ name: string; path: string }> = [];
+		let truncated = false;
 		try {
-			const items = fs.readdirSync(dirPath);
+			const items = fs.readdirSync(dirPath)
+				.filter((item) => {
+					// Skip hidden directories and node_modules
+					if (item.startsWith(".") || item === "node_modules") return false;
+					return !prefix || item.toLowerCase().startsWith(prefix);
+				})
+				.sort((a, b) => a.localeCompare(b));
 			for (const item of items) {
-				// Skip hidden directories and node_modules
-				if (item.startsWith(".") || item === "node_modules") continue;
 				const fullPath = path.join(dirPath, item);
 				try {
 					const stat = fs.lstatSync(fullPath);
 					if (stat.isDirectory() && !stat.isSymbolicLink()) {
 						entries.push({ name: item, path: fullPath });
+						if (limit > 0 && entries.length >= limit) {
+							truncated = true;
+							break;
+						}
 					}
 				} catch {
 					// Skip entries we can't stat
@@ -3823,12 +4515,10 @@ async function handleApiRoute(
 			return;
 		}
 
-		entries.sort((a, b) => a.name.localeCompare(b.name));
-
 		const parsed = path.parse(dirPath);
 		const parent = parsed.root === dirPath ? null : path.dirname(dirPath);
 
-		json({ current: dirPath, parent, entries });
+		json({ current: dirPath, parent, entries, truncated });
 		return;
 	}
 
@@ -3836,9 +4526,7 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		// Filter out hidden projects (e.g. the synthetic "system" project) so
-		// they never appear in the client's state.projects.
-		json(projectRegistry.list().filter(p => !p.hidden && p.id !== SYSTEM_PROJECT_ID));
+		json(listProjectsForApi());
 		return;
 	}
 
@@ -3860,6 +4548,27 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+
+			if (isHeadquartersOwnedPath(body.rootPath)) {
+				const hq = headquartersProject();
+				if (hq && upsert) {
+					const ctx = projectContextManager.getOrCreate(hq.id);
+					if (ctx) {
+						ctx.gateStore.onStatusChange = () => {
+							ctx.goalStore.bumpGeneration();
+						};
+						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+					}
+					json(hq, 200);
+					return;
+				}
+				json({
+					error: "Headquarters already represents the server workspace. Hide it from project lists in Settings instead of adding it again.",
+					code: "HEADQUARTERS_ALREADY_EXISTS",
+					projectId: HEADQUARTERS_PROJECT_ID,
+				}, 409);
+				return;
+			}
 
 			// Upsert: if a project already exists at this path, return it
 			if (upsert) {
@@ -4008,7 +4717,7 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -4027,7 +4736,8 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
 		const body = await readBody(req);
 		try {
-			const projects = projectRegistry.setVisibleOrder(body?.projectIds);
+			projectRegistry.setVisibleOrder(body?.projectIds);
+			const projects = listProjectsForApi();
 			broadcastToAll({ type: "projects_changed", projects });
 			json({ projects });
 		} catch (err: any) {
@@ -4068,10 +4778,19 @@ async function handleApiRoute(
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
+		if (updates.rootPath && isHeadquartersOwnedPath(updates.rootPath)) {
+			json({
+				error: "Headquarters already represents the server workspace. Select Headquarters instead of moving another project to it.",
+				code: "HEADQUARTERS_ALREADY_EXISTS",
+				projectId: HEADQUARTERS_PROJECT_ID,
+			}, 409);
+			return;
+		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4086,6 +4805,7 @@ async function handleApiRoute(
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
 		try {
+			if (project) assertNormalMutableProject(project, "removed");
 			// Drain the project's worktree pool before removing
 			await sessionManager.removeWorktreePool(projectId);
 			// Terminate all live sessions belonging to the removed project
@@ -4093,6 +4813,7 @@ async function handleApiRoute(
 			for (const s of liveSessions) {
 				try { await sessionManager.terminateSession(s.id); } catch {}
 			}
+			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
 			projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
@@ -4101,6 +4822,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -4141,6 +4863,7 @@ async function handleApiRoute(
 			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
 		} catch (err: any) {
+			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
 		return;
@@ -5061,11 +5784,6 @@ async function handleApiRoute(
 					colorIndex: colorStore.get(archived.id),
 					preview: archived.preview,
 					reattemptGoalId: archived.reattemptGoalId,
-					runtime: archived.runtime ?? "pi",
-					claudeCodeSessionId: archived.claudeCodeSessionId,
-					claudeCodeExecutable: archived.claudeCodeExecutable,
-					claudeCodePermissionMode: archived.claudeCodePermissionMode,
-					claudeCodeModelAlias: archived.claudeCodeModelAlias,
 					archived: true,
 					archivedAt: archived.archivedAt,
 					imageGenerationModel: sessionManager.getImageModelForSession(archived.id),
@@ -5108,17 +5826,14 @@ async function handleApiRoute(
 			preview: session.preview,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
-			runtime: sessionPs?.runtime ?? "pi",
-			claudeCodeSessionId: sessionPs?.claudeCodeSessionId,
-			claudeCodeExecutable: sessionPs?.claudeCodeExecutable,
-			claudeCodePermissionMode: sessionPs?.claudeCodePermissionMode,
-			claudeCodeModelAlias: sessionPs?.claudeCodeModelAlias,
 			// Persisted model selection (provider+id). Surfaces the result of
 			// the WS `set_model` handler's `persistSessionModel` call so clients
 			// (and tests) can verify the selection round-tripped to disk without
 			// reaching into the WS state stream.
 			modelProvider: sessionPs?.modelProvider,
 			modelId: sessionPs?.modelId,
+			spawnPinnedModel: session.spawnPinnedModel,
+			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
@@ -5198,30 +5913,10 @@ async function handleApiRoute(
 		}
 
 		const args = body?.args;
-		const requestedModel = normalizePostedSessionModel(body?.model);
-		const requestedRuntime = body?.runtime === "claude-code" || requestedModel?.startsWith("claude-code/")
-			? "claude-code"
-			: body?.runtime === "pi"
-				? "pi"
-				: undefined;
 
-		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
+		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
-
-		if (roleId && typeof roleId === "string") {
-			const role = roleManager.getRole(roleId);
-			if (!role) {
-				json({ error: `Role "${roleId}" not found` }, 404);
-				return;
-			}
-			createOpts = {
-				rolePrompt: role.promptTemplate,
-				roleName: role.name,
-				role: role.name,
-				accessory: role.accessory,
-			};
-		}
+		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
 		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
@@ -5308,7 +6003,13 @@ async function handleApiRoute(
 
 		// For project assistants, register a provisional project at the target cwd
 		if (isProjectAssistant && cwd && !resolvedProjectId) {
-			const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			let provisionalProject: RegisteredProject;
+			try {
+				provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			} catch (err) {
+				if (writeSpecialProjectMutationError(err)) return;
+				throw err;
+			}
 			provisionalProjectId = provisionalProject.id;
 			resolvedProjectId = provisionalProject.id;
 			// Ensure a ProjectContext exists for the provisional project
@@ -5333,6 +6034,15 @@ async function handleApiRoute(
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
 			resolvedProjectId = resolved.projectId;
+		}
+
+		if (roleId && typeof roleId === "string") {
+			const role = resolveRoleForProject(roleId, resolvedProjectId);
+			if (!role) {
+				json({ error: `Role "${roleId}" not found` }, 404);
+				return;
+			}
+			createOpts = roleCreateOptions(role);
 		}
 
 		// Now that `resolvedProjectId` is known, resolve `worktreeOpts`.
@@ -5374,8 +6084,6 @@ async function handleApiRoute(
 				reattemptGoalId,
 				sandboxed,
 				projectId: resolvedProjectId,
-				...(requestedModel ? { initialModel: requestedModel } : {}),
-				...(requestedRuntime ? { runtime: requestedRuntime as any } : {}),
 				...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}),
 				parentSessionId: typeof body?.parentSessionId === "string" ? body.parentSessionId : undefined,
 				childKind: typeof body?.childKind === "string" ? body.childKind : undefined,
@@ -5416,11 +6124,6 @@ async function handleApiRoute(
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
-				runtime: sessionManager.getPersistedSession(session.id)?.runtime,
-				claudeCodeSessionId: sessionManager.getPersistedSession(session.id)?.claudeCodeSessionId,
-				claudeCodeExecutable: sessionManager.getPersistedSession(session.id)?.claudeCodeExecutable,
-				claudeCodePermissionMode: sessionManager.getPersistedSession(session.id)?.claudeCodePermissionMode,
-				claudeCodeModelAlias: sessionManager.getPersistedSession(session.id)?.claudeCodeModelAlias,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
@@ -5895,6 +6598,7 @@ async function handleApiRoute(
 				const n = Math.floor(body.maxConcurrentChildren);
 				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
 			}
+			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -5910,6 +6614,7 @@ async function handleApiRoute(
 				divergencePolicy: effDivergencePolicy,
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
+				worktree: explicitWorktree,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -6263,6 +6968,31 @@ async function handleApiRoute(
 
 	// ── Role endpoints ─────────────────────────────────────────────
 
+	const toolDiagnosticsForProject = (projectId?: string): Array<Record<string, unknown>> => {
+		const diagnostics: Array<Record<string, unknown>> = [];
+		const seen = new Set<string>();
+		const add = (rows: Array<Record<string, unknown>> | undefined): void => {
+			for (const row of rows ?? []) {
+				const key = `${row.toolName ?? row.tool ?? ""}\0${row.extensionPath ?? row.path ?? ""}\0${row.message ?? ""}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				diagnostics.push(row);
+			}
+		};
+		if (toolManager) add(toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>>);
+		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>> | undefined);
+		return diagnostics;
+	};
+	const attachToolDiagnostics = (tools: Array<Record<string, unknown>>, diagnostics: Array<Record<string, unknown>>): void => {
+		if (diagnostics.length === 0) return;
+		for (const tool of tools) {
+			const name = typeof tool.name === "string" ? tool.name : undefined;
+			if (!name) continue;
+			const related = diagnostics.filter((diagnostic) => diagnostic.toolName === name || diagnostic.tool === name || diagnostic.name === name);
+			if (related.length > 0) tool.diagnostics = related;
+		}
+	};
+
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -6289,13 +7019,16 @@ async function handleApiRoute(
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools()) {
+			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId }))) {
 				if (!resolvedNames.has(t.name)) {
-					tools.push({ ...t, origin: "mcp" });
+					tools.push({ ...t, origin: t.origin ?? "mcp" });
 				}
 			}
 		}
-		json({ tools });
+		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId)));
+		const toolDiagnostics = toolDiagnosticsForProject(projectId);
+		attachToolDiagnostics(tools, toolDiagnostics);
+		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
 		return;
 	}
 
@@ -6311,21 +7044,34 @@ async function handleApiRoute(
 			// server-level manager (server + global-user market packs + builtins).
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
+			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId));
+			const piTool = piRows.find((row) => row.name === name);
 			const tool = tm.getToolByName(name);
-			if (!tool) { json({ error: "Tool not found" }, 404); return; }
+			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
 			// Merge in cascade origin metadata so the detail payload carries the same
 			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
 			// Without this, the tools edit page replaces the cascade list item with the
 			// raw detail and a market-pack tool loses its origin badge + read-only state.
 			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
-			if (cascadeEntry) {
+			const toolDiagnostics = toolDiagnosticsForProject(projectId);
+			if (cascadeEntry && tool) {
 				const withMeta = withOrigin(cascadeEntry as any);
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
 				// tools edit page keeps the same own-pack identity for a market-pack tool.
 				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
-				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) });
+				const detail: Record<string, unknown> = { ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) };
+				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				attachToolDiagnostics([detail], toolDiagnostics);
+				json(detail);
+			} else if (tool) {
+				const detail: Record<string, unknown> = { ...tool };
+				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
+				attachToolDiagnostics([detail], toolDiagnostics);
+				json(detail);
 			} else {
-				json(tool);
+				const detail: Record<string, unknown> = { ...(piTool as Record<string, unknown>) };
+				attachToolDiagnostics([detail], toolDiagnostics);
+				json(detail);
 			}
 			return;
 		}
@@ -6478,6 +7224,7 @@ async function handleApiRoute(
 			entrypoints: p.entrypoints.map((e) => {
 				const out: Record<string, unknown> = { id: e.id, kind: e.kind, listName: e.listName };
 				if (e.label !== undefined) out.label = e.label;
+				if (e.icon !== undefined) out.icon = e.icon;
 				if (e.routeId !== undefined) out.routeId = e.routeId;
 				if (e.target !== undefined) out.target = e.target;
 				if (e.paramKeys !== undefined) out.paramKeys = e.paramKeys;
@@ -6486,293 +7233,6 @@ async function handleApiRoute(
 			routeNames: p.routes?.names ?? [],
 		}));
 		json({ packs });
-		return;
-	}
-
-	// ── P2: pack managed-runtime (Docker-backed) supervisor REST surface ──────
-	// GET  /api/pack-runtimes?projectId=          → { runtimes: PackRuntimeStatus[] }
-	// POST /api/pack-runtimes/:id/start           → status (after ensure/start)
-	// POST /api/pack-runtimes/:id/stop            → status (after stop)
-	// POST /api/pack-runtimes/:id/restart         → status (after restart)
-	// GET  /api/pack-runtimes/:id/logs?tail=      → { logs, status? }
-	// The `:id` is the URL-safe encodePackRuntimeId(packId, runtimeId). Admin-bearer
-	// only (gated before handleApiRoute). All Docker execution lives in the
-	// supervisor; tests inject a fully-mocked supervisor (no daemon).
-	if (url.pathname === "/api/pack-runtimes" && req.method === "GET") {
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		try {
-			const statuses = await packRuntimeSupervisor.list(projectId);
-			// Re-derive the API id from {packId, runtimeId} so it always round-trips
-			// through decodePackRuntimeId regardless of the supervisor's internal id.
-			const runtimes = statuses.map((s) => ({ ...s, id: encodePackRuntimeId(s.packId, s.runtimeId) }));
-			json({ runtimes });
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// GET  /api/pack-runtimes/:id/capabilities?projectId=&mode= → capability summary
-	//   Pre-start consent disclosure (P3 §8): images/services, host ports, the
-	//   managed data/volume path, the start policy, and the memory/trust copy. Pure
-	//   (no Docker), so the Market UI can render it BEFORE the user consents.
-	const packRuntimeCapMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/capabilities$/);
-	if (packRuntimeCapMatch) {
-		if (req.method !== "GET") { json({ error: "method not allowed" }, 405); return; }
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		let packId: string, runtimeId: string;
-		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeCapMatch[1])); }
-		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const rawMode = url.searchParams.get("mode");
-		const requestedMode = rawMode !== null && rawMode.trim().length > 0 ? rawMode.trim() : undefined;
-		// The disclosure is DEPLOYMENT-mode aware (external / managed / managed-external-
-		// postgres). The caller may pass an explicit mode; absent that, resolve the
-		// EFFECTIVE deployment mode from the pack's provider config so the external
-		// (no-Docker) setup path is reachable even when the UI does not know the mode.
-		// Build the EFFECTIVE deployment config the SAME way the activation path does
-		// (each provider's flat schema defaults overlaid with its persisted store
-		// config), so the consent disclosure reflects custom settings — most importantly
-		// a custom `dataDir` bind path — rather than schema defaults that would diverge
-		// from what activation actually mounts.
-		//
-		// Read RAW (activation-UNFILTERED) contributions, NOT `getPack` — the latter
-		// drops a provider whose activation gate is still unsatisfied (e.g. Hindsight's
-		// external-mode `memory` provider before `externalUrl` is set), which would
-		// misclassify fresh/default Hindsight as provider-less and disclose the Docker
-		// default mode instead of the external (no-Docker) setup path. Mirrors the
-		// activation path's raw `loadPackContributions` derivation.
-		const deploymentConfig: Record<string, unknown> = {};
-		let hasDeploymentSurface = false;
-		{
-			const pack = packContributionRegistry.getRawPack(projectId, packId);
-			for (const p of pack?.providers ?? []) {
-				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-				Object.assign(deploymentConfig, merged);
-				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-			}
-		}
-		// Resolve the EFFECTIVE deployment mode. With NO deployment surface (a provider-
-		// less runtime pack, or a pack whose only provider carries no deployment mode)
-		// there is no external/managed concept to honour, so the disclosure must show the
-		// runtime's manifest DEFAULT (Docker) mode/services/ports — the SAME no-surface
-		// fallback the activation/start paths use (they start such runtimes in the
-		// manifest default mode). Only fall back to `external` when a deployment surface
-		// exists but selects no managed mode.
-		const deploymentMode = requestedMode
-			?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
-				? deploymentConfig.mode
-				: (hasDeploymentSurface ? "external" : undefined));
-		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
-		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
-			managed: "managed-postgres",
-			"managed-external-postgres": "external-postgres",
-		};
-		try {
-			if (deploymentMode === undefined) {
-				// No deployment surface: disclose the runtime's manifest DEFAULT (Docker)
-				// mode/services/ports (capabilitySummary with no mode picks the first
-				// manifest mode). dockerRequired:true mirrors the start path bringing this
-				// runtime up in its default mode.
-				const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, config: deploymentConfig });
-				json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
-				return;
-			}
-			if (deploymentMode === "external") {
-				// External: derive descriptor/trust from the default manifest mode but disclose
-				// NO services/ports and flag dockerRequired:false, so the UI shows setup
-				// guidance instead of a Docker start disclosure. Works without Docker.
-				const base = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId });
-				json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
-				return;
-			}
-			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
-			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
-			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
-		} catch (err) {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/pack-runtimes/:id/down { volumes?: boolean, removeState?: boolean }
-	//   `docker compose down`. Default (no volumes/removeState) preserves bind-mounted
-	//   data — the uninstall primitive. `volumes: true` + `removeState: true` is the
-	//   explicit purge. Admin-bearer only (gated before handleApiRoute).
-	const packRuntimeDownMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/down$/);
-	if (packRuntimeDownMatch) {
-		if (req.method !== "POST") { json({ error: "method not allowed" }, 405); return; }
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		let packId: string, runtimeId: string;
-		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeDownMatch[1])); }
-		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const bodyText = await readBodyText(req);
-		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
-		let body: Record<string, unknown> = {};
-		const trimmed = bodyText.trim();
-		if (trimmed.length > 0) {
-			let parsed: unknown;
-			try { parsed = JSON.parse(trimmed); } catch { json({ error: "malformed JSON body" }, 400); return; }
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
-			body = parsed as Record<string, unknown>;
-		}
-		const volumes = body.volumes === true;
-		const removeState = body.removeState === true;
-		try {
-			const status = await packRuntimeSupervisor.down(packId, runtimeId, { projectId, volumes, removeState });
-			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-		} catch (err) {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
-	if (packRuntimeMatch) {
-		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
-		const wantsGet = action === "logs";
-		if (wantsGet ? req.method !== "GET" : req.method !== "POST") {
-			json({ error: "method not allowed" }, 405);
-			return;
-		}
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-
-		// Map supervisor failures to status codes: NotFound → 404, BadRequest → 400.
-		const handleErr = (err: unknown): void => {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		};
-
-		// Decode the URL-safe id (raw path segment — decodePackRuntimeId percent-
-		// decodes the halves itself). Malformed → PackRuntimeBadRequestError → 400.
-		let packId: string;
-		let runtimeId: string;
-		try {
-			({ packId, runtimeId } = decodePackRuntimeId(packRuntimeMatch[1]));
-		} catch (err) { handleErr(err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-
-		if (action === "logs") {
-			// Tail validation/clamping is owned by the supervisor (clampTail): a
-			// non-numeric tail throws PackRuntimeBadRequestError → 400; out-of-range
-			// values are clamped. Pass the raw query value through.
-			const rawTail = url.searchParams.get("tail");
-			const tail = rawTail !== null && rawTail !== "" ? (Number(rawTail) as number) : undefined;
-			try {
-				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
-				json({ logs });
-			} catch (err) {
-				// Surface a missing-Docker install as a consistent docker-unavailable
-				// shape (200 with empty logs + status) rather than hiding it behind an
-				// empty body or a generic 500.
-				if (err instanceof PackRuntimeDockerUnavailableError) {
-					json({ logs: "", status: "docker-unavailable", message: err.message });
-					return;
-				}
-				handleErr(err);
-			}
-			return;
-		}
-
-		// start | stop | restart — optional `mode` from the POST body. An EMPTY body
-		// is valid (default mode); a NON-EMPTY but malformed-JSON body is a client
-		// error — answer 400 and do NOT invoke the supervisor (never silently treat
-		// garbage as `{}` and mutate the default mode).
-		const bodyText = await readBodyText(req);
-		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
-		let body: Record<string, unknown> = {};
-		const trimmedBody = bodyText.trim();
-		if (trimmedBody.length > 0) {
-			let parsed: unknown;
-			try { parsed = JSON.parse(trimmedBody); } catch { json({ error: "malformed JSON body" }, 400); return; }
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
-			body = parsed as Record<string, unknown>;
-		}
-		let mode: string | undefined;
-		let explicitMode = false;
-		let startConfig: Record<string, unknown> | undefined;
-		if (action !== "stop") {
-			const rawMode = (body as { mode?: unknown }).mode;
-			if (rawMode !== undefined && rawMode !== null) {
-				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
-				mode = rawMode;
-				explicitMode = true;
-			}
-			// Derive the saved provider deployment config and remap it onto the
-			// runtime's env keys EXACTLY like marketplace activation start does
-			// (resolveRuntimeStartPlan — the shared source of truth). Without this the
-			// route would forward only {projectId, mode} and a managed start would fail
-			// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
-			const deploymentConfig: Record<string, unknown> = {};
-			let hasDeploymentSurface = false;
-			{
-				// RAW (activation-UNFILTERED) contributions — NOT `getPack`. A dormant
-				// provider (e.g. Hindsight's external-mode `memory` provider before
-				// `externalUrl` is configured) is dropped from `getPack().providers`,
-				// which would hide the deployment surface and let the no-surface fallback
-				// start Docker in the runtime's default (managed) mode. Reading raw keeps
-				// the external-mode guard below in force for fresh/default Hindsight.
-				const pack = packContributionRegistry.getRawPack(projectId, packId);
-				for (const p of pack?.providers ?? []) {
-					const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-					if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-					Object.assign(deploymentConfig, merged);
-					// A deployment surface requires a provider that ACTUALLY carries a
-					// deployment mode — an unrelated provider (no mode) must behave like a
-					// provider-less runtime so the no-surface fallback below applies.
-					if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-				}
-			}
-			const plan = resolveRuntimeStartPlan(deploymentConfig);
-			startConfig = plan.config;
-			// Respect a saved EXTERNAL (or default/unset) deployment mode: that is the
-			// non-Docker setup path (plan.start === false), so there is NO managed
-			// runtime to bring up. Without an explicit body mode the route must NOT
-			// silently fall through to the runtime's first manifest mode (managed) and
-			// start Docker — activation already gates on plan.start, and the REST surface
-			// must agree. Answer 409 with a clear external/no-runtime shape; a caller that
-			// genuinely wants to start a managed stack must pass an explicit `mode`.
-			//
-			// The guard applies ONLY when the pack actually exposes a deployment-config
-			// surface (a provider whose config carries the mode). A runtime with no such
-			// surface has no external/managed concept to honor, so it keeps the legacy
-			// supervisor-default-mode behaviour and an unknown pack still reaches the
-			// supervisor (→ 404) rather than being masked by this 409.
-			if (hasDeploymentSurface && !plan.start && !explicitMode) {
-				const deploymentMode = typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
-					? deploymentConfig.mode
-					: "external";
-				json({
-					error: "runtime is configured for external (non-managed) mode; no Docker runtime to start",
-					mode: deploymentMode,
-					status: "stopped",
-					started: false,
-					id: encodePackRuntimeId(packId, runtimeId),
-				}, 409);
-				return;
-			}
-			// An explicit body mode (a runtime manifest mode) overrides the
-			// deployment-derived plan mode; otherwise use the plan's mapped mode.
-			if (mode === undefined) mode = plan.mode;
-		}
-		try {
-			const status = action === "stop"
-				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
-				: action === "start"
-					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode, config: startConfig })
-					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode, config: startConfig });
-			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-		} catch (err) { handleErr(err); }
 		return;
 	}
 
@@ -6822,7 +7282,7 @@ async function handleApiRoute(
 		const verifyToolUse = async (sid: string, toolUseId: string, t: string): Promise<boolean> => {
 			const ps = sessionManager.getPersistedSession(sid);
 			if (!ps?.agentSessionFile) return false;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			const content = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return transcriptHasToolUse(content, toolUseId, t);
 		};
@@ -6865,7 +7325,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -6880,15 +7340,6 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
-			// nested-goal creation closure (parent-derived, cap-aware team start).
-			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
-				sessionManager,
-				projectContextManager,
-				verificationHarness,
-				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
-				broadcastToAll,
-			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
@@ -6939,45 +7390,16 @@ async function handleApiRoute(
 		};
 		const contributionKind = (body as { contributionKind?: unknown }).contributionKind;
 
-		// ── Pack-bound surface (panel / entrypoint / route) — pack-schema-v1 §6.5.
-		//    No carrier tool, so NO allowedTools gate; the trust boundary is
-		//    installed + active in the session's scope + caller's own session (§4.5).
+		// ── Pack-bound surfaces (panel / entrypoint / route) are deliberately NOT
+		// minted from this public REST body: a same-session caller could choose another
+		// active pack's id. The trusted app mints these over the session WebSocket it
+		// owns; pack code receives only the resulting HostApi closure.
 		if (typeof contributionKind === "string") {
 			if (contributionKind !== "panel" && contributionKind !== "entrypoint" && contributionKind !== "route") {
 				json({ error: "invalid contributionKind" }, 400);
 				return;
 			}
-			const bodySid = (body as { sessionId?: unknown }).sessionId;
-			if (!mintHeaderSid || typeof bodySid !== "string" || bodySid !== mintHeaderSid) {
-				json({ error: "session mismatch" }, 403);
-				return;
-			}
-			if (!resolveSession(mintHeaderSid)) {
-				json({ error: "unknown session" }, 403);
-				return;
-			}
-			const packId = typeof (body as { packId?: unknown }).packId === "string" ? (body as { packId: string }).packId : "";
-			const contributionRef = typeof (body as { contributionId?: unknown }).contributionId === "string" ? (body as { contributionId: string }).contributionId : "";
-			if (!packId || !contributionRef) {
-				json({ error: "packId and contributionId are required" }, 400);
-				return;
-			}
-			// Validate the pack is installed + active in scope AND the contribution exists.
-			const pack = packContributionRegistry.getPack(mintSessionProjectId, packId);
-			let exists = false;
-			if (pack) {
-				if (contributionKind === "panel") exists = !!packContributionRegistry.getPanel(mintSessionProjectId, packId, contributionRef);
-				else if (contributionKind === "entrypoint") exists = !!packContributionRegistry.getEntrypoint(mintSessionProjectId, packId, contributionRef);
-				else exists = packContributionRegistry.hasRoute(mintSessionProjectId, packId, contributionRef);
-			}
-			if (!pack || !exists) {
-				json({ error: "surface tokens are available only to installed, active pack contributions" }, 403);
-				return;
-			}
-			const contributionId = `${contributionKind}:${contributionRef}`;
-			const token = mintSurfaceToken({ sessionId: mintHeaderSid, packId, contributionId });
-			console.log(`[ext-surface-token] kind=${contributionKind} contribution=${contributionRef} packId=${packId} session=${mintHeaderSid} outcome=ok`);
-			json({ token });
+			json({ error: "pack-bound surface tokens must be minted over the trusted session WebSocket" }, 403);
 			return;
 		}
 
@@ -7005,6 +7427,56 @@ async function handleApiRoute(
 		const token = mintSurfaceToken({ sessionId: guard.sessionId, packId: ident.packId, contributionId: ident.contributionId, tool });
 		console.log(`[ext-surface-token] tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=ok`);
 		json({ token });
+		return;
+	}
+
+	// POST /api/ext/channel-open-permit — mint the one-shot permit required by
+	// `ext_channel_open`. This scoped path accepts only pack-bound surface tokens
+	// (panel / entrypoint / route); channel name is resolved inside that pack only.
+	if (url.pathname === "/api/ext/channel-open-permit" && req.method === "POST") {
+		if (!extensionChannelServices?.openPermits) {
+			json({ error: "extension channels are not available" }, 503);
+			return;
+		}
+		const body = (await readBody(req)) ?? {};
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const channelHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const channelSessionProjectId = channelHeaderSid
+			? (sessionManager.getSession(channelHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(channelHeaderSid)?.projectId)
+			: undefined;
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const channelToolManager = resolveActionToolManager(
+			toolManager,
+			channelSessionProjectId ? projectContextManager.getOrCreate(channelSessionProjectId)?.toolManager : undefined,
+		);
+		const result = await mintScopedExtensionChannelOpenPermit({
+			openPermits: extensionChannelServices.openPermits,
+			packContributionRegistry,
+			projectId: channelSessionProjectId,
+			resolver: channelToolManager,
+			headerSessionId: channelHeaderSid,
+			rawHeaderSessionId: headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			surfaceToken: (body as { surfaceToken?: unknown }).surfaceToken,
+			name: (body as { name?: unknown }).name,
+			init: (body as { init?: unknown }).init,
+			singletonKey: (body as { singletonKey?: unknown }).singletonKey,
+			resolveSession,
+		});
+		if (!result.ok) {
+			console.warn(`[ext-channel-grant] outcome=error: ${result.error}`);
+			json({ error: result.error }, result.status);
+			return;
+		}
+		console.log(`[ext-channel-grant] channel=${result.channelName} packId=${result.packId} session=${result.sessionId} outcome=ok`);
+		json({ openGrant: result.openGrant });
 		return;
 	}
 
@@ -7157,7 +7629,7 @@ async function handleApiRoute(
 		const extPs = sessionManager.getPersistedSession(extGuard.sessionId);
 		let extJsonl: string | null = null;
 		if (extPs?.agentSessionFile) {
-			const fsCtx: SessionFsContext = { sandboxed: extPs.sandboxed, projectId: extPs.projectId };
+			const fsCtx = sessionFsContextForAgentFile(extPs, extPs.agentSessionFile);
 			extJsonl = await sessionFileRead(fsCtx, extPs.agentSessionFile, sandboxManager);
 		}
 		if (extSessionToolCall) {
@@ -7199,11 +7671,13 @@ async function handleApiRoute(
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeHeaderLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
-		const routeHeaderPersisted = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
-		const routeSessionProjectId = routeHeaderLive?.projectId ?? routeHeaderPersisted?.projectId;
+		const routeSessionProjectId = routeHeaderSid
+			? (sessionManager.getSession(routeHeaderSid)?.projectId
+				?? routePs?.projectId)
+			: undefined;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -7260,7 +7734,7 @@ async function handleApiRoute(
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
-			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 		};
 		const host = createServerHostApi({
@@ -7275,185 +7749,33 @@ async function handleApiRoute(
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			// EXPERIMENT-RUNNER SEAM: back host.agents.spawnGoal with the shared
-			// nested-goal creation closure (parent-derived, cap-aware team start).
-			spawnChildGoal: (ownerSessionId: string, spawnOpts) => spawnExperimentChildGoal({
-				sessionManager,
-				projectContextManager,
-				verificationHarness,
-				getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
-				broadcastToAll,
-			}, ownerSessionId, spawnOpts),
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
-		// P3/P4 — managed-runtime context injection for pack ROUTES. Mirror the
-		// LifecycleHub provider-hook path: if the routed pack has a provider declaring a
-		// `runtime` linkage and its EFFECTIVE config selects a managed deployment mode,
-		// resolve `ctx.runtime` from the supervisor WITHOUT starting Docker so the route
-		// handlers reach the locally-running managed runtime (e.g. Hindsight status/recall).
-		// External mode / no runtime / a stopped runtime ⇒ undefined, and the route stays
-		// dormant via its own `isActive(cfg, ctx.runtime)` gate. Resolution failure is
-		// non-fatal (the route just runs without runtime).
-		let routeRuntime: RuntimeContext | undefined;
-		try {
-			const pack = packContributionRegistry.getPack(routeSessionProjectId, ident.packId);
-			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
-			if (runtimeProvider?.runtime) {
-				routeRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
-					packId: ident.packId,
-					runtimeId: runtimeProvider.runtime,
-					projectId: routeSessionProjectId,
-					config: runtimeProvider.config ?? {},
-				});
-			}
-		} catch {
-			routeRuntime = undefined; // non-fatal — the route runs without ctx.runtime
-		}
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routeLive = sessionManager.getSession(guard.sessionId);
-			const routePs = sessionManager.getPersistedSession(guard.sessionId);
 			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
-			const routeGoalId = routeLive?.goalId ?? routeLive?.teamGoalId ?? routePs?.goalId ?? routePs?.teamGoalId;
-			const routeRoleName = routeLive?.role ?? routePs?.role;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{
-					host,
-					sessionId: guard.sessionId,
-					toolUseId: toolUseId ?? "",
-					tool: ident.contributionId,
-					projectId: routeSessionProjectId,
-					...(routeGoalId ? { goalId: routeGoalId } : {}),
-					...(routeRoleName ? { roleName: routeRoleName } : {}),
-					workingDir: routeWorkingDir,
-					...(routeRuntime ? { runtime: routeRuntime } : {}),
-				},
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
 				{ method, query, body: init.body },
 			);
-			console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
+			const durationMs = Date.now() - start;
+			// PR Walkthrough status is a browser polling route; keep slow successes and
+			// all catch-branch errors visible, but do not flood logs with fast ticks.
+			const suppressNoisyOk = ident.packId === "pr-walkthrough" && routeName === "status" && durationMs < 1_000;
+			if (!suppressNoisyOk) {
+				console.log(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${durationMs}`);
+			}
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;
 			const message = err instanceof Error ? err.message : String(err);
 			console.warn(`[ext-route] name=${routeName} tool=${routeTool ?? ident.contributionId} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
-			json({ error: message }, status);
-		}
-		return;
-	}
-
-	// GET/POST /api/ext/pack-route/:packId/:routeName — SESSIONLESS admin access to a
-	// BUILT-IN pack's route (Hindsight UX polish). The Marketplace must read built-in
-	// Hindsight config/status, AND write Hindsight config, after `#/market` navigation
-	// when there is no active chat session, so the surface-token path
-	// (`/api/ext/surface-token` → `/api/ext/route`) 403s. This additive route serves
-	// the SAME pack-level route module WITHOUT a bound session. It is narrowly scoped
-	// so it cannot widen the extension threat model:
-	//   • Admin-bearer only (gated before handleApiRoute) — the trusted app shell.
-	//   • BUILT-IN first-party packs only — a same-realm third-party pack cannot use
-	//     this sessionless seam to read or write another pack's route output.
-	//   • GET → any route (pure read). POST → ALLOWLISTED to the `config` route name
-	//     ONLY (the built-in config write); any other routeName under POST is rejected
-	//     403, so this is NOT a general write seam — it is purely the GET seam's
-	//     config-write sibling. The `config` route validates + persists to the pack
-	//     store (CONFIG_INVALID for bad input) and returns the redacted effective
-	//     config.
-	// CRITICAL: this path NEVER starts Docker and works with NO session — POST only
-	// persists config to the pack store. `ctx.runtime` is resolved WITHOUT starting
-	// Docker (mirrors `/api/ext/route`), preserving the no-Docker-auto-start invariant.
-	const packRouteMatch = url.pathname.match(/^\/api\/ext\/pack-route\/([^/]+)\/([^/]+)$/);
-	if (packRouteMatch && (req.method === "GET" || req.method === "POST")) {
-		const reqPackId = decodeURIComponent(packRouteMatch[1]);
-		const routeName = decodeURIComponent(packRouteMatch[2]);
-		const isWrite = req.method === "POST";
-		const projectId = url.searchParams.get("projectId") || undefined;
-		// POST is allowlisted to the `config` route ONLY — never a general write seam.
-		if (isWrite && routeName !== "config") {
-			json({ error: "sessionless pack-route writes are available only for the 'config' route" }, 403);
-			return;
-		}
-		// Parse the JSON body for the config write. An empty body is rejected for POST
-		// (a config write must carry overrides); malformed JSON is a 400 client error.
-		let writeBody: Record<string, unknown> = {};
-		if (isWrite) {
-			const bodyText = await readBodyText(req);
-			if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
-			const trimmed = bodyText.trim();
-			if (trimmed.length === 0) { json({ error: "config write requires a JSON body" }, 400); return; }
-			try {
-				const parsed = JSON.parse(trimmed);
-				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-					json({ error: "config write body must be a JSON object" }, 400);
-					return;
-				}
-				writeBody = parsed as Record<string, unknown>;
-			} catch {
-				json({ error: "config write body must be valid JSON" }, 400);
-				return;
-			}
-		}
-		// Restrict to BUILT-IN first-party packs (same enumeration the Installed list
-		// uses to synthesise built-in rows), keyed by the STRUCTURAL packId.
-		const builtinPackIds = new Set(
-			builtinFirstPartyPackEntries(resolveBuiltinPacksDir())
-				.filter((e) => e.manifest)
-				.map((e) => packIdFromRoot(e.path)),
-		);
-		if (!builtinPackIds.has(reqPackId)) {
-			json({ error: "sessionless pack-route access is available only to built-in packs" }, 403);
-			return;
-		}
-		const resolved = routeRegistry.resolve(reqPackId, routeName, projectId);
-		if (!resolved) {
-			json({ error: `pack "${reqPackId}" declares no route "${routeName}"` }, 404);
-			return;
-		}
-		const host = createServerHostApi({
-			sessionId: "",
-			toolUseId: undefined,
-			packId: reqPackId,
-			contributionId: "",
-			packStore: getPackStore(),
-			orchestrationCore,
-			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			onStoreWrite: notePackStoreWrite,
-		});
-		// Managed-runtime context injection (NO Docker start) — mirror `/api/ext/route`.
-		let packRouteRuntime: RuntimeContext | undefined;
-		try {
-			const pack = packContributionRegistry.getPack(projectId, reqPackId);
-			const runtimeProvider = pack?.providers.find((p) => typeof p.runtime === "string" && p.runtime.length > 0);
-			if (runtimeProvider?.runtime) {
-				packRouteRuntime = await resolveManagedRuntimeContext(packRuntimeSupervisor, {
-					packId: reqPackId,
-					runtimeId: runtimeProvider.runtime,
-					projectId,
-					config: runtimeProvider.config ?? {},
-				});
-			}
-		} catch {
-			packRouteRuntime = undefined; // non-fatal — the route runs without ctx.runtime
-		}
-		const start = Date.now();
-		try {
-			const result = await routeDispatcher.dispatch(
-				resolved.modulePath,
-				resolved.packRoot,
-				routeName,
-				{ host, sessionId: "", toolUseId: "", tool: "", projectId, ...(packRouteRuntime ? { runtime: packRouteRuntime } : {}) },
-				isWrite ? { method: "POST", body: writeBody } : { method: "GET" },
-			);
-			console.log(`[ext-pack-route] name=${routeName} packId=${reqPackId} method=${isWrite ? "POST" : "GET"} sessionless outcome=ok durationMs=${Date.now() - start}`);
-			json(result ?? null);
-		} catch (err) {
-			const status = err instanceof ActionError ? err.status : 500;
-			const message = err instanceof Error ? err.message : String(err);
-			console.warn(`[ext-pack-route] name=${routeName} packId=${reqPackId} sessionless outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
 		return;
@@ -7630,62 +7952,76 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
-
-	function firstHeader(name: string): string | undefined {
-		const value = req.headers[name.toLowerCase()];
-		const str = Array.isArray(value) ? value[0] : value;
-		return typeof str === "string" && str.length > 0 ? str : undefined;
+	// GET /api/agent-dir — return startup-resolved active dir plus next-start state.
+	if (url.pathname === "/api/agent-dir" && req.method === "GET") {
+		json(getAgentDirApiState());
+		return;
 	}
 
-	function hasSessionBoundHeaders(): boolean {
-		return Boolean(
-			firstHeader("x-bobbit-session-id")
-			|| firstHeader("x-bobbit-session-secret")
-			|| firstHeader("x-bobbit-spawning-session"),
-		);
+	// POST /api/agent-dir/validate — validate and probe an agent-dir target.
+	if (url.pathname === "/api/agent-dir/validate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ ok: false, error: { code: "MISSING_BODY", message: "Missing body" } }, 400); return; }
+		const result = validateAgentDirTarget((body as any).path, getProjectRoot());
+		json(result);
+		return;
 	}
 
-	function isHumanOperatorRequest(): boolean {
-		return Boolean(
-			cookieStore
-			&& cookieTryAuth(req, cookieStore, { operator: true })
-			&& !sandboxScope
-			&& !hasSessionBoundHeaders()
-			&& !firstHeader("authorization")
-		);
-	}
-
-	function claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string } {
-		const sensitive = sensitiveClaudeCodePreferenceMutation(patch);
-		return {
-			requiresConfirmation: sensitive.requiresConfirmation,
-			keys: sensitive.keys,
-			binding: stableConfirmationBinding({ values: sensitive.values }),
-		};
-	}
-
-	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
-	// for host-local Claude Code preferences that affect process execution or permission bypass.
-	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {
-		if (!isHumanOperatorRequest()) {
-			json({ error: "Claude Code preference confirmation requires an operator browser session" }, 403);
-			return;
-		}
+	// PUT /api/agent-dir/pending — save the next-start agent dir without live-switching.
+	if (url.pathname === "/api/agent-dir/pending" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-		try {
-			confirmation = claudeCodeConfirmationBinding(body as Record<string, unknown>);
-		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 400);
+		const rawPath = (body as any).path;
+		let persistedPath: string | undefined;
+		if (rawPath === null || rawPath === undefined || (typeof rawPath === "string" && rawPath.trim().length === 0)) {
+			preferencesStore.remove("agentDir");
+		} else if (typeof rawPath === "string") {
+			const validation = validateAgentDirTarget(rawPath, getProjectRoot());
+			if (!validation.ok) { json(validation, 400); return; }
+			persistedPath = validation.resolvedPath;
+			preferencesStore.set("agentDir", persistedPath);
+		} else {
+			json({ error: "path must be a string, null, or empty" }, 400);
 			return;
 		}
-		if (!confirmation.requiresConfirmation) {
-			json({ confirmationRequired: false, sensitiveKeys: [] });
+
+		const state = refreshAgentDirNextStart(persistedPath, bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastPreferencesChanged();
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...getAgentDirApiState(), guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
+	// POST /api/agent-dir/migrate — copy allowlisted agent data; never delete or move source.
+	if (url.pathname === "/api/agent-dir/migrate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const sourceRaw = (body as any).sourcePath;
+		const destinationRaw = (body as any).destinationPath;
+		if (typeof sourceRaw !== "string" || typeof destinationRaw !== "string" || sourceRaw.trim().length === 0 || destinationRaw.trim().length === 0) {
+			json({ error: "sourcePath and destinationPath are required" }, 400);
 			return;
 		}
-		const minted = mintOperatorConfirmation({ purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-		json({ confirmationRequired: true, confirmationToken: minted.token, expiresAt: minted.expiresAt, sensitiveKeys: confirmation.keys });
+		const sourcePath = normalizeAgentDirInput(sourceRaw, getProjectRoot());
+		const destinationPath = normalizeAgentDirInput(destinationRaw, getProjectRoot());
+		if (!isKnownAgentDir(sourcePath)) {
+			json({ error: "sourcePath must be the active or a historical agent directory", code: "INVALID_SOURCE" }, 400);
+			return;
+		}
+		if (!isPendingAgentDir(destinationPath)) {
+			json({ error: "destinationPath must be the pending next-start agent directory", code: "INVALID_DESTINATION" }, 400);
+			return;
+		}
+		const report = migrateAgentDirData(sourcePath, destinationPath, (body as any).overwrite === true);
+		if (report.error) {
+			json(report, 400);
+			return;
+		}
+		const state = refreshAgentDirNextStart((preferencesStore.get("agentDir") as string | undefined), bobbitStateDir());
+		preferencesStore.set("agentDirHistory", state.history);
+		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
+		json({ ...report, guidance: buildAgentDirRestartGuidance() });
 		return;
 	}
 
@@ -7699,34 +8035,19 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preferences" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
-		let preferencePatch = body as Record<string, unknown>;
-		if (claudeCodePrefsChanged) {
-			let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-			try {
-				confirmation = claudeCodeConfirmationBinding(preferencePatch);
-			} catch (err: any) {
-				json({ error: err?.message || String(err) }, 400);
-				return;
-			}
-			if (confirmation.requiresConfirmation) {
-				const token = firstHeader("x-bobbit-operator-confirmation");
-				const confirmed = isHumanOperatorRequest()
-					&& consumeOperatorConfirmation(token, { purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-				if (!confirmed) {
-					json({
-						error: "Claude Code host-runtime preference changes require operator confirmation",
-						confirmationRequired: true,
-						sensitiveKeys: confirmation.keys,
-					}, 403);
-					return;
-				}
-			}
-			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
-			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
-			preferencePatch = { ...preferencePatch, ...normalized.values };
+		const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
+		const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
+		if (blockedKey) {
+			json({
+				error: `${blockedKey} is managed by the agent directory settings workflow. Use PUT /api/agent-dir/pending instead.`,
+				code: "AGENT_DIR_PREFERENCE_FORBIDDEN",
+				key: blockedKey,
+				use: "/api/agent-dir/pending",
+			}, 400);
+			return;
 		}
-		for (const [key, value] of Object.entries(preferencePatch)) {
+		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
+		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
 				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
 				// authoritative. An empty/invalid list removes the key entirely.
@@ -7739,12 +8060,11 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
-		if (claudeCodePrefsChanged) {
-			invalidateClaudeCodeStatusCache();
-			invalidateModelCache();
-		}
-		json({ ok: true });
+		json(getSafePreferences());
 		broadcastPreferencesChanged();
+		if (headquartersVisibilityChanged) {
+			broadcastToAll({ type: "projects_changed", projects: listProjectsForApi() });
+		}
 		return;
 	}
 
@@ -7763,10 +8083,11 @@ async function handleApiRoute(
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId");
+		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		const resolvedStore = resolveProjectConfigStore(projectId);
-		const resolvedCwd = projectId && projectContextManager
-			? projectContextManager.getOrCreate(projectId)?.project.rootPath ?? config.defaultCwd
-			: config.defaultCwd;
+		const resolvedCwd = effectiveProjectId && projectContextManager
+			? projectContextManager.getOrCreate(effectiveProjectId)?.project.rootPath ?? config.defaultCwd
+			: (projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : config.defaultCwd);
 		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
 		return;
 	}
@@ -7811,7 +8132,20 @@ async function handleApiRoute(
 			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
 		// True iff a real user install of `(scope, packName)` exists in the ledger.
 		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
-			installer.listInstalled(allContexts(projectId)).some((p) => p.scope === scope && p.packName === packName);
+			installer.listInstalled(allContexts(normalizeConfigProjectId(projectId))).some((p) => p.scope === scope && p.packName === packName);
+
+		const sourceDisplayName = (source: Pick<MarketplaceSource, "id" | "displayName" | "type"> & { builtin?: boolean }): string =>
+			source.builtin ? "Built-in" : source.displayName ?? source.id;
+		const sourceTypeForBrowse = (source: Pick<MarketplaceSource, "type"> & { builtin?: boolean }): "builtin" | "pack" | "mcp-gateway" | "mcp-registry" =>
+			source.builtin ? "builtin" : (source.type ?? "pack");
+		const browseRowWithSource = (pack: BrowsePack, source: Pick<MarketplaceSource, "id" | "displayName" | "type"> & { builtin?: boolean }): BrowsePack => {
+			const type = sourceTypeForBrowse(source);
+			return {
+				...pack,
+				source: { id: source.id, name: sourceDisplayName(source), type: type === "mcp-registry" ? "pack" : type, ...(source.builtin ? { builtin: true } : {}) },
+				browseKey: `${source.id}:${pack.dirName}`,
+			};
+		};
 
 		const MARKET_SCOPES = new Set(["global-user", "server", "project"]);
 		const parseScope = (raw: unknown): InstallScope | null =>
@@ -7822,9 +8156,11 @@ async function handleApiRoute(
 			scope: InstallScope,
 			projectId: string | undefined,
 		): { ok: true; target: ScopeTarget } | { ok: false; status: number; error: string } => {
+			const effectiveProjectId = normalizeConfigProjectId(projectId);
 			if (scope === "project") {
 				if (!projectId) return { ok: false, status: 400, error: "projectId required for project scope" };
-				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!effectiveProjectId) return { ok: true, target: { scope: "server", store: projectConfigStore } };
+				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 				if (!ctx) return { ok: false, status: 404, error: "Project not found" };
 				return { ok: true, target: { scope, projectBase: ctx.project.rootPath, store: ctx.projectConfigStore } };
 			}
@@ -7845,6 +8181,7 @@ async function handleApiRoute(
 		};
 		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
 			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
+			if (err instanceof Error && err.name === "McpGatewayError") { json({ error: err.message }, /fetch failed|HTTP|timed out/i.test(err.message) ? 502 : 422); return; }
 			jsonError(500, err);
 		};
 
@@ -7852,67 +8189,67 @@ async function handleApiRoute(
 		// scope's `pack_order` so `listInstalled` returns rows in precedence order
 		// (finding #2) — the UI relies on that order to build reorder payloads.
 		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> => {
+			const effectiveProjectId = normalizeConfigProjectId(projectId);
 			const ctxs: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> = [
 				{ scope: "server", packOrder: projectConfigStore.getPackOrder("server") },
 				{ scope: "global-user", packOrder: projectConfigStore.getPackOrder("global-user") },
 			];
-			if (projectId) {
-				const ctx = projectContextManager.getOrCreate(projectId);
+			if (effectiveProjectId) {
+				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath, packOrder: ctx.projectConfigStore.getPackOrder("project") });
 			}
 			return ctxs;
 		};
 
-		// ── Managed-runtime activation/consent wiring (P3) ─────────
-		// Resolve a pack's SERVER-DERIVED packId + its runtime contributions + the
-		// effective deployment config carried by its providers, so the supervisor
-		// (start/stop/down) can be addressed by {packId, runtimeId}. Mirrors
-		// buildActivationCatalogue's on-disk entry resolution (works for built-in
-		// first-party packs too). Returns null when the pack is not resolvable.
-		const resolvePackRuntimeContext = (
-			scope: InstallScope,
-			projectBase: string | undefined,
-			store: PackOrderStore,
-			packName: string,
-		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown>; hasDeploymentSurface: boolean } | null => {
-			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
-			if (base === undefined) return null;
-			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
-			let entry = entries.find((e) => e.manifest?.name === packName);
-			if ((!entry || !entry.manifest) && scope === "server") {
-				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
-			}
-			if (!entry || !entry.manifest) return null;
-			const packId = packIdFromRoot(entry.path);
-			if (!packId) return null;
-			let contribs;
-			try { contribs = loadPackContributions(entry.path, entry.manifest); }
-			catch { return { packId, runtimes: [], deploymentConfig: {}, hasDeploymentSurface: false }; }
-			// Effective deployment config = each provider's FLAT schema defaults
-			// (ProviderContribution.config) overlaid with its persisted store config.
-			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
-			const deploymentConfig: Record<string, unknown> = {};
-			let hasDeploymentSurface = false;
-			for (const p of contribs.providers) {
-				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-				Object.assign(deploymentConfig, merged);
-				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-			}
-			// `hasDeploymentSurface` = the pack exposes a provider whose config ACTUALLY
-			// carries the deployment mode (external/managed/…). A runtime-only pack with NO
-			// provider — OR a pack whose only provider has no deployment mode — has no
-			// external/managed concept, so its `on-enable` runtime starts in the runtime's
-			// default mode rather than being suppressed by the external-default start plan
-			// (mirrors the REST start path's no-surface fallback so activation and
-			// `/api/pack-runtimes/:id/start` never diverge).
-			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.listName, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface };
-		};
+		// ── All-source Browse ─────────────────────────────────────
+		// GET /api/marketplace/browse?projectId=<optional>
+		if (url.pathname === "/api/marketplace/browse" && req.method === "GET") {
+			type BrowseSourceState = {
+				sourceId: string;
+				sourceName: string;
+				sourceType: "builtin" | "pack" | "mcp-gateway" | "mcp-registry";
+				builtin?: boolean;
+				status: "ok" | "loading" | "error" | "unsupported";
+				error?: string;
+				lastSyncedAt?: string;
+			};
+			const sources: BrowseSourceState[] = [];
+			const packs: BrowsePack[] = [];
+			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e): BrowsePack => ({
+				...e.manifest!,
+				dirName: e.manifest!.name,
+				hasTools: e.manifest!.contents.tools.length > 0,
+				builtin: true,
+				provided: true,
+			} as BrowsePack));
+			sources.push({ sourceId: builtinSource.id, sourceName: sourceDisplayName(builtinSource), sourceType: "builtin", builtin: true, status: "ok" });
+			packs.push(...builtinPacks.map((pack) => browseRowWithSource(pack, builtinSource)));
 
-		// Deployment-mode → runtime start plan mapping is the module-level
-		// resolveRuntimeStartPlan() (the SINGLE source of truth shared with the
-		// /api/pack-runtimes/:id/{start,restart} REST routes — see finding #2).
+			for (const source of sourceStore.list()) {
+				const sourceType = sourceTypeForBrowse(source);
+				const state: BrowseSourceState = {
+					sourceId: source.id,
+					sourceName: sourceDisplayName(source),
+					sourceType,
+					status: "ok",
+					...(source.lastSyncedAt ? { lastSyncedAt: source.lastSyncedAt } : {}),
+				};
+				if (sourceType === "mcp-registry") {
+					sources.push({ ...state, status: "unsupported", error: source.unsupportedReason ?? "source type is unsupported" });
+					continue;
+				}
+				try {
+					const rows = await installer.browseSourcePacks(source.id);
+					const refreshed = sourceStore.get(source.id) ?? source;
+					sources.push({ ...state, ...(refreshed.lastSyncedAt ? { lastSyncedAt: refreshed.lastSyncedAt } : {}) });
+					packs.push(...rows.map((pack) => browseRowWithSource(pack, refreshed)));
+				} catch (err) {
+					sources.push({ ...state, status: "error", error: err instanceof Error ? err.message : String(err) });
+				}
+			}
+			json({ sources, packs });
+			return;
+		}
 
 		// ── Sources ───────────────────────────────────────────────
 		// GET /api/marketplace/sources
@@ -7921,7 +8258,7 @@ async function handleApiRoute(
 			json({ sources: [builtinSource, ...sourceStore.list()] });
 			return;
 		}
-		// POST /api/marketplace/sources { url, ref? }
+		// POST /api/marketplace/sources { url, ref?, type? }
 		if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
 			const body = await readBody(req);
 			const srcUrl = body && typeof (body as any).url === "string" ? (body as any).url.trim() : "";
@@ -7929,12 +8266,12 @@ async function handleApiRoute(
 			if (sourceStore.getByUrl(srcUrl)) { json({ error: `source already registered: ${srcUrl}` }, 409); return; }
 			let source;
 			try {
-				source = sourceStore.add({ url: srcUrl, ref: (body as any).ref });
+				source = sourceStore.add({ url: srcUrl, ref: (body as any).ref, type: (body as any).type });
 			} catch (err) { jsonError(400, err); return; }
 			try {
-				installer.syncSource(source.id);
+				await installer.syncMarketplaceSource(source.id);
 			} catch (err) {
-				// Roll back the registration if the initial sync fails.
+				// Roll back the registration if the initial sync/fetch fails.
 				sourceStore.remove(source.id);
 				handleMarketErr(err);
 				return;
@@ -7984,12 +8321,12 @@ async function handleApiRoute(
 				return;
 			}
 			if (sub === "/sync" && req.method === "POST") {
-				try { installer.syncSource(id); } catch (err) { handleMarketErr(err); return; }
+				try { await installer.syncMarketplaceSource(id); } catch (err) { handleMarketErr(err); return; }
 				json({ source: sourceStore.get(id) });
 				return;
 			}
 			if (sub === "/packs" && req.method === "GET") {
-				try { json({ packs: installer.browsePacks(id) }); } catch (err) { handleMarketErr(err); }
+				try { json({ packs: await installer.browseSourcePacks(id) }); } catch (err) { handleMarketErr(err); }
 				return;
 			}
 		}
@@ -8010,9 +8347,12 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const installed = installer.installPack({ sourceId: body.sourceId, dirName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				json({ installed }, 201);
+				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
 			return;
 		}
@@ -8032,9 +8372,15 @@ async function handleApiRoute(
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const installed = installer.updatePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
+				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
-				json({ installed });
+				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
+				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
 			} catch (err) { handleMarketErr(err, 409); }
 			return;
 		}
@@ -8053,47 +8399,13 @@ async function handleApiRoute(
 			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			// P3 — tear down this pack's managed runtimes BEFORE removing it, preserving
-			// bind-mounted data (no `-v`, no state removal). A missing Docker install is
-			// tolerated (down returns a docker-unavailable STATUS, never throws), so an
-			// uninstall on a Docker-less host still proceeds. A REAL teardown failure (down
-			// throws) is reported and the uninstall is ABORTED — never silently swallowed.
-			if (packRuntimeSupervisor) {
-				const teardownFailures: string[] = [];
-				try {
-					const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
-					if (rtCtx && rtCtx.runtimes.length > 0) {
-						const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
-						// Tear down EVERY runtime contribution unconditionally — do NOT gate on the
-						// CURRENT saved deployment mode (resolveRuntimeStartPlan). A pack started in a
-						// managed mode and later reconfigured to `external` would otherwise skip
-						// teardown and leak its still-running containers. `down` is read-only/minimal
-						// and idempotent (it never resolves start-only inputs like
-						// HINDSIGHT_API_LLM_API_KEY, reuses an already-rendered .env only when one
-						// exists, and maps a missing Docker install to a docker-unavailable STATUS
-						// rather than throwing), so calling it for an external-only never-started
-						// runtime is a harmless no-op (`compose down` on an absent project exits 0).
-						for (const rc of rtCtx.runtimes) {
-							try {
-								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
-							} catch (err) {
-								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
-							}
-						}
-					}
-				} catch (err) {
-					// Resolving the pack's runtime context failed (e.g. the pack is no longer
-					// resolvable on disk) — there is nothing to tear down; proceed.
-					console.warn(`[pack-runtimes] uninstall runtime teardown skipped: ${(err as Error)?.message ?? err}`);
-				}
-				if (teardownFailures.length > 0) {
-					json({ error: "runtime teardown failed; pack not uninstalled", details: teardownFailures }, 502);
-					return;
-				}
-			}
 			try {
-				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const targetScope = st.target.scope;
+				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
 			return;
@@ -8108,11 +8420,6 @@ async function handleApiRoute(
 				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
 					scope: "server" as InstallScope,
 					packName: e.manifest!.name,
-					// Structural id (the shipped `market-packs/<dir>` segment) the
-					// runtime/panel APIs key by — can DIVERGE from the manifest name for a
-					// built-in whose directory differs. The UI addresses runtime REST with
-					// this, not `packName`.
-					packId: packIdFromRoot(e.path),
 					manifest: e.manifest!,
 					meta: e.meta,
 					status: "ok" as const,
@@ -8121,12 +8428,6 @@ async function handleApiRoute(
 					// "update available" (they update with the app upgrade, §4.2).
 					updateAvailable: false,
 					sourceStatus: "ok" as const,
-					// Default-disabled built-in packs (manifest `defaultDisabled: true`, e.g.
-					// Hindsight) ship dormant. Surface BOTH a stable structural flag
-					// (`defaultDisabled`) and the UI intent alias (`requiresGuidedSetup`) so the
-					// Marketplace can launch the guided setup wizard when the user enables it.
-					defaultDisabled: e.manifest!.defaultDisabled === true,
-					requiresGuidedSetup: e.manifest!.defaultDisabled === true,
 				}));
 				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
 			} catch (err) { jsonError(500, err); }
@@ -8140,7 +8441,8 @@ async function handleApiRoute(
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const st = resolveScopeTarget(scope, projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			json({ scope, order: st.target.store.getPackOrder(scope) });
+			const targetScope = st.target.scope;
+			json({ scope: targetScope, order: st.target.store.getPackOrder(targetScope) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-order" && req.method === "PUT") {
@@ -8150,18 +8452,22 @@ async function handleApiRoute(
 			if (!Array.isArray(body?.order) || !body.order.every((x: unknown) => typeof x === "string")) { json({ error: "order must be a string array" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 			// Normalize: drop names not installed at this scope; append on-disk-but-absent
 			// packs at lowest priority (front), preserving the requested order otherwise.
-			const installedNames = installer.listInstalled([{ scope, projectBase: st.target.projectBase }])
-				.filter((p) => p.scope === scope && p.status !== "corrupt")
+			const installedNames = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])
+				.filter((p) => p.scope === targetScope && p.status !== "corrupt")
 				.map((p) => p.packName);
 			const installedSet = new Set(installedNames);
 			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
 			const missing = installedNames.filter((n) => !filtered.includes(n));
 			const normalized = [...missing, ...filtered];
-			st.target.store.setPackOrder(scope, normalized);
+			st.target.store.setPackOrder(targetScope, normalized);
 			invalidateResolverCaches();
-			json({ scope, order: normalized });
+			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
+			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 
@@ -8171,12 +8477,65 @@ async function handleApiRoute(
 		// contents (NOT from the runtime-filtered /api/tools or /api/ext/contributions),
 		// so a disabled entity still appears and can be re-enabled. `disabled` is the
 		// current pack_activation override; checked = name ∉ disabled[kind].
+		type PackActivationMcpOperationEntry = {
+			name: string;
+			label?: string;
+			description?: string;
+			toolName?: string;
+			policyKey: string;
+			selected: boolean;
+			disabledByActivation: boolean;
+			inputSchema?: unknown;
+		};
+		const mcpPolicyKey = (serverName: string, subNamespace: string | undefined, operationName?: string): string => {
+			const parts = ["mcp", serverName];
+			if (subNamespace) parts.push(subNamespace);
+			if (operationName) parts.push(operationName);
+			return parts.join("__");
+		};
+		const activationMcpRef = (entry: PackEntry, mcp: ResolvedMcpContribution | { listName: string; serverName: string; subNamespace?: string; config?: any; sourceFile?: string }, metaDetails: Record<string, unknown>): string => {
+			return activationMcpContributionId(entry, mcp, metaDetails, sourceStore.getByUrl(String(entry.meta?.sourceUrl ?? ""))?.id);
+		};
+		const operationsForMcp = (mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown }, metaDetails: Record<string, unknown>): McpOperationMetadataEntry[] => {
+			return operationMetadataForMcpContribution(mcp, metaDetails);
+		};
+		const runtimeOperationsForMcp = (
+			mcp: { listName: string; serverName: string; subNamespace?: string },
+			contributionId: string,
+			routes: McpToolRouteSnapshot[],
+		): McpOperationMetadataEntry[] => {
+			const out: McpOperationMetadataEntry[] = [];
+			const seen = new Set<string>();
+			for (const route of routes) {
+				const routeContributionId = safeString(route.contributionId);
+				const routeListName = safeString(route.listName);
+				const routeServerName = safeString(route.serverName ?? route.publicServerName);
+				const routeSubNamespace = safeString(route.subNamespace);
+				const belongsToContribution = routeContributionId
+					? routeContributionId === contributionId
+					: routeListName === mcp.listName && routeServerName === mcp.serverName && routeSubNamespace === mcp.subNamespace;
+				if (!belongsToContribution) continue;
+				const parsed = typeof route.name === "string" ? parseMcpToolName(route.name) : undefined;
+				const rawName = safeString(route.mcpToolName);
+				const name = parsed?.sub && parsed.sub === mcp.subNamespace && parsed.op ? parsed.op : rawName;
+				if (!name || seen.has(name)) continue;
+				seen.add(name);
+				out.push({
+					name,
+					...(safeString(route.description) ? { description: safeString(route.description) } : {}),
+					...(route.inputSchema !== undefined ? { inputSchema: route.inputSchema } : {}),
+				});
+			}
+			return out;
+		};
+
 		const buildActivationCatalogue = (
 			scope: InstallScope,
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+			projectId?: string,
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -8188,6 +8547,11 @@ async function handleApiRoute(
 			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
+			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
+			const activationStore = store as unknown as ProjectConfigStore;
+			const currentDisabled = activationStore.getPackActivation?.(scope as PackOrderScope, packName) ?? {};
+			const disabledMcpRefs = new Set(currentDisabled.mcp ?? []);
+			const disabledMcpOperations = currentDisabled.mcpOperations ?? {};
 			const concreteTools = readConcretePackToolsFromGroups(entry.path, c.tools);
 			const descriptions = readPackEntityDescriptions(entry.path, entry.manifest);
 			if (Object.keys(concreteTools.descriptions).length > 0) {
@@ -8199,11 +8563,96 @@ async function handleApiRoute(
 			// unsupported entrypoint kinds are omitted so retired launch surfaces do not
 			// render as activation toggles.
 			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "session-menu" | "route"; routeId?: string }>();
+			const mcpByListName = new Map<string, Record<string, unknown>>();
+			const piExtensionByListName = new Map<string, Record<string, unknown>>();
 			try {
-				for (const ep of loadPackContributions(entry.path, entry.manifest).entrypoints) {
+				const contributions = loadPackContributions(entry.path, entry.manifest);
+				for (const ep of contributions.entrypoints) {
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
+				const mcpManager = scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+				const statuses = mcpManager?.getServerStatuses() ?? [];
+				const runtimeRoutes = mcpManager?.getToolRouteSnapshots?.() ?? [];
+				for (const mcp of contributions.mcp ?? []) {
+					const transport = mcp.config.url ? "http" : "stdio";
+					const contributionId = activationMcpRef(entry, mcp, metaDetails);
+					const status = statuses.find((s) => s.ownerContributions?.some((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope)))
+						?? statuses.find((s) => s.name === mcp.serverName);
+					const owner = status?.ownerContributions?.find((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope));
+					const overriddenBy = status && !owner
+						? (status.origin?.scope === "manual" ? "overridden-by-manual" : "overridden-by-marketplace")
+						: undefined;
+					const disabledOps = [...new Set(disabledMcpOperations[contributionId] ?? [])];
+					const disabledOpsSet = new Set(disabledOps);
+					const staticOperationMetadata = operationsForMcp(mcp, metaDetails);
+					const operationMetadata = staticOperationMetadata.length > 0
+						? staticOperationMetadata
+						: runtimeOperationsForMcp(mcp, contributionId, runtimeRoutes);
+					const knownOperationNames = new Set(operationMetadata.map((op) => op.name));
+					const operations = operationMetadata.map((op): PackActivationMcpOperationEntry => {
+						const policyKey = mcpPolicyKey(mcp.serverName, mcp.subNamespace, op.name);
+						return {
+							name: op.name,
+							...(op.label ? { label: op.label } : {}),
+							...(op.description ? { description: op.description } : {}),
+							...(op.inputSchema !== undefined ? { inputSchema: op.inputSchema } : {}),
+							toolName: policyKey,
+							policyKey,
+							selected: !disabledOpsSet.has(op.name),
+							disabledByActivation: disabledOpsSet.has(op.name),
+						};
+					});
+					const staleDisabledOperations = disabledOps.filter((name) => !knownOperationNames.has(name));
+					mcpByListName.set(mcp.listName, {
+						ref: mcp.listName,
+						contributionId,
+						listName: mcp.listName,
+						serverName: mcp.serverName,
+						policyKey: mcpPolicyKey(mcp.serverName, mcp.subNamespace),
+						selected: !disabledMcpRefs.has(contributionId) && !disabledMcpRefs.has(mcp.listName),
+						...(safeString(metaDetails.sourceId) ? { sourceId: safeString(metaDetails.sourceId) } : {}),
+						...(entry.manifest?.name ? { installedPackName: entry.manifest.name } : {}),
+						...(safeString(metaDetails.gatewayProviderId) ? { gatewayProviderId: safeString(metaDetails.gatewayProviderId) } : {}),
+						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
+						...(mcp.label ? { label: mcp.label } : {}),
+						...(mcp.description ? { description: mcp.description } : {}),
+						transport,
+						...(mcp.config.command ? { command: mcp.config.command } : {}),
+						...(mcp.config.args ? { args: mcp.config.args } : {}),
+						...(mcp.config.cwd ? { cwd: mcp.config.cwd } : {}),
+						...(mcp.config.env ? { env: Object.keys(mcp.config.env) } : {}),
+						...(mcp.config.url ? { url: mcp.config.url } : {}),
+						...(mcp.config.headers ? { headers: Object.keys(mcp.config.headers) } : {}),
+						...(status ? { status: status.status, ownerStatus: overriddenBy ?? (owner ? status.status : status.status), toolCount: operations.length > 0 ? operations.filter((op) => op.selected).length : status.toolCount } : {}),
+						...(operations.length > 0 ? { operations, selectedOperationCount: operations.filter((op) => op.selected).length, totalOperationCount: operations.length } : { selectedOperationCount: undefined, totalOperationCount: undefined }),
+						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
+						...(staleDisabledOperations.length > 0 ? { staleDisabledOperations } : {}),
+						...(overriddenBy ? { ownerStatus: overriddenBy, overriddenBy: status?.origin?.packName ?? status?.origin?.scope } : {}),
+						...(status?.error ? { error: status.error } : {}),
+					});
+					if (mcp.description) {
+						descriptions.mcp = { ...(descriptions.mcp ?? {}), [mcp.listName]: mcp.description };
+					}
+				}
 			} catch { /* metadata is optional; listName is the stable key */ }
+			try {
+				const resolvedPiExtensions = sessionManager.resolveMarketplacePiExtensionContributions(projectId)
+					.filter((piExtension) => piExtension.origin.scope === entry.scope && piExtension.origin.packName === entry.manifest!.name);
+				const piExtensions = resolvedPiExtensions.length > 0 ? resolvedPiExtensions : loadPiExtensionContributionsFromRuntime(entry.path, entry.manifest);
+				const disabledPiExtensions = new Set(((store as unknown as ProjectConfigStore).getPackActivation?.(scope as PackOrderScope, packName).piExtensions) ?? []);
+				for (const piExtension of piExtensions) {
+					const diagnostic = disabledPiExtensions.has(piExtension.listName)
+						? piExtensionDiagnostic("disabled", "disabled_by_activation", `Pi extension "${piExtension.listName}" is disabled for pack "${entry.manifest.name}".`)
+						: piExtension.diagnostic;
+					piExtensionByListName.set(piExtension.listName, {
+						ref: piExtension.listName,
+						listName: piExtension.listName,
+						...(piExtension.entryRelativePath ? { entryRelativePath: piExtension.entryRelativePath } : {}),
+						diagnostic,
+						tools: (piExtension.discovery?.tools ?? []).map((tool) => ({ name: tool.name, ...(tool.description ? { description: tool.description } : {}) })),
+					});
+				}
+			} catch { /* pi extension metadata is optional; listName is the stable key */ }
 			const baseCatalogue = {
 				roles: [...c.roles],
 				tools: concreteTools.tools,
@@ -8225,13 +8674,31 @@ async function handleApiRoute(
 				entrypoints: baseCatalogue.entrypoints,
 				providers: [...(c.providers ?? [])],
 				hooks: [...(c.hooks ?? [])],
-				mcp: [...(c.mcp ?? [])],
-				piExtensions: [...(c.piExtensions ?? [])],
+				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
+				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
 				workflows: [...(c.workflows ?? [])],
 				descriptions,
 			};
 		};
+		const mcpContributionLookup = (catalogue: { mcp?: Array<string | Record<string, unknown>> }): Map<string, string> => {
+			const out = new Map<string, string>();
+			for (const entry of catalogue.mcp ?? []) {
+				if (typeof entry === "string") {
+					out.set(entry, entry);
+					continue;
+				}
+				const contributionId = safeString(entry.contributionId) ?? safeString(entry.ref) ?? safeString(entry.listName);
+				if (!contributionId) continue;
+				for (const alias of [entry.contributionId, entry.ref, entry.listName, entry.legacyRef]) {
+					const key = safeString(alias);
+					if (key) out.set(key, contributionId);
+				}
+			}
+			return out;
+		};
+		const packActivationRevision = (disabled: unknown): string =>
+			`act:${createHash("sha256").update(JSON.stringify(disabled ?? {})).digest("hex").slice(0, 16)}`;
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {
 			const scope = parseScope(url.searchParams.get("scope"));
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
@@ -8240,11 +8707,13 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName);
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(projectId) : undefined;
+			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const disabled = cfgStore.getPackActivation(scope as PackOrderScope, packName);
-			json({ scope, packName, catalogue, disabled });
+			const disabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
+			json({ scope: targetScope, packName, catalogue, disabled, revision: packActivationRevision(disabled) });
 			return;
 		}
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "PUT") {
@@ -8255,16 +8724,41 @@ async function handleApiRoute(
 			if (!packName) { json({ error: "packName is required" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const catalogue = buildActivationCatalogue(scope, st.target.projectBase, st.target.store, packName);
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			// Normalize the requested disabled refs against the pack's declared
 			// catalogue (drop refs for entities the pack does not declare).
 			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
 			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
+			const mcpLookup = mcpContributionLookup(catalogue);
+			const catalogueMcpContributionIds = new Set(mcpLookup.values());
+			const cfgStore = st.target.store as unknown as ProjectConfigStore;
+			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
+			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
 			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
+			};
+			const normalizeMcpRefs = (): string[] => {
+				const raw = reqDisabled.mcp;
+				if (!Array.isArray(raw)) return [];
+				return [...new Set(raw.flatMap((x) => typeof x === "string" ? [mcpLookup.get(x) ?? ""] : []).filter((x) => x && catalogueMcpContributionIds.has(x)))];
+			};
+			const normalizeMcpOperationsForCatalogue = (): Record<string, string[]> | undefined => {
+				const raw = reqDisabled.mcpOperations;
+				const source = raw === undefined ? beforeActivation.mcpOperations : raw;
+				if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
+				const out: Record<string, string[]> = {};
+				for (const [rawContributionId, rawOps] of Object.entries(source)) {
+					const contributionId = mcpLookup.get(rawContributionId) ?? rawContributionId;
+					if (!catalogueMcpContributionIds.has(contributionId) || !Array.isArray(rawOps)) continue;
+					const ops = [...new Set(rawOps.filter((x): x is string => typeof x === "string" && x.length > 0))];
+					if (ops.length > 0) out[contributionId] = ops;
+				}
+				return Object.keys(out).length > 0 ? out : undefined;
 			};
 			const normalized = {
 				roles: normaliseKind("roles", new Set(catalogue.roles)),
@@ -8273,183 +8767,82 @@ async function handleApiRoute(
 				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
 				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
 				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
-				mcp: normaliseKind("mcp", new Set(catalogue.mcp ?? [])),
-				piExtensions: normaliseKind("piExtensions", new Set(catalogue.piExtensions ?? [])),
+				mcp: normalizeMcpRefs(),
+				mcpOperations: normalizeMcpOperationsForCatalogue(),
+				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
-			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const prevActivation = cfgStore.getPackActivation(scope as PackOrderScope, packName);
-			const prevDisabledRuntimes = new Set(prevActivation.runtimes ?? []);
-
-			// P3 — managed-runtime activation side effects. Enabling a
-			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit
-			// user start action; disabling (enabled → disabled) stops it. The external
-			// (non-Docker) deployment mode never starts a container. Toggling any other
-			// entity — or a pack with no runtimes — is inert here, so install/update/
-			// list/status never start Docker.
-			//
-			// CRITICAL ordering: the Docker side effects run BEFORE the activation state
-			// is persisted, and a side effect that MATTERS (start/stop throwing, or a
-			// start that fails to come up) aborts the whole PUT WITHOUT persisting — so
-			// Bobbit never records "enabled"/"disabled" while Docker did the opposite. A
-			// graceful `docker-unavailable` status is TOLERATED (there is nothing to
-			// start/stop on a Docker-less host; the provider is defensive and the toggle
-			// is just metadata), so it persists and is reported, not treated as a hard
-			// failure. Stop is best-effort: only a thrown stop blocks a disable.
-			const runtimeStatuses: Array<Record<string, unknown>> = [];
-			const sideEffectFailures: string[] = [];
-			if (packRuntimeSupervisor && (catalogue.runtimes?.length ?? 0) > 0) {
-				const nextDisabledRuntimes = new Set(normalized.runtimes);
-				const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, packName);
-				if (rtCtx && rtCtx.runtimes.length > 0) {
-					const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
-					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
-					// A runtime-only pack with NO provider deployment-config surface has no
-					// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
-					// external (start:false) and would wrongly suppress its `on-enable` start.
-					// Mirror the REST start path's no-surface fallback: enabling such a runtime
-					// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
-					// the manifest default). When a deployment surface exists, honour plan.start.
-					const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
-					const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
-					for (const rc of rtCtx.runtimes) {
-						const ref = rc.listName;
-						const wasDisabled = prevDisabledRuntimes.has(ref);
-						const nowDisabled = nextDisabledRuntimes.has(ref);
-						const policy = readRuntimeStartPolicy(rc.manifest);
-						try {
-							if (wasDisabled && !nowDisabled) {
-								// disabled → enabled: explicit enable. Only `on-enable` runtimes
-								// auto-start, and only when the deployment mode is a managed
-								// (Docker) mode — external mode avoids the Docker start entirely.
-								// A provider-less runtime pack has no such gate (startWhenEnabled).
-								if (policy === "on-enable" && startWhenEnabled) {
-									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId, mode: startMode, config: plan.config });
-									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-									// A managed enable that does not come up running (and is not a
-									// tolerated docker-unavailable) is a real failure: don't persist
-									// "enabled" while the container is unhealthy/down.
-									if (status.status !== "running" && status.status !== "starting" && status.status !== "docker-unavailable") {
-										sideEffectFailures.push(`${rtCtx.packId}:${rc.id} failed to start (${status.status}${status.message ? `: ${status.message}` : ""})`);
-									}
-								}
-							} else if (!wasDisabled && nowDisabled) {
-								// enabled → disabled: stop the managed container UNCONDITIONALLY — do NOT
-								// gate on the CURRENT saved deployment mode (plan.start). A runtime started
-								// in a managed mode and later reconfigured to `external` would otherwise
-								// skip the stop and leak its still-running container. `stop` is
-								// read-only/minimal and idempotent: it never resolves start-only inputs
-								// (e.g. HINDSIGHT_API_LLM_API_KEY), reuses an already-rendered .env only
-								// when one exists, and maps a missing Docker install to a
-								// docker-unavailable STATUS rather than throwing — so calling it for an
-								// external-only never-started runtime is a harmless no-op (`compose stop`
-								// on an absent project exits 0) and never 502s the disable.
-								const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId });
-								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-							}
-						} catch (err) {
-							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
-							// failure: abort the PUT so persisted state matches Docker reality.
-							runtimeStatuses.push({
-								id: encodePackRuntimeId(rtCtx.packId, rc.id),
-								packId: rtCtx.packId,
-								runtimeId: rc.id,
-								status: "error",
-								message: (err as Error)?.message ?? String(err),
-							});
-							sideEffectFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
-						}
-					}
-				}
-			}
-
-			// A side effect that matters failed → do NOT persist (state is unchanged) and
-			// surface the failure with the prior activation so the client/UI reverts the
-			// toggle instead of believing the change took effect.
-			if (sideEffectFailures.length > 0) {
-				json({
-					scope,
-					packName,
-					catalogue,
-					disabled: prevActivation,
-					runtimes: runtimeStatuses,
-					error: `runtime activation failed: ${sideEffectFailures.join("; ")}`,
-				}, 502);
-				return;
-			}
-
-			// Default-disabled built-in packs (e.g. Hindsight) persist only DEVIATIONS
-			// from the pack's current default, keeping the dormancy invariant byte-clean
-			// and giving a deterministic way to return to the default (no stored record,
-			// no marker). The default itself depends on whether the pack is "already
-			// configured" (live-setup rule): configured ⇒ enabled ({}), else ⇒ all-disabled.
-			//   • request == default              → clear the stored record + drop the marker
-			//   • request all-enabled, NOT default → explicit ENABLE: drop the record, SET the
-			//                                         force-enable marker (an empty record is
-			//                                         indistinguishable from "never touched", so
-			//                                         the marker is what makes the enable stick)
-			//   • anything else                    → persist the record verbatim (explicit
-			//                                         per-entity / disable choice wins), drop marker
-			const ddInfo = scope === "server" ? getDefaultDisabledInfo(packName, cfgStore) : null;
-			if (ddInfo) {
-				let configured = false;
-				for (const pid of ddInfo.providerIds) {
-					if (isProviderConfigConfigured(getPackStore().getSync<Record<string, unknown>>(ddInfo.packId, providerConfigStoreKey(pid)))) { configured = true; break; }
-				}
-				const defaultDisabled: DisabledRefs = configured ? {} : ddInfo.allDisabled;
-				const nowAllEnabled = Object.keys(normalized).every((k) => (normalized as Record<string, string[]>)[k].length === 0);
-				const marker = readForceEnabledPacks(cfgStore);
-				if (disabledRefsEqual(normalized, defaultDisabled)) {
-					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
-					marker.delete(packName);
-				} else if (nowAllEnabled) {
-					// all-enabled but the default is disabled (pack not configured) → explicit enable.
-					cfgStore.setPackActivation(scope as PackOrderScope, packName, {});
-					marker.add(packName);
-				} else {
-					cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
-					marker.delete(packName);
-				}
-				writeForceEnabledPacks(cfgStore, marker);
-			} else {
-				cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);
-			}
+			const before = beforeActivation.mcp ?? [];
+			const beforeOps = beforeActivation.mcpOperations ?? {};
+			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
-
-			const activationResponse: Record<string, unknown> = { scope, packName, catalogue, disabled: cfgStore.getPackActivation(scope as PackOrderScope, packName) };
-			if (runtimeStatuses.length > 0) activationResponse.runtimes = runtimeStatuses;
-			json(activationResponse);
+			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
+			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
+			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
+			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
+			json({ scope: targetScope, packName, catalogue: refreshedCatalogue, disabled: nextDisabled, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
-
-		// ── purge a managed runtime (P3 explicit purge) ───────────
-		// POST /api/marketplace/purge-runtime { packName, scope, runtimeId, projectId? }
-		//   `compose down -v` + remove supervisor-owned runtime state (rendered env,
-		//   persisted generated secrets + allocated ports). Bind-mounted DATA is
-		//   preserved by the supervisor — only Docker volumes + bookkeeping are removed.
-		if (url.pathname === "/api/marketplace/purge-runtime" && req.method === "POST") {
+		if (url.pathname === "/api/marketplace/pack-activation/mcp-operation" && req.method === "PATCH") {
 			const body = (await readBody(req)) as any;
 			const scope = parseScope(body?.scope);
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (typeof body?.packName !== "string" || !body.packName) { json({ error: "packName is required" }, 400); return; }
-			if (typeof body?.runtimeId !== "string" || !body.runtimeId) { json({ error: "runtimeId is required" }, 400); return; }
-			if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+			const contributionId = typeof body?.contributionId === "string" ? body.contributionId : "";
+			const operationName = typeof body?.operationName === "string" ? body.operationName : "";
+			if (!contributionId || !operationName) { json({ error: "contributionId and operationName are required" }, 400); return; }
+			if (typeof body?.disabled !== "boolean") { json({ error: "disabled must be boolean" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const rtCtx = resolvePackRuntimeContext(scope, st.target.projectBase, st.target.store, body.packName);
-			if (!rtCtx) { json({ error: "pack not installed at this scope" }, 404); return; }
-			const rc = rtCtx.runtimes.find((r) => r.id === body.runtimeId || r.listName === body.runtimeId);
-			if (!rc) { json({ error: `unknown runtime ${body.runtimeId}` }, 404); return; }
-			const projectId = scope === "project" ? (body?.projectId as string | undefined) : undefined;
-			try {
-				const status = await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: true, removeState: true });
-				json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-			} catch (err) {
-				if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-				if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-				jsonError(500, err);
+			const targetScope = st.target.scope;
+			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+			let matchedPackName = "";
+			let matchedCatalogue: ReturnType<typeof buildActivationCatalogue> = null;
+			let matchedEntry: Record<string, unknown> | undefined;
+			for (const installed of installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])) {
+				if (installed.scope !== targetScope || installed.status === "corrupt") continue;
+				const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, installed.packName, targetProjectId);
+				if (!catalogue) continue;
+				const lookup = mcpContributionLookup(catalogue);
+				if (lookup.get(contributionId) === contributionId) {
+					matchedPackName = installed.packName;
+					matchedCatalogue = catalogue;
+					matchedEntry = (catalogue.mcp ?? []).find((entry): entry is Record<string, unknown> => {
+						if (typeof entry === "string") return entry === contributionId;
+						return mcpContributionLookup({ mcp: [entry] }).get(contributionId) === contributionId;
+					}) as Record<string, unknown> | undefined;
+					break;
+				}
 			}
+			if (!matchedPackName || !matchedCatalogue) { json({ error: "unknown MCP contribution for scope" }, 404); return; }
+			const cfgStore = st.target.store as unknown as ProjectConfigStore;
+			const current = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
+			const currentRevision = packActivationRevision(current);
+			if (typeof body?.expectedRevision === "string" && body.expectedRevision !== currentRevision) {
+				json({ error: "stale activation revision", code: "STALE_REVISION", scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: current, catalogue: matchedCatalogue, revision: currentRevision }, 409);
+				return;
+			}
+			const operationRows = Array.isArray(matchedEntry?.operations) ? matchedEntry.operations.filter((op): op is Record<string, unknown> => !!op && typeof op === "object" && !Array.isArray(op)) : [];
+			const knownOperationNames = new Set(operationRows.map((op) => safeString(op.name)).filter((name): name is string => !!name));
+			const nextOps = { ...(current.mcpOperations ?? {}) };
+			const currentOps = new Set(nextOps[contributionId] ?? []);
+			if (!knownOperationNames.has(operationName) && !(body.disabled === false && currentOps.has(operationName))) {
+				json({ error: `unknown MCP operation for contribution: ${operationName}` }, 400);
+				return;
+			}
+			if (body.disabled) currentOps.add(operationName);
+			else currentOps.delete(operationName);
+			if (currentOps.size > 0) nextOps[contributionId] = [...currentOps].sort();
+			else delete nextOps[contributionId];
+			cfgStore.setPackActivation(targetScope as PackOrderScope, matchedPackName, {
+				...current,
+				mcpOperations: Object.keys(nextOps).length > 0 ? nextOps : undefined,
+			});
+			invalidateResolverCaches();
+			const mcpReload = await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
+			const refreshedCatalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, matchedPackName, targetProjectId) ?? matchedCatalogue;
+			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
+			json({ scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: nextDisabled, catalogue: refreshedCatalogue, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
 			return;
 		}
 
@@ -8548,40 +8941,10 @@ async function handleApiRoute(
 
 	// ── Unified Model Registry ──
 
-	// GET /api/claude-code/status — local Claude Code CLI readiness probe.
-	// The executable path is user/admin preference only; project config never controls probes.
-	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
-		const scoped = resolveClaudeCodeStatusConfigStore(url);
-		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
-		try {
-			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
-		} catch (err: any) {
-			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
-		}
-		return;
-	}
-
-	// POST /api/claude-code/status/refresh — clear cached status and re-probe.
-	if (url.pathname === "/api/claude-code/status/refresh" && req.method === "POST") {
-		const scoped = resolveClaudeCodeStatusConfigStore(url);
-		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
-		try {
-			invalidateClaudeCodeStatusCache();
-			invalidateModelCache();
-			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
-		} catch (err: any) {
-			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
-		}
-		return;
-	}
-
-	// GET /api/models — unified model list from all sources.
-	// Claude Code model probes use only the user/admin executable preference.
+	// GET /api/models — unified model list from all sources
 	if (url.pathname === "/api/models" && req.method === "GET") {
-		const scoped = resolveClaudeCodeStatusConfigStore(url);
-		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
-			const models = await getAvailableModels(preferencesStore, scoped.store ?? null);
+			const models = await getAvailableModels(preferencesStore);
 			json(models);
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load models: ${err.message}` });
@@ -9013,20 +9376,30 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveRoles(projectId);
-		json({ roles: resolved.map(r => withRoleResolution(r as any, projectId)) });
+		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}
 
-	// POST /api/roles (scope-aware: body.projectId → create in that project's store)
+	// POST /api/roles (scope-aware: body.projectId → create in that project's store; Headquarters aliases server scope)
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
-		const targetProjectId = body?.projectId;
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const target = resolveRoleMutationTarget(body?.projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			if (target.scope === "server") {
+				const role = target.manager.createRole({
+					name: body?.name,
+					label: body?.label,
+					promptTemplate: body?.promptTemplate || "",
+					accessory: body?.accessory,
+					toolPolicies: body?.toolPolicies,
+					model: modelStr,
+					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
+				});
+				json(role, 201);
+			} else {
 				const now = Date.now();
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 				const role = {
 					name: body?.name,
 					label: body?.label ?? body?.name,
@@ -9041,19 +9414,7 @@ async function handleApiRoute(
 				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
 				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				ctx.roleStore.put(role);
-				json(role, 201);
-			} else {
-				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				const role = roleManager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
-				});
+				target.store.put(role);
 				json(role, 201);
 			}
 		} catch (err: any) {
@@ -9073,12 +9434,12 @@ async function handleApiRoute(
 		const source = resolved.find(r => r.item.name === name);
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9098,12 +9459,12 @@ async function handleApiRoute(
 		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
 
-		let targetStore;
+		let targetStore: RoleStore;
 		if (scope === "project") {
 			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.roleStore;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			targetStore = target.store;
 		} else {
 			// scope === "server" (or unspecified) → system/server layer
 			targetStore = serverRoleStore;
@@ -9121,15 +9482,14 @@ async function handleApiRoute(
 
 		if (req.method === "GET") {
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const resolved = configCascade.resolveRoles(qProjectId);
-				const found = resolved.find(r => r.item.name === name);
-				if (!found) { json({ error: "Role not found" }, 404); return; }
-				json(withRoleResolution(found as any, qProjectId));
+			const resolved = configCascade.resolveRoles(qProjectId);
+			const found = resolved.find(r => r.item.name === name);
+			if (found) {
+				json(withOrigin(found as any));
 			} else {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
-				json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name) });
+				json(role);
 			}
 			return;
 		}
@@ -9138,10 +9498,10 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.roleStore.get(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
@@ -9174,7 +9534,7 @@ async function handleApiRoute(
 					name,
 					updatedAt: Date.now(),
 				};
-				ctx.roleStore.put(updated);
+				target.store.put(updated);
 				json({ ok: true });
 			} else {
 				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
@@ -9186,7 +9546,7 @@ async function handleApiRoute(
 					: undefined;
 				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
 				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = roleManager.getRole(name);
+					const existing = target.manager.getRole(name);
 					if (existing) {
 						const patched = {
 							...existing,
@@ -9194,10 +9554,10 @@ async function handleApiRoute(
 							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
 							updatedAt: Date.now(),
 						};
-						serverRoleStore.put(patched);
+						target.store.put(patched);
 					}
 				}
-				const ok = roleManager.updateRole(name, {
+				const ok = target.manager.updateRole(name, {
 					label: body.label,
 					promptTemplate: body.promptTemplate,
 					accessory: body.accessory,
@@ -9220,13 +9580,13 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				ctx.roleStore.remove(name);
+			const target = resolveRoleMutationTarget(qProjectId);
+			if (!target) { json({ error: "Project not found" }, 404); return; }
+			if (target.scope === "project") {
+				target.store.remove(name);
 				json({ ok: true });
 			} else {
-				const ok = roleManager.deleteRole(name);
+				const ok = target.manager.deleteRole(name);
 				if (!ok) { json({ error: "Role not found" }, 404); return; }
 				json({ ok: true });
 			}
@@ -10462,34 +10822,62 @@ async function handleApiRoute(
 	// OrchestrationCore), route the verb through the core so the documented verbs work
 	// on the lead's own delegate helpers. Goal-member behaviour is unchanged.
 	const teamLeadOwnChildOwner = (goalId: string, targetId: string): string | undefined => {
-		const lead = teamManager.getTeamState(goalId)?.teamLeadSessionId;
-		if (!lead) return undefined;
-		return orchestrationCore.list(lead).some(h => h.sessionId === targetId) ? lead : undefined;
+		const teamState = teamManager.getTeamState(goalId);
+		if (!teamState?.teamLeadSessionId) return undefined;
+		const lead = teamState.teamLeadSessionId;
+
+		// Tracked goal team members must flow through TeamManager.dismissRoleForGoal()
+		// so it can remove team-manager state, subscriptions, timers, and broadcasts.
+		// They are also registered in OrchestrationCore under the team lead, so a
+		// plain owner/child match would incorrectly route real team agents through
+		// the private team_delegate fallback. Check both the goal state snapshot and
+		// the session→goal index; tests and restart paths can observe one before the
+		// other is refreshed.
+		if (teamState.agents.some((agent) => agent.sessionId === targetId)) return undefined;
+		if (teamManager.findAgentBySessionId(targetId)) return undefined;
+		const persisted = sessionManager.getPersistedSession(targetId) as any;
+
+		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId && h.childKind !== "team")) return lead;
+		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
+		return persisted?.delegateOf === lead || (persisted?.parentSessionId === lead && persisted?.childKind !== "team") ? lead : undefined;
 	};
+	const resolveAuthenticCallerFromSessionSecret = (): string | undefined => {
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const secretHeader = h["x-bobbit-session-secret"];
+		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+	};
+	const denyDismissNotOwned = (sessionId: string, message = "Caller session is not the team lead for this goal") => json({
+		ok: false,
+		status: "not-owned",
+		sessionId,
+		message,
+		retryable: false,
+	}, 403);
+
 	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
 	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
 	// sandbox-scoped token, so without this a same-goal agent that learns a
 	// helper child's session id could prompt/steer/abort/dismiss the team-lead's
 	// PRIVATE team_delegate child. Bind to the unforgeable per-session secret and
 	// require the AUTHENTIC caller to BE the team-lead owner. Goal-MEMBER
-	// operations (the normal /team/* path) are unaffected — this guards the
-	// own-child fallback ONLY. Returns the owner id when authorized, a `denied`
-	// sentinel when the target IS an own child but the caller is not its owner,
-	// or `undefined` when the target is not an own child (normal path continues).
+	// operations use TeamManager below; tracked team-agent dismiss has its own
+	// team-lead authz check before destructive cleanup. Returns the owner id when
+	// authorized, a `denied` sentinel when the target IS an own child but the
+	// caller is not its owner, or `undefined` when the target is not an own child
+	// (normal path continues).
 	const resolveOwnChildOwner = (goalId: string, targetId: string): { owner: string } | { denied: true } | undefined => {
 		const owner = teamLeadOwnChildOwner(goalId, targetId);
 		if (!owner) return undefined;
-		const h = req.headers as Record<string, string | string[] | undefined>;
-		const secretHeader = h["x-bobbit-session-secret"];
-		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
-		const authenticCaller = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
-		);
+		const authenticCaller = resolveAuthenticCallerFromSessionSecret();
 		if (!authenticCaller || authenticCaller !== owner) return { denied: true };
 		return { owner };
 	};
 	const denyOwnChild = () => json({ error: "Caller session is not the owner of this child agent", code: "NOT_OWNER" }, 403);
 	const ocStatusForTeamFallback = (err: unknown): number => {
+		if (err instanceof SessionPromptDeliveryError) return err.status;
 		if (err instanceof OrchestrationCoreError) {
 			if (err.code === "NOT_STREAMING") return 409;
 			if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
@@ -10506,25 +10894,35 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId" }, 400);
 			return;
 		}
+		const goalId = teamDismissMatch[1];
 		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
 		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
-		const ownerResult = resolveOwnChildOwner(teamDismissMatch[1], body.sessionId);
+		const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
 		if (ownerResult) {
-			if ("denied" in ownerResult) { denyOwnChild(); return; }
-			try {
-				const ok = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
-				json({ ok });
-			} catch (err) {
-				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+			if ("denied" in ownerResult) {
+				json({ ok: false, status: "not-owned", sessionId: body.sessionId, message: "Caller session is not the owner of this child agent", retryable: false }, 403);
+				return;
 			}
+			const result = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
+			json(result, dismissHttpStatus(result));
 			return;
 		}
-		try {
-			const ok = await teamManager.dismissRole(body.sessionId);
-			json({ ok });
-		} catch (err) {
-			jsonError(400, err);
+		const teamState = teamManager.getTeamState(goalId);
+		const isTrackedTeamAgent = teamState?.agents.some((agent) => agent.sessionId === body.sessionId) ?? false;
+		if (isTrackedTeamAgent) {
+			const authz = authorizeChildrenMutation({
+				mutationClass: "orchestration",
+				isHumanOperator: false,
+				authenticCallerSessionId: resolveAuthenticCallerFromSessionSecret(),
+				teamLeadSessionId: teamState?.teamLeadSessionId,
+			});
+			if (!authz.ok) {
+				denyDismissNotOwned(body.sessionId);
+				return;
+			}
 		}
+		const result = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
+		json(result, dismissHttpStatus(result));
 		return;
 	}
 
@@ -10534,8 +10932,9 @@ async function handleApiRoute(
 		const goalId = commitsMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Commit history"), 409); return; }
 		if (!fs.existsSync(goal.cwd)) { json({ commits: [] }); return; }
-		const branch = goal.branch || "HEAD";
+		const branch = goal.branch;
 		// Validate branch name to prevent injection
 		if (!/^[a-zA-Z0-9/_.\-]+$/.test(branch)) { json({ error: "Invalid branch name" }, 400); return; }
 		const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 1), 100);
@@ -10556,11 +10955,8 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" ${rangeSpec}`, goal.cwd);
-			const commits = out.trim().split("\n").filter(Boolean).map((line: string) => {
-				const [sha, shortSha, message, author, timestamp] = line.split("|");
-				return { sha, shortSha, message, author, timestamp };
-			});
+			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, goal.cwd);
+			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -10574,6 +10970,7 @@ async function handleApiRoute(
 		const goalId = goalGitMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Git status"), 409); return; }
 		const cwd = goal.cwd;
 
 		// Resolve container ID for sandboxed goals + project `base_ref` config
@@ -10631,6 +11028,7 @@ async function handleApiRoute(
 		const goalId = goalDiffMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "Git diff"), 409); return; }
 		const cwd = goal.cwd;
 
 		// Resolve container ID for sandboxed goals
@@ -10645,6 +11043,7 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const commit = url.searchParams.get("commit") || undefined;
 		const repoParam = url.searchParams.get("repo") || undefined;
 		const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
 		let diffCwd = cwd;
@@ -10652,10 +11051,11 @@ async function handleApiRoute(
 			diffCwd = goalRepoWorktrees[repoParam];
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid, commit);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "INVALID_COMMIT") { json({ error: "Invalid commit" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			jsonError(500, err);
 		}
@@ -10674,6 +11074,7 @@ async function handleApiRoute(
 		const goalId = goalPrStatusMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
@@ -10690,6 +11091,7 @@ async function handleApiRoute(
 		const goalId = goalGithubLinkMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+		if (!hasGoalGitWorktree(goal)) { json({ available: false, reason: "no-worktree", message: noWorktreeGoalGitMessage(goal) } satisfies GoalGithubLinkResponse); return; }
 
 		const cached = prStatusStore.get(goalId);
 		if (cached?.url) {
@@ -10744,6 +11146,7 @@ async function handleApiRoute(
 		const goalId = goalPrMergeMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const body = await readBody(req);
@@ -10752,12 +11155,10 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const goalAdminFlag = body?.admin ? " --admin" : "";
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
-		const goalMergeBranch = resolvedGoalBranch ? ` ${resolvedGoalBranch}` : "";
 		try {
-			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -10875,18 +11276,28 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/prompt — send a prompt to a team agent (queued or immediate)
+	// POST /api/goals/:id/team/prompt — prompt or steer a team agent, direct-child lead, or owned helper.
 	const teamPromptMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/prompt$/);
 	if (teamPromptMatch && req.method === "POST") {
 		const goalId = teamPromptMatch[1];
 		const body = await readBody(req);
-		if (!body?.sessionId || !body?.message) {
+		if (typeof body?.sessionId !== "string" || typeof body?.message !== "string") {
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent OR a direct-child team-lead
+		let mode: "prompt" | "steer";
+		try {
+			mode = parseSessionPromptMode(body.mode, "steer");
+		} catch (err) {
+			if (err instanceof SessionPromptDeliveryError) json({ error: err.message, code: err.code }, err.status);
+			else jsonError(500, err);
+			return;
+		}
+
+		// Validate target is a team agent OR a direct-child team-lead OR an owned helper child.
 		const agents = teamManager.listAgents(goalId);
 		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
+		let ownChildOwner: string | undefined;
 		if (!allowed) {
 			const targetSession = sessionManager.getSession(body.sessionId);
 			if (targetSession?.role === "team-lead" && targetSession.goalId) {
@@ -10900,14 +11311,11 @@ async function handleApiRoute(
 			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
 			if (ownerResult) {
 				if ("denied" in ownerResult) { denyOwnChild(); return; }
-				try {
-					const result = await orchestrationCore.prompt(ownerResult.owner, body.sessionId, body.message as string);
-					json({ ok: true, status: result.status });
-				} catch (err) {
-					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
-				}
-				return;
+				ownChildOwner = ownerResult.owner;
+				allowed = true;
 			}
+		}
+		if (!allowed) {
 			json({
 				error: "Session is not a member of this team and is not a direct-child team-lead",
 				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
@@ -10919,11 +11327,8 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
-		if (session.nonInteractive) {
-			json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
-			return;
-		}
-		// Enforce gate dependency check for team/prompt
+
+		// Enforce gate dependency check for team/prompt.
 		const wfGateId = typeof body.workflowGateId === "string" ? body.workflowGateId : undefined;
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
@@ -10940,7 +11345,7 @@ async function handleApiRoute(
 			}
 		}
 		try {
-			// Resolve workflow gate context and prepend to message if provided
+			// Resolve workflow gate context and prepend to message if provided.
 			let message = body.message as string;
 			if (wfGateId || inputIds?.length) {
 				const ctx = teamManager.buildDependencyContext(goalId, wfGateId, inputIds);
@@ -10948,10 +11353,20 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
-			const result = await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: result.status });
+			const result = ownChildOwner
+				? await orchestrationCore.prompt(ownChildOwner, body.sessionId, message, { mode })
+				: await deliverSessionPrompt({
+					getSession: (id) => sessionManager.getSession(id),
+					enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
+					deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+				}, body.sessionId, message, { mode, defaultMode: "steer" });
+			json(result);
 		} catch (err) {
-			jsonError(500, err);
+			if (err instanceof SessionPromptDeliveryError || err instanceof OrchestrationCoreError) {
+				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof Error ? (err as { code?: string }).code : undefined }, ocStatusForTeamFallback(err));
+			} else {
+				jsonError(500, err);
+			}
 		}
 		return;
 	}
@@ -11238,9 +11653,10 @@ async function handleApiRoute(
 		// worktree is ready, adopting this clone via switch_session.
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
 
-		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
 		try {
-			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -11254,18 +11670,19 @@ async function handleApiRoute(
 			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
+		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath, source.cwd]
+			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
 			sessionId: forkId,
 			projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
-			claudeCodeSessionId: ps.claudeCodeSessionId,
+			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
 			allowedTools: ps.allowedTools,
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
 		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
@@ -11274,17 +11691,16 @@ async function handleApiRoute(
 
 		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
 		if (staff) {
-			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager);
+			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
 			createOpts.roleName = staff.roleId;
 			createOpts.accessory = staff.accessory;
 			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
 		} else {
-			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
 			if (role) {
-				createOpts.rolePrompt = role.promptTemplate;
-				createOpts.roleName = role.name;
-				createOpts.role = role.name;
-				createOpts.accessory = role.accessory;
+				const opts = roleCreateOptions(role);
+				if (createOpts.initialModel) delete opts.initialModel;
+				Object.assign(createOpts, opts);
 			} else if (ps.role) {
 				createOpts.role = ps.role;
 				createOpts.roleName = ps.role;
@@ -11300,7 +11716,6 @@ async function handleApiRoute(
 			const title = `Fork: ${baseTitle}`;
 			sessionManager.setTitle(fork.id, title, { markGenerated: true });
 			if (ps.staffId) fork.staffId = ps.staffId;
-			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
 
 			json({
 				id: fork.id,
@@ -11317,7 +11732,49 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/wait — block until session becomes idle
+	// POST /api/sessions/:id/prompt — prompt or steer any live session by id.
+	const sessionPromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt$/);
+	if (sessionPromptMatch && req.method === "POST") {
+		const targetSessionId = sessionPromptMatch[1];
+		const body = await readBody(req);
+		if (typeof body?.message !== "string") {
+			json({ error: "Missing message" }, 400);
+			return;
+		}
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const secretHeader = h["x-bobbit-session-secret"];
+		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+		const callerSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+		const callerSession = callerSessionId ? sessionManager.getSession(callerSessionId) : undefined;
+		if (!callerSession || callerSession.status === "terminated") {
+			json({ error: "Valid caller session secret is required", code: "SESSION_SECRET_REQUIRED" }, 403);
+			return;
+		}
+		const callerAllowedTools = callerSession.allowedTools ?? [];
+		if (!callerAllowedTools.some((tool) => tool.toLowerCase() === "session_prompt")) {
+			json({ error: 'Tool "session_prompt" is not allowed for this session', code: "SESSION_PROMPT_NOT_ALLOWED" }, 403);
+			return;
+		}
+		try {
+			const result = await deliverSessionPrompt({
+				getSession: (id) => sessionManager.getSession(id),
+				enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
+				deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
+			json(result);
+		} catch (err) {
+			if (err instanceof SessionPromptDeliveryError) {
+				json({ error: err.message, code: err.code }, err.status);
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/wait — block until session becomes idle.
 	// Uses chunked transfer with periodic heartbeat newlines to prevent
 	// HTTP client body-timeout (undici defaults to 300s between chunks).
 	const waitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/wait$/);
@@ -11393,6 +11850,12 @@ async function handleApiRoute(
 				typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
 			);
 			if (!authenticCaller || authenticCaller !== ownerId) {
+				if (verb === "dismiss") {
+					const deniedBody = await readBody(req).catch(() => ({}));
+					const targetId = typeof deniedBody?.childSessionId === "string" ? deniedBody.childSessionId : "unknown";
+					json({ ok: false, status: "not-owned", sessionId: targetId, message: "Caller session is not the owner of these child agents", retryable: false }, 403);
+					return;
+				}
 				json({ error: "Caller session is not the owner of these child agents", code: "NOT_OWNER" }, 403);
 				return;
 			}
@@ -11400,6 +11863,7 @@ async function handleApiRoute(
 
 		// Map OrchestrationCore error codes → HTTP status.
 		const ocStatus = (err: unknown): number => {
+			if (err instanceof SessionPromptDeliveryError) return err.status;
 			if (err instanceof OrchestrationCoreError) {
 				if (err.code === "NOT_STREAMING") return 409;
 				if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
@@ -11446,11 +11910,11 @@ async function handleApiRoute(
 				return;
 			}
 
-			// POST /orchestrate/prompt — run-if-idle / queue.
+			// POST /orchestrate/prompt — default steer delivery; mode:"prompt" preserves queue semantics.
 			if (verb === "prompt") {
 				if (!body?.childSessionId || typeof body?.message !== "string") { json({ error: "Missing childSessionId or message" }, 400); return; }
-				const result = await orchestrationCore.prompt(ownerId, body.childSessionId, body.message);
-				json({ ok: true, status: result.status });
+				const result = await orchestrationCore.prompt(ownerId, body.childSessionId, body.message, { mode: body.mode });
+				json(result);
 				return;
 			}
 
@@ -11474,8 +11938,8 @@ async function handleApiRoute(
 			// POST /orchestrate/dismiss — terminate + archive own child.
 			if (verb === "dismiss") {
 				if (!body?.childSessionId) { json({ error: "Missing childSessionId" }, 400); return; }
-				const ok = await orchestrationCore.dismiss(ownerId, body.childSessionId);
-				json({ ok });
+				const result = await orchestrationCore.dismiss(ownerId, body.childSessionId);
+				json(result, dismissHttpStatus(result));
 				return;
 			}
 
@@ -11601,7 +12065,7 @@ async function handleApiRoute(
 			json({ error: `Unknown orchestrate verb: ${verb}` }, 404);
 		} catch (err) {
 			const status = ocStatus(err);
-			json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, status);
+			json({ error: String(err instanceof Error ? err.message : err), code: err instanceof Error ? (err as { code?: string }).code : undefined }, status);
 		}
 		return;
 	}
@@ -11726,8 +12190,8 @@ async function handleApiRoute(
 		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
 
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
-		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
-		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
@@ -11757,7 +12221,7 @@ async function handleApiRoute(
 			console.warn(`[continue-archived] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
-		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const role = ps.role ? resolveRoleForProject(ps.role, ps.projectId) : undefined;
 		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
 			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
@@ -11766,7 +12230,6 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
-			claudeCodeSessionId: ps.claudeCodeSessionId,
 			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
 			// the archived source worktree/branch remain provenance only. Non-sandboxed
@@ -11774,8 +12237,6 @@ async function handleApiRoute(
 			// continues keep bypassing the host-side pool because container worktrees are isolated.
 			awaitWorktreeSetup: !!worktreeOpts,
 			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
-			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
 		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
@@ -11783,10 +12244,9 @@ async function handleApiRoute(
 			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		}
 		if (role) {
-			createOpts.rolePrompt = role.promptTemplate;
-			createOpts.roleName = role.name;
-			createOpts.role = role.name;
-			createOpts.accessory = role.accessory;
+			const opts = roleCreateOptions(role);
+			if (createOpts.initialModel) delete opts.initialModel;
+			Object.assign(createOpts, opts);
 		} else if (ps.role) {
 			// Persisted role name without a registered Role definition (e.g. the
 			// generic "assistant" role assigned to assistant sessions). Propagate
@@ -11818,13 +12278,6 @@ async function handleApiRoute(
 		// markGenerated: prevents the first-message auto-titler from overwriting
 		// "Continued: …" once the user sends their first prompt in the new session.
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
-
-		if (ps.modelProvider && ps.modelId) {
-			// Model is pinned at spawn via createOpts.initialModel above; just
-			// persist the choice so a later restore picks it up. No redundant
-			// post-spawn setModel — that's the whole point of spawn-time pinning.
-			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
-		}
 
 		json({
 			id: newSession.id,
@@ -11894,7 +12347,9 @@ async function handleApiRoute(
 		}
 
 		if (typeof body.roleId === "string" && body.roleId !== "") {
-			const role = roleManager.getRole(body.roleId);
+			const session = sessionManager.getSession(id);
+			const ps = sessionManager.getPersistedSession(id);
+			const role = resolveRoleForProject(body.roleId, session?.projectId ?? ps?.projectId);
 			if (!role) { json({ error: `Role "${body.roleId}" not found` }, 404); return; }
 			try {
 				const ok = await sessionManager.assignRole(id, role);
@@ -12577,18 +13032,20 @@ async function handleApiRoute(
 			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
 			// `repos: { ".": result }, aggregate: result`.
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			json({ ...result, aggregate: result, repos: { ".": result } });
+			const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, result.branch);
+			const shapedResult = remotePublication ? { ...result, remotePublication } : result;
+			json({ ...shapedResult, aggregate: shapedResult, repos: { ".": shapedResult } });
 
 			// Auto-push: for feature branches with unpushed commits, publish the
 			// current branch to its matching remote ref regardless of inherited
-			// upstream config.
-			if (!shouldSkipRemotePush()) {
-				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
-					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
-				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-					// Session branches without upstream: publish safely, then set tracking.
-					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
-				}
+			// upstream config. Local-only sessions are explicitly durable via their
+			// local worktree and must not publish just because status was queried.
+			const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
+			if (publishDecision && !shouldSkipRemotePush()) {
+				publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
+					containerId: cid,
+					setUpstream: publishDecision.setUpstream,
+				}).catch(() => {});
 			}
 			return;
 		}
@@ -12642,18 +13099,21 @@ async function handleApiRoute(
 			};
 		}
 
-		json({ ...aggregate, aggregate, repos });
+		const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, aggregate.branch);
+		const shapedAggregate = remotePublication ? { ...aggregate, remotePublication } : aggregate;
+		json({ ...shapedAggregate, aggregate: shapedAggregate, repos });
 
 		// Auto-push only when the root container IS a git repo. Session branches
 		// are published at worktree-claim time, so skipping container auto-push
-		// for a true (non-git-container) polyrepo is fine.
-		if (result && !shouldSkipRemotePush()) {
-			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
-				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
-			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-				// Session branches without upstream: publish safely, then set tracking.
-				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
-			}
+		// for a true (non-git-container) polyrepo is fine. Local-only sessions are
+		// explicitly durable via their local worktree and must not publish just
+		// because status was queried.
+		const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
+		if (publishDecision && !shouldSkipRemotePush()) {
+			publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
+				containerId: cid,
+				setUpstream: publishDecision.setUpstream,
+			}).catch(() => {});
 		}
 		return;
 	}
@@ -12696,19 +13156,8 @@ async function handleApiRoute(
 		// Resolve target session (live or persisted).
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
-		// Authorization: caller must belong to the same project as the target.
-		// Caller session id is propagated via `x-bobbit-session-id` header by the
-		// extension; if missing, fall back to allow (e.g. UI-initiated calls go
-		// through Bearer auth which already gates by project).
-		const callerSid = req.headers["x-bobbit-session-id"];
-		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
-		if (callerSidStr) {
-			const callerPs = sessionManager.getPersistedSession(callerSidStr);
-			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
-				json({ error: "permission_denied" }, 403); return;
-			}
-		}
 
 		// Parse query params.
 		const qp = url.searchParams;
@@ -12721,6 +13170,19 @@ async function handleApiRoute(
 			}
 			return n;
 		}
+		function parseBoolParam(...names: string[]): boolean | undefined {
+			let raw: string | null = null;
+			let foundName = "";
+			for (const name of names) {
+				raw = qp.get(name);
+				if (raw !== null) { foundName = name; break; }
+			}
+			if (raw === null) return undefined;
+			const normalized = raw.toLowerCase();
+			if (normalized === "1" || normalized === "true") return true;
+			if (normalized === "0" || normalized === "false") return false;
+			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
+		}
 		try {
 			const params = {
 				offset: parseIntParam("offset"),
@@ -12729,24 +13191,11 @@ async function handleApiRoute(
 				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
 				context: parseIntParam("context"),
 				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
 			};
-			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
-				readContent: async () => {
-					if (targetPs.agentSessionFile) return sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager);
-					const live = sessionManager.getSession(targetId);
-					const isClaudeCode = targetPs.runtime === "claude-code" || targetPs.modelProvider === "claude-code";
-					if (!isClaudeCode || !live?.rpcClient?.getMessages) return null;
-					const msgsResp = await live.rpcClient.getMessages();
-					const messages = Array.isArray(msgsResp?.data) ? msgsResp.data : msgsResp?.data?.messages;
-					if (!msgsResp?.success || !Array.isArray(messages) || messages.length === 0) return null;
-					return messages.map((message: any) => JSON.stringify({
-						type: "message",
-						id: message?.id,
-						ts: new Date().toISOString(),
-						message,
-					})).join("\n") + "\n";
-				},
+				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 			});
 			json(envelope);
 		} catch (err) {
@@ -12772,16 +13221,6 @@ async function handleApiRoute(
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
 		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
-		// Caller-project authorisation header check — same shape as the
-		// sibling transcript route.
-		const callerSid = req.headers["x-bobbit-session-id"];
-		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
-		if (callerSidStr) {
-			const callerPs = sessionManager.getPersistedSession(callerSidStr);
-			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
-				json({ error: "permission_denied" }, 403); return;
-			}
-		}
 
 		const compactionId = url.searchParams.get("compactionId");
 		if (!compactionId) {
@@ -12820,7 +13259,7 @@ async function handleApiRoute(
 			}
 			return;
 		}
-		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+		const ctx2 = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 		try {
 			const envelope = await readOrphanedBeforeCompaction(
 				{ compactionId, cursor, limit, verbose },
@@ -12850,6 +13289,7 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const commit = url.searchParams.get("commit") || undefined;
 		// Per-repo diff routing (multi-repo sessions). `session.repoWorktrees` is
 		// an array; resolve the requested repo's worktree path, else fall back to cwd.
 		const repoParam = url.searchParams.get("repo") || undefined;
@@ -12859,10 +13299,11 @@ async function handleApiRoute(
 			if (entry) diffCwd = entry.worktreePath;
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid, commit);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "INVALID_COMMIT") { json({ error: "Invalid commit" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			jsonError(500, err);
 		}
@@ -12907,32 +13348,8 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000, cid);
-			const lines = out.split('\n');
-			const commits: Array<{sha: string; shortSha: string; message: string; author: string; timestamp: string; filesChanged: number; insertions: number; deletions: number}> = [];
-
-			for (let i = 0; i < lines.length; i++) {
-				const line = lines[i];
-				if (!line.includes('|')) continue;
-				const parts = line.split('|');
-				if (parts.length < 5) continue;
-				const [sha, shortSha, message, author, timestamp] = parts;
-				// Next non-empty line should be the shortstat
-				let filesChanged = 0, insertions = 0, deletions = 0;
-				for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-					const statLine = lines[j].trim();
-					if (statLine.includes('file') && statLine.includes('changed')) {
-						const fm = statLine.match(/(\d+) file/);
-						const im = statLine.match(/(\d+) insertion/);
-						const dm = statLine.match(/(\d+) deletion/);
-						if (fm) filesChanged = parseInt(fm[1], 10);
-						if (im) insertions = parseInt(im[1], 10);
-						if (dm) deletions = parseInt(dm[1], 10);
-						break;
-					}
-				}
-				commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions });
-			}
+			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, cwd, 10000, cid);
+			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
 
 			json({ commits });
 		} catch (e: any) {
@@ -13185,18 +13602,16 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const sessAdminFlag = body?.admin ? " --admin" : "";
 		// Prefer the client-provided branch (headRefName from PR status) so the merge
 		// targets the exact PR the widget displayed — avoids mismatches when the session's
 		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
 		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
-		const sessMergeBranchArg = sessMergeBranch ? ` ${sessMergeBranch}` : "";
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execAsync(`gh pr merge${sessMergeBranchArg} --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await execFileAsync("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
@@ -14277,12 +14692,6 @@ async function handleApiRoute(
 			json({ error: "roleId must be a string or null" }, 400);
 			return;
 		}
-		// Validate the referenced role exists (when provided). roleId omitted or
-		// null/empty is allowed — staff with no role behave as before.
-		if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
-			json({ error: "Role not found" }, 404);
-			return;
-		}
 		// Validate goal-* triggers carry a non-empty prompt (push-based
 		// dispatcher has no fallback; the prompt is mandatory).
 		try {
@@ -14315,6 +14724,12 @@ async function handleApiRoute(
 		}
 		const cwd = explicitCwd ?? resolved.project.rootPath;
 		const projectId = resolved.projectId;
+		// Validate the referenced role exists in the selected project's cascade.
+		// roleId omitted or null/empty is allowed — staff with no role behave as before.
+		if (typeof body.roleId === "string" && body.roleId.length > 0 && !resolveRoleForProject(body.roleId, projectId)) {
+			json({ error: "Role not found" }, 404);
+			return;
+		}
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
@@ -14382,9 +14797,11 @@ async function handleApiRoute(
 				json({ error: "roleId must be a string or null" }, 400);
 				return;
 			}
-			// Validate the referenced role exists (when provided). roleId: null
-			// (clear) and omitted are allowed.
-			if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+			const existingStaff = staffManager.getStaff(id);
+			if (!existingStaff) { json({ error: "Staff agent not found" }, 404); return; }
+			// Validate the referenced role exists in the staff agent's project cascade.
+			// roleId: null (clear) and omitted are allowed.
+			if (typeof body.roleId === "string" && body.roleId.length > 0 && !resolveRoleForProject(body.roleId, existingStaff.projectId)) {
 				json({ error: "Role not found" }, 404);
 				return;
 			}
@@ -14402,8 +14819,7 @@ async function handleApiRoute(
 
 			let cwdUpdate: string | undefined;
 			if (Object.prototype.hasOwnProperty.call(body, "cwd")) {
-				const staff = staffManager.getStaff(id);
-				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				const staff = existingStaff;
 				if (typeof body.cwd !== "string" || body.cwd.trim().length === 0) {
 					json({ error: "cwd must be a non-empty string" }, 400);
 					return;
@@ -14621,25 +15037,49 @@ async function handleApiRoute(
 
 	// GET /api/mcp-servers
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
-		const mcpManager = sessionManager.getMcpManager();
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const cwd = url.searchParams.get("cwd") || undefined;
+		const ensure = url.searchParams.get("ensure") === "true";
+		const mcpManager = projectId || cwd
+			? (ensure ? await sessionManager.ensureMcpManager({ projectId, cwd }) : sessionManager.getMcpManager({ projectId, cwd }))
+			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json([]);
 			return;
 		}
 		const statuses = mcpManager.getServerStatuses();
-		const toolInfos = mcpManager.getToolInfos();
-		const result = statuses.map(s => ({
-			...s,
-			tools: toolInfos.filter(t => t.serverName === s.name).map(t => {
-				const parsed = parseMcpToolName(t.name);
-				return {
-					name: t.name,
-					description: t.description,
-					subNamespace: parsed?.sub,
-					op: parsed?.op ?? t.mcpToolName,
-				};
-			}),
-		}));
+		const routeSnapshots = mcpManager.getToolRouteSnapshots();
+		const result = statuses.map(s => {
+			const ownedRoutes = routeSnapshots.filter(t => t.runtimeServerKey === s.name);
+			const publicServerNames = new Set<string>([
+				...ownedRoutes.map(t => t.publicServerName),
+				...(s.ownerContributions ?? []).map(c => c.serverName),
+			].filter((name): name is string => typeof name === "string" && name.length > 0));
+			const publicServerName = publicServerNames.size === 1 ? [...publicServerNames][0] : undefined;
+			const serverPolicyKey = publicServerName ? `mcp__${publicServerName}` : `mcp__${s.name}`;
+			return {
+				...s,
+				serverPolicyKey,
+				policyKey: serverPolicyKey,
+				toolCount: ownedRoutes.length,
+				tools: ownedRoutes.map(t => {
+					const parsed = parseMcpToolName(t.name);
+					const subNamespace = t.subNamespace ?? parsed?.sub;
+					const routeServerPolicyKey = `mcp__${t.publicServerName}`;
+					const packagePolicyKey = subNamespace ? `${routeServerPolicyKey}__${subNamespace}` : undefined;
+					return {
+						name: t.name,
+						description: t.description,
+						serverPolicyKey: routeServerPolicyKey,
+						policyKey: t.name,
+						operationPolicyKey: t.name,
+						...(packagePolicyKey ? { packagePolicyKey, subNamespacePolicyKey: packagePolicyKey } : {}),
+						subNamespace,
+						op: parsed?.op ?? t.mcpToolName,
+					};
+				}),
+			};
+		});
 		json(result);
 		return;
 	}
@@ -14647,7 +15087,11 @@ async function handleApiRoute(
 	// POST /api/mcp-servers/:name/restart
 	const mcpRestartMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/restart$/);
 	if (mcpRestartMatch && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const cwd = url.searchParams.get("cwd") || undefined;
+		const mcpManager = projectId || cwd
+			? await sessionManager.ensureMcpManager({ projectId, cwd })
+			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;
@@ -14671,19 +15115,8 @@ async function handleApiRoute(
 			const config = refreshed[serverName] || existing.config;
 			await mcpManager.connectServer(serverName, config);
 		}
-		// Re-register MCP tools with ToolManager
-		if (toolManager) {
-			toolManager.removeExternalTools("mcp__");
-			const infos = mcpManager.getToolInfos();
-			toolManager.registerExternalTools(infos.map(info => ({
-				name: info.name,
-				description: info.description,
-				summary: info.description,
-				group: info.group,
-				docs: info.docs,
-				provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-			})));
-		}
+		// Re-register MCP tools with ToolManager across default and scoped managers.
+		refreshMcpExternalTools();
 		const updated = mcpManager.getServerStatuses().find(s => s.name === serverName);
 		json({ ok: true, ...updated });
 		return;
@@ -14691,11 +15124,6 @@ async function handleApiRoute(
 
 	// POST /api/internal/mcp-call
 	if (url.pathname === "/api/internal/mcp-call" && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
-		if (!mcpManager) {
-			json({ error: "MCP not initialized" }, 500);
-			return;
-		}
 		let parsedToolForError: string | undefined;
 		try {
 			const body = await new Promise<string>((resolve) => {
@@ -14703,7 +15131,9 @@ async function handleApiRoute(
 				req.on("data", (chunk: Buffer) => data += chunk.toString());
 				req.on("end", () => resolve(data));
 			});
-			const { tool, args } = JSON.parse(body);
+			const parsedBody = JSON.parse(body);
+			const { tool, args } = parsedBody;
+			const scopeKey = typeof parsedBody?.scopeKey === "string" && parsedBody.scopeKey ? parsedBody.scopeKey : undefined;
 			parsedToolForError = typeof tool === "string" ? tool : undefined;
 			if (!tool) {
 				json({ error: "Missing 'tool' field" }, 400);
@@ -14729,6 +15159,11 @@ async function handleApiRoute(
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
 			}
+			const mcpManager = await sessionManager.resolveMcpManagerForSession(mcpSessionId, scopeKey);
+			if (!mcpManager) {
+				json({ error: "MCP not initialized" }, 500);
+				return;
+			}
 			// Enforce allowedTools for non-MCP tools on live sessions.
 			// MCP tools (mcp__*) are dynamically discovered and governed by the
 			// grant policy system — they may not appear in the session's static
@@ -14747,7 +15182,7 @@ async function handleApiRoute(
 			// after the meta-tool is granted wholesale.
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
-				const role = roleName ? roleManager.getRole(roleName) : undefined;
+				const role = roleName ? resolveRoleForProject(roleName, mcpSession?.projectId ?? (persistedSession as any)?.projectId) : undefined;
 				const parsed = parseMcpToolName(toolStr);
 				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
 				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
@@ -14779,11 +15214,6 @@ async function handleApiRoute(
 
 	// POST /api/internal/mcp-describe — discovery endpoint for the `mcp_describe` tool (§3.3)
 	if (url.pathname === "/api/internal/mcp-describe" && req.method === "POST") {
-		const mcpManager = sessionManager.getMcpManager();
-		if (!mcpManager) {
-			json({ error: "MCP not initialized" }, 500);
-			return;
-		}
 		try {
 			const body = await new Promise<string>((resolve) => {
 				let data = "";
@@ -14793,6 +15223,7 @@ async function handleApiRoute(
 			const parsed = JSON.parse(body || "{}");
 			const server: string | undefined = parsed?.server;
 			const operation: string | undefined = parsed?.operation;
+			const scopeKey = typeof parsed?.scopeKey === "string" && parsed.scopeKey ? parsed.scopeKey : undefined;
 			if (!server || typeof server !== "string") {
 				json({ error: "Missing 'server' field" }, 400);
 				return;
@@ -14812,32 +15243,55 @@ async function handleApiRoute(
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
 				return;
 			}
+			const mcpManager = await sessionManager.resolveMcpManagerForSession(describeSessionId, scopeKey);
+			if (!mcpManager) {
+				json({ error: "MCP not initialized" }, 500);
+				return;
+			}
 
 			const statuses = mcpManager.getServerStatuses();
-			const status = statuses.find(s => s.name === server);
-			if (!status || status.status !== "connected") {
-				const reason = status?.error ?? (status ? status.status : "unknown server");
+			const directStatus = statuses.find(s => s.name === server);
+			const ownerStatuses = statuses.filter(s => (s.ownerContributions ?? []).some((c) => c.serverName === server));
+			const connectedRuntimeKeys = new Set(
+				statuses.filter(s => s.status === "connected").map(s => s.name),
+			);
+			const serverIsConnected = directStatus?.status === "connected" || ownerStatuses.some(s => s.status === "connected");
+			if (!serverIsConnected) {
+				const statusForReason = directStatus ?? ownerStatuses.find(s => s.error || s.status !== "connected");
+				const reason = statusForReason?.error ?? (statusForReason ? statusForReason.status : "unknown server");
 				json({ error: `server ${server} not connected: ${reason}` }, 503);
 				return;
 			}
 
-			const infos = mcpManager.getToolInfos().filter(i => i.serverName === server);
+			const infos = mcpManager.getToolRouteSnapshots()
+				.filter(i => i.publicServerName === server && connectedRuntimeKeys.has(i.runtimeServerKey));
+			const describeNameFor = (info: (typeof infos)[number]): { name: string; subNamespace?: string } => {
+				const parsedName = parseMcpToolName(info.name);
+				if (parsedName?.server === server && info.subNamespace && parsedName.sub === info.subNamespace) {
+					return { name: parsedName.op, subNamespace: info.subNamespace };
+				}
+				return { name: info.mcpToolName };
+			};
+			const toDescriptor = (info: (typeof infos)[number]) => {
+				const described = describeNameFor(info);
+				return {
+					name: described.name,
+					...(described.subNamespace ? { subNamespace: described.subNamespace } : {}),
+					description: info.description,
+					inputSchema: info.inputSchema,
+				};
+			};
 			if (operation) {
-				const match = infos.find(i => i.mcpToolName === operation);
+				const match = infos.find(i => i.mcpToolName === operation)
+					?? infos.find(i => describeNameFor(i).name === operation);
 				if (!match) {
 					json({ error: "operation not found" }, 404);
 					return;
 				}
-				json({ tool: { name: match.mcpToolName, description: match.description, inputSchema: match.inputSchema } });
+				json({ tool: toDescriptor(match) });
 				return;
 			}
-			json({
-				tools: infos.map(i => ({
-					name: i.mcpToolName,
-					description: i.description,
-					inputSchema: i.inputSchema,
-				})),
-			});
+			json({ tools: infos.map(toDescriptor) });
 		} catch (err) {
 			const e = err as Error;
 			console.error(`[mcp] Describe failed:`, e.stack || e);
@@ -14936,7 +15390,9 @@ async function handleApiRoute(
 		// and to detect duplicate submits (multi-tab / network retry).
 		let messages: any[] = [];
 		try {
-			messages = await loadHydratedMessagesForAskSubmit(sessionManager, sessionId, session);
+			const msgsResp = await session.rpcClient.getMessages();
+			const raw = msgsResp?.data?.messages || msgsResp?.data;
+			if (Array.isArray(raw)) messages = raw;
 		} catch (e: any) {
 			json({ error: `Could not load transcript: ${e?.message || String(e)}` }, 500);
 			return;
@@ -14960,7 +15416,23 @@ async function handleApiRoute(
 		}
 
 		// Locate the ask_user_choices tool_use block; use its input to cross-validate.
-		const matchedQuestions = findAskUserChoicesQuestions(messages, toolUseId);
+		let matchedQuestions: UserQuestion[] | null = null;
+		for (const m of messages) {
+			if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
+			for (const b of m.content) {
+				if (!b) continue;
+				const isToolUse = b.type === "toolCall" || b.type === "tool_use";
+				if (!isToolUse) continue;
+				if (b.name !== "ask_user_choices") continue;
+				if (b.id !== toolUseId) continue;
+				const args = b.arguments ?? b.input;
+				if (args && Array.isArray(args.questions)) {
+					matchedQuestions = args.questions as UserQuestion[];
+				}
+				break;
+			}
+			if (matchedQuestions) break;
+		}
 		if (!matchedQuestions) {
 			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
 			return;
@@ -14987,64 +15459,120 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
+
+	// GET /api/maintenance/worktrees
+	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
+		const include = url.searchParams.get("include");
+		if (include && include !== "all" && include !== "actionable" && include !== "troubleshooting") {
+			json({ error: "include must be all, actionable, or troubleshooting" }, 400);
+			return;
+		}
+		json(await worktreeInventory().scan({ include: (include as any) || "all" }));
+		return;
+	}
+
+	// GET /api/maintenance/archived-session-worktrees
+	if (url.pathname === "/api/maintenance/archived-session-worktrees" && req.method === "GET") {
+		const includeAlreadyCleaned = url.searchParams.get("includeAlreadyCleaned") === "1";
+		json(await worktreeInventory().legacyArchivedSessionWorktrees(includeAlreadyCleaned));
+		return;
+	}
+
+	// POST /api/maintenance/cleanup-archived-session-worktrees
+	if (url.pathname === "/api/maintenance/cleanup-archived-session-worktrees" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Request body must be an object" }, 400);
+			return;
+		}
+		const rec = body as Record<string, unknown>;
+		const mode = rec.mode;
+		const hasSessionIds = Object.prototype.hasOwnProperty.call(body, "sessionIds");
+		const hasWorktrees = Object.prototype.hasOwnProperty.call(body, "worktrees");
+		const hasCategories = Object.prototype.hasOwnProperty.call(body, "categories");
+		const hasPresetId = Object.prototype.hasOwnProperty.call(body, "presetId");
+		const hasProjectId = Object.prototype.hasOwnProperty.call(body, "projectId");
+		const hasRepoPath = Object.prototype.hasOwnProperty.call(body, "repoPath");
+		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") { json({ error: "Invalid cleanup mode" }, 400); return; }
+		if (mode === "all" && (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath)) { json({ error: "mode=all does not accept selectors" }, 400); return; }
+		if (mode === "selected") {
+			if (hasCategories || hasPresetId) { json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400); return; }
+			if (hasSessionIds && hasWorktrees) { json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400); return; }
+			if (hasSessionIds && (!Array.isArray(rec.sessionIds) || rec.sessionIds.some((id: unknown) => typeof id !== "string"))) { json({ error: "sessionIds must be an array of strings" }, 400); return; }
+			if (hasWorktrees && (!Array.isArray(rec.worktrees) || rec.worktrees.some((wt: unknown) => {
+				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
+				const selector = wt as Record<string, unknown>;
+				return typeof selector.sessionId !== "string" || (selector.repo !== undefined && typeof selector.repo !== "string") || (selector.path !== undefined && typeof selector.path !== "string") || (selector.key !== undefined && typeof selector.key !== "string");
+			}))) { json({ error: "worktrees must be an array of selector objects with string fields" }, 400); return; }
+		}
+		if (mode === "category") {
+			const validCategories = new Set(["archived-session", "goal-session", "team-session", "delegate-session", "child-session", "single-repo", "multi-repo"]);
+			if (hasSessionIds || hasWorktrees || hasPresetId) { json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400); return; }
+			if (!Array.isArray(rec.categories) || rec.categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) { json({ error: "categories must be an array of supported category strings" }, 400); return; }
+			if (rec.projectId !== undefined && typeof rec.projectId !== "string") { json({ error: "projectId must be a string" }, 400); return; }
+			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") { json({ error: "repoPath must be a string" }, 400); return; }
+		}
+		if (mode === "preset") {
+			if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) { json({ error: "mode=preset accepts presetId only" }, 400); return; }
+			if (typeof rec.presetId !== "string") { json({ error: "presetId must be a string" }, 400); return; }
+		}
+		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
+		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
+		return;
+	}
 
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
-		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
-		// Hidden contexts (synthetic system project) have no worktrees and
-		// resolving their repoPath can leak into an unrelated host repo.
-		for (const ctx of projectContextManager.visible()) {
-			try {
-				const repoPath = ctx.project.rootPath;
-				if (await isGitRepo(repoPath)) {
-					const orphans = await sessionManager.listOrphanedSessionWorktrees(repoPath);
-					for (const o of orphans) {
-						allOrphans.push({ ...o, repoPath });
-					}
-				}
-			} catch { /* best-effort */ }
-		}
-		json({ worktrees: allOrphans });
+		json(await worktreeInventory().legacyOrphanedWorktrees());
 		return;
 	}
 
 	// POST /api/maintenance/cleanup-worktrees
 	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
 		const body = await readBody(req);
-		let cleaned = 0;
-		if (body?.worktrees && Array.isArray(body.worktrees)) {
-			// Clean specific worktrees — validate each against registered projects and orphan list
-			const validRepoPaths = new Set([...projectContextManager.visible()].map(ctx => ctx.project.rootPath));
-			for (const wt of body.worktrees) {
-				if (wt.path && wt.branch && wt.repoPath) {
-					// Validate repoPath is a registered project
-					if (!validRepoPaths.has(wt.repoPath)) continue;
-					// Validate this worktree is actually orphaned
-					try {
-						const orphans = await sessionManager.listOrphanedSessionWorktrees(wt.repoPath);
-						const isOrphan = orphans.some(o => o.path === wt.path && o.branch === wt.branch);
-						if (!isOrphan) continue;
-					} catch { continue; }
-					try {
-						const { cleanupWorktree } = await import("./skills/git.js");
-						await cleanupWorktree(wt.repoPath, wt.path, wt.branch, true);
-						cleaned++;
-					} catch { /* best-effort */ }
+		const contentLengthHeader = Array.isArray(req.headers["content-length"]) ? req.headers["content-length"][0] : req.headers["content-length"];
+		const hasRequestBody = contentLengthHeader !== undefined
+			? Number(contentLengthHeader) > 0
+			: req.headers["transfer-encoding"] !== undefined;
+		const isPlainObjectBody = body !== null && typeof body === "object" && !Array.isArray(body);
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "mode")) {
+			const mode = (body as any).mode;
+			if (mode !== "all-safe" && mode !== "selected") {
+				json({ error: "mode must be all-safe or selected" }, 400);
+				return;
+			}
+			if (mode === "all-safe") {
+				if (Object.prototype.hasOwnProperty.call(body, "itemIds") || Object.prototype.hasOwnProperty.call(body, "worktrees")) {
+					json({ error: "mode=all-safe does not accept selectors" }, 400);
+					return;
 				}
+			} else if (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string")) {
+				json({ error: "itemIds must be an array of strings" }, 400);
+				return;
 			}
-		} else {
-			// Clean all orphans across all projects (hidden contexts excluded).
-			for (const ctx of projectContextManager.visible()) {
-				try {
-					const repoPath = ctx.project.rootPath;
-					if (await isGitRepo(repoPath)) {
-						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
-						cleaned++; // count projects cleaned, not individual worktrees
-					}
-				} catch { /* best-effort */ }
-			}
+			json(await worktreeInventory().cleanup(body as any));
+			return;
 		}
-		json({ cleaned });
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
+			json({ error: "mode is required when itemIds is provided" }, 400);
+			return;
+		}
+		if ((body === null && hasRequestBody) || (body !== null && !isPlainObjectBody)) {
+			json({ error: "cleanup-worktrees body must be an object" }, 400);
+			return;
+		}
+		const legacyBodyKeys = isPlainObjectBody ? Object.keys(body as Record<string, unknown>) : [];
+		if (legacyBodyKeys.some(key => key !== "worktrees")) {
+			json({ error: "legacy cleanup-worktrees body accepts worktrees only" }, 400);
+			return;
+		}
+		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
+			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
+			return;
+		}
+		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: isPlainObjectBody ? (body as any).worktrees : undefined });
+		json({ cleaned: result.counts.cleaned });
 		return;
 	}
 
@@ -15256,24 +15784,37 @@ async function handleApiRoute(
 }
 
 /**
- * Validate a goal proposal's `workflow` / `options` args against the project's
- * configured workflows. Returns a structured error object to send as 400, or
- * null if valid. Pure — caller resolves the workflow list (see seed handler).
+ * Validate a goal proposal's `workflow` / `inlineWorkflow` / `options` args.
+ * Returns a structured error object to send as 400, or null if valid. Pure —
+ * caller resolves the workflow list (see seed handler).
  *
  * Rules (see docs/design — Validate goal workflow):
- * - Zero workflows ⇒ no validation (nothing available to validate against).
- * - Empty/omitted `workflow` ⇒ MISSING_WORKFLOW when workflows are available.
- * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
- * - `options` (comma-separated optional-step names) validated against the chosen
- *   explicit workflow — matched ONLY by the canonical step.name of
- *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
- *   the UI both key on step.name, so accepting optionalLabel/label here would be a
+ * - A structurally valid `inlineWorkflow` is a bespoke snapshot and takes
+ *   precedence over any `workflow` id. It satisfies the project workflow
+ *   requirement and `options` are validated against the inline snapshot.
+ * - A malformed `inlineWorkflow` fails structurally before project-workflow
+ *   validation so it never degrades into MISSING_WORKFLOW/UNKNOWN_WORKFLOW.
+ * - Without `inlineWorkflow`, zero project workflows ⇒ no validation.
+ * - Without `inlineWorkflow`, empty/omitted `workflow` ⇒ MISSING_WORKFLOW when
+ *   workflows are available.
+ * - Without `inlineWorkflow`, an explicit `workflow` not among the configured
+ *   ids ⇒ UNKNOWN_WORKFLOW.
+ * - `options` are comma-separated optional-step names matched ONLY by canonical
+ *   `verify[].name` where `optional: true`. The runtime (verification-logic.ts)
+ *   and UI both key on step.name, so accepting optionalLabel/label would be a
  *   false-success path that later fails to enable the step.
  */
 function validateGoalProposalWorkflow(
 	args: Record<string, unknown>,
-	workflows: import("./agent/workflow-store.js").Workflow[],
+	workflows: Workflow[],
 ): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null {
+	const inlineWorkflow = args.inlineWorkflow;
+	if (inlineWorkflow !== undefined && inlineWorkflow !== null) {
+		const inlineErr = validateGoalInlineWorkflow(inlineWorkflow);
+		if (inlineErr) return inlineErr;
+		return validateGoalProposalOptions(args, inlineWorkflow as Workflow);
+	}
+
 	if (workflows.length === 0) return null;
 
 	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
@@ -15291,7 +15832,8 @@ function validateGoalProposalWorkflow(
 	}
 
 	// 2. Unknown explicit workflow id.
-	if (!workflows.some(w => w.id === wfArg)) {
+	const chosen = workflows.find(w => w.id === wfArg);
+	if (!chosen) {
 		return {
 			ok: false,
 			code: "UNKNOWN_WORKFLOW",
@@ -15301,30 +15843,34 @@ function validateGoalProposalWorkflow(
 	}
 
 	// 3. Validate optional-step names against the chosen explicit workflow.
-	const chosen = workflows.find(w => w.id === wfArg)!;
+	return validateGoalProposalOptions(args, chosen);
+}
+
+function validateGoalProposalOptions(
+	args: Record<string, unknown>,
+	workflow: Workflow,
+): { ok: false; code: "UNKNOWN_OPTIONAL_STEP"; message: string; validOptionalSteps: string[] } | null {
 	const optsArg = typeof args.options === "string" ? args.options : "";
 	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
-	if (requested.length > 0) {
-		const validNames = new Set<string>();
-		for (const g of chosen.gates) {
-			for (const s of (g.verify ?? [])) {
-				// Only the canonical step.name is a valid enable key (runtime + UI both
-				// match on name); accepting optionalLabel/label would be a false success.
-				if (s.optional === true) validNames.add(s.name);
-			}
-		}
-		const validList = [...validNames];
-		const unknown = requested.filter(n => !validNames.has(n));
-		if (unknown.length > 0) {
-			return {
-				ok: false,
-				code: "UNKNOWN_OPTIONAL_STEP",
-				message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${chosen.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
-				validOptionalSteps: validList,
-			};
+	if (requested.length === 0) return null;
+
+	const validNames = new Set<string>();
+	for (const g of workflow.gates) {
+		for (const s of (g.verify ?? [])) {
+			// Only the canonical step.name is a valid enable key (runtime + UI both
+			// match on name); accepting optionalLabel/label would be a false success.
+			if (s.optional === true) validNames.add(s.name);
 		}
 	}
-	return null;
+	const validList = [...validNames];
+	const unknown = requested.filter(n => !validNames.has(n));
+	if (unknown.length === 0) return null;
+	return {
+		ok: false,
+		code: "UNKNOWN_OPTIONAL_STEP",
+		message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${workflow.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
+		validOptionalSteps: validList,
+	};
 }
 
 /** Return a gate plus every transitive dependent in workflow-DAG order. */
@@ -15394,22 +15940,15 @@ export function bodyLimitExceeded(
 	return Number.isFinite(len) && len > maxBytes;
 }
 
-/**
- * Read the raw request body as text. Resolves the decoded string for a complete
- * body (the empty string when no body was sent), or `null` when the body was
- * oversized/aborted/errored. Unlike {@link readBody} it does NOT attempt to
- * JSON-parse, so callers can distinguish an EMPTY body (valid — treat as `{}`)
- * from a NON-EMPTY but malformed-JSON body (client error → 400).
- */
-export function readBodyText(
+export function readBody(
 	req: http.IncomingMessage,
 	maxBytes: number = MAX_REQUEST_BODY_BYTES,
-): Promise<string | null> {
+): Promise<any> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
 		let settled = false;
-		const finish = (value: string | null): void => {
+		const finish = (value: any): void => {
 			if (settled) return;
 			settled = true;
 			resolve(value);
@@ -15418,11 +15957,12 @@ export function readBodyText(
 			if (settled) return;
 			total += chunk.length;
 			if (total > maxBytes) {
-				// Oversized body: reject BEFORE Buffer.concat() so a huge payload is
-				// never fully materialised in memory. Drop buffered chunks, tear down
-				// the stream, and resolve null — handlers treat a null body as a
-				// malformed request (400); the request-handler's Content-Length
-				// precheck returns a definitive 413 when the length is declared up front.
+				// Oversized body: reject BEFORE Buffer.concat()/JSON.parse() so a
+				// huge payload is never fully materialised in memory. Drop buffered
+				// chunks, tear down the stream, and resolve null — handlers treat a
+				// null body as a malformed request (400); the request-handler's
+				// Content-Length precheck returns a definitive 413 for the common
+				// case where the length is declared up front.
 				chunks.length = 0;
 				try { req.destroy(); } catch { /* best-effort */ }
 				finish(null);
@@ -15430,26 +15970,15 @@ export function readBodyText(
 			}
 			chunks.push(chunk);
 		});
-		req.on("end", () => finish(Buffer.concat(chunks).toString()));
+		req.on("end", () => {
+			try {
+				finish(JSON.parse(Buffer.concat(chunks).toString()));
+			} catch {
+				finish(null);
+			}
+		});
 		req.on("error", () => finish(null));
 		req.on("aborted", () => finish(null));
-	});
-}
-
-export function readBody(
-	req: http.IncomingMessage,
-	maxBytes: number = MAX_REQUEST_BODY_BYTES,
-): Promise<any> {
-	return readBodyText(req, maxBytes).then((text) => {
-		// Preserve the historical contract: a null (oversized/aborted) OR
-		// unparseable/empty body resolves to null. Callers that must distinguish an
-		// empty body from a malformed one read the raw text via readBodyText instead.
-		if (text === null) return null;
-		try {
-			return JSON.parse(text);
-		} catch {
-			return null;
-		}
 	});
 }
 

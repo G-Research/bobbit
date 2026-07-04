@@ -37,7 +37,7 @@
  * change size when suggestions open/close.
  */
 
-import { html, LitElement, nothing } from "lit";
+import { html, LitElement, nothing, type PropertyValues } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
 // ---------------------------------------------------------------------------
@@ -73,13 +73,19 @@ export interface DirectoryBrowseRequestDetail {
 	path: string;
 }
 
-export type BrowseDirectoryFn = (path?: string) => Promise<DirectoryBrowseResult>;
+export interface BrowseDirectoryOptions {
+	prefix?: string;
+	limit?: number;
+}
+
+export type BrowseDirectoryFn = (path?: string, options?: BrowseDirectoryOptions) => Promise<DirectoryBrowseResult>;
 
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
 const SEPARATOR_REGEX = /[\\/]/;
+const TRAILING_SEPARATOR_REGEX = /[\\/]$/;
 
 /**
  * Split a typed path into `{ parent, basename }` for suggestion lookup.
@@ -88,18 +94,27 @@ const SEPARATOR_REGEX = /[\\/]/;
  *   "/foo/bar/"     → { parent: "/foo/bar", basename: "" }
  *   "/foo/bar"      → { parent: "/foo",     basename: "bar" }
  *   "C:\\Users\\j"  → { parent: "C:\\Users", basename: "j" }
+ *   "C:\\Us"       → { parent: "C:\\",      basename: "Us" }
  *   "/"             → { parent: "/",         basename: "" }
  *   ""              → { parent: null,        basename: "" }
  */
+function directoryFromTrailingPath(raw: string): string | null {
+	const value = raw ?? "";
+	if (!value) return null;
+	const trimmed = value.replace(/[\\/]+$/, "");
+	if (trimmed === "") return "/";
+	// Preserve Windows drive roots. `C:\\` should browse `C:\\`, not `C:`.
+	if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}\\`;
+	return trimmed;
+}
+
 function splitPath(raw: string): { parent: string | null; basename: string } {
 	const value = raw ?? "";
 	if (!value) return { parent: null, basename: "" };
 
 	// Trailing separator → user is inside the directory, no basename filter.
-	if (SEPARATOR_REGEX.test(value[value.length - 1] ?? "")) {
-		// Strip exactly one trailing sep so `/foo/` → parent `/foo` (or root `/`).
-		const trimmed = value.replace(/[\\/]+$/, "");
-		return { parent: trimmed === "" ? "/" : trimmed, basename: "" };
+	if (TRAILING_SEPARATOR_REGEX.test(value)) {
+		return { parent: directoryFromTrailingPath(value), basename: "" };
 	}
 
 	// Find last separator.
@@ -114,10 +129,19 @@ function splitPath(raw: string): { parent: string | null; basename: string } {
 		// No separator at all — typed bare word, no useful parent.
 		return { parent: null, basename: value };
 	}
-	const parent = lastSep === 0 ? "/" : value.slice(0, lastSep);
+	const parent = lastSep === 0
+		? "/"
+		: lastSep === 2 && /^[A-Za-z]:[\\/]$/.test(value.slice(0, 3))
+			? value.slice(0, 3)
+			: value.slice(0, lastSep);
 	const basename = value.slice(lastSep + 1);
 	return { parent, basename };
 }
+
+type LookupIntent =
+	| { kind: "recent"; key: string }
+	| { kind: "browse"; parent: string; basename: string; key: string }
+	| { kind: "none"; key: string };
 
 @customElement("directory-picker")
 export class DirectoryPicker extends LitElement {
@@ -138,6 +162,7 @@ export class DirectoryPicker extends LitElement {
 	@state() private _open = false;
 	@state() private _highlight = -1;
 	@state() private _loading = false;
+	@state() private _inputFocused = false;
 
 	@query("input.directory-picker-input") private _inputEl?: HTMLInputElement;
 
@@ -146,6 +171,10 @@ export class DirectoryPicker extends LitElement {
 	private _browseToken = 0;
 	/** Last `value` we ran a suggestion lookup against (avoid duplicate work). */
 	private _lastQueried: string | null = null;
+	/** Exact value last committed by a suggestion or parent-driven completed selection. */
+	private _completedPath: string | null = null;
+	/** Set while value changes originate from the user's keystrokes. */
+	private _valueChangingFromInput = false;
 
 	protected override createRenderRoot(): this {
 		return this;
@@ -153,11 +182,19 @@ export class DirectoryPicker extends LitElement {
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
-		if (this._debounceTimer) {
-			clearTimeout(this._debounceTimer);
-			this._debounceTimer = null;
+		this._cancelPendingLookup(true);
+	}
+
+	protected override updated(changed: PropertyValues<this>): void {
+		if (!changed.has("value")) return;
+		if (this._valueChangingFromInput) {
+			this._valueChangingFromInput = false;
+			return;
 		}
-		this._browseToken++; // invalidate any in-flight lookup
+		// External value writes come from completed programmatic selections (for
+		// example the Browse dialog). Treat them like a committed path so focus
+		// restoration cannot immediately open the selected folder's children.
+		this._markCompletedPath(this.value ?? "");
 	}
 
 	/** Public: focus the inner text input. */
@@ -166,6 +203,11 @@ export class DirectoryPicker extends LitElement {
 		Promise.resolve().then(() => {
 			this._inputEl?.focus();
 		});
+	}
+
+	/** Public: set a path that is already complete without opening suggestions. */
+	setCompletedPath(path: string): void {
+		this._markCompletedPath(path ?? "");
 	}
 
 	// --- event helpers ----------------------------------------------------
@@ -180,11 +222,64 @@ export class DirectoryPicker extends LitElement {
 
 	// --- suggestion lookup ------------------------------------------------
 
-	private _scheduleLookup(immediate = false): void {
+	private _cancelPendingLookup(invalidate = false): void {
 		if (this._debounceTimer) {
 			clearTimeout(this._debounceTimer);
 			this._debounceTimer = null;
 		}
+		if (invalidate) this._browseToken++;
+		this._loading = false;
+	}
+
+	private _markCompletedPath(path: string): void {
+		this.value = path;
+		this._completedPath = path.trim() ? path : null;
+		this._lastQueried = path;
+		this._suggestions = [];
+		this._open = false;
+		this._highlight = -1;
+		this._cancelPendingLookup(true);
+	}
+
+	private _hasActiveInput(): boolean {
+		return this._inputFocused && this._inputEl != null && document.activeElement === this._inputEl;
+	}
+
+	private _lookupIntent(value: string): LookupIntent {
+		if (!this._hasActiveInput()) return { kind: "none", key: "blurred" };
+		if (value.trim() === "") return { kind: "recent", key: "recent" };
+		if (this._completedPath != null && value === this._completedPath) {
+			return { kind: "none", key: `completed:${value}` };
+		}
+		if (TRAILING_SEPARATOR_REGEX.test(value)) {
+			const parent = directoryFromTrailingPath(value);
+			return parent
+				? { kind: "browse", parent, basename: "", key: `browse:${parent}:` }
+				: { kind: "none", key: "invalid-trailing" };
+		}
+		const { parent, basename } = splitPath(value);
+		return parent
+			? { kind: "browse", parent, basename, key: `browse:${parent}:${basename}` }
+			: { kind: "none", key: "no-parent" };
+	}
+
+	private _lookupStillValid(token: number, value: string, intent: LookupIntent): boolean {
+		if (token !== this._browseToken) return false;
+		if (!this._hasActiveInput()) return false;
+		if ((this.value ?? "") !== value) return false;
+		return this._lookupIntent(value).key === intent.key;
+	}
+
+	private _applySuggestions(suggestions: DirectorySuggestion[]): void {
+		this._suggestions = suggestions;
+		this._highlight = suggestions.length > 0 ? 0 : -1;
+		this._open = this._hasActiveInput() && suggestions.length > 0;
+		this._loading = false;
+	}
+
+	private _scheduleLookup(immediate = false): void {
+		this._cancelPendingLookup(false);
+		if (!this._hasActiveInput()) return;
 		const run = () => {
 			this._debounceTimer = null;
 			void this._runLookup();
@@ -213,49 +308,42 @@ export class DirectoryPicker extends LitElement {
 
 	private async _runLookup(): Promise<void> {
 		const value = this.value ?? "";
+		const intent = this._lookupIntent(value);
 		this._lastQueried = value;
 		const token = ++this._browseToken;
 
-		// Empty input → recent paths only.
-		if (value.trim() === "") {
-			const recents = this._recentAsSuggestions();
-			if (token !== this._browseToken) return;
-			this._suggestions = recents;
-			this._highlight = recents.length > 0 ? 0 : -1;
-			this._open = recents.length > 0;
-			this._loading = false;
+		if (intent.kind === "none") {
+			this._applySuggestions([]);
 			return;
 		}
 
-		// Ask the injected browseDirectory.
-		const { parent, basename } = splitPath(value);
-		this._loading = true;
-
-		// Strategy: try the value as a directory first (covers the "existing dir"
-		// case from the spec). If that throws, fall back to the parent.
-		let result: DirectoryBrowseResult | null = null;
-		let basenameFilter = "";
-		try {
-			result = await this.browseDirectory(value);
-			// If browseDirectory returned with current === value (or close),
-			// treat as existing dir and show its children unfiltered.
-			basenameFilter = "";
-		} catch {
-			if (parent) {
-				try {
-					result = await this.browseDirectory(parent);
-					basenameFilter = basename;
-				} catch {
-					result = null;
-				}
-			}
+		// Empty input → recent paths only.
+		if (intent.kind === "recent") {
+			const recents = this._recentAsSuggestions();
+			if (!this._lookupStillValid(token, value, intent)) return;
+			this._applySuggestions(recents);
+			return;
 		}
 
-		if (token !== this._browseToken) return; // stale
+		// Intent-based lookup: browse only the parent for typed prefixes. Browse
+		// the completed directory itself only when the user typed a trailing
+		// separator, which creates an explicit child-list request.
+		this._loading = true;
+		let result: DirectoryBrowseResult | null = null;
+		try {
+			result = await this.browseDirectory(intent.parent, {
+				prefix: intent.basename || undefined,
+				limit: this.maxSuggestions,
+			});
+		} catch {
+			result = null;
+		}
+
+		if (!this._lookupStillValid(token, value, intent)) return;
 
 		const suggestions: DirectorySuggestion[] = [];
 		if (result && Array.isArray(result.entries)) {
-			const lowerFilter = basenameFilter.toLowerCase();
+			const lowerFilter = intent.basename.toLowerCase();
 			for (const entry of result.entries) {
 				if (!entry?.path || !entry?.name) continue;
 				if (lowerFilter && !entry.name.toLowerCase().startsWith(lowerFilter)) continue;
@@ -268,7 +356,6 @@ export class DirectoryPicker extends LitElement {
 			}
 		}
 
-		// If we got nothing useful and the input is empty after trimming, fall back to recents.
 		if (suggestions.length === 0 && this.recentPaths.length > 0) {
 			// Filter recents by typed substring (case-insensitive) so the user
 			// still sees something familiar even when browse fails.
@@ -283,17 +370,20 @@ export class DirectoryPicker extends LitElement {
 			}
 		}
 
-		this._suggestions = suggestions;
-		this._highlight = suggestions.length > 0 ? 0 : -1;
-		this._open = suggestions.length > 0;
-		this._loading = false;
+		this._applySuggestions(suggestions);
 	}
 
 	// --- DOM event handlers ----------------------------------------------
 
 	private _onInput = (e: Event): void => {
 		const next = (e.target as HTMLInputElement).value;
+		this._valueChangingFromInput = true;
 		this.value = next;
+		if (next !== this._completedPath) this._completedPath = null;
+		this._suggestions = [];
+		this._open = false;
+		this._highlight = -1;
+		this._loading = false;
 		this._fire<DirectoryPickerPathDetail>("directory-input", {
 			path: next,
 			source: "typed",
@@ -302,40 +392,48 @@ export class DirectoryPicker extends LitElement {
 	};
 
 	private _onFocus = (): void => {
+		this._inputFocused = true;
+		if (this.disabled) return;
+		const value = this.value ?? "";
+		if (this._completedPath != null && value === this._completedPath) {
+			this._open = false;
+			return;
+		}
 		// Re-run lookup if the value changed since last query, otherwise just open.
-		if (this._lastQueried !== this.value) {
+		if (this._lastQueried !== value) {
 			this._scheduleLookup(true);
 		} else if (this._suggestions.length > 0) {
 			this._open = true;
-		} else if ((this.value ?? "").trim() === "" && this.recentPaths.length > 0) {
+		} else if (value.trim() === "" && this.recentPaths.length > 0) {
 			this._scheduleLookup(true);
 		}
 	};
 
 	private _onBlur = (): void => {
-		// Delay so a click on a suggestion fires `_onPickSuggestion` first.
-		setTimeout(() => {
-			this._open = false;
-		}, 120);
+		this._inputFocused = false;
+		this._open = false;
+		this._highlight = -1;
+		this._cancelPendingLookup(true);
 	};
 
 	private _onKeyDown = (e: KeyboardEvent): void => {
 		if (e.key === "ArrowDown") {
 			if (!this._open && this._suggestions.length === 0) {
+				e.preventDefault();
 				// Open with whatever we have (e.g. recent paths) on demand.
 				this._scheduleLookup(true);
 				return;
 			}
 			if (this._suggestions.length === 0) return;
 			e.preventDefault();
-			this._open = true;
+			this._open = this._hasActiveInput();
 			this._highlight = (this._highlight + 1) % this._suggestions.length;
 			return;
 		}
 		if (e.key === "ArrowUp") {
 			if (this._suggestions.length === 0) return;
 			e.preventDefault();
-			this._open = true;
+			this._open = this._hasActiveInput();
 			this._highlight =
 				this._highlight <= 0
 					? this._suggestions.length - 1
@@ -352,6 +450,7 @@ export class DirectoryPicker extends LitElement {
 			// No highlight → commit current value.
 			e.preventDefault();
 			this._open = false;
+			this._cancelPendingLookup(true);
 			this._fire<DirectoryPickerPathDetail>("directory-commit", {
 				path: this.value,
 				source: "typed",
@@ -369,6 +468,7 @@ export class DirectoryPicker extends LitElement {
 				e.stopPropagation();
 				this._open = false;
 				this._highlight = -1;
+				this._cancelPendingLookup(true);
 				return;
 			}
 			// Overlay already closed — propagate cancel up; the surrounding dialog
@@ -382,11 +482,7 @@ export class DirectoryPicker extends LitElement {
 	};
 
 	private _pickSuggestion(s: DirectorySuggestion): void {
-		this.value = s.path;
-		this._lastQueried = s.path;
-		this._open = false;
-		this._highlight = -1;
-		this._suggestions = [];
+		this.setCompletedPath(s.path);
 		this._fire<DirectoryPickerPathDetail>("directory-select", {
 			path: s.path,
 			source: "suggestion",
@@ -407,6 +503,7 @@ export class DirectoryPicker extends LitElement {
 
 	private _onBrowseClick = (): void => {
 		this._open = false;
+		this._cancelPendingLookup(true);
 		this._fire<DirectoryBrowseRequestDetail>("directory-browse-request", {
 			path: this.value ?? "",
 		});
@@ -447,13 +544,12 @@ export class DirectoryPicker extends LitElement {
 		const browseBtnClasses =
 			"shrink-0 h-9 px-3 inline-flex items-center justify-center rounded-md border border-border bg-transparent text-sm text-foreground hover:bg-secondary/50 transition-colors disabled:pointer-events-none disabled:opacity-50";
 
-		const showSuggestions = this._open && this._suggestions.length > 0;
+		const showSuggestions = this._inputFocused && this._open && this._suggestions.length > 0;
 
 		return html`
 			<div
 				class="relative block w-full"
 				data-testid="directory-picker"
-				@focusout=${this._onBlur}
 			>
 				<div class="flex items-stretch gap-2">
 					<input
@@ -473,6 +569,7 @@ export class DirectoryPicker extends LitElement {
 						data-testid="directory-picker-input"
 						@input=${this._onInput}
 						@focus=${this._onFocus}
+						@blur=${this._onBlur}
 						@keydown=${this._onKeyDown}
 					/>
 					${this.showBrowseButton

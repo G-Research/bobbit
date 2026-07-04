@@ -9,7 +9,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
@@ -45,6 +45,58 @@ export default function (pi: ExtensionAPI) {
 
 	function ok(data: unknown) {
 		return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: undefined };
+	}
+
+	const dismissStatuses = new Set(["dismissed", "already-dismissed", "not-owned", "not-found", "failed"]);
+
+	function dismissText(result: any): string {
+		return [
+			`team_dismiss ${result?.status ?? "unknown"} for ${result?.sessionId ?? "unknown session"}`,
+			result?.message ? `message: ${result.message}` : undefined,
+			`retryable: ${result?.retryable === true ? "true" : "false"}`,
+			"",
+			JSON.stringify(result, null, 2),
+		].filter(Boolean).join("\n");
+	}
+
+	function isStructuredDismissResult(value: unknown): value is { ok: boolean; status: string; sessionId: string; message: string; retryable: boolean } {
+		if (!value || typeof value !== "object") return false;
+		const v = value as Record<string, unknown>;
+		return typeof v.ok === "boolean"
+			&& typeof v.status === "string"
+			&& dismissStatuses.has(v.status)
+			&& typeof v.sessionId === "string"
+			&& typeof v.message === "string"
+			&& typeof v.retryable === "boolean";
+	}
+
+	function responseErrorText(body: unknown, fallback: string): string {
+		if (body && typeof body === "object" && "error" in body) return String((body as Record<string, unknown>).error);
+		if (typeof body === "string" && body.trim()) return body;
+		return fallback;
+	}
+
+	function normalizeDismissResponse(resp: { ok: boolean; status: number; body: unknown }, sessionId: string) {
+		if (isStructuredDismissResult(resp.body)) return resp.body;
+		const retryable = resp.status === 401 || resp.status === 408 || resp.status === 429 || resp.status >= 500;
+		return {
+			ok: false,
+			status: "failed",
+			sessionId,
+			message: resp.ok
+				? `team_dismiss returned an unstructured response (HTTP ${resp.status}).`
+				: `team_dismiss request failed (HTTP ${resp.status}): ${responseErrorText(resp.body, "unstructured gateway response")}`,
+			retryable,
+			httpStatus: resp.status,
+			response: resp.body,
+		};
+	}
+
+	async function apiDetailed(method: string, urlPath: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown }> {
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		const { ok, status, body: responseBody } = await apiCallDetailed(creds, method, urlPath, body, { extraHeaders });
+		return { ok, status, body: responseBody };
 	}
 
 	function err(msg: string) {
@@ -90,14 +142,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_dismiss",
 		label: "Dismiss Team Agent",
-		description: "Terminate a role agent and clean up its worktree.",
-		promptSnippet: "Dismiss (terminate) a team agent by session ID.",
+		description: "Dismiss a team agent; returns structured status, sessionId, message, retryable. already-dismissed is idempotent and non-retryable.",
+		promptSnippet: "Dismiss a team agent by session ID. Inspect status/retryable; already-dismissed is idempotent success and should not be retried.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: params.session_id }));
+				const targetSessionId = params.session_id;
+				const resp = await apiDetailed("POST", `/api/goals/${goalId}/team/dismiss`, { sessionId: targetSessionId });
+				const result = normalizeDismissResponse(resp, targetSessionId);
+				return { content: [{ type: "text" as const, text: dismissText(result) }], details: result, isError: result.status === "failed" };
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -118,8 +173,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_steer",
 		label: "Steer Team Agent",
-		description: "Send an urgent mid-turn redirect to a streaming agent. Fails if idle; use team_prompt.",
-		promptSnippet: "Steer a running team agent with an urgent message (mid-turn only).",
+		description: "Backward-compatible mid-turn redirect for a streaming agent. Fails if idle; prefer team_prompt(mode:'steer') for routine nudges.",
+		promptSnippet: "Legacy steer for a running team agent (mid-turn only); prefer team_prompt(mode:'steer') unless you need compatibility.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 			message: Type.String(),
@@ -149,17 +204,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_prompt",
 		label: "Prompt Team Agent",
-		description: "Prompt a team agent or direct-child team-lead. Runs immediately if idle, else queues.",
-		promptSnippet: "Send a prompt to a team agent (immediate if idle, queued if busy).",
+		description: "Prompt or steer a team agent or direct-child team-lead. Default mode is steer; use mode:'prompt' for next-turn queue semantics.",
+		promptSnippet: "Send a prompt/steer to a team agent. Default mode:'steer'; use mode:'prompt' to run/queue a normal next-turn prompt.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 			message: Type.String(),
+			mode: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("steer")], { description: "Delivery mode. Default steer.", default: "steer" })),
 			workflowGateId: Type.Optional(Type.String({ description: "Gate the agent works toward; auto-injects upstream gate content." })),
 			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Override DAG: gate IDs whose content to inject as context." })),
 		}),
 		async execute(_id, params) {
 			try {
-				const body: Record<string, unknown> = { sessionId: params.session_id, message: params.message };
+				const body: Record<string, unknown> = { sessionId: params.session_id, message: params.message, mode: params.mode ?? "steer" };
 				if (params.workflowGateId) body.workflowGateId = params.workflowGateId;
 				if (params.inputGateIds?.length) body.inputGateIds = params.inputGateIds;
 				return ok(await api("POST", `/api/goals/${goalId}/team/prompt`, body));

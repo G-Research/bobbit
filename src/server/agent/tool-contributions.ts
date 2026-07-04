@@ -24,6 +24,8 @@
 // tool still loads with no renderer/actions; a console.warn is emitted) — never
 // fatal, mirroring the per-tool try/catch in tool-manager.ts::scanToolsDir.
 
+import { isSupportedEntrypointIconId, type EntrypointIconId } from "../../shared/entrypoint-icons.js";
+
 /** Tool-scoped contributions parsed from a tool YAML (renderer + actions only). */
 export interface ToolContributions {
 	/** Renderer ESM module path, relative to the tool YAML's dir (contained in
@@ -58,8 +60,9 @@ export interface EntrypointContribution {
 	id: string;
 	kind: "composer-slash" | "session-menu" | "route";
 	label?: string;
+	icon?: EntrypointIconId;
 	routeId?: string;
-	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 }
 
@@ -184,6 +187,13 @@ function parseActions(raw: unknown, filePath: string): ToolActionsContribution |
 	return out;
 }
 
+function parseLauncherEntrypointIcon(raw: unknown, id: string, filePath: string): EntrypointIconId | undefined {
+	if (raw === undefined) return undefined;
+	if (isSupportedEntrypointIconId(raw)) return raw;
+	console.warn(`[tool-contributions] Dropping unsupported launcher entrypoint icon for '${id}' in ${filePath}`);
+	return undefined;
+}
+
 /**
  * Parse an array of entrypoint declarations into typed `EntrypointContribution[]`
  * (pack-schema-v1 §1.5). Launcher kinds require a `label` + a structured `target`
@@ -223,6 +233,8 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 		const panelId = rawTarget && typeof rawTarget.panelId === "string" ? rawTarget.panelId : undefined;
 		const route = rawTarget && typeof rawTarget.route === "string" ? rawTarget.route : undefined;
 		const action = rawTarget && typeof rawTarget.action === "string" ? rawTarget.action : undefined;
+		const channel = rawTarget && typeof rawTarget.channel === "string" ? rawTarget.channel : undefined;
+		const singletonKey = rawTarget && typeof rawTarget.singletonKey === "string" ? rawTarget.singletonKey : undefined;
 		const params = rawTarget && rawTarget.params && typeof rawTarget.params === "object"
 			? rawTarget.params as Record<string, unknown>
 			: undefined;
@@ -253,30 +265,41 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 				console.warn(`[tool-contributions] Dropping launcher entrypoint '${id}' with no structured target in ${filePath}`);
 				continue;
 			}
-			// A spawn launcher (`action:"spawn"`) carries ALL of { action, route, panelId }:
-			// the client calls `route` to spawn the child, then opens `panelId` in the
-			// returned child session. Both are required — drop with a warning if either
-			// is missing. Non-spawn launchers keep the legacy shape (panelId wins, else route).
+			// Action launchers carry a `panelId` like a plain panel target, but the
+			// client dispatches them through a trusted host-owned flow first.
 			if (action === "spawn") {
 				if (!route || !panelId) {
 					console.warn(`[tool-contributions] Dropping spawn launcher entrypoint '${id}' missing target.route or target.panelId in ${filePath}`);
 					continue;
 				}
+			} else if (action === "channel-panel") {
+				if (!channel || !panelId) {
+					console.warn(`[tool-contributions] Dropping channel-panel launcher entrypoint '${id}' missing target.channel or target.panelId in ${filePath}`);
+					continue;
+				}
 			}
 			if (seen.has(id)) continue;
 			seen.add(id);
-			const target: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> } = {};
+			const target: { action?: string; panelId?: string; route?: string; channel?: string; singletonKey?: string; params?: Record<string, unknown> } = {};
 			if (action === "spawn") {
 				target.action = "spawn";
 				target.route = route;
 				target.panelId = panelId;
+			} else if (action === "channel-panel") {
+				target.action = "channel-panel";
+				target.channel = channel;
+				target.panelId = panelId;
+				if (singletonKey) target.singletonKey = singletonKey;
 			} else if (panelId) {
 				target.panelId = panelId;
 			} else if (route) {
 				target.route = route;
 			}
 			if (params) target.params = params;
-			out.push({ id, kind: kind as EntrypointContribution["kind"], label, target });
+			const icon = parseLauncherEntrypointIcon(obj.icon, id, filePath);
+			const launcher: EntrypointContribution = { id, kind: kind as EntrypointContribution["kind"], label, target };
+			if (icon) launcher.icon = icon;
+			out.push(launcher);
 		}
 	}
 	return out;

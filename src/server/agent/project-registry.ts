@@ -9,16 +9,19 @@ import {
 import { getProjectRoot } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
+export type ProjectKind = "normal" | "headquarters" | "system";
+
 export interface RegisteredProject {
-  id: string;           // UUID
+  id: string;           // UUID or stable built-in project id
   name: string;         // Display name
   rootPath: string;     // Absolute path to project directory
   createdAt: number;    // Epoch ms
+  kind?: ProjectKind;   // Special project discriminator; absent means normal for legacy records
   color?: string;       // Deprecated — kept for backward compat
   palette?: string;     // One of 10 palette IDs or undefined
   colorLight: string;   // Accent color for light mode (always present)
   colorDark: string;    // Accent color for dark mode (always present)
-  position?: number;    // Visible project ordering; hidden/system projects do not participate
+  position?: number;    // User-controlled normal-project ordering; hidden/system/HQ projects do not participate
   provisional?: boolean; // True while a project assistant is setting up this project
   /**
    * True for synthetic projects that should be filtered out of UI listings
@@ -39,6 +42,53 @@ export interface RegisteredProject {
 
 /** Stable id for the synthetic system project. */
 export const SYSTEM_PROJECT_ID = "system";
+/** Stable id for the user-facing server workspace alias. */
+export const HEADQUARTERS_PROJECT_ID = "headquarters";
+/** Server-owned display name for the Headquarters project. */
+export const HEADQUARTERS_PROJECT_NAME = "Headquarters";
+
+export function isHeadquartersProject(project: Pick<RegisteredProject, "id" | "kind"> | string | undefined | null): boolean {
+  if (!project) return false;
+  if (typeof project === "string") return project === HEADQUARTERS_PROJECT_ID;
+  return project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
+}
+
+export function isSystemProject(project: Pick<RegisteredProject, "id" | "kind"> | string | undefined | null): boolean {
+  if (!project) return false;
+  if (typeof project === "string") return project === SYSTEM_PROJECT_ID;
+  return project.id === SYSTEM_PROJECT_ID || project.kind === "system";
+}
+
+export type SpecialProjectMutationErrorCode =
+  | "HEADQUARTERS_IMMUTABLE"
+  | "SYSTEM_PROJECT_IMMUTABLE"
+  | "HIDDEN_PROJECT_IMMUTABLE";
+
+export class SpecialProjectMutationError extends Error {
+  readonly status = 403;
+  constructor(
+    public readonly code: SpecialProjectMutationErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SpecialProjectMutationError";
+  }
+}
+
+export function assertNormalMutableProject(project: RegisteredProject, action: string): void {
+  if (isHeadquartersProject(project)) {
+    const message = action === "removed"
+      ? "Headquarters cannot be removed. Hide it from project lists in Settings instead."
+      : `Headquarters is managed by the server and cannot be ${action}. Hide it from project lists in Settings instead.`;
+    throw new SpecialProjectMutationError("HEADQUARTERS_IMMUTABLE", message);
+  }
+  if (isSystemProject(project)) {
+    throw new SpecialProjectMutationError("SYSTEM_PROJECT_IMMUTABLE", `The system project is managed by the server and cannot be ${action}.`);
+  }
+  if (project.hidden) {
+    throw new SpecialProjectMutationError("HIDDEN_PROJECT_IMMUTABLE", `Hidden projects are managed by the server and cannot be ${action}.`);
+  }
+}
 
 export type ProjectOrderErrorCode = "invalid_project_order" | "stale_project_order";
 
@@ -70,6 +120,17 @@ export function detectSymlinkRoot(
     /* best-effort */
   }
   return { symlink: false };
+}
+
+function canonicalProjectPath(rootPath: string): string {
+  let resolved = path.resolve(rootPath);
+  try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
+  const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function sameProjectPath(a: string, b: string): boolean {
+  return canonicalProjectPath(a) === canonicalProjectPath(b);
 }
 
 /**
@@ -113,8 +174,18 @@ export class ProjectRegistry {
     this.load();
   }
 
+  private isVisibleListProject(project: RegisteredProject): boolean {
+    return !project.hidden && !isSystemProject(project);
+  }
+
   private participatesInVisibleOrder(project: RegisteredProject): boolean {
-    return !project.hidden && project.id !== SYSTEM_PROJECT_ID;
+    return this.isVisibleListProject(project) && !isHeadquartersProject(project);
+  }
+
+  private listSortCategory(project: RegisteredProject): number {
+    if (this.isVisibleListProject(project) && isHeadquartersProject(project)) return 0;
+    if (this.participatesInVisibleOrder(project)) return 1;
+    return 2;
   }
 
   private positionSortValue(project: RegisteredProject): number {
@@ -214,10 +285,10 @@ export class ProjectRegistry {
     return [...this.projects.values()]
       .map((project, index) => ({ project, index }))
       .sort((a, b) => {
-        const visibleA = this.participatesInVisibleOrder(a.project);
-        const visibleB = this.participatesInVisibleOrder(b.project);
-        if (visibleA && visibleB) return this.compareVisibleOrderEntries(a, b);
-        if (visibleA !== visibleB) return visibleA ? -1 : 1;
+        const categoryA = this.listSortCategory(a.project);
+        const categoryB = this.listSortCategory(b.project);
+        if (categoryA !== categoryB) return categoryA - categoryB;
+        if (categoryA === 1) return this.compareVisibleOrderEntries(a, b);
         if (a.project.createdAt !== b.project.createdAt) return a.project.createdAt - b.project.createdAt;
         return a.index - b.index;
       })
@@ -262,7 +333,7 @@ export class ProjectRegistry {
       project.position = position;
     });
     this.save();
-    return this.list().filter(project => this.participatesInVisibleOrder(project));
+    return this.list().filter(project => this.isVisibleListProject(project));
   }
 
   /** Lookup by project ID. */
@@ -420,6 +491,7 @@ export class ProjectRegistry {
   ): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
+    assertNormalMutableProject(project, "updated");
 
     if (updates.parentProjectId !== undefined) {
       const v = updates.parentProjectId;
@@ -519,12 +591,73 @@ export class ProjectRegistry {
   }
 
   remove(id: string): void {
-    if (!this.projects.has(id)) {
+    const project = this.projects.get(id);
+    if (!project) {
       throw new Error(`Project not found: ${id}`);
     }
+    assertNormalMutableProject(project, "removed");
     this.projects.delete(id);
     this.normalizeVisiblePositions();
     this.save();
+  }
+
+  /**
+   * Ensure the built-in user-facing Headquarters project exists. Headquarters
+   * is the project-list alias for the server workspace, so it bypasses normal
+   * add-project preflight and scaffolds the supplied server config/state dirs
+   * instead of `<rootPath>/.bobbit`.
+   */
+  ensureHeadquartersProject(
+    rootPath: string,
+    opts: { stateDir?: string; configDir?: string } = {},
+  ): RegisteredProject {
+    if (!path.isAbsolute(rootPath)) {
+      throw new Error(`rootPath must be absolute, got: ${rootPath}`);
+    }
+
+    const canonicalRoot = (() => {
+      try { return path.resolve(fs.realpathSync(rootPath)); }
+      catch { return path.resolve(rootPath); }
+    })();
+
+    try { if (opts.stateDir) fs.mkdirSync(opts.stateDir, { recursive: true }); } catch { /* best-effort */ }
+    try { if (opts.configDir) fs.mkdirSync(opts.configDir, { recursive: true }); } catch { /* best-effort */ }
+
+    const existing = this.projects.get(HEADQUARTERS_PROJECT_ID);
+
+    let project = existing;
+
+    if (!project) {
+      project = {
+        id: HEADQUARTERS_PROJECT_ID,
+        name: HEADQUARTERS_PROJECT_NAME,
+        rootPath: canonicalRoot,
+        createdAt: Date.now(),
+        kind: "headquarters",
+        colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
+        colorDark: DEFAULT_PROJECT_COLOR_DARK,
+      };
+    }
+
+    project.name = HEADQUARTERS_PROJECT_NAME;
+    project.rootPath = canonicalRoot;
+    project.kind = "headquarters";
+    project.hidden = false;
+    delete project.provisional;
+    delete project.position;
+    delete project.parentProjectId;
+    project.colorLight = project.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
+    project.colorDark = project.colorDark || DEFAULT_PROJECT_COLOR_DARK;
+    project.color = project.color || project.colorLight;
+
+    this.projects.set(HEADQUARTERS_PROJECT_ID, project);
+    // Leave any legacy normal project at the server root in place for
+    // migrateToPerProjectState(), which rewrites its structured references
+    // before removing the duplicate. Doing it here would lose the old id.
+
+    this.normalizeVisiblePositions();
+    this.save();
+    return project;
   }
 
   /**
@@ -536,23 +669,6 @@ export class ProjectRegistry {
    * listings.
    */
   registerSystemProject(rootPath: string): RegisteredProject {
-    const existing = this.projects.get(SYSTEM_PROJECT_ID);
-    if (existing) {
-      let changed = false;
-      if (!existing.hidden) {
-        existing.hidden = true;
-        changed = true;
-      }
-      if (existing.position !== undefined) {
-        delete existing.position;
-        changed = true;
-      }
-      if (changed) {
-        this.normalizeVisiblePositions();
-        this.save();
-      }
-      return existing;
-    }
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
@@ -562,6 +678,35 @@ export class ProjectRegistry {
     {
       const sym = detectSymlinkRoot(rootPath);
       if (sym.symlink) rootPath = sym.canonical;
+    }
+    const existing = this.projects.get(SYSTEM_PROJECT_ID);
+    if (existing) {
+      let changed = false;
+      if (!existing.hidden) {
+        existing.hidden = true;
+        changed = true;
+      }
+      if (existing.kind !== "system") {
+        existing.kind = "system";
+        changed = true;
+      }
+      if (existing.rootPath !== rootPath) {
+        existing.rootPath = rootPath;
+        changed = true;
+      }
+      if (existing.position !== undefined) {
+        delete existing.position;
+        changed = true;
+      }
+      if (existing.provisional !== undefined) {
+        delete existing.provisional;
+        changed = true;
+      }
+      if (changed) {
+        this.normalizeVisiblePositions();
+        this.save();
+      }
+      return existing;
     }
     // Scaffold .bobbit dirs only if rootPath exists. The bobbit install dir
     // normally does, but tests may pass a placeholder.
@@ -577,6 +722,7 @@ export class ProjectRegistry {
       name: "System",
       rootPath,
       createdAt: Date.now(),
+      kind: "system",
       colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
       colorDark: DEFAULT_PROJECT_COLOR_DARK,
       hidden: true,
@@ -611,6 +757,9 @@ export class ProjectRegistry {
       if (p.provisional && path.resolve(p.rootPath) === normalized) {
         return p;
       }
+      if (sameProjectPath(p.rootPath, normalized) && (isHeadquartersProject(p) || isSystemProject(p) || p.hidden)) {
+        assertNormalMutableProject(p, "used as a provisional project");
+      }
     }
 
     // Scaffold .bobbit directories only if rootPath exists
@@ -644,6 +793,7 @@ export class ProjectRegistry {
   promote(id: string, updates: { name?: string }): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
+    assertNormalMutableProject(project, "promoted");
     // Idempotent — if already promoted, just update the name and return
     delete project.provisional;
     if (updates.name !== undefined) project.name = updates.name;
@@ -667,6 +817,7 @@ export class ProjectRegistry {
   removeProvisional(id: string): void {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
+    assertNormalMutableProject(project, "removed");
     if (!project.provisional) throw new Error(`Cannot remove non-provisional project ${id} via removeProvisional()`);
     this.projects.delete(id);
     this.normalizeVisiblePositions();

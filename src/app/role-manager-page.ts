@@ -1528,7 +1528,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = roles.find(r => r.name === selectedRole!.name);
 					if (updated) showEdit(updated);
 				}
-			}}>Customize at Server Level</button>`;
+			}}>Customize in Headquarters</button>`;
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
@@ -1556,7 +1556,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 					const updated = roles.find(r => r.name === selectedRole!.name);
 					if (updated) showEdit(updated); else showList();
 				}
-			}}>Revert to Inherited</button>`;
+			}}>Revert to Headquarters</button>`;
 		}
 	}
 	return "";
