@@ -6,7 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, type TemplateResult } from "lit";
 import { state } from "./state.js";
 import { gatewayFetch } from "./api.js";
-import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 
 export type ConfigOrigin = "builtin" | "server" | "user" | "project";
 
@@ -30,6 +30,13 @@ export function getConfigProjectId(options?: { preserveHeadquarters?: boolean })
 	if (_configScope === "system") return undefined;
 	if (isHeadquartersProject(_configScope) && !options?.preserveHeadquarters) return undefined;
 	return _configScope;
+}
+
+/** Get an explicit projectId for APIs that require a project scope.
+ *  The presentation "system" scope is backed by the Headquarters project. */
+export function getConfigApiProjectId(scope = _configScope): string {
+	if (!scope || scope === "system" || isHeadquartersProject(scope)) return HEADQUARTERS_PROJECT_ID;
+	return scope;
 }
 
 // ============================================================================
