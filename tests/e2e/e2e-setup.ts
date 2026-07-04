@@ -47,6 +47,17 @@ export function projectStateDirForRoot(rootPath: string): string {
 }
 
 /**
+ * Live server secrets (admin token, TLS, sandbox-agent auth) now live under
+ * serverSecretsDir(), which the test harnesses pin via BOBBIT_SECRETS_DIR to a
+ * temp dir so they never touch the real OS home. Mirror that resolution here so
+ * token readers look in the right place. Falls back to `<bobbitDir>/.secrets`
+ * (the harness default) when the env is not set for this worker.
+ */
+export function secretsDir(): string {
+	return process.env.BOBBIT_SECRETS_DIR || join(bobbitDir(), ".secrets");
+}
+
+/**
  * Backward-compatible exports. These are getters so existing code like
  *   fetch(`${BASE}/api/sessions`)
  * resolves the current worker's server on each access.
@@ -147,21 +158,29 @@ function envToken(): string | undefined {
 }
 
 export function readE2EToken(): string {
-	const p = join(bobbitDir(), "state", "token");
-	try {
-		return readFileSync(p, "utf-8").trim();
-	} catch (err: any) {
-		if (err?.code === "ENOENT") {
-			const fallback = envToken();
-			if (fallback) return fallback;
-			throw new Error(
-				`E2E token missing at ${p}. ` +
-				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
-				`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
-			);
+	// The live token lives under serverSecretsDir(); fall back to the legacy
+	// Headquarters-state location for older fixtures / pre-migration boots.
+	const candidates = [join(secretsDir(), "token"), join(bobbitDir(), "state", "token")];
+	let lastErr: any;
+	for (const p of candidates) {
+		try {
+			return readFileSync(p, "utf-8").trim();
+		} catch (err: any) {
+			lastErr = err;
+			if (err?.code !== "ENOENT") throw err;
 		}
-		throw err;
 	}
+	const fallback = envToken();
+	if (fallback) return fallback;
+	if (lastErr?.code === "ENOENT") {
+		throw new Error(
+			`E2E token missing at ${candidates.join(" or ")}. ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR/BOBBIT_SECRETS_DIR ` +
+			`point at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}, ` +
+			`BOBBIT_SECRETS_DIR=${process.env.BOBBIT_SECRETS_DIR ?? "<unset>"}.`
+		);
+	}
+	throw lastErr;
 }
 
 /**
@@ -173,28 +192,30 @@ export function readE2EToken(): string {
  * inside an `async` function (which is essentially every test).
  */
 export async function readE2ETokenAsync(): Promise<string> {
-	const p = join(bobbitDir(), "state", "token");
+	// Live token under serverSecretsDir(), legacy Headquarters-state fallback.
+	const candidates = [join(secretsDir(), "token"), join(bobbitDir(), "state", "token")];
 	let lastErr: any;
 	for (let attempt = 0; attempt < 6; attempt++) {
-		try {
-			return readFileSync(p, "utf-8").trim();
-		} catch (err: any) {
-			lastErr = err;
-			const code = err?.code;
-			if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") {
-				if (attempt < 5) await new Promise(r => setTimeout(r, 30));
-				continue;
+		for (const p of candidates) {
+			try {
+				return readFileSync(p, "utf-8").trim();
+			} catch (err: any) {
+				lastErr = err;
+				const code = err?.code;
+				if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") continue;
+				throw err;
 			}
-			throw err;
 		}
+		if (attempt < 5) await new Promise(r => setTimeout(r, 30));
 	}
 	if (lastErr?.code === "ENOENT") {
 		const fallback = envToken();
 		if (fallback) return fallback;
 		throw new Error(
-			`E2E token missing at ${p} (after 6 retries). ` +
-			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
-			`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+			`E2E token missing at ${candidates.join(" or ")} (after 6 retries). ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR/BOBBIT_SECRETS_DIR ` +
+			`point at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}, ` +
+			`BOBBIT_SECRETS_DIR=${process.env.BOBBIT_SECRETS_DIR ?? "<unset>"}.`
 		);
 	}
 	throw lastErr;

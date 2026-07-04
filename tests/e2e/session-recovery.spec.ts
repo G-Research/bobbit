@@ -78,6 +78,8 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	mkdirSync(agentDir, { recursive: true });
 
 	process.env.BOBBIT_DIR = bobbitDir;
+	// Isolate live server secrets so they never land in the real OS home dir.
+	process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.NODE_ENV = "test";

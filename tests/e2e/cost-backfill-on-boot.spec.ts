@@ -95,6 +95,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	// regression that motivated this isolation.
 	const MUTATED_ENV_KEYS = [
 		"BOBBIT_DIR",
+		"BOBBIT_SECRETS_DIR",
 		"BOBBIT_SKIP_MCP",
 		"BOBBIT_SKIP_NPM_CI",
 		"BOBBIT_TEST_NO_PUSH",
@@ -108,6 +109,8 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	for (const k of MUTATED_ENV_KEYS) envSnapshot[k] = process.env[k];
 
 	process.env.BOBBIT_DIR = bobbitDir;
+	// Isolate live server secrets so they never land in the real OS home dir.
+	process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";

@@ -168,6 +168,7 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 
 	const previousEnv: Record<string, string | undefined> = {
 		BOBBIT_DIR: process.env.BOBBIT_DIR,
+		BOBBIT_SECRETS_DIR: process.env.BOBBIT_SECRETS_DIR,
 		BOBBIT_PI_DIR: process.env.BOBBIT_PI_DIR,
 		BOBBIT_AGENT_DIR: process.env.BOBBIT_AGENT_DIR,
 		NODE_ENV: process.env.NODE_ENV,
@@ -193,6 +194,8 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 
 	if (usesOverride) process.env.BOBBIT_DIR = headquartersDir;
 	else delete process.env.BOBBIT_DIR;
+	// Isolate live server secrets so they never land in the real OS home dir.
+	process.env.BOBBIT_SECRETS_DIR = join(serverRoot, ".bobbit-secrets");
 	delete process.env.BOBBIT_PI_DIR;
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.NODE_ENV = "test";

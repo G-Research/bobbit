@@ -5,11 +5,31 @@ import os from "node:os";
 import path from "node:path";
 
 const { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } = await import("../src/server/agent/state-migration.ts");
+const { serverSecretsDir } = await import("../src/server/bobbit-dir.ts");
 const {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
 	ProjectRegistry,
 } = await import("../src/server/agent/project-registry.ts");
+
+/**
+ * Live server secrets (token/TLS/sandbox-agent auth) resolve to serverSecretsDir(),
+ * which defaults to an OS user-level directory. Pin BOBBIT_SECRETS_DIR to a fresh
+ * temp dir so these tests NEVER write real admin secrets into the developer's home
+ * dir. Returns the isolated secrets dir. Callers set it before invoking migration.
+ */
+function useIsolatedSecretsDir(): string {
+	const dir = tmpRoot("bobbit-hq-secrets-");
+	process.env.BOBBIT_SECRETS_DIR = dir;
+	return dir;
+}
+
+// Safety net: guarantee BOBBIT_SECRETS_DIR is always an isolated temp dir for the
+// whole file, so even standalone `tsx --test` runs never write real admin secrets
+// into the developer's home dir. Individual tests override this per-case.
+if (!process.env.BOBBIT_SECRETS_DIR) {
+	process.env.BOBBIT_SECRETS_DIR = tmpRoot("bobbit-hq-secrets-file-");
+}
 
 function tmpRoot(prefix = "bobbit-hq-migration-"): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -262,13 +282,16 @@ describe("Headquarters directory migration", () => {
 		assert.equal(reread.sessions.length, 1);
 	});
 
-	// Security regression: SERVER_STATE_ENTRIES includes `token`. In the default
-	// no-override same-root case the legacy `<serverRunDir>/.bobbit/state/token` is a
-	// live admin bearer token readable by a normal same-root project agent (whose cwd
-	// defaults to `<serverRunDir>` and reads `<serverRunDir>/.bobbit/state`). The
-	// migration must strip it from that path while preserving it in Headquarters.
-	it("neutralizes legacy server secrets at the normal-project state path (default same-root)", () => {
+	// Security regression (S1): live server secrets must live OUTSIDE any project
+	// root, under serverSecretsDir(). In the default same-root case the legacy
+	// `<serverRunDir>/.bobbit/state/token` AND the Headquarters
+	// `<serverRunDir>/.bobbit/headquarters/state/token` are both descendants of a
+	// normal same-root project's default cwd (`<serverRunDir>`). The migration must
+	// relocate every SERVER_SECRET_ENTRY into serverSecretsDir() and leave NONE
+	// behind at any project-reachable path.
+	it("relocates server secrets into serverSecretsDir and leaves none at project-reachable paths (default same-root)", () => {
 		const root = tmpRoot();
+		const secretsDir = useIsolatedSecretsDir();
 		const legacyStateDir = path.join(root, ".bobbit", "state");
 		fs.mkdirSync(legacyStateDir, { recursive: true });
 		// A normal project registered at the server run dir → same-root split.
@@ -276,43 +299,52 @@ describe("Headquarters directory migration", () => {
 		const adminToken = "admin-bearer-secret-value";
 		fs.writeFileSync(path.join(legacyStateDir, "token"), adminToken, "utf-8");
 		fs.writeFileSync(path.join(legacyStateDir, "sandbox-agent-auth"), "sandbox-secret", "utf-8");
+		fs.mkdirSync(path.join(legacyStateDir, "tls"), { recursive: true });
+		fs.writeFileSync(path.join(legacyStateDir, "tls", "cert.pem"), "cert-material", "utf-8");
 
 		const dirs = migrateDirs(root);
 		const diagnostics = migrateLegacyHeadquartersDirectory(dirs);
 
 		const legacyToken = path.join(legacyStateDir, "token");
 		const hqToken = path.join(dirs.headquartersStateDir, "token");
-		// Legacy admin token must no longer be readable by a same-root project agent.
+		const secretsToken = path.join(secretsDir, "token");
+		// No live secret may remain at either project-reachable state dir.
 		assert.equal(fs.existsSync(legacyToken), false, "legacy admin token must be removed from the normal-project state path");
-		// Headquarters retains the authoritative token.
-		assert.equal(fs.readFileSync(hqToken, "utf-8"), adminToken, "Headquarters state must retain the admin token");
-		// Restricted quarantine backup preserves the value under HQ state.
-		assert.equal(
-			fs.readFileSync(path.join(dirs.headquartersStateDir, "migration-quarantine", "secrets", "token"), "utf-8"),
-			adminToken,
-		);
-		// A NON-secret marker is left behind; diagnostics record the move without secrets.
-		assert.equal(fs.existsSync(path.join(legacyStateDir, ".token-moved-to-headquarters")), true);
-		assert.ok(diagnostics.copied.some(entry => entry.includes("neutralized legacy server secret") && entry.includes("token")));
-		assert.ok(diagnostics.copied.every(entry => !entry.includes(adminToken)), "diagnostics must not contain secret contents");
-		// sandbox-agent-auth is likewise neutralized.
+		assert.equal(fs.existsSync(hqToken), false, "admin token must not remain under the Headquarters state dir");
 		assert.equal(fs.existsSync(path.join(legacyStateDir, "sandbox-agent-auth")), false);
+		assert.equal(fs.existsSync(path.join(legacyStateDir, "tls")), false);
+		// The single authoritative copy lives in serverSecretsDir(), value preserved.
+		assert.equal(fs.readFileSync(secretsToken, "utf-8"), adminToken, "serverSecretsDir must hold the authoritative admin token");
+		assert.equal(fs.readFileSync(path.join(secretsDir, "sandbox-agent-auth"), "utf-8"), "sandbox-secret");
+		assert.equal(fs.readFileSync(path.join(secretsDir, "tls", "cert.pem"), "utf-8"), "cert-material");
+		// A NON-secret marker is left behind; diagnostics record the move without secrets.
+		assert.equal(fs.existsSync(path.join(legacyStateDir, ".token-moved-to-server-secrets")), true);
+		assert.ok(diagnostics.copied.some(entry => entry.includes("relocated live server secret") && entry.includes("token")));
+		assert.ok(diagnostics.copied.every(entry => !entry.includes(adminToken)), "diagnostics must not contain secret contents");
 
-		// Idempotent: re-running does not resurrect the legacy token or change the HQ copy.
+		// Idempotent: re-running does not resurrect a project-reachable copy or change the value.
 		const second = migrateLegacyHeadquartersDirectory(dirs);
 		assert.equal(fs.existsSync(legacyToken), false, "re-running migration must not resurrect the legacy token");
-		assert.equal(fs.readFileSync(hqToken, "utf-8"), adminToken);
+		assert.equal(fs.existsSync(hqToken), false);
+		assert.equal(fs.readFileSync(secretsToken, "utf-8"), adminToken);
 		assert.equal(second.failures.length, 0);
 	});
 
-	it("leaves BOBBIT_DIR-override server secrets in place and never neutralizes them", () => {
+	// S1 (BOBBIT_DIR override): the override state dir is ALSO a descendant of a
+	// same-root normal project's cwd, so override secrets must be relocated too.
+	// Preserve-first: an existing serverSecretsDir token VALUE wins over both the
+	// override and legacy copies (token continuity across boots).
+	it("relocates BOBBIT_DIR-override server secrets into serverSecretsDir (preserve-first)", () => {
 		const root = tmpRoot();
 		const override = tmpRoot("bobbit-hq-override-");
+		const secretsDir = useIsolatedSecretsDir();
+		// A pre-existing authoritative token already lives in serverSecretsDir().
+		const existingToken = "already-present-authoritative-token-value-1234567890";
+		fs.writeFileSync(path.join(secretsDir, "token"), existingToken, "utf-8");
 		const overrideState = path.join(override, "state");
 		fs.mkdirSync(overrideState, { recursive: true });
-		const adminToken = "override-admin-token";
-		fs.writeFileSync(path.join(overrideState, "token"), adminToken, "utf-8");
-		// A legacy default .bobbit/state token also exists but is NOT the HQ source.
+		fs.writeFileSync(path.join(overrideState, "token"), "override-admin-token", "utf-8");
+		// A legacy default .bobbit/state token also exists.
 		const legacyStateDir = path.join(root, ".bobbit", "state");
 		fs.mkdirSync(legacyStateDir, { recursive: true });
 		fs.writeFileSync(path.join(legacyStateDir, "token"), "legacy-default-token", "utf-8");
@@ -325,10 +357,28 @@ describe("Headquarters directory migration", () => {
 			legacyServerBobbitDir: path.join(root, ".bobbit"),
 		});
 
-		// Override HQ token untouched; legacy default token untouched (override path skips the copy/neutralize loop).
-		assert.equal(fs.readFileSync(path.join(overrideState, "token"), "utf-8"), adminToken);
-		assert.equal(fs.existsSync(path.join(legacyStateDir, "token")), true, "override case must not touch the legacy default .bobbit/state");
+		// The pre-existing serverSecretsDir value is preserved (never overwritten).
+		assert.equal(fs.readFileSync(path.join(secretsDir, "token"), "utf-8"), existingToken, "existing serverSecretsDir token value must be preserved");
+		// The override copy is removed (project-reachable duplicate stripped).
+		assert.equal(fs.existsSync(path.join(overrideState, "token")), false, "override HQ token must be relocated out of the override state dir");
+		// Override-mode intentionally leaves the legacy default `.bobbit/state` in
+		// place (it is not the HQ source), but never quarantines under HQ.
 		assert.equal(fs.existsSync(path.join(overrideState, "migration-quarantine", "secrets", "token")), false);
+	});
+
+	it("moves an existing Headquarters-state token into serverSecretsDir when no legacy copy exists", () => {
+		const root = tmpRoot();
+		const secretsDir = useIsolatedSecretsDir();
+		const dirs = migrateDirs(root);
+		// Simulate a prior migration that left the token under HQ state (old layout).
+		fs.mkdirSync(dirs.headquartersStateDir, { recursive: true });
+		const adminToken = "hq-state-legacy-admin-token-value-abcdefghij-0123456789";
+		fs.writeFileSync(path.join(dirs.headquartersStateDir, "token"), adminToken, "utf-8");
+
+		migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.equal(fs.existsSync(path.join(dirs.headquartersStateDir, "token")), false, "token must be relocated out of the HQ state dir");
+		assert.equal(fs.readFileSync(path.join(secretsDir, "token"), "utf-8"), adminToken, "relocated token value must be preserved");
 	});
 
 	it("does not promote same-root normal projects and quarantines ambiguous config", () => {
@@ -407,6 +457,127 @@ describe("Headquarters directory migration", () => {
 		assert.equal(fs.existsSync(path.join(override, "headquarters", "state")), false);
 		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(overrideState, "projects.json")).some(project => project.id === "normal-default-root"), false, "BOBBIT_DIR must not import default .bobbit project registry");
 		assert.ok(diagnostics.skipped.some(entry => entry.includes("override config is used in place")));
+	});
+
+	// B1: BOBBIT_DIR-override installs promoted per-store records under `headquarters`
+	// during the old PR #925 migration and left their `.pre-headquarters-id-migration`
+	// per-store backups in the OVERRIDE state dir. Restoring only the registry record
+	// (as before) leaves those sessions/goals/staff attributed to headquarters. The
+	// per-store repair must run for override installs too, reading the per-store files
+	// and backups from the override state dir, and re-attribute the normal records to
+	// the restored normal project while removing them from the HQ store.
+	it("re-attributes promoted per-store records to the restored normal project (BOBBIT_DIR override, B1)", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		// Post-promotion override registry: only headquarters remains; the normal
+		// project's original record survives in the per-store id-migration backup.
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		// Promoted sessions/goals were re-tagged to headquarters; the backups keep
+		// the original normal-project attribution.
+		writeJson(path.join(overrideState, "sessions.json"), [
+			{ id: "s1", title: "Promoted", cwd: root, agentSessionFile: "a.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1 },
+		]);
+		writeJson(path.join(overrideState, "sessions.json.pre-headquarters-id-migration"), [
+			{ id: "s1", title: "Original", cwd: root, agentSessionFile: "a.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1 },
+		]);
+		writeJson(path.join(overrideState, "goals.json"), [
+			{ id: "g1", title: "G", cwd: root, state: "todo", spec: "", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, updatedAt: 1 },
+		]);
+		writeJson(path.join(overrideState, "goals.json.pre-headquarters-id-migration"), [
+			{ id: "g1", title: "G", cwd: root, state: "todo", spec: "", projectId: oldId, createdAt: 1, updatedAt: 1 },
+		]);
+
+		const diagnostics = migrateLegacyHeadquartersDirectory({
+			serverRunDir: root,
+			headquartersDir: override,
+			headquartersStateDir: overrideState,
+			headquartersConfigDir: path.join(override, "config"),
+			legacyServerBobbitDir: path.join(root, ".bobbit"),
+		});
+
+		// Registry record restored.
+		const projects = readJson<Array<Record<string, unknown>>>(path.join(overrideState, "projects.json"));
+		assert.ok(projects.some(project => project.id === oldId), "normal project registry record must be restored");
+		assert.deepEqual(diagnostics.restoredNormalProjectIds, [oldId]);
+
+		// Per-store records re-attributed to the normal project's own state dir.
+		const normalSessions = readJson<{ sessions?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "sessions.json"));
+		const normalSessionRecords = Array.isArray(normalSessions) ? normalSessions : (normalSessions.sessions ?? []);
+		assert.equal(normalSessionRecords[0].projectId, oldId, "promoted session must be re-attributed to the normal project");
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "goals.json"))[0].projectId, oldId);
+
+		// And removed from the Headquarters (override) store — no lingering duplicate.
+		const hqSessions = readJson<{ sessions?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>>(path.join(overrideState, "sessions.json"));
+		const hqSessionRecords = Array.isArray(hqSessions) ? hqSessions : (hqSessions.sessions ?? []);
+		assert.equal(hqSessionRecords.some(record => record.id === "s1"), false, "re-attributed session must not remain under headquarters");
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(overrideState, "goals.json")).some(record => record.id === "g1"), false, "re-attributed goal must not remain under headquarters");
+
+		// Idempotent: re-running does not duplicate or resurrect records.
+		migrateLegacyHeadquartersDirectory({
+			serverRunDir: root,
+			headquartersDir: override,
+			headquartersStateDir: overrideState,
+			headquartersConfigDir: path.join(override, "config"),
+			legacyServerBobbitDir: path.join(root, ".bobbit"),
+		});
+		const normalGoalsAfter = readJson<Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "goals.json"));
+		assert.equal(normalGoalsAfter.filter(record => record.id === "g1").length, 1, "re-running must not duplicate the re-attributed record");
+	});
+});
+
+describe("serverSecretsDir resolution", () => {
+	const prev = process.env.BOBBIT_SECRETS_DIR;
+	it("honours the BOBBIT_SECRETS_DIR override verbatim (resolved absolute)", () => {
+		const dir = tmpRoot("bobbit-secrets-override-");
+		process.env.BOBBIT_SECRETS_DIR = dir;
+		try {
+			assert.equal(serverSecretsDir(), path.resolve(dir));
+			assert.equal(fs.existsSync(serverSecretsDir()), true, "serverSecretsDir must create the directory");
+		} finally {
+			process.env.BOBBIT_SECRETS_DIR = prev;
+		}
+	});
+
+	it("namespaces per Headquarters directory via a stable hash when no override is set", () => {
+		// Redirect EVERY OS user-dir base to a temp root so the default (no-override)
+		// resolution never writes into the developer's real home dir.
+		const fakeHome = tmpRoot("bobbit-fake-home-");
+		const saved: Record<string, string | undefined> = {
+			BOBBIT_SECRETS_DIR: process.env.BOBBIT_SECRETS_DIR,
+			BOBBIT_DIR: process.env.BOBBIT_DIR,
+			HOME: process.env.HOME,
+			USERPROFILE: process.env.USERPROFILE,
+			APPDATA: process.env.APPDATA,
+			XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+		};
+		delete process.env.BOBBIT_SECRETS_DIR;
+		process.env.HOME = fakeHome;
+		process.env.USERPROFILE = fakeHome;
+		process.env.APPDATA = path.join(fakeHome, "AppData", "Roaming");
+		process.env.XDG_STATE_HOME = path.join(fakeHome, ".local", "state");
+		try {
+			const hqA = tmpRoot("bobbit-hqdir-a-");
+			process.env.BOBBIT_DIR = hqA;
+			const a1 = serverSecretsDir();
+			const a2 = serverSecretsDir();
+			assert.equal(a1, a2, "resolution must be stable for a fixed Headquarters dir");
+			const hqB = tmpRoot("bobbit-hqdir-b-");
+			process.env.BOBBIT_DIR = hqB;
+			const b1 = serverSecretsDir();
+			assert.notEqual(a1, b1, "different Headquarters dirs must map to different secrets namespaces");
+			// Lives under the (faked) OS user-level base, never under either Headquarters dir.
+			assert.equal(a1.startsWith(path.resolve(hqA)), false, "secrets must not live under the Headquarters/project root");
+			assert.equal(a1.startsWith(path.resolve(fakeHome)), true, "secrets must live under the OS user-level base");
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key]; else process.env[key] = value;
+			}
+		}
 	});
 });
 

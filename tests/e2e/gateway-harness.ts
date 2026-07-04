@@ -75,7 +75,12 @@ export interface GatewayInfo {
 }
 
 function readHarnessToken(info: GatewayInfo): string {
-	try { return readFileSync(join(info.bobbitDir, "state", "token"), "utf-8").trim(); } catch {}
+	// Live token lives under serverSecretsDir() (BOBBIT_SECRETS_DIR); fall back to
+	// the legacy Headquarters-state location for older fixtures.
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR || join(info.bobbitDir, ".secrets");
+	for (const p of [join(secretsDir, "token"), join(info.bobbitDir, "state", "token")]) {
+		try { return readFileSync(p, "utf-8").trim(); } catch {}
+	}
 	const token = process.env.BOBBIT_TOKEN?.trim();
 	if (token && token.length >= 64) return token;
 	throw new Error(`missing token for ${info.bobbitDir}`);
@@ -296,6 +301,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			delete process.env.BOBBIT_DEV_HARNESS;
 		}
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+		// land in the developer's real OS home dir (serverSecretsDir() default).
+		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";

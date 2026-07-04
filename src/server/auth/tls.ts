@@ -1,16 +1,18 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
+import { serverSecretsDir } from "../bobbit-dir.js";
 
-const STATE_DIR = bobbitStateDir();
-const TLS_DIR = path.join(STATE_DIR, "tls");
-const CERT_PATH = path.join(TLS_DIR, "cert.pem");
-const KEY_PATH = path.join(TLS_DIR, "key.pem");
-
+// TLS material is a live server secret, so it lives under serverSecretsDir()
+// (outside any project root). Resolved lazily at call time because the secrets
+// dir depends on env (BOBBIT_SECRETS_DIR) that must be readable when used, not
+// at module load.
+function tlsDir(): string { return path.join(serverSecretsDir(), "tls"); }
+function certPath(): string { return path.join(tlsDir(), "cert.pem"); }
+function keyPath(): string { return path.join(tlsDir(), "key.pem"); }
 // mkcert CA files
-const CA_CERT_PATH = path.join(TLS_DIR, "ca.crt");
-const CA_KEY_PATH = path.join(TLS_DIR, "ca.key");
+function caCertPath(): string { return path.join(tlsDir(), "ca.crt"); }
+function caKeyPath(): string { return path.join(tlsDir(), "ca.key"); }
 
 /** Resolve the openssl binary, checking Git-bundled locations on Windows. */
 function resolveOpenssl(): string {
@@ -53,17 +55,16 @@ export interface TlsFiles {
  * Returns paths to the cert, key, and optionally the CA cert.
  */
 export async function ensureTlsCert(host: string, extraDomains?: string[]): Promise<TlsFiles> {
-	fs.mkdirSync(STATE_DIR, { recursive: true });
-	fs.mkdirSync(TLS_DIR, { recursive: true });
+	fs.mkdirSync(tlsDir(), { recursive: true });
 
 	// All domains/IPs the cert should cover
 	const allDomains = [host, "127.0.0.1", "localhost", ...(extraDomains || [])];
 
 	// If existing cert covers all required names, reuse it
-	if (fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
-		if (certCoversAllDomains(CERT_PATH, allDomains)) {
-			const caCert = fs.existsSync(CA_CERT_PATH) ? CA_CERT_PATH : undefined;
-			return { cert: CERT_PATH, key: KEY_PATH, caCert };
+	if (fs.existsSync(certPath()) && fs.existsSync(keyPath())) {
+		if (certCoversAllDomains(certPath(), allDomains)) {
+			const caCert = fs.existsSync(caCertPath()) ? caCertPath() : undefined;
+			return { cert: certPath(), key: keyPath(), caCert };
 		}
 		console.log(`  TLS cert does not cover all required names, regenerating...`);
 	}
@@ -89,10 +90,10 @@ async function generateMkcertCert(_host: string, allDomains: string[]): Promise<
 	let caCert: string;
 	let caKey: string;
 
-	if (fs.existsSync(CA_CERT_PATH) && fs.existsSync(CA_KEY_PATH)) {
-		console.log(`  Reusing existing Bobbit CA from ${TLS_DIR}`);
-		caCert = fs.readFileSync(CA_CERT_PATH, "utf-8");
-		caKey = fs.readFileSync(CA_KEY_PATH, "utf-8");
+	if (fs.existsSync(caCertPath()) && fs.existsSync(caKeyPath())) {
+		console.log(`  Reusing existing Bobbit CA from ${tlsDir()}`);
+		caCert = fs.readFileSync(caCertPath(), "utf-8");
+		caKey = fs.readFileSync(caKeyPath(), "utf-8");
 	} else {
 		console.log(`  Creating Bobbit local CA...`);
 		const ca = await createCA({
@@ -104,12 +105,12 @@ async function generateMkcertCert(_host: string, allDomains: string[]): Promise<
 		});
 		caCert = ca.cert;
 		caKey = ca.key;
-		fs.writeFileSync(CA_CERT_PATH, caCert);
-		fs.writeFileSync(CA_KEY_PATH, caKey);
+		fs.writeFileSync(caCertPath(), caCert);
+		fs.writeFileSync(caKeyPath(), caKey);
 		if (process.platform !== "win32") {
-			fs.chmodSync(CA_KEY_PATH, 0o600);
+			fs.chmodSync(caKeyPath(), 0o600);
 		}
-		console.log(`  CA cert: ${CA_CERT_PATH}`);
+		console.log(`  CA cert: ${caCertPath()}`);
 	}
 
 	// Generate a cert for all required domains signed by our CA
@@ -122,18 +123,18 @@ async function generateMkcertCert(_host: string, allDomains: string[]): Promise<
 		validity: 397,
 	});
 
-	fs.writeFileSync(CERT_PATH, cert.cert);
-	fs.writeFileSync(KEY_PATH, cert.key);
+	fs.writeFileSync(certPath(), cert.cert);
+	fs.writeFileSync(keyPath(), cert.key);
 	if (process.platform !== "win32") {
-		fs.chmodSync(KEY_PATH, 0o600);
-		fs.chmodSync(CERT_PATH, 0o644);
+		fs.chmodSync(keyPath(), 0o600);
+		fs.chmodSync(certPath(), 0o644);
 	}
 
-	console.log(`  TLS cert: ${CERT_PATH} (signed by Bobbit CA)`);
-	console.log(`  TLS key:  ${KEY_PATH}`);
-	console.log(`  Install ${CA_CERT_PATH} on other devices to trust this certificate.`);
+	console.log(`  TLS cert: ${certPath()} (signed by Bobbit CA)`);
+	console.log(`  TLS key:  ${keyPath()}`);
+	console.log(`  Install ${caCertPath()} on other devices to trust this certificate.`);
 
-	return { cert: CERT_PATH, key: KEY_PATH, caCert: CA_CERT_PATH };
+	return { cert: certPath(), key: keyPath(), caCert: caCertPath() };
 }
 
 function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
@@ -156,8 +157,8 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 				"-days", "397",
 				"-subj", `"/CN=bobbit"`,
 				"-addext", `"${san}"`,
-				"-keyout", `"${KEY_PATH}"`,
-				"-out", `"${CERT_PATH}"`,
+				"-keyout", `"${keyPath()}"`,
+				"-out", `"${certPath()}"`,
 			].join(" "),
 			{ stdio: "pipe", shell: true as unknown as string },
 		);
@@ -165,7 +166,7 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 		// Try alternate openssl syntax for older versions that don't support -addext
 		try {
 			// Write a minimal openssl config with SAN
-			const cnfPath = path.join(TLS_DIR, "openssl.cnf");
+			const cnfPath = path.join(tlsDir(), "openssl.cnf");
 			fs.writeFileSync(cnfPath, [
 				"[req]",
 				"distinguished_name = req_dn",
@@ -188,8 +189,8 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 					"-nodes",
 					"-days", "397",
 					"-config", `"${cnfPath}"`,
-					"-keyout", `"${KEY_PATH}"`,
-					"-out", `"${CERT_PATH}"`,
+					"-keyout", `"${keyPath()}"`,
+					"-out", `"${certPath()}"`,
 				].join(" "),
 				{ stdio: "pipe", shell: true as unknown as string },
 			);
@@ -204,14 +205,14 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 
 	// Restrict key permissions (owner-only on Unix)
 	if (process.platform !== "win32") {
-		fs.chmodSync(KEY_PATH, 0o600);
-		fs.chmodSync(CERT_PATH, 0o644);
+		fs.chmodSync(keyPath(), 0o600);
+		fs.chmodSync(certPath(), 0o644);
 	}
 
-	console.log(`  TLS cert: ${CERT_PATH}`);
-	console.log(`  TLS key:  ${KEY_PATH}`);
+	console.log(`  TLS cert: ${certPath()}`);
+	console.log(`  TLS key:  ${keyPath()}`);
 
-	return { cert: CERT_PATH, key: KEY_PATH };
+	return { cert: certPath(), key: keyPath() };
 }
 
 /** Check if an existing cert covers ALL required domains/IPs. */
