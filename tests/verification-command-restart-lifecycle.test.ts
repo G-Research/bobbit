@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { makeTmpDir } from "./helpers/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../src/server/agent/verification-harness.js";
+import { killTreeByPid } from "../src/server/agent/spawn-tree.js";
+import { GIT_BASH } from "../src/server/agent/shell-util.js";
 
 const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";
@@ -116,6 +118,45 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
 	});
 }
 
+function isPidAliveForTest(pid: number): boolean {
+	if (!Number.isFinite(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code === "EPERM";
+	}
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!isPidAliveForTest(pid)) return true;
+		await sleep(50);
+	}
+	return !isPidAliveForTest(pid);
+}
+
+function killPidBestEffort(pid: number): void {
+	if (!isPidAliveForTest(pid)) return;
+	try { killTreeByPid(pid, "SIGKILL"); } catch { /* best-effort */ }
+	try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${MARKER}: timed out waiting for ${label}`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 async function cleanupChild(child: ChildProcess): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) return;
 	try { child.kill("SIGKILL"); } catch { /* already gone */ }
@@ -217,6 +258,52 @@ function activeVerification(signalId: string, steps: any[], startedAt = Date.now
 		steps,
 	};
 }
+
+test("command step settles from process exit when inherited stdio delays close", async (t) => {
+	if (process.platform === "win32" && !GIT_BASH) {
+		t.skip("requires Git Bash background-job semantics on Windows");
+		return;
+	}
+	const { stateDir, harness } = makeHarness(t);
+	const workDir = path.join(stateDir, "stdio-close-delay-work");
+	fs.mkdirSync(workDir, { recursive: true });
+	const holderPidFile = path.join(workDir, "stdio-holder.pid");
+	const holderScript = [
+		"const fs = require('node:fs');",
+		`fs.writeFileSync(${JSON.stringify(holderPidFile)}, String(process.pid));`,
+		"setTimeout(() => {}, 30000);",
+	].join("\n");
+	const holderB64 = Buffer.from(holderScript, "utf8").toString("base64");
+	const nodeExe = process.execPath.replace(/\\/g, "/");
+	const safeHolderCwd = process.cwd().replace(/\\/g, "/").replace(/'/g, `'"'"'`);
+	const command = `cd '${safeHolderCwd}' && "${nodeExe}" -e "eval(Buffer.from('${holderB64}','base64').toString())" & echo stdio-close-delay-parent-exiting; exit 0`;
+
+	let holderPid = 0;
+	const stepPromise = (harness as any).runCommandStep(command, workDir, 30, false, undefined, undefined, undefined);
+	try {
+		holderPid = await waitForCondition("stdio holder pid", () => {
+			if (!fs.existsSync(holderPidFile)) return false;
+			const pid = Number(fs.readFileSync(holderPidFile, "utf8"));
+			return Number.isFinite(pid) && pid > 0 ? pid : false;
+		}, 3_000, 25);
+
+		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio");
+		assert.equal(result.passed, true, `${MARKER}: the exited command should be treated as the authoritative result even when a descendant holds stdio open.`);
+		assert.match(result.output, /stdio-close-delay-parent-exiting/, `${MARKER}: output written before the immediate process exit should be retained.`);
+		assert.match(result.output, /stdio did not close/i, `${MARKER}: delayed-close fallback should explain why Bobbit finalized from process exit.`);
+		if (process.platform !== "win32") {
+			assert.equal(
+				await waitForPidExit(holderPid, 5_000),
+				true,
+				`${MARKER}: delayed-stdio descendants should be reaped when Bobbit finalizes from process exit.`,
+			);
+		}
+	} finally {
+		killPidBestEffort(holderPid);
+		await waitForPidExit(holderPid, 5_000);
+		await Promise.race([stepPromise.catch(() => undefined), sleep(2_000)]);
+	}
+});
 
 test("resume does not trust or kill an alive PID when the pidfile identity does not match", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);

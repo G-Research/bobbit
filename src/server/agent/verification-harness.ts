@@ -17,6 +17,10 @@ const COMMAND_IDENTITY_HEARTBEAT_STALE_MS = 10_000;
 const COMMAND_IDENTITY_PIDFILE_RETRY_MS = 2_000;
 const COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS = 100;
 const COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES = Math.min(MAX_RETAINED_LOG_BYTES, 1024 * 1024);
+const COMMAND_EXIT_CLOSE_GRACE_MS = Math.max(
+	500,
+	Number.parseInt(process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS || "2000", 10) || 2_000,
+);
 
 class PendingCommandCleanupError extends Error {
 	constructor(message: string) {
@@ -5012,7 +5016,15 @@ export class VerificationHarness {
 				child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
 			}
 
-			child.on("close", (code: number | null) => {
+			let settled = false;
+			let exitCode: number | null = null;
+			let exitSignal: NodeJS.Signals | null = null;
+			let closeGraceTimer: NodeJS.Timeout | undefined;
+
+			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
+				if (settled) return;
+				settled = true;
+				if (closeGraceTimer) clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
@@ -5048,9 +5060,31 @@ export class VerificationHarness {
 					resolve(withDiagnostics(matchExpectFailure(code, tail, errorPattern)));
 					return;
 				}
-				resolve(withDiagnostics({ passed: code === 0, output: tail || `exit code ${code}` }));
+				resolve(withDiagnostics({ passed: code === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${code}`) }));
+			};
+
+			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+				exitCode = code;
+				exitSignal = signal;
+				closeGraceTimer = setTimeout(() => {
+					if (settled) return;
+					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
+					stderr += `${stderr ? "\n" : ""}${warning}`;
+					appendRetainedLogChunk(errFile, `${warning}\n`);
+					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					try { child.stdout?.destroy(); } catch { /* ignore */ }
+					try { child.stderr?.destroy(); } catch { /* ignore */ }
+					settleFromProcess(exitCode, exitSignal);
+				}, COMMAND_EXIT_CLOSE_GRACE_MS);
+				closeGraceTimer.unref?.();
+			});
+			child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+				settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
+				if (settled) return;
+				settled = true;
+				if (closeGraceTimer) clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
