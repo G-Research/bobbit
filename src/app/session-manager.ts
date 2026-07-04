@@ -126,6 +126,21 @@ function withSessionProjectId(type: ProposalType, sessionId: string, fields: Rec
 	return projectId && fields.projectId !== projectId ? { ...fields, projectId } : fields;
 }
 
+function isProposalDismissedForSession(sessionId: string, type: ProposalType, fields: Record<string, unknown>): boolean {
+	if (isProposalDismissedTyped(sessionId, type, fields)) return true;
+	const scopedFields = withSessionProjectId(type, sessionId, fields);
+	if (scopedFields !== fields && isProposalDismissedTyped(sessionId, type, scopedFields)) return true;
+	// Some persisted proposal files predate projectId stamping while the UI slot is
+	// normalized with the session projectId before rendering. Treat that client-side
+	// projectId as dismissal-equivalent so hidden off-screen proposals stay hidden.
+	if (type !== "project" && typeof fields.projectId === "string") {
+		const unscopedFields = { ...fields };
+		delete unscopedFields.projectId;
+		if (isProposalDismissedTyped(sessionId, type, unscopedFields)) return true;
+	}
+	return false;
+}
+
 function resetStaffProposalPreview(sessionId: string): void {
 	const projectId = projectIdForSession(sessionId);
 	const project = projectId ? state.projects.find(p => p.id === projectId) : undefined;
@@ -507,7 +522,7 @@ const goalDraft = createDraftManager({
 			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
 			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
 			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
-			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
+			if (isProposalDismissedForSession(_sessionId, "goal", fields)) {
 				// User previously dismissed this proposal — keep the draft on disk
 				// (so future edit_proposal events can rehydrate it) but don't
 				// re-open the panel or re-populate the proposal-mirror preview
@@ -627,9 +642,26 @@ function mirrorGoalSetupFields(src: { metadata?: unknown }, opts?: { authoritati
 	if (opts?.authoritative) state.previewMetadataRows = [];
 }
 
+function clearGoalFormMirrorForDismissal(): void {
+	state.previewTitle = "";
+	state.previewSpec = "";
+	state.previewCwd = "";
+	state.previewTitleEdited = false;
+	state.previewSpecEdited = false;
+	state.previewCwdEdited = false;
+	state.previewMetadataEdited = false;
+	state.previewMetadataRows = [];
+}
+
 function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
 	const goalSlot = state.activeProposals.goal;
 	if (!goalSlot || goalSlot.sessionId !== sessionId) return false;
+	if (isProposalDismissedForSession(sessionId, "goal", goalSlot.fields as Record<string, unknown>)) {
+		delete state.activeProposals.goal;
+		clearGoalFormMirrorForDismissal();
+		state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
+		return false;
+	}
 	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; projectId?: string; metadata?: unknown };
 	if (typeof g.projectId === "string" && g.projectId.trim()) state.previewProjectId = g.projectId.trim();
 	if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
@@ -1739,7 +1771,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// proposal, don't re-populate the form-mirror preview fields.
 				if (
 					!state.activeProposals.goal &&
-					isProposalDismissedTyped(sessionId, "goal", proposal as unknown as Record<string, unknown>)
+					isProposalDismissedForSession(sessionId, "goal", proposal as unknown as Record<string, unknown>)
 				) {
 					return;
 				}
@@ -1943,11 +1975,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					showProposalToast("Proposal updated — comments cleared");
 				}
 			}
-			// First-emit dismissal short-circuit — generalised from the goal-only
-			// check at session-manager.ts:1062. Skip this only when (a) it's the
-			// very first emit for this slot AND (b) the user previously dismissed
-			// an identical-fingerprint proposal of this type.
-			if (isFirstEmit && isProposalDismissedTyped(sessionId, type, merged)) {
+			// Dismissal short-circuit — a dismissed proposal must stay hidden even
+			// when a fast-path draft restore or replay populated the slot before the
+			// rehydrate event arrives. The comparison tolerates session projectId
+			// normalization, while revised proposal content still surfaces normally.
+			if (isProposalDismissedForSession(sessionId, type, merged)) {
+				if (type === "goal" || type === "role" || type === "staff") {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+				}
+				delete state.activeProposals[type];
+				if (type === "goal" && state.assistantType === "goal") {
+					clearGoalFormMirrorForDismissal();
+				}
+				state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
+				renderApp();
 				return;
 			}
 			// Server-stamped rev (from proposal_update events) is the source of truth.
