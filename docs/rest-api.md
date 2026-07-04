@@ -305,18 +305,18 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. See [Hierarchical goal metadata](design/goal-metadata.md). |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
-| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
-| `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
+| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
+| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
-| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
-| `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
+| `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 
 ### Git commit lists and commit-scoped diffs
 
@@ -363,6 +363,7 @@ Validation and errors:
 - `commit` is optional. When present, it must be a 4- to 40-character hexadecimal SHA that resolves to a commit object; otherwise the endpoint returns `400 { "error": "Invalid commit" }`.
 - `file` is required for commit-scoped diffs. File paths that are empty, contain traversal (`..`), are POSIX/Windows absolute paths, or start with a Windows drive prefix are rejected with `400 { "error": "Invalid file path" }`.
 - If the selected commit/file pair has no diff, the endpoint returns `404 { "error": "No diff found" }`.
+- No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE", goalId, projectId, branch: null, worktreePath: null }` for git-dependent goal endpoints instead of falling back to the server checkout. Headquarters responses use copy explaining that the goal runs in the server directory without a git worktree.
 - Unknown sessions/goals and missing worktrees use the same not-found responses as the existing git-status and git-diff endpoints.
 
 Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, the rich diff viewer opens, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
@@ -404,7 +405,7 @@ Success or unavailability both return `200` with a discriminated response:
 ```ts
 type GoalGithubLinkResponse =
   | { available: true; url: string; kind: "pr" | "branch" }
-  | { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+  | { available: false; reason: "no-branch" | "no-worktree" | "no-github-remote" | "goal-not-found"; message?: string };
 ```
 
 Resolution order:
@@ -413,7 +414,7 @@ Resolution order:
 2. Otherwise look up PR status for the goal branch using `gh` through `execFile` argument arrays, not shell command strings.
 3. If no PR URL exists, read `origin` with `git remote get-url origin` through `execFile`.
 4. Strip embedded credentials, accept only GitHub remotes, and build an encoded branch tree URL.
-5. Return `available: false` for missing goals, goals without branches, missing/non-GitHub remotes, or git lookup failures.
+5. Return `available: false` for missing goals, goals without branches/worktrees, missing/non-GitHub remotes, or git lookup failures.
 
 Branch names are never interpolated into a shell command; PR lookup and remote resolution both go through `execFile` argument arrays. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for how the menu item mirrors the PR badge rather than calling this endpoint.
 
@@ -555,6 +556,8 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, clamped to the role's model capability when `model` is set). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
 
+Role list/mutation routes that accept `projectId` treat `projectId=headquarters` as server/Headquarters scope for non-workflow config. Created or customized roles are stored in server config and appear with origin `server` (labelled Headquarters in the UI), not as a duplicate project override.
+
 ### Tool Group Policies
 
 | Method | Path | Description |
@@ -562,12 +565,16 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | `GET` | `/api/tool-group-policies` | Get all group default policies as `Record<string, GrantPolicy>` |
 | `PUT` | `/api/tool-group-policies/:group` | Set or clear a group default policy (`{ policy: GrantPolicy \| null }`). Valid values: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Pass `null` to clear. |
 
+Tool and tool-policy resolution follows the same Headquarters alias rule as roles: `projectId=headquarters` resolves server/Headquarters scope.
+
 ### Slash Skills
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
 | `GET` | `/api/slash-skills/details` | Full slash skill details including content, file paths, and `directories` array listing all scanned directories (default + custom) |
+
+Slash-skill discovery normalizes `projectId=headquarters` to server/Headquarters config while using the server run directory as the discovery cwd.
 
 ### Assistant Prompts
 
@@ -604,17 +611,17 @@ Staff records include a persisted `accessory` string as part of the staff identi
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List visible registered projects in persisted project order. Hidden projects, including the synthetic `system` project, are excluded. |
-| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
-| `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
-| `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. |
-| `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). See [add-project-preflight.md](add-project-preflight.md). |
+| `GET` | `/api/projects` | List visible registered projects in persisted project order. Headquarters appears first by default unless `showHeadquartersInProjectLists === false`. Hidden projects, including the synthetic `system` project, are excluded. |
+| `POST` | `/api/projects` | Register a normal project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`; an upsert for the server workspace returns the existing Headquarters project. Without upsert, the server workspace returns `409 { code: "HEADQUARTERS_ALREADY_EXISTS", projectId: "headquarters" }`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
+| `PUT` | `/api/projects/order` | Persist the full normal-project ID order for sidebar project drag reorder. Headquarters is anchored first and must not be included. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
+| `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. For the server workspace, remediation that would archive gateway-owned `.bobbit` state is removed and the report explains that Headquarters already owns the path. |
+| `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). Returns 403 `HEADQUARTERS_IMMUTABLE` for the server/Headquarters-owned `.bobbit` state. See [add-project-preflight.md](add-project-preflight.md). |
 | `GET` | `/api/browse-directory?path=&prefix=&limit=` | Directory-only listing used by Add Project Browse and typeahead. See [Add Project directory helpers](#add-project-directory-helpers). |
 | `POST` | `/api/create-directory` | Create the typed Add Project directory's final path segment. See [Add Project directory helpers](#add-project-directory-helpers). |
-| `GET` | `/api/projects/:id` | Get a single project. |
+| `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
-| `PUT` | `/api/projects/:id` | Update name/color. |
-| `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk). Any project may be removed, including the last visible one — when zero non-hidden projects remain, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow. |
+| `PUT` | `/api/projects/:id` | Update normal-project name/color/root/palette. Headquarters and hidden/system projects are immutable. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk). The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
 
 #### Add Project directory helpers
 
@@ -658,11 +665,11 @@ not create missing parents recursively.
 
 #### Project order
 
-`GET /api/projects` returns only visible, non-system projects in the server-persisted order. Use the returned array order as the source of truth for sidebar grouping; visible project records may include a `position` field, but clients should not need to sort by it.
+`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is anchored first when visible and has no `position`; normal project records may include a `position` field, but clients should not need to sort by it.
 
 `PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
 
-`PUT /api/projects/order` saves a new global order for visible projects:
+`PUT /api/projects/order` saves a new global order for normal visible projects. Do not include Headquarters:
 
 ```http
 PUT /api/projects/order
@@ -671,13 +678,14 @@ Content-Type: application/json
 { "projectIds": ["project-c", "project-a", "project-b"] }
 ```
 
-`projectIds` must be the complete current list of visible, non-system project IDs in the requested order. On success, the server stores contiguous positions, returns `200` with the visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+`projectIds` must be the complete current list of normal visible project IDs in the requested order. Headquarters, hidden projects, and `system` are excluded. On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
 
 Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
 
 ```json
 {
   "projects": [
+    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server" },
     { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 0 },
     { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 1 },
     { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 2 }
@@ -691,7 +699,7 @@ Invalid requests return `400` and do not mutate the registry:
 { "error": "projectIds must be an array of strings", "code": "invalid_project_order" }
 ```
 
-`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, hidden project IDs, and the synthetic `system` project ID. Hidden/system projects do not participate in ordering and are never returned by `GET /api/projects`.
+`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, hidden project IDs, and the synthetic `system` project ID. Headquarters/system/hidden projects do not participate in user ordering; `system` is never returned by `GET /api/projects`.
 
 Stale complete-order mismatches return `409` and do not mutate the registry:
 
@@ -710,7 +718,7 @@ For the user-facing sidebar behavior, see [Sidebar project drag reorder](sidebar
 
 ### Project resolution contract
 
-`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Resolution order (no silent fallback):
+`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Headquarters satisfies this contract like any other registered project: pass `projectId: "headquarters"`, or a `cwd` inside the server run directory while Headquarters is registered. Resolution order (no silent fallback to an arbitrary normal project):
 
 1. If `body.projectId` is a non-empty string matching a registered project → use it.
 2. Else if `body.cwd` is a non-empty string inside some registered project's `rootPath` → use that project.
@@ -739,19 +747,19 @@ Why: `role` / `tool` assistants edit server-level config (custom roles, custom t
 
 ### Project Config
 
-Per-project overrides (recommended — scoped to a registered project):
+Per-project overrides are scoped to a registered project. Headquarters is special: `/api/projects/headquarters/config` is an alias over the server `ProjectConfigStore`, not a duplicate project config tree.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). |
+| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). For `:id=headquarters`, returns the server/Headquarters config file. |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults for all known config keys. |
-| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. |
-| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. |
+| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. Headquarters values resolve from the aliased server config. |
+| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. For `:id=headquarters`, writes server/Headquarters config. |
 | `GET` | `/api/projects/:id/qa-testing-config` | Returns `{ configured: boolean }` — `true` iff at least one component has a non-empty `config.qa_start_command`. Drives the UI toggle on the `agent-qa` optional verify step. Detailed per-key values are not surfaced here; the `/qa-test` skill reads them directly from `project.yaml`. |
 
 `PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, `base_ref`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. `base_ref` carries extra rules: tags, SHAs, non-`origin` remote prefixes, and (for `sandbox = docker` projects) local refs are rejected with 400 and a structured `{ field: "base_ref", error, details? }` payload; multi-repo saves additionally `git rev-parse --verify` the ref in every component repo and return per-component bullets in `details[]` when missing. Validation only runs when `base_ref` is present in the body. See [design/base-ref.md](design/base-ref.md). Two fields (`config_directories`, `sandbox_tokens`) are sent as structured native types (arrays of mappings); legacy JSON-string payloads for these keys are rejected with 400. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 — they live on `components[<name>].config[<key>]` now (see [internals.md — Multi-repo & components](internals.md#multi-repo--components)). Inline env vars directly into `qa_start_command`. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
 
-Server-level fallback (applied when no project override is set):
+Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 
 | Method | Path | Description |
 |---|---|---|
@@ -798,7 +806,7 @@ This is the explicit opt-in path for customising the global system prompt. The s
 
 ### Workflows
 
-Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
+Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). Use `projectId=headquarters` for Headquarters workflows; they live in the aliased server `project.yaml::workflows` and are still reported as project-scoped workflows. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
 
 | Method | Path | Description |
 |---|---|---|
@@ -809,7 +817,7 @@ Workflows are **project-scoped only** — there is no cascade and no system-scop
 | `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals). **Requires `projectId`** — 400 otherwise. |
 | `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID. **Requires `projectId`** — 400 otherwise. |
 
-There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated.
+There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated. Use `projectId=headquarters` for the visible server workspace workflow scope.
 
 ### Preferences
 
@@ -819,6 +827,8 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
 
 Model-related preference keys include `default.sessionModel`, `default.reviewModel`, `default.imageModel`, and `allowSessionModelFallback`. The fallback setting defaults to off when absent; see [Controlled session model fallback](session-model-fallback.md).
+
+`showHeadquartersInProjectLists` controls only whether Headquarters appears in normal project lists/sidebar/pickers. It defaults to visible when absent. Setting it to `false` does not delete or archive Headquarters sessions, goals, staff, config, or persisted state; explicit `projectId: "headquarters"` remains resolvable.
 
 `agentDir` and `agentDirHistory` are managed by the dedicated agent-directory workflow, not generic preferences. `PUT /api/preferences` rejects those keys with `400 { code: "AGENT_DIR_PREFERENCE_FORBIDDEN", use: "/api/agent-dir/pending" }` so callers cannot bypass validation, copy guidance, or restart-gated semantics.
 
