@@ -388,7 +388,7 @@ function sanitizeHeadquartersStoreFile(
 	opts: { stampMissingProjectId?: boolean } = {},
 ): void {
 	if (!fs.existsSync(filePath) || !HEADQUARTERS_EXECUTION_STORE_FILES.has(fileName)) return;
-	const records = readJsonRecords(filePath);
+	const { records, shape } = readStoreRecordsWithShape(filePath, fileName);
 	if (records.length === 0) return;
 	let changed = false;
 	const sanitizedRecords = records.map(record => {
@@ -403,7 +403,7 @@ function sanitizeHeadquartersStoreFile(
 		return result.record;
 	});
 	if (!changed) return;
-	fs.writeFileSync(filePath, JSON.stringify(sanitizedRecords, null, 2), "utf-8");
+	writeStoreRecords(filePath, sanitizedRecords, shape);
 }
 
 function sanitizeExistingHeadquartersStores(
@@ -417,13 +417,59 @@ function sanitizeExistingHeadquartersStores(
 	}
 }
 
-function readJsonRecords(filePath: string): Record<string, unknown>[] {
+/**
+ * On-disk shape of a per-project store file. Most stores
+ * (goals/staff/tasks/team-state/gates/inbox) are plain JSON arrays, but
+ * `sessions.json` is a versioned envelope `{ version: 2, epoch, sessions: [...] }`
+ * written by SessionStore. The migration MUST round-trip whichever shape it
+ * finds: rewriting the envelope as a bare array (the previous bug) flattened its
+ * top-level keys into `{ id: "version" | "epoch" | "sessions" }` pseudo-records,
+ * which SessionStore cannot load — so Headquarters sessions silently vanished on
+ * the next restart. Pinned by tests/headquarters-state-migration.test.ts.
+ */
+type StoreFileShape = { kind: "array" } | { kind: "sessions-v2"; epoch: number };
+
+function isSessionsEnvelopeFile(fileName: string): boolean {
+	return fileName === "sessions.json";
+}
+
+/**
+ * Read a store file into flat records plus the shape needed to write it back
+ * unchanged. Arbitrary object-shaped files are flattened key-by-key into
+ * `{ id, ... }` records (the legacy behaviour for non-array stores).
+ */
+function readStoreRecordsWithShape(filePath: string, fileName: string): { records: Record<string, unknown>[]; shape: StoreFileShape } {
+	const sessionsEnvelope = isSessionsEnvelopeFile(fileName);
 	const value = readJsonValue<unknown>(filePath);
-	if (Array.isArray(value)) return value.filter(isPlainRecord);
-	if (isPlainRecord(value)) {
-		return Object.entries(value).map(([id, record]) => isPlainRecord(record) ? { id, ...record } : { id, value: record });
+	if (Array.isArray(value)) return { records: value.filter(isPlainRecord), shape: { kind: "array" } };
+	if (
+		sessionsEnvelope &&
+		isPlainRecord(value) &&
+		(value as { version?: unknown }).version === 2 &&
+		Array.isArray((value as { sessions?: unknown }).sessions)
+	) {
+		const epoch = typeof (value as { epoch?: unknown }).epoch === "number" ? (value as { epoch: number }).epoch : 0;
+		return { records: ((value as { sessions: unknown[] }).sessions).filter(isPlainRecord), shape: { kind: "sessions-v2", epoch } };
 	}
-	return [];
+	if (isPlainRecord(value)) {
+		return {
+			records: Object.entries(value).map(([id, record]) => isPlainRecord(record) ? { id, ...record } : { id, value: record }),
+			shape: { kind: "array" },
+		};
+	}
+	// Missing/unreadable: write a bare array. SessionStore accepts the legacy v1
+	// array shape and upgrades it to the v2 envelope on its next save. The envelope
+	// is only ever *preserved* here when the file already exists in that shape, so a
+	// sanitize/merge of an existing HQ store never downgrades it to the array form.
+	return { records: [], shape: { kind: "array" } };
+}
+
+function writeStoreRecords(filePath: string, records: Record<string, unknown>[], shape: StoreFileShape): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	const payload = shape.kind === "sessions-v2"
+		? { version: 2 as const, epoch: shape.epoch, sessions: records }
+		: records;
+	fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
 }
 
 function mergeRecordsByKey(
@@ -434,7 +480,7 @@ function mergeRecordsByKey(
 	label: string,
 ): void {
 	if (records.length === 0) return;
-	const existing = readJsonRecords(filePath);
+	const { records: existing, shape } = readStoreRecordsWithShape(filePath, fileName);
 	const indexByKey = new Map(existing.map((record, index) => [recordKeyForFile(fileName, record), index] as const).filter(([key]) => Boolean(key)));
 	let added = 0;
 	let repaired = 0;
@@ -460,8 +506,7 @@ function mergeRecordsByKey(
 		added++;
 	}
 	if (added === 0 && repaired === 0 && fs.existsSync(filePath)) return;
-	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), "utf-8");
+	writeStoreRecords(filePath, existing, shape);
 	diagnostics.copied.push(`${label}: ${added} added, ${repaired} repaired ${fileName} record${added + repaired === 1 ? "" : "s"}`);
 }
 
@@ -578,9 +623,9 @@ function routeLegacyProjectStoreFile(
 	projectEvidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
 	diagnostics: HeadquartersMigrationDiagnostics,
 ): void {
-	const legacyRecords = readJsonRecords(legacyFile);
+	const legacyRecords = readStoreRecordsWithShape(legacyFile, fileName).records;
 	if (legacyRecords.length === 0) return;
-	const backupRecords = readJsonRecords(legacyFile + HEADQUARTERS_BACKUP_SUFFIX);
+	const backupRecords = readStoreRecordsWithShape(legacyFile + HEADQUARTERS_BACKUP_SUFFIX, fileName).records;
 	const backupByKey = new Map<string, Record<string, unknown>>();
 	for (const record of backupRecords) {
 		const key = recordKeyForFile(fileName, record);
@@ -636,7 +681,7 @@ function routeLegacyProjectStoreFile(
 		}
 	}
 
-	const existingHeadquartersKeys = new Set(readJsonRecords(targetFile)
+	const existingHeadquartersKeys = new Set(readStoreRecordsWithShape(targetFile, fileName).records
 		.map(record => recordKeyForFile(fileName, record))
 		.filter(Boolean));
 	const sanitizedHeadquartersRecords = hqRecords.map(record => {
