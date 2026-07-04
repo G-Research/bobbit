@@ -519,6 +519,7 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
+import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
@@ -3837,6 +3838,29 @@ async function handleApiRoute(
 			if (ctx) return ctx.projectConfigStore;
 		}
 		return projectConfigStore;
+	}
+
+	function resolveClaudeCodeStatusConfigStore(url: URL): { ok: true; store?: ProjectConfigStore; projectId?: string } | { ok: false; status: number; error: string } {
+		const projectId = normalizeConfigProjectId(url.searchParams.get("projectId") || undefined);
+		if (projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) return { ok: false, status: 404, error: "Project not found" };
+			return { ok: true, store: ctx.projectConfigStore, projectId };
+		}
+		const cwd = url.searchParams.get("cwd") || undefined;
+		if (cwd) {
+			const resolvedCwd = path.resolve(cwd);
+			const matches = projectRegistry.list()
+				.filter(project => !project.hidden)
+				.map(project => ({ project, root: path.resolve(project.rootPath) }))
+				.filter(({ root }) => resolvedCwd === root || resolvedCwd.startsWith(root + path.sep))
+				.sort((a, b) => b.root.length - a.root.length);
+			if (matches[0]) {
+				const ctx = projectContextManager.getOrCreate(matches[0].project.id);
+				if (ctx) return { ok: true, store: ctx.projectConfigStore, projectId: ctx.project.id };
+			}
+		}
+		return { ok: true };
 	}
 
 	type RoleMutationTarget =
@@ -8166,6 +8190,10 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
+		if (claudeCodePrefsChanged) {
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
+		}
 		json(getSafePreferences());
 		broadcastPreferencesChanged();
 		if (headquartersVisibilityChanged) {
@@ -9047,10 +9075,40 @@ async function handleApiRoute(
 
 	// ── Unified Model Registry ──
 
-	// GET /api/models — unified model list from all sources
-	if (url.pathname === "/api/models" && req.method === "GET") {
+	// GET /api/claude-code/status — local Claude Code CLI readiness probe.
+	// The executable path is user/admin preference only; project config never controls probes.
+	if (url.pathname === "/api/claude-code/status" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
 		try {
-			const models = await getAvailableModels(preferencesStore);
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
+		} catch (err: any) {
+			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
+		}
+		return;
+	}
+
+	// POST /api/claude-code/status/refresh — clear cached status and re-probe.
+	if (url.pathname === "/api/claude-code/status/refresh" && req.method === "POST") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
+		try {
+			invalidateClaudeCodeStatusCache();
+			invalidateModelCache();
+			json(await getClaudeCodeStatus(preferencesStore, scoped.store ?? null));
+		} catch (err: any) {
+			jsonError(500, err, { error: `Failed to probe Claude Code: ${err.message}` });
+		}
+		return;
+	}
+
+	// GET /api/models — unified model list from all sources.
+	// Claude Code model probes use only the user/admin executable preference.
+	if (url.pathname === "/api/models" && req.method === "GET") {
+		const scoped = resolveClaudeCodeStatusConfigStore(url);
+		if (!scoped.ok) { json({ error: scoped.error }, scoped.status); return; }
+		try {
+			const models = await getAvailableModels(preferencesStore, scoped.store ?? null);
 			json(models);
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load models: ${err.message}` });
