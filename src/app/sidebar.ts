@@ -410,6 +410,8 @@ export function renderProjectReorderHandle(project: Project) {
 
 /** Currently selected role in the picker. */
 let _pickerRole = "";
+/** Whether the New Session role dropdown menu is expanded. */
+let _pickerRoleDropdownOpen = false;
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
@@ -432,7 +434,8 @@ interface PickerItem { type: PickerItemType; id: string; }
 /** Build the flat ordered list of focusable items. */
 function _buildPickerItems(): PickerItem[] {
 	const items: PickerItem[] = [];
-	for (const r of state.roles) items.push({ type: "role", id: r.name });
+	// Role is a single dropdown control (one focus stop), not one item per role.
+	items.push({ type: "role", id: "role" });
 	if (!_pickerProjectId) items.push({ type: "cwd", id: "cwd" });
 	items.push({ type: "worktree", id: "worktree" });
 	items.push({ type: "create", id: "create" });
@@ -464,6 +467,7 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 	// Pre-select the "general" role (server default) if it exists
 	const generalRole = state.roles.find(r => r.name === "general");
 	_pickerRole = generalRole ? "general" : "";
+	_pickerRoleDropdownOpen = false;
 	_pickerFocusIndex = -1;
 	state.rolePickerOpen = true;
 	if (!state.sandboxStatus) {
@@ -476,11 +480,13 @@ export function renderRolePickerDropdown() {
 	if (!state.rolePickerOpen) return "";
 
 	const selectRole = (roleName: string) => {
-		_pickerRole = _pickerRole === roleName ? "" : roleName;
+		_pickerRole = roleName;
+		_pickerRoleDropdownOpen = false;
 		renderApp();
 	};
 	const doCreate = () => {
 		state.rolePickerOpen = false;
+		_pickerRoleDropdownOpen = false;
 		const cwd = _pickerCwd || undefined;
 		const worktree = _pickerWorktree;
 		const sandboxed = _pickerSandbox || undefined;
@@ -517,32 +523,55 @@ export function renderRolePickerDropdown() {
 	return html`
 		<div class="fixed z-50 rounded-md shadow-lg py-1"
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
-			@click=${(e: Event) => e.stopPropagation()}>
+			@click=${(e: Event) => { e.stopPropagation(); if (_pickerRoleDropdownOpen) { _pickerRoleDropdownOpen = false; renderApp(); } }}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
 				<span class="flex-1 font-semibold text-foreground">Create New Session${_pickerProjectName ? html` <span class="text-muted-foreground font-normal">in ${_pickerProjectName}</span>` : ""}</span>
 				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
 				</button>
 			</div>
-			<div class="overflow-y-auto flex-1" style="min-height: 0;">
-			<!-- Roles (2-column grid) -->
-			<div>
-				<div class="px-3 pt-1 pb-1.5 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Role</div>
+			<!-- Role (dropdown menu — mirrors the Modify Session dialog) -->
+			<div class="px-3 pt-1 pb-2 shrink-0" style="overflow: visible;">
+				<div class="pb-1.5 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Role</div>
 				${allRoles.length === 0
-					? html`<div class="px-3 py-1 text-muted-foreground">No roles defined</div>`
-					: html`<div class="px-2 pb-1 grid gap-0.5" style="grid-template-columns: 1fr 1fr;">
-						${allRoles.map(role => {
-							const focused = isFocused("role", role.name);
-							return html`
-							<button class="text-left px-2 py-1 rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""} ${focused ? "ring-2 ring-ring" : ""}"
-								@click=${() => selectRole(role.name)}
-								title="Select ${role.label} role">
-								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
-								<span class="flex-1 truncate ${_pickerRole === role.name ? "text-primary font-medium" : ""}">${role.label}</span>
+					? html`<div class="py-1 text-muted-foreground">No roles defined</div>`
+					: (() => {
+						const selectedRoleObj = allRoles.find(r => r.name === _pickerRole);
+						const selectedLabel = selectedRoleObj?.label || "None";
+						const selectedAccessory = selectedRoleObj?.accessory ?? "none";
+						const focused = isFocused("role", "role");
+						return html`
+						<div class="relative" id="picker-role-container">
+							<button
+								class="w-full text-left px-3 py-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-2.5 ${focused ? "ring-2 ring-ring" : ""}"
+								@click=${(e: Event) => { e.stopPropagation(); _pickerRoleDropdownOpen = !_pickerRoleDropdownOpen; renderApp(); }}
+								title="Select role">
+								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, selectedAccessory, true)}</span>
+								<span class="flex-1 truncate ${_pickerRole ? "text-foreground" : "text-muted-foreground"}">${selectedLabel}</span>
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${_pickerRoleDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
 							</button>
-						`; })}
-					</div>`}
-			</div>
+							${_pickerRoleDropdownOpen ? html`
+								<div class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto">
+									<button
+										class="w-full text-left px-3 py-2 text-sm text-popover-foreground/60 hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${!_pickerRole ? "bg-accent/50" : ""}"
+										@click=${(e: Event) => { e.stopPropagation(); selectRole(""); }}
+										title="No role">
+										<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, "none", true)}</span>
+										<span>None</span>
+									</button>
+									${allRoles.map(role => html`
+										<button
+											class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${_pickerRole === role.name ? "bg-accent/50" : ""}"
+											@click=${(e: Event) => { e.stopPropagation(); selectRole(role.name); }}
+											title="Select ${role.label} role">
+											<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
+											<span>${role.label}</span>
+										</button>
+									`)}
+								</div>
+							` : ""}
+						</div>`;
+					})()}
 			</div>
 			<!-- Working Directory (pinned at bottom, hidden when project is set) -->
 			${!_pickerProjectId ? html`
@@ -676,7 +705,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		e.stopPropagation();
 		// If focused on a specific item, activate it; otherwise create session
 		if (focusedItem?.type === "role") {
-			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
+			_pickerRoleDropdownOpen = !_pickerRoleDropdownOpen;
 			renderApp();
 		} else if (focusedItem?.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
@@ -697,7 +726,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
 		if (focusedItem.type === "role") {
-			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
+			_pickerRoleDropdownOpen = !_pickerRoleDropdownOpen;
 			renderApp();
 		} else if (focusedItem.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
@@ -720,10 +749,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (_pickerFocusIndex < 0) {
 			_pickerFocusIndex = 0;
 		} else {
-			// In the 2-column role grid, ArrowDown skips a row (2 items)
-			const item = items[_pickerFocusIndex];
-			const step = item?.type === "role" ? 2 : 1;
-			_pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + step);
+			_pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + 1);
 		}
 		_focusCwdIfNeeded(items);
 		renderApp();
@@ -736,9 +762,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (_pickerFocusIndex < 0) {
 			_pickerFocusIndex = total - 1;
 		} else {
-			const item = items[_pickerFocusIndex];
-			const step = item?.type === "role" ? 2 : 1;
-			_pickerFocusIndex = Math.max(0, _pickerFocusIndex - step);
+			_pickerFocusIndex = Math.max(0, _pickerFocusIndex - 1);
 		}
 		_focusCwdIfNeeded(items);
 		renderApp();
