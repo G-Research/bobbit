@@ -2231,6 +2231,10 @@ export function createGateway(config: GatewayConfig) {
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
+		// Disabled-runtime activation override (DisabledRefs.runtimes): a runtime
+		// disabled via pack_activation is dropped from the pack's contributions, so the
+		// supervisor's registry lookup 404s and runtime listings omit it.
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,

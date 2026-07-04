@@ -334,4 +334,38 @@ describe("Source pin — merge-loss invariants", () => {
 			"delete this pin — restore the dropped gating logic instead.",
 		);
 	});
+
+	it("pack-contribution-registry.ts exposes getRawPack (restored by the w2-getrawpack-restore fix)", () => {
+		const text = read("src/server/extension-host/pack-contribution-registry.ts");
+		assert.ok(
+			text.includes("getRawPack(projectId: string | undefined, packId: string): PackContributions | undefined {"),
+			"src/server/extension-host/pack-contribution-registry.ts must expose\n" +
+			"PackContributionRegistry.getRawPack() — the activation-UNFILTERED winning-pack\n" +
+			"contributions lookup. Without it the managed-runtime REST surface\n" +
+			"(/api/pack-runtimes/:id/{capabilities,start,restart}) cannot classify the\n" +
+			"deployment mode from a pack whose provider is still dormant (e.g. Hindsight's\n" +
+			"external-mode `memory` provider before `externalUrl` is configured), and\n" +
+			"misclassifies fresh/default installs as provider-less. Originally added by\n" +
+			"6552422c; silently dropped by merge commit b687d93d (first parent 06498f81 had\n" +
+			"it, merge result did not); restored by the w2-getrawpack-restore fix. DO NOT\n" +
+			"delete this pin — restore the dropped method instead. Independently pinned by\n" +
+			"the \"getRawPack returns a DORMANT provider\" test in tests/pack-contributions.test.ts.",
+		);
+	});
+
+	it("pack-contribution-registry.ts filters disabled runtimes by listName (restored by the w2-getrawpack-restore fix)", () => {
+		const text = read("src/server/extension-host/pack-contribution-registry.ts");
+		assert.ok(
+			text.includes("private readonly disabledRuntimes?: DisabledEntrypointsLookup,")
+			&& text.includes("contrib.runtimes.filter((r) => !disabledRuntimes.has(r.listName))"),
+			"src/server/extension-host/pack-contribution-registry.ts must accept a\n" +
+			"`disabledRuntimes` activation-override lookup (DisabledRefs.runtimes) and filter\n" +
+			"`contrib.runtimes` by listName in build(). Without this a runtime disabled via\n" +
+			"pack_activation stays visible in getPack()/getRuntime(), so the supervisor never\n" +
+			"404s it and runtime listings never omit it — the kill-switch is dead data.\n" +
+			"Originally added by d0bc4358; silently dropped by the same merge (b687d93d) that\n" +
+			"dropped getRawPack; restored by the w2-getrawpack-restore fix. DO NOT delete this\n" +
+			"pin — restore the dropped filtering logic instead.",
+		);
+	});
 });

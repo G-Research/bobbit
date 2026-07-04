@@ -122,6 +122,10 @@ export interface RuntimeContribution {
 	title?: string;
 	description?: string;
 	manifest: Record<string, unknown>;
+	/** The contents.runtimes[] basename that listed this file — the activation
+	 *  toggle key the registry's disabled-runtime filter (DisabledRefs.runtimes)
+	 *  keys on. */
+	listName: string;
 	sourceFile: string;
 	packRoot: string;
 }
@@ -591,6 +595,7 @@ export function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeC
 			title: runtime.title,
 			description: runtime.description,
 			manifest: raw as Record<string, unknown>,
+			listName,
 			sourceFile,
 			packRoot,
 		});
