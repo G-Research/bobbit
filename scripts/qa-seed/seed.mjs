@@ -4,8 +4,9 @@
  *
  * Usage: node scripts/qa-seed/seed.mjs <WORK_DIR>
  *
- * Writes projects.json, sessions.json, goals.json, gates.json, tasks.json,
- * team-state.json, project.yaml, and JSONL message files into $WORK_DIR/.bobbit/.
+ * Writes the server project registry into the Headquarters state directory
+ * (default $WORK_DIR/.bobbit/headquarters or $BOBBIT_DIR) and project-owned
+ * fixture stores into $WORK_DIR/.bobbit/.
  */
 
 import fs from "node:fs";
@@ -35,10 +36,19 @@ const SIGNAL_2 = "qa-seed-signal-0002";
 const BASE_TS = Date.now() - 3600000;
 
 // ── Directories ────────────────────────────────────────────────────────────
-const stateDir = path.join(workDir, ".bobbit", "state");
-const messagesDir = path.join(stateDir, "messages");
-const configDir = path.join(workDir, ".bobbit", "config");
+function envPath(name) {
+	const value = process.env[name];
+	return typeof value === "string" && value.trim() ? path.resolve(value) : null;
+}
 
+const projectBobbitDir = path.join(workDir, ".bobbit");
+const headquartersDir = envPath("BOBBIT_DIR") ?? envPath("BOBBIT_PI_DIR") ?? path.join(projectBobbitDir, "headquarters");
+const serverStateDir = path.join(headquartersDir, "state");
+const stateDir = path.join(projectBobbitDir, "state");
+const messagesDir = path.join(stateDir, "messages");
+const configDir = path.join(projectBobbitDir, "config");
+
+fs.mkdirSync(serverStateDir, { recursive: true });
 fs.mkdirSync(messagesDir, { recursive: true });
 fs.mkdirSync(configDir, { recursive: true });
 
@@ -53,8 +63,8 @@ fs.writeFileSync(
 	"name: QA Seed Project\n",
 );
 
-// ── projects.json ──────────────────────────────────────────────────────────
-writeJSON(path.join(stateDir, "projects.json"), [
+// ── projects.json (server/Headquarters registry) ───────────────────────────
+writeJSON(path.join(serverStateDir, "projects.json"), [
 	{
 		id: PROJECT_ID,
 		name: "QA Seed Project",
@@ -704,4 +714,4 @@ const fileCount =
 	1 + // tasks.json
 	1 + // team-state.json
 	2; // JSONL files
-console.log(`QA seed: wrote ${fileCount} files to ${workDir}`);
+console.log(`QA seed: wrote ${fileCount} files to ${workDir} (registry: ${serverStateDir})`);
