@@ -140,6 +140,33 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect(m.content[1].type).toBe("tool_use");
 	});
 
+	test("include_tool_results query controls redaction while omitted preserves API compatibility", async ({ gateway }) => {
+		const secret = "E2E_UNIQUE_TOOL_RESULT_BODY";
+		const jsonl = makeJsonl([
+			{ role: "assistant", content: [{ type: "tool_use", id: "tu-e2e", name: "bash", input: { cmd: "echo secret" } }] },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-e2e", content: secret }] },
+		]);
+		const { id } = seedSession(gateway, {}, jsonl);
+
+		const defaultResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1`, { headers: authHeaders() });
+		expect(defaultResp.status).toBe(200);
+		const defaultBody = await defaultResp.json();
+		expect(defaultBody.messages[0].toolResults[0].preview).toBe(secret);
+
+		const redactedResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1&include_tool_results=false`, { headers: authHeaders() });
+		expect(redactedResp.status).toBe(200);
+		const redactedBody = await redactedResp.json();
+		expect(JSON.stringify(redactedBody)).not.toContain(secret);
+		expect(redactedBody.messages[0].toolResults[0].omitted).toBe(true);
+		expect(redactedBody.messages[0].toolResults[0].name).toBe("bash");
+		expect(redactedBody.messages[0].toolResults[0].size.lines).toBe(1);
+
+		const optInResp = await fetch(`${base()}/api/sessions/${id}/transcript?offset=1&limit=1&includeToolResults=true`, { headers: authHeaders() });
+		expect(optInResp.status).toBe(200);
+		const optInBody = await optInResp.json();
+		expect(optInBody.messages[0].toolResults[0].preview).toBe(secret);
+	});
+
 	test("session_not_found", async () => {
 		const resp = await fetch(`${base()}/api/sessions/does-not-exist/transcript`, { headers: authHeaders() });
 		expect(resp.status).toBe(404);

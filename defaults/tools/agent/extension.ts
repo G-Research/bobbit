@@ -145,6 +145,7 @@ interface ReadSessionParams {
 	case_sensitive?: boolean;
 	context?: number;
 	verbose?: boolean;
+	include_tool_results?: boolean;
 }
 
 type SessionPromptMode = "prompt" | "steer";
@@ -170,6 +171,7 @@ async function callReadSessionEndpoint(
 	if (params.case_sensitive) qs.set("case_sensitive", "1");
 	if (params.context !== undefined) qs.set("context", String(params.context));
 	if (params.verbose) qs.set("verbose", "1");
+	qs.set("include_tool_results", params.include_tool_results ? "1" : "0");
 	const suffix = qs.toString() ? `?${qs.toString()}` : "";
 	const headers: Record<string, string> = {
 		"Authorization": `Bearer ${token}`,
@@ -307,9 +309,10 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet:
 			"read_session - Read another session's transcript with pagination and regex filtering.",
 		promptGuidelines: [
-			"Default returns compact summaries — use verbose:true only when you need full tool inputs/results",
+			"Default omits tool result bodies; use include_tool_results:true only for narrow, deliberate raw-output reads",
+			"Use verbose:true for full message blocks; it still omits tool results unless include_tool_results:true is also set",
 			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
-			"Find specific events with pattern (regex). Combine with offset:-N, limit:N to get the last N matches.",
+			"Find specific events with pattern (regex). Combine pattern/context/offset/limit first, then opt into include_tool_results:true for the small window you need.",
 			"Use context:1..5 to expand each pattern match by ±N neighbours",
 		],
 		parameters: Type.Object({
@@ -320,6 +323,7 @@ const extension: ExtensionFactory = (pi) => {
 			case_sensitive: Type.Optional(Type.Boolean()),
 			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
 			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of summaries." })),
+			include_tool_results: Type.Optional(Type.Boolean({ description: "Include raw tool result bodies; default false returns metadata placeholders." })),
 		}),
 
 		async execute(_toolCallId, params) {
