@@ -63,6 +63,12 @@ export function rotateBackups(file: string, backups: number): void {
  * (best-effort, skipped when `backups` is 0). Throws on failure to write —
  * callers should catch and log (mirroring existing store `save()` methods),
  * and should clean up a stray `.tmp` on error.
+ *
+ * After the rename, the containing directory is fsync'd (best-effort) so
+ * the rename itself is durable across power loss — without it the file
+ * *content* is on disk but the directory entry pointing at it may not be.
+ * Some platforms (notably Windows) reject opening/fsyncing a directory, so
+ * failure there is swallowed.
  */
 export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups?: number } = {}): void {
 	const dir = path.dirname(file);
@@ -86,6 +92,19 @@ export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups
 			fs.closeSync(fd);
 		}
 		fs.renameSync(tmp, file);
+		// Make the rename durable across power loss: fsync the directory
+		// entry. Best-effort — directory fsync is not supported everywhere
+		// (e.g. Windows rejects opening directories for read).
+		try {
+			const dirFd = fs.openSync(dir, "r");
+			try {
+				fs.fsyncSync(dirFd);
+			} finally {
+				fs.closeSync(dirFd);
+			}
+		} catch {
+			/* non-fatal */
+		}
 	} catch (err) {
 		try {
 			if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
@@ -94,6 +113,48 @@ export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups
 		}
 		throw err;
 	}
+}
+
+/**
+ * Delete `file` AND every artifact this module may have created alongside
+ * it: all rotated `<file>.bak.N` generations (found by directory scan, so
+ * removal stays complete even if the caller's backup depth changed between
+ * runs) and any stray `<file>.tmp`.
+ *
+ * Callers that intentionally delete a store file MUST use this instead of a
+ * bare `fs.unlinkSync(file)`: `loadJsonWithBackupFallback()` treats a
+ * missing primary as recoverable and falls back to the newest `.bak.N`, so
+ * deleting only the primary would let the deleted state RESURRECT from a
+ * leftover backup on the next load.
+ *
+ * Backups/tmp are deleted BEFORE the primary so a crash mid-removal leaves
+ * the primary present and authoritative (no partial-delete resurrection
+ * window). Throws on failure to delete the primary; backup/tmp cleanup is
+ * best-effort per file.
+ */
+export function removeJsonWithBackups(file: string): void {
+	const dir = path.dirname(file);
+	const base = path.basename(file);
+
+	let entries: string[] = [];
+	try {
+		entries = fs.readdirSync(dir);
+	} catch {
+		/* directory gone — nothing to clean */
+	}
+	const bakPrefix = `${base}.bak.`;
+	for (const entry of entries) {
+		const isBak = entry.startsWith(bakPrefix) && /^\d+$/.test(entry.slice(bakPrefix.length));
+		if (isBak || entry === `${base}.tmp`) {
+			try {
+				fs.unlinkSync(path.join(dir, entry));
+			} catch {
+				/* best-effort */
+			}
+		}
+	}
+
+	if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
 /**

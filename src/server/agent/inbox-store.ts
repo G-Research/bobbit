@@ -1,6 +1,5 @@
-import fs from "node:fs";
 import path from "node:path";
-import { atomicWriteJsonSync, loadJsonWithBackupFallback } from "./atomic-json.js";
+import { atomicWriteJsonSync, loadJsonWithBackupFallback, removeJsonWithBackups } from "./atomic-json.js";
 
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
 
@@ -149,13 +148,18 @@ export class InboxStore {
 		return true;
 	}
 
-	/** Wipe the entire inbox for a staff (used when a staff is deleted). */
+	/**
+	 * Wipe the entire inbox for a staff (used when a staff is deleted).
+	 *
+	 * Must purge the rotated `.bak.N` files along with the primary: load()
+	 * falls back to backups when the primary is missing, so deleting only the
+	 * primary would resurrect the deleted inbox on the next restart.
+	 */
 	removeAll(staffId: string): void {
 		this.byStaff.set(staffId, []);
 		this.loaded.add(staffId);
-		const file = this.fileFor(staffId);
 		try {
-			if (fs.existsSync(file)) fs.unlinkSync(file);
+			removeJsonWithBackups(this.fileFor(staffId));
 		} catch (err) {
 			console.error(`[inbox-store] Failed to remove inbox for staff ${staffId}:`, err);
 		}

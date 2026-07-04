@@ -17,6 +17,7 @@ import { makeTmpDir } from "./helpers/tmp.ts";
 import {
 	atomicWriteJsonSync,
 	loadJsonWithBackupFallback,
+	removeJsonWithBackups,
 	rotateBackups,
 	bakPath,
 } from "../src/server/agent/atomic-json.ts";
@@ -165,5 +166,61 @@ describe("loadJsonWithBackupFallback", () => {
 
 		const data = loadJsonWithBackupFallback(file, { backups: 3 });
 		assert.equal(data, undefined);
+	});
+});
+
+describe("removeJsonWithBackups", () => {
+	it("deletes the primary, every .bak.N generation, and a stray .tmp", () => {
+		const file = freshFile("remove-all");
+		atomicWriteJsonSync(file, { n: 1 }, { backups: 2 });
+		atomicWriteJsonSync(file, { n: 2 }, { backups: 2 });
+		atomicWriteJsonSync(file, { n: 3 }, { backups: 2 });
+		fs.writeFileSync(`${file}.tmp`, "leftover", "utf-8");
+
+		assert.ok(fs.existsSync(bakPath(file, 1)) && fs.existsSync(bakPath(file, 2)), "precondition: backups exist");
+
+		removeJsonWithBackups(file);
+
+		assert.ok(!fs.existsSync(file), "primary deleted");
+		assert.ok(!fs.existsSync(bakPath(file, 1)), ".bak.1 deleted");
+		assert.ok(!fs.existsSync(bakPath(file, 2)), ".bak.2 deleted");
+		assert.ok(!fs.existsSync(`${file}.tmp`), ".tmp deleted");
+	});
+
+	it("purges backups even deeper than any current depth setting (scan-based, not count-based)", () => {
+		const file = freshFile("remove-deep");
+		fs.writeFileSync(file, "{}", "utf-8");
+		for (let i = 1; i <= 7; i++) fs.writeFileSync(bakPath(file, i), "{}", "utf-8");
+
+		removeJsonWithBackups(file);
+		for (let i = 1; i <= 7; i++) assert.ok(!fs.existsSync(bakPath(file, i)), `.bak.${i} deleted`);
+	});
+
+	it("does not touch unrelated sibling files or non-numeric .bak lookalikes", () => {
+		const file = freshFile("remove-sibling");
+		const sibling = path.join(path.dirname(file), "other.json");
+		const lookalike = path.join(path.dirname(file), "data.json.bak.notanumber");
+		atomicWriteJsonSync(file, { n: 1 }, { backups: 1 });
+		fs.writeFileSync(sibling, "{}", "utf-8");
+		fs.writeFileSync(lookalike, "{}", "utf-8");
+
+		removeJsonWithBackups(file);
+		assert.ok(fs.existsSync(sibling), "unrelated sibling untouched");
+		assert.ok(fs.existsSync(lookalike), "non-numeric .bak lookalike untouched");
+	});
+
+	it("after removal, loadJsonWithBackupFallback finds nothing (no resurrection)", () => {
+		const file = freshFile("remove-no-resurrect");
+		atomicWriteJsonSync(file, { alive: true }, { backups: 2 });
+		atomicWriteJsonSync(file, { alive: true, v: 2 }, { backups: 2 }); // rotates .bak.1
+
+		removeJsonWithBackups(file);
+
+		assert.equal(loadJsonWithBackupFallback(file, { backups: 2 }), undefined);
+	});
+
+	it("is a no-op (no throw) when nothing exists", () => {
+		const file = freshFile("remove-missing");
+		assert.doesNotThrow(() => removeJsonWithBackups(file));
 	});
 });

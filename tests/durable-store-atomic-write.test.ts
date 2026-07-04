@@ -229,4 +229,25 @@ describe("InboxStore atomic write + backup recovery", () => {
 		const store = new InboxStore(stateDir);
 		assert.deepEqual(store.list("s1"), []);
 	});
+
+	it("removeAll purges .bak files too — a deleted inbox must NOT resurrect from backup after restart", async () => {
+		const { InboxStore } = await import("../src/server/agent/inbox-store.ts");
+		const stateDir = freshStateDir("inbox-remove-all");
+		const storeFile = path.join(stateDir, "inbox", "s1.json");
+
+		// Write twice so a .bak.1 backup is rotated into existence.
+		const store1 = new InboxStore(stateDir);
+		store1.put(makeEntry("e1", "s1"));
+		store1.put(makeEntry("e2", "s1"));
+		assert.ok(fs.existsSync(`${storeFile}.bak.1`), "precondition: a rotated backup exists");
+
+		// Delete the staff's inbox (as staff deletion does), then "restart".
+		store1.removeAll("s1");
+
+		assert.ok(!fs.existsSync(storeFile), "primary deleted");
+		assert.ok(!fs.existsSync(`${storeFile}.bak.1`), ".bak.1 purged — would otherwise resurrect on load");
+
+		const store2 = new InboxStore(stateDir);
+		assert.deepEqual(store2.list("s1"), [], "deleted inbox stays deleted across restart");
+	});
 });
