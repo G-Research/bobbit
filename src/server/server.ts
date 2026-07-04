@@ -534,10 +534,10 @@ import {
 	type RegisteredProject,
 } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
-import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
+import { archiveProjectBobbitDir, ArchiveError, GATEWAY_OWNED_FILES } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
-import { resolveProjectForRequest } from "./agent/resolve-project.js";
+import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
@@ -1777,7 +1777,7 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	try {
-		projectRegistry.ensureHeadquartersProject(getProjectRoot(), { stateDir, configDir });
+		projectRegistry.ensureHeadquartersProject(bobbitDir(), { stateDir, configDir });
 	} catch (err) {
 		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
 	}
@@ -3731,13 +3731,9 @@ async function handleApiRoute(
 	};
 	const samePath = (a: string, b: string): boolean => canonicalPathForCompare(a) === canonicalPathForCompare(b);
 	const headquartersProject = (): RegisteredProject | undefined => projectRegistry.get(HEADQUARTERS_PROJECT_ID);
-	const bobbitOwnerPath = (): string => path.dirname(bobbitDir());
 	const isHeadquartersOwnedPath = (candidatePath: string): boolean => {
 		const hq = headquartersProject();
-		return (hq ? samePath(candidatePath, hq.rootPath) : samePath(candidatePath, getProjectRoot()))
-			|| samePath(candidatePath, getProjectRoot())
-			|| samePath(candidatePath, bobbitDir())
-			|| samePath(candidatePath, bobbitOwnerPath());
+		return !!hq && samePath(candidatePath, hq.rootPath);
 	};
 	const shouldShowHeadquartersInProjectLists = (): boolean => preferencesStore.get("showHeadquartersInProjectLists") !== false;
 	const listProjectsForApi = (): RegisteredProject[] => projectRegistry.list().filter(project => {
@@ -3745,6 +3741,12 @@ async function handleApiRoute(
 		if (isHeadquartersProject(project) && !shouldShowHeadquartersInProjectLists()) return false;
 		return true;
 	});
+	const writeProjectResolutionError = (resolved: Extract<ReturnType<typeof resolveProjectForRequest>, { ok: false }>): void => {
+		json({ error: resolved.error, code: resolved.code }, resolved.status);
+	};
+	const writeCwdValidationError = (validation: Extract<ReturnType<typeof validateExecutionCwd>, { ok: false }>): void => {
+		json({ error: validation.error, code: validation.code }, validation.status);
+	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
 		if (!(err instanceof SpecialProjectMutationError)) return false;
 		json({ error: err.message, code: err.code }, err.status);
@@ -3848,12 +3850,15 @@ async function handleApiRoute(
 	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
 	 */
 	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			return headquartersProject()?.rootPath ?? bobbitDir();
+		}
 		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		if (effectiveProjectId && projectContextManager) {
 			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.project.rootPath;
 		}
-		return projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : cwd;
+		return cwd;
 	}
 
 	/**
@@ -3865,8 +3870,9 @@ async function handleApiRoute(
 	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
 		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		const ctx = effectiveProjectId && projectContextManager ? projectContextManager.getOrCreate(effectiveProjectId) : undefined;
+		const hqRoot = headquartersProject()?.rootPath ?? bobbitDir();
 		return {
-			serverBase: getProjectRoot(),
+			serverBase: projectId === HEADQUARTERS_PROJECT_ID ? hqRoot : getProjectRoot(),
 			globalUserBase: os.homedir(),
 			projectBase: ctx?.project.rootPath ?? "",
 			serverConfigStore: projectConfigStore,
@@ -4261,7 +4267,7 @@ async function handleApiRoute(
 		}
 		if (isHeadquartersOwnedPath(body.rootPath)) {
 			json({
-				error: "Headquarters owns the server .bobbit state. Hide Headquarters from project lists in Settings instead of archiving it.",
+				error: "Headquarters is managed by the server and cannot be archived. Hide it from project lists in Settings instead.",
 				code: "HEADQUARTERS_IMMUTABLE",
 			}, 403);
 			return;
@@ -4271,8 +4277,12 @@ async function handleApiRoute(
 		const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
 		const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
 		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
+		const preserveHeadquartersDir = sameAsGateway && fs.existsSync(path.join(body.rootPath, ".bobbit", "headquarters"));
+		const allowlist = preserveHeadquartersDir
+			? [...GATEWAY_OWNED_FILES, "headquarters/"]
+			: undefined;
 		try {
-			const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned });
+			const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned, ...(allowlist ? { allowlist } : {}) });
 			json(result);
 		} catch (err: any) {
 			if (err instanceof ArchiveError) {
@@ -5894,19 +5904,22 @@ async function handleApiRoute(
 			else if (body?.toolAssistant) assistantType = "tool";
 		}
 
-		// If creating under a goal, use the goal's cwd as default
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
+		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		const explicitProjectId = typeof body?.projectId === "string" && body.projectId.trim().length > 0
+			? body.projectId.trim()
+			: undefined;
+
+		// If creating under a goal, use the goal's cwd/project as the default.
+		let cwd = explicitCwd || config.defaultCwd;
+		let goalForSession: PersistedGoal | undefined;
 		if (goalId) {
-			const goal = getGoalAcrossProjects(goalId);
-			if (goal) {
-				cwd = body?.cwd || goal.cwd;
+			goalForSession = getGoalAcrossProjects(goalId);
+			if (goalForSession) {
+				cwd = explicitCwd || goalForSession.cwd;
 				// Auto-transition goal to in-progress when first session starts
-				if (goal.state === "todo") {
+				if (goalForSession.state === "todo") {
 					await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
 				}
 			}
@@ -5955,53 +5968,45 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-detect projectId from cwd if not explicitly provided.
-		// Project assistant sessions (assistantType "project" or "project-scaffolding") are
-		// setting up a NEW project — they get a provisional project registration so sessions
-		// persist under their own project context (survives page refresh).
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
-		// Role/Tool assistants edit server-scope config and do not require a
-		// project. When the client supplies a projectId we still attach to it (the
-		// Roles page can be scoped to a project); otherwise we skip project
-		// resolution entirely so `npx bobbit` in a non-project directory works.
-		// Staff assistants are project-scoped — they must resolve a project the
-		// same way `goal` assistants do (see the surface-staff-in-sessions design).
+		// Role/Tool assistants can deliberately use the hidden system project when
+		// no projectId is supplied. All normal user/work sessions need an explicit
+		// projectId or a persisted goal/reattempt source project.
 		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool";
-		let resolvedProjectId = body?.projectId as string | undefined;
+		let resolvedProjectId = explicitProjectId;
+		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
+		let cwdSource: CwdOwnershipSource = { kind: "user-input" };
 
-		// If re-attempting a goal, inherit cwd and projectId from the original goal
-		if (reattemptGoalId && !body?.cwd) {
-			const origGoal = getGoalAcrossProjects(reattemptGoalId);
-			if (origGoal) {
-				cwd = origGoal.cwd || cwd;
-				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
-			}
-		}
-
-		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
-		// or a project whose rootPath is gone). spawn(process.execPath, { cwd }) on Windows
-		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
-		// Fall back to the project rootPath when we have a resolved project to anchor the
-		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
-		// will reject a bogus cwd with the canonical 400 rather than silently rewriting
-		// it to defaultCwd (which would mask user error and match an unrelated project).
-		if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
-			const staleCwd = cwd;
-			const proj = projectRegistry.get(resolvedProjectId);
-			let fallback: string | undefined;
-			if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
-			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
-			if (fallback) {
-				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
-				cwd = fallback;
-			} else {
-				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+		const goalProjectId = goalForSession?.projectId
+			?? (goalId ? projectContextManager.getContextForGoal(goalId)?.project.id : undefined);
+		if (goalProjectId) {
+			if (resolvedProjectId && resolvedProjectId !== goalProjectId) {
+				json({ error: "projectId must match the goal's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
 				return;
 			}
+			resolvedProjectId = goalProjectId;
+			cwdSource = { kind: "goal", goalId };
 		}
 
-		// For project assistants, register a provisional project at the target cwd
+		// If re-attempting a goal, inherit cwd and projectId from the original goal.
+		if (reattemptGoalId) {
+			const origGoal = getGoalAcrossProjects(reattemptGoalId);
+			if (origGoal) {
+				if (!explicitCwd) cwd = origGoal.cwd || cwd;
+				const origProjectId = origGoal.projectId ?? projectContextManager.getContextForGoal(reattemptGoalId)?.project.id;
+				if (origProjectId) {
+					if (resolvedProjectId && resolvedProjectId !== origProjectId) {
+						json({ error: "projectId must match the reattempt goal's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
+						return;
+					}
+					resolvedProjectId = origProjectId;
+					cwdSource = { kind: "goal", goalId: reattemptGoalId };
+				}
+			}
+		}
+
+		// For project assistants, register a provisional project at the target cwd.
 		if (isProjectAssistant && cwd && !resolvedProjectId) {
 			let provisionalProject: RegisteredProject;
 			try {
@@ -6022,18 +6027,43 @@ async function handleApiRoute(
 			}
 		}
 
-		// Project must be resolvable explicitly or from cwd — no silent default fallback.
-		// (Provisional-project handling above may already have set resolvedProjectId;
-		// if so, skip the resolver.)
-		// Server-scope assistants (role/tool/staff) without an explicit projectId
-		// anchor at the synthetic system project so they have a valid persistence
-		// store without forcing the user to register a real project.
 		if (!resolvedProjectId && isServerScopeAssistant) {
 			resolvedProjectId = SYSTEM_PROJECT_ID;
-		} else if (!resolvedProjectId) {
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			resolvedProjectId = resolved.projectId;
+		}
+		if (!resolvedProjectId) {
+			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
+			if (!missing.ok) writeProjectResolutionError(missing);
+			return;
+		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: resolvedProjectId }, {
+			allowSystem: isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID,
+		});
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		resolvedProjectId = resolved.projectId;
+		resolvedProject = resolved.project;
+
+		if (!explicitCwd && !goalForSession && !reattemptGoalId && !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
+			cwd = resolvedProject.rootPath;
+		}
+
+		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted).
+		if (cwd && !fs.existsSync(cwd)) {
+			const staleCwd = cwd;
+			let fallback: string | undefined;
+			if (fs.existsSync(resolvedProject.rootPath)) fallback = resolvedProject.rootPath;
+			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
+			if (fallback) {
+				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
+				cwd = fallback;
+			} else {
+				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+				return;
+			}
+		}
+
+		if (!(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		}
 
 		if (roleId && typeof roleId === "string") {
@@ -6102,7 +6132,7 @@ async function handleApiRoute(
 				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
-			// Store projectId on the session if resolved (explicit or auto-detected).
+			// Store projectId on the session if resolved from an explicit or persisted scope.
 			// Project assistant sessions keep their provisional projectId so they
 			// persist under the provisional project's store and appear in the sidebar.
 			if (resolvedProjectId) {
@@ -6341,12 +6371,10 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
 		const title = body?.title;
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
+		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		let cwd = explicitCwd || config.defaultCwd;
 		const spec = body?.spec || "";
 		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
@@ -6375,12 +6403,12 @@ async function handleApiRoute(
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
 			}
-			// Resolve target project — explicit projectId or cwd-match. No fallback.
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const resolved = resolveProjectForRequest(projectRegistry, { projectId: body.projectId });
+			if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 			const targetProjectId = resolved.projectId;
-			// If caller passed a projectId but no cwd, use the project's rootPath.
-			if (!body?.cwd) cwd = resolved.project.rootPath;
+			if (!explicitCwd) cwd = resolved.project.rootPath;
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, targetProjectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -6616,7 +6644,7 @@ async function handleApiRoute(
 				metadata,
 				worktree: explicitWorktree,
 			});
-			// Set projectId (explicit or auto-detected from cwd)
+			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
 				goal.projectId = targetProjectId;
@@ -8082,13 +8110,11 @@ async function handleApiRoute(
 
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId");
-		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const resolvedCwd = effectiveProjectId && projectContextManager
-			? projectContextManager.getOrCreate(effectiveProjectId)?.project.rootPath ?? config.defaultCwd
-			: (projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : config.defaultCwd);
-		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
+		json(getAllConfigDirectories(resolved.project.rootPath, resolvedStore));
 		return;
 	}
 
@@ -8099,8 +8125,9 @@ async function handleApiRoute(
 			json({ error: "Missing 'path' in body" }, 400);
 			return;
 		}
-		const projectId = (body as any).projectId as string | null ?? null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: (body as any).projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
 		removeBuiltinDirectory(resolvedStore, (body as any).path);
 		json({ ok: true });
 		return;
@@ -8109,8 +8136,9 @@ async function handleApiRoute(
 	// POST /api/config-directories/reset — reset all config dirs to defaults
 	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
 		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? ((body as any).projectId as string | null ?? null) : null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: body && typeof body === "object" ? (body as any).projectId : undefined });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
 		resetConfigDirectories(resolvedStore);
 		json({ ok: true });
 		return;
@@ -12568,6 +12596,22 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
+			if (proposalType === "goal" || proposalType === "staff") {
+				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+				const sessionProjectId = proposalSession?.projectId;
+				if (!sessionProjectId) {
+					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
+					return;
+				}
+				const proposalProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined;
+				if (proposalProjectId && proposalProjectId !== sessionProjectId) {
+					json({ ok: false, code: "PROJECT_ID_MISMATCH", message: "proposal projectId must match the session projectId" }, 422);
+					return;
+				}
+				enrichedArgs = { ...enrichedArgs, projectId: sessionProjectId };
+			}
 			if (proposalType === "goal") {
 				const sess = sessionManager.getSession(sessionId);
 				if (sess?.role === "team-lead" && sess.teamGoalId) {
@@ -12591,7 +12635,7 @@ async function handleApiRoute(
 			// when the session has no resolvable project or the project has zero
 			// workflows (empty-state behaviour preserved).
 			if (proposalType === "goal") {
-				const projectId = sessionManager.getSession(sessionId)?.projectId;
+				const projectId = (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
 				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
 				if (projectId) {
 					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
@@ -12600,7 +12644,7 @@ async function handleApiRoute(
 						if (ctx) workflows = ctx.workflowStore.getAll();
 					}
 				}
-				const wfErr = validateGoalProposalWorkflow(args as Record<string, unknown>, workflows);
+				const wfErr = validateGoalProposalWorkflow(enrichedArgs, workflows);
 				if (wfErr) { json(wfErr, 400); return; }
 			}
 			try {
@@ -13625,12 +13669,14 @@ async function handleApiRoute(
 	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
 	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
 		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
 		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
 		// Skill files live on the host, so resolve the project rootPath for discovery.
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
 		return;
 	}
@@ -13667,10 +13713,12 @@ async function handleApiRoute(
 	// GET /api/slash-skills/details — full slash skill details including content and file paths
 	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
 		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
 		const directories = getSkillDirectories(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })), directories });
 		return;
@@ -14706,23 +14754,11 @@ async function handleApiRoute(
 		const explicitProjectId = typeof body.projectId === "string" && body.projectId.trim().length > 0
 			? body.projectId.trim()
 			: undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: explicitProjectId, cwd: explicitCwd });
-		if (!resolved.ok) {
-			json({ error: resolved.error }, resolved.status);
-			return;
-		}
-		if (resolved.project.hidden || resolved.projectId === SYSTEM_PROJECT_ID) {
-			json({ error: "projectId required: staff agents must be created in a registered project" }, 400);
-			return;
-		}
-		if (explicitCwd && explicitProjectId) {
-			const cwdProject = projectRegistry.findByCwd(explicitCwd);
-			if (!cwdProject || cwdProject.id !== resolved.projectId) {
-				json({ error: "cwd must be inside the selected project" }, 400);
-				return;
-			}
-		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: explicitProjectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const cwd = explicitCwd ?? resolved.project.rootPath;
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolved.projectId, cwd, { kind: "user-input" });
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		const projectId = resolved.projectId;
 		// Validate the referenced role exists in the selected project's cascade.
 		// roleId omitted or null/empty is allowed — staff with no role behave as before.
@@ -14844,11 +14880,8 @@ async function handleApiRoute(
 						json({ error: "Staff agent is not attached to a registered project" }, 400);
 						return;
 					}
-					const cwdProject = projectRegistry.findByCwd(requestedCwd);
-					if (!cwdProject || cwdProject.id !== staffProject.id) {
-						json({ error: "cwd must be inside the staff agent's project" }, 400);
-						return;
-					}
+					const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, staffProject.id, requestedCwd, { kind: "staff", staffId: staff.id });
+					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 					cwdUpdate = requestedCwd;
 				}
 			}
@@ -15039,9 +15072,20 @@ async function handleApiRoute(
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
+		if (cwd && !projectId) {
+			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
+			if (!missing.ok) writeProjectResolutionError(missing);
+			return;
+		}
 		const ensure = url.searchParams.get("ensure") === "true";
-		const mcpManager = projectId || cwd
-			? (ensure ? await sessionManager.ensureMcpManager({ projectId, cwd }) : sessionManager.getMcpManager({ projectId, cwd }))
+		let resolvedProjectId: string | undefined;
+		if (projectId) {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+		}
+		const mcpManager = resolvedProjectId
+			? (ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId }))
 			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json([]);
@@ -15089,8 +15133,19 @@ async function handleApiRoute(
 	if (mcpRestartMatch && req.method === "POST") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
-		const mcpManager = projectId || cwd
-			? await sessionManager.ensureMcpManager({ projectId, cwd })
+		if (cwd && !projectId) {
+			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
+			if (!missing.ok) writeProjectResolutionError(missing);
+			return;
+		}
+		let resolvedProjectId: string | undefined;
+		if (projectId) {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+		}
+		const mcpManager = resolvedProjectId
+			? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId })
 			: sessionManager.getMcpManager();
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
