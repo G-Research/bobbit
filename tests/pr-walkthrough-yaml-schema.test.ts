@@ -282,17 +282,18 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
 	});
 
-	it("falls back to the only file hunk when YAML line coordinates are stale", () => {
-		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -371,7 +371,8 @@ stale location"));
+	it("fails closed when a supplied hunk header misses the only file hunk", () => {
+		const staleHeader = "@@ -371,7 +371,8 @@ stale location";
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml(staleHeader));
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
 
-		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample")] });
-
-		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
-		const review = payload.cards.find(card => card.id === "significant-context-review");
-		assert.equal(review?.suggestedComments?.length, 1);
-		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+		const error = captureError(() => mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample")] }));
+		assert.equal(error.code, "PRW_HUNK_REF_UNRESOLVED");
+		assert.equal(error.retryable, true);
+		assert.equal(error.details?.supplied?.file, "src/context.ts");
+		assert.equal(error.details?.supplied?.hunk_header, staleHeader);
+		assert.equal(error.details?.candidateCount, 0);
 	});
 
 	it("fails closed when an older header reference is ambiguous across multiple hunks", () => {
@@ -306,8 +307,8 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(error.details?.cardId, "design-context-design");
 	});
 
-	it("does not duplicate diff blocks when mapped hunks and file fallback overlap", () => {
-		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@", "@@ -10,2 +10,3 @@", [{ header: "@@ -99,1 +99,1 @@", why: "Intentional fallback to the same file." }]));
+	it("does not duplicate diff blocks when repeated hunk references overlap", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@", "@@ -10,2 +10,3 @@", [{ header: "@@ -10,2 +10,3 @@", why: "Intentional repeated reference to the same hunk." }]));
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
 

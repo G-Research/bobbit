@@ -1539,8 +1539,7 @@ class DiffReferenceMapper {
 		}
 		if (narrowed.length === 1) return narrowed[0];
 
-		const noContradictoryCoords = ref.hunk_index === undefined && ref.old_start === undefined && ref.old_lines === undefined && ref.new_start === undefined && ref.new_lines === undefined;
-		if (ref.file && noContradictoryCoords && candidates.length === 1) return candidates[0];
+		if (ref.file && !hasHunkDisambiguator(ref) && candidates.length === 1) return candidates[0];
 
 		throw unresolvedHunkError(path, cardId, ref, narrowed.length, narrowed.length > 1 ? "reference matched multiple hunks" : "reference did not match any hunk");
 	}
@@ -1571,6 +1570,18 @@ function indexHunk(block: PrWalkthroughDiffBlock, hunk: PrWalkthroughHunk, hunkI
 		sourceTruncated: Boolean(sourceFlags.sourceIsTruncated ?? sourceFlags.source_is_truncated ?? block.isTruncated),
 		fileCategory: fileCategory(block.filePath, block),
 	};
+}
+
+function hasHunkDisambiguator(ref: PrWalkthroughYamlHunkReference): boolean {
+	return Boolean(
+		ref.hunk_id
+		|| ref.hunk_header
+		|| ref.hunk_index !== undefined
+		|| ref.old_start !== undefined
+		|| ref.old_lines !== undefined
+		|| ref.new_start !== undefined
+		|| ref.new_lines !== undefined,
+	);
 }
 
 function referenceMatchesProvidedFields(candidate: IndexedHunk, ref: PrWalkthroughYamlHunkReference): boolean {
