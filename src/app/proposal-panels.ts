@@ -3045,7 +3045,6 @@ let _proposalMaxConcurrentChildren: number | null = null;
 // tests/source-pin-merge-invariants.test.ts.
 // ----------------------------------------------------------------------------
 type ProposalTab = "goal" | "workflow" | "roles" | "metadata" | "subgoals";
-
 interface GoalProposalTabsState {
 	activeTab: ProposalTab;
 	inlineWorkflow: Workflow | null;

@@ -889,7 +889,15 @@ export function handleWebSocketConnection(
 						const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
 						if (clamped) level = clamped;
 					}
-					await session.rpcClient.setThinkingLevel(level);
+					try {
+						const result = await session.rpcClient.setThinkingLevel(level);
+						if (result && result.success === false) throw new Error(result.error || "thinking level change rejected by runtime");
+						session.spawnPinnedThinkingLevel = level;
+						broadcast(session.clients, { type: "state", data: { thinkingLevel: level } });
+					} catch (err: any) {
+						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${level}):`, err?.message || err);
+						send(ws, { type: "error", message: `Failed to change thinking level: ${err?.message || err}`, code: "SET_THINKING_LEVEL_FAILED" });
+					}
 					break;
 				}
 				case "compact": {

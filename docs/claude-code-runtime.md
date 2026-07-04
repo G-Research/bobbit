@@ -9,9 +9,9 @@ Use this mode when you want Bobbit's session UI, goal/task context, persistence,
 The local runtime currently supports:
 
 - **Claude Code-backed chat sessions** — Bobbit sends user prompts to the local CLI over structured stdin and renders the streamed stdout response in the normal chat surface. Claude Code owns inference, authentication, permission prompts, and its internal context handling.
-- **Model alias selection** — picker rows use `claude-code/<alias>` ids. The default alias for new Claude Code sessions is `claude-opus-4-8`, with built-in rows for `default`, `sonnet`, and `opus`; short custom aliases may also be forwarded to the CLI. Persisted model metadata is derived from the active local Claude Code alias, not from stale API/Pi model state.
-- **Same-session alias switching** — changing between Claude Code aliases keeps the Bobbit session when the runtime is idle. Bobbit restarts the local `claude` process with the new alias and resumes with the latest known Claude Code session id when available.
-- **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists. Supported pending `ask_user_choices` widgets restored from that fallback remain answerable after a gateway restart. Hydration also repairs stale persisted rows for the known Claude Code Ask User Question placeholder so existing/restored sessions can render the widget.
+- **Model alias selection** — picker rows use `claude-code/<alias>` ids. The visible supported aliases are `local-claude-opus-4-8` and `local-claude-sonnet-4-6`; fresh/default Claude Code sessions use `local-claude-opus-4-8` unless preferences or project config choose another valid alias. Bobbit stores and displays the `local-*` alias, but forwards only the CLI alias to Claude Code by stripping that prefix, for example `local-claude-opus-4-8` → `claude-opus-4-8`.
+- **Same-session alias and effort switching** — changing between Claude Code aliases keeps the Bobbit session when the runtime is idle. Bobbit restarts the local `claude` process with the new alias and resumes with the latest known Claude Code session id when available. Bobbit thinking/effort selection maps to Claude Code `--effort`; idle sessions can restart/resume to apply a new effort, while active turns reject the change with a clear error.
+- **Transcript persistence and hydration** — Bobbit persists runtime metadata and a Bobbit-owned transcript fallback, so reloads and `read_session` can hydrate Claude Code conversations even when no Pi `agentSessionFile` exists. Supported pending `ask_user_choices` widgets restored from that fallback remain answerable after a gateway restart. Hydration also repairs stale persisted rows for the known Claude Code Ask User Question placeholder so existing/restored sessions can render the widget. Live and hydrated Claude Code user/assistant messages carry timestamps when the CLI provides them, falling back to Bobbit receive time.
 - **Structured tool-use display** — Claude Code `tool_use` and `tool_result` stream events are translated into Bobbit tool-call and tool-result messages where their shape can be mapped. Claude Code Ask User Question payloads render as Bobbit `ask_user_choices` when they use the supported structured question/options shape. If the Claude CLI marks the known `Answer questions?` Ask User Question placeholder result as an error, Bobbit normalizes only that placeholder into the posted interactive widget state; real tool errors remain errors. Shell, git, and other tool outputs are visible when Claude Code emits them as structured tool events.
 - **Session status and errors** — readiness, runtime metadata, normal turn completion, CLI exits, malformed stream diagnostics, auth/start failures, and error results surface through Bobbit status/error events instead of failing silently.
 - **Stop/abort MVP behavior** — graceful stops terminate the local process, escalating when needed; abort emits a visible aborted turn and lets the next prompt start a fresh CLI process with the latest known resume id.
@@ -34,9 +34,10 @@ claude --print \
 
 Depending on session metadata and preferences Bobbit may also pass:
 
-- `--model <alias>` for non-`default` aliases such as `claude-opus-4-8`, `sonnet`, or `opus`.
+- `--model <cli-alias>` for non-`default` aliases. Bobbit strips only the `local-` prefix from visible aliases before passing the value, so `local-claude-opus-4-8` becomes `claude-opus-4-8` and `local-claude-sonnet-4-6` becomes `claude-sonnet-4-6`.
 - `--append-system-prompt <text>` with Bobbit's assembled system prompt.
-- `--permission-mode acceptEdits|bypassPermissions` for explicit non-default permission modes.
+- `--permission-mode <mode>` on every spawn. Normal editable sessions default to `acceptEdits`; an explicit stored/configured `default` is preserved and lets Claude Code apply its own default permission behavior; read-only Bobbit sessions force Claude Code `plan` mode across create, restore, and respawn; `bypassPermissions` is allowed only after explicit opt-in/confirmation.
+- `--effort low|medium|high|xhigh|max` when Bobbit's thinking/effort selector maps to a Claude Code effort.
 - `--resume <claudeCodeSessionId>` when Bobbit has a previous Claude Code session id.
 
 Claude Code stdout is parsed as JSONL. Bobbit translates Claude Code events into the same live event stream the UI already understands. This is display/coordination only: Bobbit does not execute Claude Code's internal tool calls or substitute its own tool catalog for the CLI's tool catalog.
@@ -57,14 +58,12 @@ The parser has size limits for JSONL lines, diagnostic lines, per-event content,
 
 `GET /api/models` always emits synthetic Claude Code model rows for the local runtime aliases:
 
-- `claude-code/claude-opus-4-8` (default)
-- `claude-code/default`
-- `claude-code/sonnet`
-- `claude-code/opus`
+- `claude-code/local-claude-opus-4-8` (default)
+- `claude-code/local-claude-sonnet-4-6`
 
 Picker rows are deliberately labeled as local runtime rows:
 
-- Name: `Claude Code Opus 4.8`, `Claude Code Sonnet`, `Claude Code Opus`, etc.
+- Name: `local-claude-opus-4-8`, `local-claude-sonnet-4-6`.
 - Provider/runtime label: `Claude Code (local)`.
 - Detail text: `Claude Code managed` / `Claude Code account`.
 - Tooltip when available: `Runs through your local Claude Code CLI and existing Claude Code login.`
@@ -89,16 +88,17 @@ Settings → Models contains a **Claude Code (local)** section. These preference
 | Preference key | Default | Meaning |
 |---|---|---|
 | `claudeCode.executablePath` | `claude` | Command name on trusted `PATH` or an absolute executable path. Relative paths such as `./claude` are rejected. |
-| `claudeCode.defaultModel` | `claude-opus-4-8` | Default model alias when a Claude Code session is created without a specific `claude-code/<alias>` model. Built-in choices are `claude-opus-4-8`, `default`, `sonnet`, and `opus`; short custom model tokens are accepted. |
-| `claudeCode.permissionMode` | `default` | Claude Code permission mode: `default`, `acceptEdits`, or `bypassPermissions`. |
+| `claudeCode.defaultModel` | `local-claude-opus-4-8` | Default model alias when a Claude Code session is created without a specific `claude-code/<alias>` model. Visible supported choices are `local-claude-opus-4-8` and `local-claude-sonnet-4-6`; compatible historical aliases and short custom model tokens are accepted and normalized where possible. |
+| `claudeCode.permissionMode` | `acceptEdits` | Claude Code permission mode for normal editable sessions: `default`, `acceptEdits`, or `bypassPermissions`. An explicit stored/configured `default` is not rewritten at bridge time; it is passed as `--permission-mode default` so Claude Code keeps its own default prompting behavior. |
 | `claudeCode.allowBypassPermissions` | `false` | Explicit user/admin opt-in required before `bypassPermissions` can be saved or used. |
 
-Project config may provide `claudeCodeDefaultModel` and `claudeCodePermissionMode` for sessions in that project. It cannot choose the host executable for readiness probes or sessions, and repository-controlled keys such as `claudeCodeExecutablePath` are ignored for that purpose. Project config also cannot enable bypass mode. If a project requests `bypassPermissions` and the user/admin has not enabled `claudeCode.allowBypassPermissions`, Bobbit downgrades the mode to `default`.
+Project config may provide `claudeCodeDefaultModel` and `claudeCodePermissionMode` for sessions in that project. It cannot choose the host executable for readiness probes or sessions, and repository-controlled keys such as `claudeCodeExecutablePath` are ignored for that purpose. Project config also cannot enable bypass mode. If a project requests `bypassPermissions` and the user/admin has not enabled `claudeCode.allowBypassPermissions`, Bobbit falls back to the safe configured default (`acceptEdits`).
 
 Permission modes are intentionally explicit:
 
-- `default` lets Claude Code ask normally.
-- `acceptEdits` accepts edit operations when Claude Code requests them; it still changes local files, so use it only for trusted sessions.
+- `acceptEdits` is Bobbit's default for fresh editable Claude Code sessions. It accepts edit operations when Claude Code requests them; it still changes local files, so use it only for trusted sessions.
+- `default` preserves Claude Code's own default permission behavior and lets Claude Code ask normally.
+- `plan` is forced by Bobbit for read-only Claude Code sessions across create, restore, and respawn. It is not a user-saved preference.
 - `bypassPermissions` disables normal Claude Code permission prompts. It is disabled until the separate bypass opt-in is set because it increases local-machine risk.
 
 ## Session behavior
@@ -108,7 +108,7 @@ Permission modes are intentionally explicit:
 A Claude Code session can be created by posting a session with either:
 
 ```json
-{ "runtime": "claude-code", "model": "claude-code/sonnet" }
+{ "runtime": "claude-code", "model": "claude-code/local-claude-sonnet-4-6" }
 ```
 
 or a model object with provider `claude-code` and an alias id.
@@ -136,9 +136,10 @@ Bobbit does not silently convert a running session between Pi and Claude Code.
 - Picking a Claude Code row from an existing Pi session opens a confirmation dialog and creates a new top-level Claude Code session from the same working directory.
 - Picking a Pi/API-backed model from a Claude Code session follows the same new-session pattern.
 - If the UI misses the guard, the bridge/server rejects the runtime-mismatched `set_model` request.
-- Changing between Claude Code aliases keeps the same Bobbit session. Bobbit does not rely on an undocumented in-process model-switch event; when idle, it gracefully stops the current Claude Code process, restarts `claude` with the new `--model <alias>`, and includes `--resume <claudeCodeSessionId>` when one is known.
+- Changing between Claude Code aliases keeps the same Bobbit session. Bobbit does not rely on an undocumented in-process model-switch event; when idle, it gracefully stops the current Claude Code process, restarts `claude` with the new `--model <cli-alias>`, and includes `--resume <claudeCodeSessionId>` when one is known.
+- Changing Bobbit thinking/effort for a Claude Code session also requires an idle restart/resume because it maps to CLI `--effort`. Active turns reject the change until the turn finishes; sessions with existing messages but no Claude Code resume id fail clearly rather than losing context.
 
-This keeps each session tied to the runtime that owns its process, transcript, and resume semantics while still allowing safe same-runtime alias changes.
+This keeps each session tied to the runtime that owns its process, transcript, and resume semantics while still allowing safe same-runtime alias/effort changes.
 
 ### Continue, fork, restart, and resume
 
@@ -164,7 +165,7 @@ Claude Code resume uses Claude Code's own session id and `--resume`; it does not
 - **Host-only sandbox boundary** — Claude Code sessions cannot run in Bobbit Docker sandboxes in the MVP, and Bobbit does not mount or expose private Claude credentials into sandbox containers by default.
 - **Resume depends on the CLI** — restart, restore, continue, fork, and alias switching can pass `--resume <claudeCodeSessionId>` only when Bobbit has a valid Claude Code session id and the local CLI honors it. If Bobbit has messages but no Claude Code session id, operations that would lose Claude Code context fail clearly.
 - **Usage, cost, and timing are best-effort** — Bobbit normalizes token display when Claude Code reports usage and can surface CLI-reported cost fields, but usage/cost accounting is local-runtime managed and should not be treated as Bobbit API billing data. Turn timing comes from CLI-reported durations when available or from Bobbit's elapsed-time inference otherwise.
-- **Unsupported Pi control surfaces** — live steer, thinking-level changes, and compaction are not supported for Claude Code sessions in the MVP. Active streaming turns reject alias switches until the turn finishes.
+- **Unsupported Pi control surfaces** — live steer and compaction are not supported for Claude Code sessions in the MVP. Active streaming turns reject alias and effort switches until the turn finishes.
 - **Auth failures may be deferred** — the readiness probe intentionally avoids an undocumented authenticated no-op, so some login/account failures only appear when the first Claude Code session starts.
 
 ## Safety and credentials

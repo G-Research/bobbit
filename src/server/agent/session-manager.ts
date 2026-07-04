@@ -18,6 +18,8 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
+import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime, runtimeFromModelString, runtimeFromProvider, type SessionBridgeOptions } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
@@ -1037,6 +1039,54 @@ type IdleWaiter = {
 	reject: (error: Error) => void;
 	cleanup: () => void;
 };
+
+function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
+	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
+	let timestamp: number | undefined;
+	if (typeof envelopeTs === "number" && Number.isFinite(envelopeTs)) timestamp = envelopeTs < 10_000_000_000 ? envelopeTs * 1000 : envelopeTs;
+	else if (typeof envelopeTs === "string") {
+		const parsed = Date.parse(envelopeTs);
+		if (Number.isFinite(parsed)) timestamp = parsed;
+	}
+	return timestamp === undefined ? message : { ...message, timestamp };
+}
+
+function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
+	const askToolIds = new Set<string>();
+	for (const message of messages as any[]) {
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
+			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
+		}
+	}
+	return messages.map((message: any) => {
+		if (message?.role !== "toolResult") return message;
+		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
+		const text = stringifyPersistedToolResultContent(message.content).trim();
+		if (text !== "Answer questions?") return message;
+		const rest = { ...message };
+		delete rest.error;
+		return {
+			...rest,
+			isError: false,
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
+		};
+	});
+}
+
+function stringifyPersistedToolResultContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content.map((item: any) => {
+			if (typeof item === "string") return item;
+			if (item?.type === "text" && typeof item.text === "string") return item.text;
+			try { return JSON.stringify(item); } catch { return String(item); }
+		}).join("\n");
+	}
+	if (content == null) return "";
+	try { return JSON.stringify(content); } catch { return String(content); }
+}
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
@@ -5301,7 +5351,19 @@ export class SessionManager {
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, ps.modelProvider);
 
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const runtime = resolveSessionRuntime({ runtime: ps.runtime, initialModel: bridgeOptions.initialModel, modelProvider: ps.modelProvider });
+		assertRuntimeAllowedForSession(runtime, ps.sandboxed);
+		Object.assign(bridgeOptions, hydrateRuntimeOptions({
+			...bridgeOptions,
+			runtime,
+			claudeCodeSessionId: ps.claudeCodeSessionId,
+			claudeCodeExecutable: ps.claudeCodeExecutable,
+			claudeCodePermissionMode: ps.claudeCodePermissionMode,
+			claudeCodeModelAlias: ps.claudeCodeModelAlias,
+			readOnly: ps.readOnly,
+		}, this.readClaudeCodeConfigForProject(ps.projectId)));
+
+		const rpcClient = createSessionBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
 		// stash the previous session's streaming frame-of-reference on `ps` so the
@@ -6076,7 +6138,7 @@ export class SessionManager {
 				if (!line.trim()) continue;
 				try {
 					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) messages.push(entry.message);
+					if (entry.type === "message" && entry.message) messages.push(isClaudeCode ? withPersistedClaudeCodeMessageTimestamp(entry.message, entry.ts) : entry.message);
 				} catch { /* skip malformed line */ }
 			}
 			return this.extractAssistantText(messages);
@@ -7186,11 +7248,22 @@ export class SessionManager {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
 		}
-		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
+		const initThinking = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
+		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
+		assertRuntimeAllowedForSession(runtime, session.sandboxed);
+		Object.assign(bridgeOptions, hydrateRuntimeOptions({
+			...bridgeOptions,
+			runtime,
+			claudeCodeSessionId: respawnPersisted?.claudeCodeSessionId,
+			claudeCodeExecutable: respawnPersisted?.claudeCodeExecutable,
+			claudeCodePermissionMode: respawnPersisted?.claudeCodePermissionMode,
+			claudeCodeModelAlias: respawnPersisted?.claudeCodeModelAlias,
+			readOnly: respawnPersisted?.readOnly ?? session.readOnly,
+		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const rpcClient = createSessionBridge(bridgeOptions);
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		let switchingSession = true;
@@ -9269,11 +9342,22 @@ export class SessionManager {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;
 			}
-			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
+			const initThinking = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(session.role, session.projectId);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
+			const runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: forceRespawnPersisted?.modelProvider });
+			assertRuntimeAllowedForSession(runtime, session.sandboxed);
+			Object.assign(bridgeOptions, hydrateRuntimeOptions({
+				...bridgeOptions,
+				runtime,
+				claudeCodeSessionId: forceRespawnPersisted?.claudeCodeSessionId,
+				claudeCodeExecutable: forceRespawnPersisted?.claudeCodeExecutable,
+				claudeCodePermissionMode: forceRespawnPersisted?.claudeCodePermissionMode,
+				claudeCodeModelAlias: forceRespawnPersisted?.claudeCodeModelAlias,
+				readOnly: forceRespawnPersisted?.readOnly ?? session.readOnly,
+			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-			const rpcClient = new RpcBridge(bridgeOptions);
+			const rpcClient = createSessionBridge(bridgeOptions);
 			session.spawnPinnedModel = bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;

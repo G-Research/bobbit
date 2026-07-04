@@ -48,8 +48,9 @@ import {
 import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
-import { setConfigScope, getConfigScope } from "./config-scope.js";
+import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { GW_URL_KEY } from "./gateway-fetch.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
@@ -1485,12 +1486,67 @@ let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
 
+type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+type ClaudeCodeStatus = {
+	available?: boolean;
+	authenticated?: boolean;
+	ready?: boolean;
+	checking?: boolean;
+	commandPath?: string;
+	executablePath?: string;
+	version?: string;
+	modelAliases?: string[];
+	permissionMode?: ClaudeCodePermissionMode;
+	reason?: string;
+	message?: string;
+	authenticationStatus?: "verified" | "login-required" | "unknown";
+	checkedAt?: number;
+};
+
+let claudeCodeStatus: ClaudeCodeStatus | null = null;
+let claudeCodeStatusLoading = false;
+let claudeCodeStatusError = "";
+let prefClaudeCodeExecutable = "claude";
+let prefClaudeCodeDefaultModel = "local-claude-opus-4-8";
+let prefClaudeCodePermissionMode: ClaudeCodePermissionMode = "acceptEdits";
+let prefClaudeCodeAllowBypass = false;
+
 // Per-row Test-button state. Keyed by the pref value ("provider/id").
 // Cached results live ~30s so repeated clicks don't re-hit the gateway.
 type ModelTestResult = { ok: boolean; latencyMs?: number; error?: string; at: number };
 let modelTestResults: Record<string, ModelTestResult> = {};
 let modelTestInFlight: Record<string, boolean> = {};
 const MODEL_TEST_TTL_MS = 30_000;
+
+function normalizeClaudeCodePermissionMode(value: unknown): ClaudeCodePermissionMode {
+	if (value === "default" || value === "acceptEdits" || value === "bypassPermissions") return value;
+	return "acceptEdits";
+}
+
+function claudeCodeStatusTitle(status: ClaudeCodeStatus | null): string {
+	if (!status) return claudeCodeStatusError || "Status not checked";
+	if (status.checking || claudeCodeStatusLoading) return "Checking Claude Code…";
+	if (status.authenticationStatus === "login-required") return "Claude Code login required";
+	if (status.authenticationStatus === "unknown" && status.available !== false) return "CLI available; auth checked at session start";
+	if (status.ready) return "Ready";
+	const reason = String(status.reason ?? "").toLowerCase();
+	if (reason.includes("cli_missing") || reason.includes("not found")) return "Claude Code CLI not found";
+	if (reason.includes("auth_required") || reason.includes("login required")) return "Claude Code login required";
+	if (reason.includes("probe_failed") || reason.includes("probe failed")) return "Claude Code probe failed";
+	if (status.available === false) return status.reason || status.message || "Claude Code not ready";
+	return status.message || "Claude Code not ready";
+}
+
+function claudeCodeStatusTone(status: ClaudeCodeStatus | null): "ready" | "checking" | "warning" {
+	if (status?.ready) return "ready";
+	if (status?.checking || claudeCodeStatusLoading) return "checking";
+	return "warning";
+}
+
+function currentProjectQuery(): string {
+	const projectId = getConfigProjectId();
+	return projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+}
 
 async function runModelTest(pref: string): Promise<void> {
 	if (!pref) return;
@@ -1545,11 +1601,13 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const [statusRes, prefsRes, modelsRes, imageModelsRes] = await Promise.all([
+			const projectQuery = currentProjectQuery();
+			const [statusRes, prefsRes, modelsRes, imageModelsRes, claudeCodeStatusRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
-				gatewayFetch("/api/models"),
+				gatewayFetch(`/api/models${projectQuery}`),
 				gatewayFetch("/api/image-models"),
+				gatewayFetch(`/api/claude-code/status${projectQuery}`),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -1570,6 +1628,11 @@ function loadModelsState(): void {
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
 				allowSessionModelFallback = prefs.allowSessionModelFallback === true; // default false
+				prefClaudeCodeExecutable = prefs["claudeCode.executablePath"] || "claude";
+				prefClaudeCodeDefaultModel = prefs["claudeCode.defaultModel"] || "local-claude-opus-4-8";
+				prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(prefs["claudeCode.permissionMode"]);
+				prefClaudeCodeAllowBypass = prefs["claudeCode.allowBypassPermissions"] === true;
+				if (prefClaudeCodePermissionMode === "bypassPermissions" && !prefClaudeCodeAllowBypass) prefClaudeCodePermissionMode = "acceptEdits";
 				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
 			}
 			if (modelsRes.ok) {
@@ -1582,18 +1645,60 @@ function loadModelsState(): void {
 				const imageModels = await imageModelsRes.json();
 				if (Array.isArray(imageModels)) allImageModels = imageModels;
 			}
+			if (claudeCodeStatusRes.ok) {
+				claudeCodeStatus = await claudeCodeStatusRes.json();
+				claudeCodeStatusError = "";
+			} else if (claudeCodeStatusRes.status !== 404) {
+				claudeCodeStatusError = `Status unavailable (${claudeCodeStatusRes.status})`;
+			}
 		} catch {}
 		renderApp();
 	})();
 }
 
-async function savePref(key: string, value: string | boolean | null): Promise<void> {
+async function operatorPreferenceFetch(path: string, init: RequestInit): Promise<Response> {
+	const url = localStorage.getItem(GW_URL_KEY) || window.location.origin;
+	const doFetch = () => fetch(`${url}${path}`, {
+		...init,
+		credentials: "include",
+		headers: {
+			"Content-Type": "application/json",
+			...(init.headers as Record<string, string> | undefined),
+		},
+	});
+	let res = await doFetch();
+	if (res.status === 403 || res.status === 401) {
+		await fetch(`${url}/api/health`, { credentials: "include" }).catch(() => undefined);
+		res = await doFetch();
+	}
+	return res;
+}
+
+async function savePref(key: string, value: string | boolean | null, operatorConfirmationToken?: string): Promise<void> {
 	try {
+		if (operatorConfirmationToken) {
+			await operatorPreferenceFetch("/api/preferences", {
+				method: "PUT",
+				headers: { "X-Bobbit-Operator-Confirmation": operatorConfirmationToken },
+				body: JSON.stringify({ [key]: value }),
+			});
+			return;
+		}
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ [key]: value }),
 		});
 	} catch {}
+}
+
+async function requestClaudeCodePreferenceConfirmation(patch: Record<string, unknown>): Promise<string | undefined> {
+	const res = await operatorPreferenceFetch("/api/preferences/claude-code/confirmation", {
+		method: "POST",
+		body: JSON.stringify(patch),
+	});
+	if (!res.ok) return undefined;
+	const data = await res.json().catch(() => ({}));
+	return typeof data.confirmationToken === "string" ? data.confirmationToken : undefined;
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
@@ -1632,6 +1737,91 @@ async function setImageModel(value: string): Promise<void> {
 async function setSessionThinking(value: string): Promise<void> {
 	prefSessionThinking = value;
 	await savePref("default.sessionThinkingLevel", value || null);
+	renderApp();
+}
+
+async function setClaudeCodeExecutable(value: string): Promise<void> {
+	const next = value.trim() ? value.trim() : null;
+	if ((next || "claude") === prefClaudeCodeExecutable) return;
+	const confirmed = await confirmAction(
+		"Change Claude Code executable?",
+		"This controls the host-local command Bobbit runs for Claude Code sessions. Continue only if this path is trusted.",
+		"Change executable",
+		true,
+	);
+	if (!confirmed) return;
+	const confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.executablePath": next });
+	if (!confirmationToken) return;
+	prefClaudeCodeExecutable = next || "claude";
+	await savePref("claudeCode.executablePath", next, confirmationToken);
+	renderApp();
+}
+
+async function setClaudeCodeDefaultModel(value: string): Promise<void> {
+	prefClaudeCodeDefaultModel = value || "local-claude-opus-4-8";
+	await savePref("claudeCode.defaultModel", value || null);
+	renderApp();
+}
+
+async function setClaudeCodePermissionMode(value: string): Promise<void> {
+	const next = normalizeClaudeCodePermissionMode(value);
+	if (next === "bypassPermissions" && !prefClaudeCodeAllowBypass) return;
+	let confirmationToken: string | undefined;
+	if (next === "bypassPermissions") {
+		const confirmed = await confirmAction(
+			"Use bypass permissions?",
+			"Bypass mode can let Claude Code run local actions without normal permission prompts.",
+			"Use bypass",
+			true,
+		);
+		if (!confirmed) return;
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.permissionMode": next });
+		if (!confirmationToken) return;
+	}
+	prefClaudeCodePermissionMode = next;
+	await savePref("claudeCode.permissionMode", next === "default" ? null : next, confirmationToken);
+	renderApp();
+}
+
+async function setClaudeCodeAllowBypass(value: boolean): Promise<void> {
+	if (value) {
+		const confirmed = await confirmAction(
+			"Allow bypass permissions?",
+			"Bypass mode can let Claude Code run local actions without normal permission prompts. Enable it only if you understand the local-machine risk.",
+			"Allow bypass",
+			true,
+		);
+		if (!confirmed) return;
+	}
+	let confirmationToken: string | undefined;
+	if (value) {
+		confirmationToken = await requestClaudeCodePreferenceConfirmation({ "claudeCode.allowBypassPermissions": true });
+		if (!confirmationToken) return;
+	}
+	prefClaudeCodeAllowBypass = value;
+	if (!value && prefClaudeCodePermissionMode === "bypassPermissions") {
+		prefClaudeCodePermissionMode = "acceptEdits";
+		await savePref("claudeCode.permissionMode", null);
+	}
+	await savePref("claudeCode.allowBypassPermissions", value ? true : null, confirmationToken);
+	renderApp();
+}
+
+async function refreshClaudeCodeStatus(): Promise<void> {
+	claudeCodeStatusLoading = true;
+	claudeCodeStatusError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/claude-code/status/refresh${currentProjectQuery()}`, { method: "POST" });
+		if (res.ok) {
+			claudeCodeStatus = await res.json();
+		} else {
+			claudeCodeStatusError = `Refresh failed (${res.status})`;
+		}
+	} catch (err: any) {
+		claudeCodeStatusError = err?.message || "Refresh failed";
+	}
+	claudeCodeStatusLoading = false;
 	renderApp();
 }
 async function setReviewThinking(value: string): Promise<void> {
@@ -1949,6 +2139,105 @@ export function renderModelRow(
 	`;
 }
 
+function renderClaudeCodeSection() {
+	const status = claudeCodeStatus;
+	const tone = claudeCodeStatusTone(status);
+	const title = claudeCodeStatusTitle(status);
+	const commandPath = status?.commandPath || status?.executablePath || prefClaudeCodeExecutable || "claude";
+	const aliases = Array.isArray(status?.modelAliases) && status!.modelAliases!.length
+		? status!.modelAliases!
+		: ["local-claude-opus-4-8", "local-claude-sonnet-4-6"];
+	const statusClass = tone === "ready"
+		? "bg-green-500/10 border-green-500/20"
+		: tone === "checking"
+			? "bg-muted border-border"
+			: "bg-destructive/10 border-destructive/20";
+	const dotClass = tone === "ready" ? "bg-green-500" : tone === "checking" ? "bg-muted-foreground animate-pulse" : "bg-destructive";
+	return html`
+		<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="claude-code-section">
+			<h3 class="text-sm font-semibold text-foreground">Claude Code (local)</h3>
+			<p class="text-sm text-muted-foreground">
+				Runs sessions through your local Claude Code CLI and existing Claude Code login. You are responsible for complying with Anthropic and Claude Code terms.
+			</p>
+
+			<div class="flex flex-col gap-2 px-3 py-2 rounded-md border ${statusClass}" data-testid="claude-code-status-card">
+				<div class="flex items-center gap-2">
+					<span class="w-2 h-2 rounded-full ${dotClass}"></span>
+					<span class="text-sm font-medium text-foreground" data-testid="claude-code-status-title">${title}</span>
+					${status?.version ? html`<span class="text-xs text-muted-foreground">${status.version}</span>` : ""}
+				</div>
+				<div class="text-xs text-muted-foreground">
+					Command: <code>${commandPath}</code>${status?.message ? html` · ${status.message}` : ""}
+				</div>
+				<div>
+					<button
+						class="px-3 py-1.5 text-xs rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						data-testid="claude-code-refresh-status"
+						?disabled=${claudeCodeStatusLoading}
+						@click=${refreshClaudeCodeStatus}
+					>${claudeCodeStatusLoading ? "Checking…" : "Refresh status"}</button>
+				</div>
+				${claudeCodeStatusError ? html`<div class="text-xs text-destructive">${claudeCodeStatusError}</div>` : ""}
+			</div>
+
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-medium text-foreground">Executable path</label>
+				<input
+					type="text"
+					class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+					placeholder="claude"
+					.value=${prefClaudeCodeExecutable}
+					data-testid="claude-code-executable"
+					@blur=${(e: Event) => setClaudeCodeExecutable((e.target as HTMLInputElement).value)}
+				/>
+			</div>
+
+			<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+				<label class="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+					Default model alias
+					<select
+						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						.value=${prefClaudeCodeDefaultModel}
+						data-testid="claude-code-default-model"
+						@change=${(e: Event) => setClaudeCodeDefaultModel((e.target as HTMLSelectElement).value)}
+					>
+						${aliases.map((alias) => html`<option value=${alias}>${alias}</option>`)}
+					</select>
+				</label>
+				<label class="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+					Permission mode
+					<select
+						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						.value=${prefClaudeCodePermissionMode}
+						data-testid="claude-code-permission-mode"
+						@change=${(e: Event) => setClaudeCodePermissionMode((e.target as HTMLSelectElement).value)}
+					>
+						<option value="default">default</option>
+						<option value="acceptEdits">acceptEdits</option>
+						<option value="bypassPermissions" ?disabled=${!prefClaudeCodeAllowBypass}>bypassPermissions</option>
+					</select>
+				</label>
+			</div>
+			<p class="text-xs text-muted-foreground">
+				Bobbit uses acceptEdits for normal fresh sessions and plan for read-only sessions. Select default only to use Claude Code's own permission default; bypassPermissions disables normal prompts and is gated below.
+			</p>
+			<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
+				<input
+					type="checkbox"
+					class="mt-0.5"
+					.checked=${prefClaudeCodeAllowBypass}
+					data-testid="claude-code-allow-bypass"
+					@change=${(e: Event) => setClaudeCodeAllowBypass((e.target as HTMLInputElement).checked)}
+				/>
+				<span class="flex flex-col">
+					<span>Allow bypassPermissions mode</span>
+					<span class="text-xs text-muted-foreground">Only enable if you understand the local-machine risk.</span>
+				</span>
+			</label>
+		</div>
+	`;
+}
+
 function renderImageModelRow(
 	label: string,
 	hint: string,
@@ -2026,6 +2315,13 @@ export function __testResetModelsTab(opts: {
 	prefReviewModel = opts.prefReviewModel ?? "";
 	prefNamingModel = opts.prefNamingModel ?? "";
 	prefImageModel = opts.prefImageModel ?? "";
+	claudeCodeStatus = opts.claudeCodeStatus ?? null;
+	claudeCodeStatusLoading = false;
+	claudeCodeStatusError = "";
+	prefClaudeCodeExecutable = opts.prefClaudeCodeExecutable ?? "claude";
+	prefClaudeCodeDefaultModel = opts.prefClaudeCodeDefaultModel ?? "local-claude-opus-4-8";
+	prefClaudeCodePermissionMode = normalizeClaudeCodePermissionMode(opts.prefClaudeCodePermissionMode);
+	prefClaudeCodeAllowBypass = opts.prefClaudeCodeAllowBypass ?? false;
 	prefSessionThinking = "";
 	prefReviewThinking = "";
 	prefNamingThinking = "";

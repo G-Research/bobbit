@@ -5,7 +5,8 @@ import path from "node:path";
 import type { PreferencesStore } from "./preferences-store.js";
 
 export type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
-export type ClaudeCodeModelAlias = "claude-opus-4-8" | "default" | "sonnet" | "opus" | string;
+export type ClaudeCodeEffectivePermissionMode = ClaudeCodePermissionMode | "plan";
+export type ClaudeCodeModelAlias = "local-claude-opus-4-8" | "local-claude-sonnet-4-6" | "claude-opus-4-8" | "claude-sonnet-4-6" | "default" | "sonnet" | "opus" | string;
 
 export interface ClaudeCodeConfig {
 	executablePath: string;
@@ -16,8 +17,8 @@ export interface ClaudeCodeConfig {
 
 export const CLAUDE_CODE_DEFAULT_CONFIG: ClaudeCodeConfig = {
 	executablePath: "claude",
-	defaultModel: "claude-opus-4-8",
-	permissionMode: "default",
+	defaultModel: "local-claude-opus-4-8",
+	permissionMode: "acceptEdits",
 	allowBypassPermissions: false,
 };
 
@@ -28,7 +29,8 @@ export const CLAUDE_CODE_PREF_KEYS = {
 	allowBypassPermissions: "claudeCode.allowBypassPermissions",
 } as const;
 
-export const CLAUDE_CODE_MODEL_ALIASES = ["claude-opus-4-8", "default", "sonnet", "opus"] as const;
+export const CLAUDE_CODE_MODEL_ALIASES = ["local-claude-opus-4-8", "local-claude-sonnet-4-6"] as const;
+const CLAUDE_CODE_COMPAT_MODEL_ALIASES = ["claude-opus-4-8", "claude-sonnet-4-6", "default", "sonnet", "opus"] as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions"] as const;
 
 export const CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE = "claude-code-preferences";
@@ -236,7 +238,7 @@ export function normalizeModelAlias(value: unknown): ClaudeCodeModelAlias {
 
 export function validateModelAlias(value: unknown): ClaudeCodeModelAlias {
 	if (typeof value !== "string" || !isValidModelAlias(value.trim())) {
-		throw new Error("Claude Code model alias must be claude-opus-4-8, default, sonnet, opus, or a short model token");
+		throw new Error("Claude Code model alias must be local-claude-opus-4-8, local-claude-sonnet-4-6, a compatible Claude Code alias, or a short model token");
 	}
 	return value.trim();
 }
@@ -244,7 +246,21 @@ export function validateModelAlias(value: unknown): ClaudeCodeModelAlias {
 export function isValidModelAlias(value: string): boolean {
 	if (!value) return false;
 	if ((CLAUDE_CODE_MODEL_ALIASES as readonly string[]).includes(value)) return true;
+	if ((CLAUDE_CODE_COMPAT_MODEL_ALIASES as readonly string[]).includes(value)) return true;
 	return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(value);
+}
+
+export function toClaudeCodeCliModelAlias(alias: string | undefined): string | undefined {
+	if (!alias || alias === "default") return undefined;
+	return alias.startsWith("local-") ? alias.slice("local-".length) : alias;
+}
+
+export function toClaudeCodeDisplayModelAlias(alias: string | undefined): string | undefined {
+	if (!alias || alias === "default") return alias;
+	if (alias.startsWith("local-")) return alias;
+	if (alias === "claude-opus-4-8" || alias === "opus") return "local-claude-opus-4-8";
+	if (alias === "claude-sonnet-4-6" || alias === "sonnet") return "local-claude-sonnet-4-6";
+	return alias;
 }
 
 export function normalizePermissionMode(value: unknown, allowBypassPermissions: boolean): ClaudeCodePermissionMode {

@@ -97,6 +97,8 @@ export interface RpcBridgeOptions {
 	env?: Record<string, string>;
 	/** Whether this session runs in a Docker sandbox (affects timeouts). */
 	sandboxed?: boolean;
+	/** Whether this session should run in read-only mode where supported by the runtime. */
+	readOnly?: boolean;
 	/** Env vars to inject into the container (API keys, etc.) */
 	sandboxCredentials?: Record<string, string>;
 	/** Gateway URL for the agent to call back */

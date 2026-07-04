@@ -42,7 +42,7 @@ Add a reusable fake CLI so unit/API/browser tests never require a real Claude Co
   - `--replay-user-messages`
 - Runtime mode reads stdin JSONL and writes stdout JSONL.
 - It should emit one complete line at a time by default, and optionally split lines/UTF-8 bytes when `FAKE_CLAUDE_SPLIT=1` to exercise decoder behavior.
-- It should record received stdin into `FAKE_CLAUDE_RECORD_PATH` for assertions about prompt, abort, model, permission mode, and resume commands.
+- It should record received stdin into `FAKE_CLAUDE_RECORD_PATH` for assertions about prompt, abort, model, permission mode, effort, and resume commands.
 
 ### Fixture event shapes
 
@@ -127,8 +127,9 @@ Required assertions:
 The planned standalone `tests/claude-code-runtime-config.test.ts` was superseded by final coverage in `tests/claude-code-status-models.test.ts`, `tests/session-runtime-selection.test.ts`, `tests/session-setup-claude-code-preexisting.test.ts`, and the Claude Code runtime API suites. Together they cover:
 
 - Default executable path is `claude`.
-- Default alias is a supported Claude Code alias such as `sonnet`.
-- Permission mode accepts only `default`, `acceptEdits`, and `bypassPermissions`.
+- Default visible alias is `local-claude-opus-4-8`; visible model rows are `local-claude-opus-4-8` and `local-claude-sonnet-4-6`.
+- CLI model forwarding strips only the `local-` prefix, so the fake CLI should see `claude-opus-4-8` / `claude-sonnet-4-6`.
+- Permission mode accepts only `default`, `acceptEdits`, and `bypassPermissions` as saved/configured values; normal fresh editable sessions default to `acceptEdits`, explicit `default` is preserved, and read-only sessions force CLI `plan` mode.
 - `bypassPermissions` is rejected unless the explicit enable flag/preference is set.
 - Claude credentials are never added to Docker sandbox credential mounts by default. If implemented as a source guard, keep it narrow and explicit, similar to `tests/spawn-env.test.ts`.
 
@@ -148,7 +149,7 @@ The planned standalone `tests/claude-code-runtime-config.test.ts` was superseded
 
 Coverage:
 
-- `/api/models` includes local Claude Code models, e.g. provider `claude-code`, ids `sonnet` and/or `opus`, display label indicating local runtime/auth.
+- `/api/models` includes local Claude Code models, provider `claude-code`, ids `local-claude-opus-4-8` and `local-claude-sonnet-4-6`, display label indicating local runtime/auth.
 - When fake CLI `--version` succeeds and auth probe succeeds, models are `authenticated: true` and `sessionSelectable: true`.
 - When `claude` is missing or auth probe fails, models are visible but cleanly unavailable:
   - `authenticated: false` or `sessionSelectable: false` as chosen by implementation.
@@ -161,16 +162,16 @@ Coverage:
 
 Required cases:
 
-- `POST /api/sessions` with model/runtime `claude-code/sonnet` creates a session whose persisted metadata includes:
+- `POST /api/sessions` with model/runtime `claude-code/local-claude-sonnet-4-6` creates a session whose persisted metadata includes:
   - `runtime: "claude-code"` or equivalent runtime discriminator.
   - `modelProvider: "claude-code"`.
-  - `modelId: "sonnet"`.
+  - `modelId: "local-claude-sonnet-4-6"`.
   - `claudeCodeSessionId` only after the fake CLI emits `system/init`.
   - permission mode used for spawn.
 - `GET /api/sessions/:id` and `GET /api/sessions` return runtime metadata needed by the UI after reload.
 - Prompting the session uses the Claude Code bridge, not the Pi `RpcBridge` path. Assert via fake CLI record file or a server-side test hook.
 - Existing Pi sessions still create with no runtime field or with `runtime: "pi"`, and their behavior remains unchanged.
-- `set_model` from a Pi-backed session to `claude-code/sonnet` is rejected with a clear restart-required error, unless the implementation supports in-place runtime migration. The test should pin whichever UX contract is chosen.
+- `set_model` from a Pi-backed session to `claude-code/local-claude-sonnet-4-6` is rejected with a clear restart-required error. Same-runtime Claude Code alias changes are allowed only while idle and resume through the CLI.
 - Runtime metadata survives gateway restart: create Claude Code session, wait for fake `system/init`, restart harness, fetch/open session, assert runtime/model/Claude session id persist.
 
 ### Session store and restore
@@ -201,10 +202,10 @@ Update `tests/session-manager-restore.test.ts`:
 
 Update `tests/ui-fixtures/model-selector-fixture.spec.ts` with local fixture models:
 
-- An available `claude-code/sonnet` row renders provider badge text like `Claude Code (local)` or other final label.
+- An available `claude-code/local-claude-sonnet-4-6` row renders provider badge text like `Claude Code (local)` or other final label.
 - An unavailable row is dimmed/disabled with `data-session-unavailable="true"` and a title mentioning local Claude Code install/auth.
 - Auth-disabled copy must not mention API keys as the primary action if the chosen UX is Claude Code account login.
-- Selecting an available Claude Code row invokes `onSelect` with `{ provider: "claude-code", id: "sonnet" }`.
+- Selecting an available Claude Code row invokes `onSelect` with `{ provider: "claude-code", id: "local-claude-sonnet-4-6" }`.
 
 ### Full browser E2E
 
@@ -226,20 +227,20 @@ Required journeys:
 
 3. **Create/select Claude Code session**
    - Configure fake CLI auth success.
-   - Create a session directly with `claude-code/sonnet`, or select it before first prompt if the UI supports pre-session runtime selection.
+   - Create a session directly with `claude-code/local-claude-sonnet-4-6`, or select it before first prompt if the UI supports pre-session runtime selection.
    - Send a message.
-   - Assert user echo and assistant fake response render in order.
+   - Assert user echo and assistant fake response render in order, with timestamps visible/hydratable.
    - Assert fake CLI record file contains the structured stdin prompt.
 
 4. **Runtime switch guard**
    - Start with a Pi/mock session.
-   - Attempt to pick `claude-code/sonnet`.
-   - Assert either a restart-required prompt appears or a new Claude Code session is created, depending on the final product decision. Do not allow silent in-place switch.
+   - Attempt to pick `claude-code/local-claude-sonnet-4-6`.
+   - Assert a restart-required/new-session prompt appears. Do not allow silent in-place runtime switch.
 
 5. **Reload persistence**
    - Open a Claude Code session, wait for idle, reload page.
-   - Assert footer still shows `sonnet` and session metadata still identifies local Claude Code runtime.
-   - Send another message after reload if restore/resume is in MVP; otherwise assert the documented limitation/status is visible.
+   - Assert footer still shows `local-claude-sonnet-4-6` and session metadata still identifies local Claude Code runtime.
+   - Send another message after reload if restore/resume is available; otherwise assert the documented limitation/status is visible.
 
 ## Commands to run
 

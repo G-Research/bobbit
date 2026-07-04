@@ -66,7 +66,7 @@ test.describe("Claude Code status/model APIs", () => {
 		expect(modelsResp.status).toBe(200);
 		const models = await modelsResp.json();
 		const claudeCodeModels = models.filter((m: any) => m.provider === "claude-code");
-		expect(claudeCodeModels.map((m: any) => m.id)).toEqual(["claude-opus-4-8", "default", "sonnet", "opus"]);
+		expect(claudeCodeModels.map((m: any) => m.id)).toEqual(["local-claude-opus-4-8", "local-claude-sonnet-4-6"]);
 		for (const model of claudeCodeModels) {
 			expect(model).toMatchObject({
 				api: "claude-code-runtime",
@@ -113,15 +113,15 @@ test.describe("Claude Code status/model APIs", () => {
 			expect(projectConfigResp.status).toBe(200);
 
 			const globalModels = await (await apiFetch("/api/models")).json();
-			expect(globalModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(false);
+			expect(globalModels.find((m: any) => m.provider === "claude-code" && m.id === "local-claude-sonnet-4-6")?.sessionSelectable).toBe(false);
 
 			const scopedStatus = await (await apiFetch(`/api/claude-code/status?projectId=${encodeURIComponent(project.id)}`)).json();
 			expect(scopedStatus.executablePath).toBe(missing);
 			expect(scopedStatus.ready).toBe(false);
 			expect(scopedStatus.reason).toBe("Claude Code CLI not found");
 			const scopedModels = await (await apiFetch(`/api/models?projectId=${encodeURIComponent(project.id)}`)).json();
-			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionSelectable).toBe(false);
-			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "sonnet")?.sessionUnavailableReason).toBe("Claude Code CLI not found");
+			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "local-claude-sonnet-4-6")?.sessionSelectable).toBe(false);
+			expect(scopedModels.find((m: any) => m.provider === "claude-code" && m.id === "local-claude-sonnet-4-6")?.sessionUnavailableReason).toBe("Claude Code CLI not found");
 		} finally {
 			await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
@@ -168,7 +168,7 @@ test.describe("Claude Code status/model APIs", () => {
 		const safe = await apiFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({
-				"claudeCode.defaultModel": "opus",
+				"claudeCode.defaultModel": "local-claude-opus-4-8",
 				"claudeCode.permissionMode": "acceptEdits",
 			}),
 		});

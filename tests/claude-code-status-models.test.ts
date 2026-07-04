@@ -62,7 +62,17 @@ describe("Claude Code config", () => {
 		const { prefs, dir } = makePrefs();
 		try {
 			assert.deepEqual(readClaudeCodeConfig(prefs), CLAUDE_CODE_DEFAULT_CONFIG);
-			assert.equal(CLAUDE_CODE_DEFAULT_CONFIG.defaultModel, "claude-opus-4-8");
+			assert.equal(CLAUDE_CODE_DEFAULT_CONFIG.defaultModel, "local-claude-opus-4-8");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves an explicitly stored Claude Code default permission mode", () => {
+		const { prefs, dir } = makePrefs();
+		try {
+			prefs.set(CLAUDE_CODE_PREF_KEYS.permissionMode, "default");
+			assert.equal(readClaudeCodeConfig(prefs).permissionMode, "default");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -73,13 +83,13 @@ describe("Claude Code config", () => {
 		try {
 			const ok = normalizeClaudeCodePreferencePatch({
 				[CLAUDE_CODE_PREF_KEYS.executablePath]: "  /usr/local/bin/claude  ",
-				[CLAUDE_CODE_PREF_KEYS.defaultModel]: "opus",
+				[CLAUDE_CODE_PREF_KEYS.defaultModel]: "local-claude-sonnet-4-6",
 				[CLAUDE_CODE_PREF_KEYS.allowBypassPermissions]: true,
 				[CLAUDE_CODE_PREF_KEYS.permissionMode]: "bypassPermissions",
 			}, prefs);
 			assert.equal(ok.ok, true);
 			assert.equal((ok as any).values[CLAUDE_CODE_PREF_KEYS.executablePath], "/usr/local/bin/claude");
-			assert.equal((ok as any).values[CLAUDE_CODE_PREF_KEYS.defaultModel], "opus");
+			assert.equal((ok as any).values[CLAUDE_CODE_PREF_KEYS.defaultModel], "local-claude-sonnet-4-6");
 			assert.equal((ok as any).values[CLAUDE_CODE_PREF_KEYS.permissionMode], "bypassPermissions");
 
 			const bypassWithoutOptIn = normalizeClaudeCodePreferencePatch({
@@ -139,7 +149,7 @@ describe("Claude Code config", () => {
 			});
 			assert.equal(config.executablePath, "/user/bin/claude");
 			assert.equal(config.allowBypassPermissions, false);
-			assert.equal(config.permissionMode, "default");
+			assert.equal(config.permissionMode, "acceptEdits");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -283,7 +293,7 @@ describe("Claude Code synthetic models", () => {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, path.join(dir, "missing-claude"));
 			const models = await getAvailableModels(prefs);
 			const local = models.filter(m => m.provider === "claude-code");
-			assert.deepEqual(local.map(m => m.id), ["claude-opus-4-8", "default", "sonnet", "opus"]);
+			assert.deepEqual(local.map(m => m.id), ["local-claude-opus-4-8", "local-claude-sonnet-4-6"]);
 			for (const model of local) {
 				assert.equal(model.api, "claude-code-runtime");
 				assert.equal(model.runtime, "claude-code");
@@ -303,9 +313,9 @@ describe("Claude Code synthetic models", () => {
 		try {
 			prefs.set(CLAUDE_CODE_PREF_KEYS.executablePath, process.execPath);
 			const models = await getAvailableModels(prefs);
-			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "local-claude-opus-4-8");
 			assert.ok(opus48);
-			assert.equal(opus48.name, "Claude Code Opus 4.8");
+			assert.equal(opus48.name, "local-claude-opus-4-8");
 			assert.equal(opus48.authenticated, false);
 			assert.equal(opus48.sessionSelectable, true);
 			assert.equal(opus48.sessionUnavailableReason, undefined);
@@ -324,7 +334,7 @@ describe("Claude Code synthetic models", () => {
 				},
 			};
 			const models = await getAvailableModels(prefs, projectConfig);
-			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "local-claude-opus-4-8");
 			assert.ok(opus48);
 			assert.equal(opus48.sessionSelectable, false);
 			assert.equal(opus48.sessionUnavailableReason, "Claude Code CLI not found");
@@ -342,7 +352,7 @@ describe("Claude Code synthetic models", () => {
 			invalidateClaudeCodeStatusCache();
 			invalidateModelCache();
 			const models = await getAvailableModels(prefs);
-			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "claude-opus-4-8");
+			const opus48 = models.find(m => m.provider === "claude-code" && m.id === "local-claude-opus-4-8");
 			assert.ok(opus48);
 			assert.equal(opus48.authenticated, true);
 			assert.equal(opus48.sessionSelectable, true);

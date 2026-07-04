@@ -30,17 +30,21 @@ describe("Claude Code stream translation", () => {
 		const start = out.find((event) => event.type === "agent_start");
 		assert.equal(start?.runtime, "claude-code");
 		assert.equal(start?.claudeCodeSessionId, "claude-sess-1");
+		assert.equal(start?.model.id, "local-claude-sonnet-4-6");
 
 		const user = out.find((event) => event.type === "message_end" && event.message.role === "user");
 		assert.equal(user?.message.content[0].text, "Hello");
+		assert.equal(typeof user?.message.timestamp, "number");
 
 		const updates = out.filter((event) => event.type === "message_update");
 		assert.equal(updates.length, 2);
 		assert.equal(updates[0].message.content[0].text, "Hi ");
 		assert.equal(updates[1].message.content[0].text, "Hi there");
+		assert.equal(typeof updates[0].message.timestamp, "number");
 
 		const assistantEnd = out.find((event) => event.type === "message_end" && event.message.role === "assistant");
 		assert.equal(assistantEnd?.message.content[0].text, "Hi there");
+		assert.equal(typeof assistantEnd?.message.timestamp, "number");
 		assert.equal(assistantEnd?.message.stopReason, "stop");
 		assert.deepEqual(assistantEnd?.message.usage, {
 			input: 10,

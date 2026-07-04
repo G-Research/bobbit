@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import { toClaudeCodeDisplayModelAlias } from "./claude-code-config.js";
 
 export const CLAUDE_CODE_STREAM_LIMITS = {
 	maxJsonlLineLength: 1024 * 1024,
@@ -130,6 +131,7 @@ export interface ClaudeCodeTranslatorState {
 	assistantToolCalls: any[];
 	toolNamesById: Record<string, string>;
 	assistantMessageId?: string;
+	assistantTimestamp?: number;
 	assistantOpen: boolean;
 	messages: any[];
 	lastUsage?: any;
@@ -192,10 +194,11 @@ export function translateClaudeCodeEvent(
 	assertEventContentWithinLimit(event, resolvedLimits.maxContentCharsPerEvent);
 	const out: any[] = [];
 	if (!event || typeof event !== "object") return out;
+	const eventTimestamp = timestampFromClaudeCodeEvent(event);
 
 	if (event.type === "system" && event.subtype === "init") {
 		if (typeof event.session_id === "string") state.claudeCodeSessionId = event.session_id;
-		if (typeof event.model === "string") state.modelAlias = event.model;
+		if (typeof event.model === "string") state.modelAlias = toClaudeCodeDisplayModelAlias(event.model) ?? event.model;
 		out.push({
 			type: "agent_start",
 			runtime: "claude-code",
@@ -211,12 +214,14 @@ export function translateClaudeCodeEvent(
 		const toolResults = blocks.filter((block: any) => block?.type === "tool_result");
 		if (toolResults.length > 0 && (state.assistantOpen || state.assistantToolCalls.length > 0)) {
 			if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
+			if (!state.assistantTimestamp) state.assistantTimestamp = eventTimestamp;
 			const message = assistantMessageSnapshot(state);
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
 			state.assistantText = "";
 			state.assistantToolCalls = [];
 			state.assistantMessageId = undefined;
+			state.assistantTimestamp = undefined;
 			state.assistantOpen = false;
 		}
 		for (const block of toolResults) {
@@ -251,6 +256,7 @@ export function translateClaudeCodeEvent(
 				toolName,
 				isError,
 				content: resultContent,
+				timestamp: eventTimestamp,
 			};
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
@@ -260,6 +266,7 @@ export function translateClaudeCodeEvent(
 				id: nextMessageId(),
 				role: "user",
 				content: [{ type: "text", text }],
+				timestamp: eventTimestamp,
 			};
 			appendStoredMessage(state, message, resolvedLimits.maxStoredMessages);
 			out.push({ type: "message_end", message });
@@ -277,6 +284,7 @@ export function translateClaudeCodeEvent(
 				state.assistantText += block.text;
 				state.assistantOpen = true;
 				if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
+				if (!state.assistantTimestamp) state.assistantTimestamp = eventTimestamp;
 				out.push({
 					type: "message_update",
 					message: assistantMessageSnapshot(state),
@@ -294,6 +302,7 @@ export function translateClaudeCodeEvent(
 					input,
 				};
 				state.assistantOpen = true;
+				if (!state.assistantTimestamp) state.assistantTimestamp = eventTimestamp;
 				state.toolNamesById[toolCallId] = toolName;
 				if (!state.assistantToolCalls.some((existing) => existing.id === toolCallId)) state.assistantToolCalls.push(toolCall);
 				if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
@@ -331,6 +340,7 @@ export function translateClaudeCodeEvent(
 		const finalText = state.assistantText || resultText;
 		if (finalText || isError || state.assistantOpen) {
 			if (!state.assistantMessageId) state.assistantMessageId = nextMessageId();
+			if (!state.assistantTimestamp) state.assistantTimestamp = eventTimestamp;
 			const message = assistantMessageSnapshot(state, undefined, finalText);
 			message.stopReason = isError ? "error" : "stop";
 			if (isError) message.errorMessage = resultText || "Claude Code turn failed";
@@ -347,6 +357,7 @@ export function translateClaudeCodeEvent(
 		state.assistantText = "";
 		state.assistantToolCalls = [];
 		state.assistantMessageId = undefined;
+		state.assistantTimestamp = undefined;
 		state.assistantOpen = false;
 		out.push({
 			type: "agent_end",
@@ -424,6 +435,7 @@ function assistantMessageSnapshot(state: ClaudeCodeTranslatorState, extraContent
 		id: state.assistantMessageId,
 		role: "assistant",
 		model: state.modelAlias ? `claude-code/${state.modelAlias}` : "claude-code",
+		timestamp: state.assistantTimestamp ?? Date.now(),
 		content: [
 			...(text ? [{ type: "text", text }] : []),
 			...state.assistantToolCalls,
@@ -460,6 +472,16 @@ function estimateContentChars(value: any): number {
 
 function truncateString(value: string, maxLength: number): string {
 	return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function timestampFromClaudeCodeEvent(event: any): number {
+	const raw = event?.timestamp ?? event?.ts ?? event?.created_at ?? event?.createdAt;
+	if (typeof raw === "number" && Number.isFinite(raw)) return raw < 10_000_000_000 ? raw * 1000 : raw;
+	if (typeof raw === "string") {
+		const parsed = Date.parse(raw);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return Date.now();
 }
 
 function textFromContentBlocks(blocks: any[]): string {
