@@ -16,16 +16,37 @@
  * The node globs come from scripts/test-phase-config.mjs (the single source of
  * truth shared with the phase-invariant guard) and are passed VERBATIM so node
  * expands them — never the shell (Windows command-line-length limit).
+ *
+ * `npm run test:unit -- <paths...>` (TEST-01) filters to just the given test
+ * files: each path is routed to its owning sub-phase (a *.test.ts under the
+ * node globs → node phase; a *.spec.ts fixture → browser phase) and the OTHER
+ * phase is skipped entirely when it has no matching args. An arg that matches
+ * neither phase's membership (e.g. tests/e2e/**) is a hard error, not a
+ * silent no-op. Zero args is unchanged: both phases run their full default
+ * glob/suite. See scripts/test-unit-args.mjs for the pure selection logic and
+ * tests/test-unit-args.test.ts for the pinned seam.
  */
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
+import { resolveUnitSelection } from "./test-unit-args.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
+
+const selection = resolveUnitSelection(process.argv.slice(2), { projectRoot });
+if (selection.error) {
+	console.error(`[run-unit] ${selection.error}`);
+	process.exit(1);
+}
+if (selection.nodeTestArgs === null && selection.browserTestArgs === null) {
+	// Unreachable given resolveUnitSelection's contract, but guards against a
+	// future selection bug silently skipping the entire unit phase.
+	console.error("[run-unit] internal error: no sub-phase selected and no error reported.");
+	process.exit(1);
+}
 
 // Canonicalize TMPDIR so os.tmpdir() returns the REAL path in every spawned test
 // worker. On macOS os.tmpdir() yields /var/folders/... which reaches /private/var
@@ -234,25 +255,30 @@ function run(label, args) {
 	});
 }
 
-const nodeArgs = [
+const nodeArgs = selection.nodeTestArgs === null ? null : [
 	"tsx",
 	"--import", "./tests/helpers/css-stub-loader.mjs",
 	"--test",
 	"--test-force-exit",
 	`--test-concurrency=${nodeConcurrency}`,
-	...NODE_UNIT_GLOBS,
+	...selection.nodeTestArgs,
 ];
-const browserArgs = ["playwright", "test", "--config", "tests/playwright.config.ts", "--workers", browserWorkers];
+const browserArgs = selection.browserTestArgs === null ? null : [
+	"playwright", "test", "--config", "tests/playwright.config.ts", "--workers", browserWorkers,
+	...selection.browserTestArgs,
+];
 
 console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency}, browser --workers=${browserWorkers}`);
+if (nodeArgs === null) console.log("[run-unit] node-logic phase skipped (no matching args)");
+if (browserArgs === null) console.log("[run-unit] browser-fixtures phase skipped (no matching args)");
 
 const overallStart = Date.now();
 const restoreGeneratedArtifacts = snapshotGeneratedArtifacts();
 let results;
 try {
 	results = await Promise.all([
-		run("node-logic", nodeArgs),
-		run("browser-fixtures", browserArgs),
+		...(nodeArgs === null ? [] : [run("node-logic", nodeArgs)]),
+		...(browserArgs === null ? [] : [run("browser-fixtures", browserArgs)]),
 	]);
 } finally {
 	restoreGeneratedArtifacts();

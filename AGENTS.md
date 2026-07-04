@@ -7,7 +7,7 @@ npm run build          # Full build (server + UI)
 npm run dev:harness    # Gateway via restart harness + vite (use this for dev)
 npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web (no emit)
-npm run test:unit      # Unit phase — node:test logic + file:// browser fixtures, run concurrently (~90s)
+npm run test:unit      # Unit phase — node:test + file:// fixtures, concurrent (~90s); `-- <paths>` filters
 npm run test:e2e       # E2E phase — API (in-process) + browser (spawned gateway)
 npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path (SCREENSHOTS=1 adds screenshots + HTML report)
 ```
