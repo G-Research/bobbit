@@ -74,6 +74,10 @@ export class AgentInterface extends LitElement {
 	@property() delegateOf?: string;
 	@property() teamGoalId?: string;
 	@property() assistantType?: string;
+	@property() sessionRuntime?: "pi" | "claude-code";
+	@property() runtimeLabel?: string;
+	@property() claudeCodeSessionId?: string;
+	@property() claudeCodeModelAlias?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget

@@ -22,6 +22,7 @@ import {
 	type EntrypointContribution,
 	type ProviderContribution,
 	type ChannelContribution,
+	type RuntimeContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -39,6 +40,8 @@ export interface PackContributionResolver {
 	listProviders(projectId: string | undefined): ProviderContribution[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
+	/** Resolve a runtime descriptor within a pack. */
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean;
 }
@@ -117,6 +120,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
 		return this.getPack(projectId, packId)?.channels.find((c) => c.name === name);
+	}
+
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
+		return this.getPack(projectId, packId)?.runtimes.find((r) => r.id === runtimeId);
 	}
 
 	hasRoute(projectId: string | undefined, packId: string, routeName: string): boolean {

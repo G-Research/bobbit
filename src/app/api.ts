@@ -2395,8 +2395,26 @@ export interface RoleData {
 	model?: string;
 	/** "off" | "minimal" | "low" | "medium" | "high" | "xhigh" — overrides default.sessionThinkingLevel / default.reviewThinkingLevel. "xhigh" is auto-detected from per-model metadata when available; otherwise Bobbit falls back to known family rules (Claude Opus 4.6+, gpt-5.1-codex-max, gpt-5.2* / gpt-5.4* / gpt-5.5*). */
 	thinkingLevel?: string;
+	/** Cascade source metadata for model/thinking fields, present on resolved role payloads. */
+	modelResolution?: RoleModelResolution;
 	createdAt: number;
 	updatedAt: number;
+}
+
+export type RoleFieldSourceKind = "role" | "inherited-role" | "default";
+
+export interface RoleFieldSource {
+	value?: string;
+	source: RoleFieldSourceKind;
+	origin?: "builtin" | "server" | "user" | "project";
+	originPackName?: string | null;
+	editable: boolean;
+	sourceLabel: string;
+}
+
+export interface RoleModelResolution {
+	model: RoleFieldSource;
+	thinkingLevel: RoleFieldSource;
 }
 
 // ============================================================================

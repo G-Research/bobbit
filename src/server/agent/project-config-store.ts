@@ -910,7 +910,7 @@ export class ProjectConfigStore {
 			const overlay = this.defaultActivationResolver(scope, packName, out);
 			if (overlay) return overlay;
 		}
-		const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
+		const mcpOperations = normalizeMcpOperations(refs?.mcpOperations);
 		if (mcpOperations) out.mcpOperations = mcpOperations;
 		return out;
 	}

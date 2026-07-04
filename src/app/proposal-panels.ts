@@ -3052,7 +3052,7 @@ interface GoalProposalTabsState {
 	selectedRoleName: string | null;
 	customizingWorkflow: boolean;
 	customizingRole: boolean;
-	roleEditTab: "prompt" | "tools" | "model";
+	roleEditTab: "prompt" | "tools";
 	roleCollapsedGroups: Set<string>;
 	tabsInitializedFrom: string | null;
 }

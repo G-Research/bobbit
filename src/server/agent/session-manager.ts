@@ -17,9 +17,9 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { readClaudeCodeConfig } from "./claude-code-config.js";
-import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime, runtimeFromModelString, runtimeFromProvider, type SessionBridgeOptions } from "./session-runtime.js";
+import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
@@ -523,7 +523,7 @@ export interface SessionInfo {
 	createdAt: number;
 	lastActivity: number;
 	clients: Set<WebSocket>;
-	rpcClient: RpcBridge;
+	rpcClient: IRpcBridge;
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -1039,54 +1039,6 @@ type IdleWaiter = {
 	reject: (error: Error) => void;
 	cleanup: () => void;
 };
-
-function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
-	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
-	let timestamp: number | undefined;
-	if (typeof envelopeTs === "number" && Number.isFinite(envelopeTs)) timestamp = envelopeTs < 10_000_000_000 ? envelopeTs * 1000 : envelopeTs;
-	else if (typeof envelopeTs === "string") {
-		const parsed = Date.parse(envelopeTs);
-		if (Number.isFinite(parsed)) timestamp = parsed;
-	}
-	return timestamp === undefined ? message : { ...message, timestamp };
-}
-
-function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
-	const askToolIds = new Set<string>();
-	for (const message of messages as any[]) {
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
-			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
-		}
-	}
-	return messages.map((message: any) => {
-		if (message?.role !== "toolResult") return message;
-		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
-		const text = stringifyPersistedToolResultContent(message.content).trim();
-		if (text !== "Answer questions?") return message;
-		const rest = { ...message };
-		delete rest.error;
-		return {
-			...rest,
-			isError: false,
-			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
-		};
-	});
-}
-
-function stringifyPersistedToolResultContent(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content.map((item: any) => {
-			if (typeof item === "string") return item;
-			if (item?.type === "text" && typeof item.text === "string") return item.text;
-			try { return JSON.stringify(item); } catch { return String(item); }
-		}).join("\n");
-	}
-	if (content == null) return "";
-	try { return JSON.stringify(content); } catch { return String(content); }
-}
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
@@ -1722,6 +1674,14 @@ export class SessionManager {
 	/** Get the sandbox manager (used by team-manager and verification-harness). */
 	getSandboxManager(): SandboxManager | null {
 		return this.sandboxManager;
+	}
+
+	private readClaudeCodeConfigForProject(projectId?: string) {
+		if (!this.preferencesStore) return undefined;
+		const projectConfigStore = projectId && this.projectContextManager
+			? (this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore ?? null)
+			: (this.projectConfigStore ?? null);
+		return readClaudeCodeConfig(this.preferencesStore, projectConfigStore);
 	}
 
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
@@ -6138,7 +6098,7 @@ export class SessionManager {
 				if (!line.trim()) continue;
 				try {
 					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) messages.push(isClaudeCode ? withPersistedClaudeCodeMessageTimestamp(entry.message, entry.ts) : entry.message);
+					if (entry.type === "message" && entry.message) messages.push(entry.message);
 				} catch { /* skip malformed line */ }
 			}
 			return this.extractAssistantText(messages);

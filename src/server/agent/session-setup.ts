@@ -17,11 +17,13 @@ import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
+import { assertRuntimeAllowedForSession, hydrateRuntimeOptions, modelAliasFromModelString, resolveSessionRuntime, runtimeFromModelString, type SessionBridgeOptions } from "./session-runtime.js";
+import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
-import type { SessionStore, WorktreePushPolicy } from "./session-store.js";
+import type { SessionRuntime, SessionStore, WorktreePushPolicy } from "./session-store.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -252,6 +254,8 @@ export interface SessionSetupPlan {
 	parentSessionId?: string;
 	childKind?: string;
 	readOnly?: boolean;
+	runtime?: SessionRuntime;
+	claudeCodeSessionId?: string;
 	/** Explicit session-scoped tool allowlist that must survive process restarts. */
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
@@ -266,7 +270,7 @@ export interface SessionSetupPlan {
 	nonInteractive?: boolean;
 
 	// Computed during planning
-	bridgeOptions: RpcBridgeOptions;
+	bridgeOptions: SessionBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
@@ -610,6 +614,14 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
+
+	const runtime = resolveSessionRuntime({ runtime: plan.runtime, initialModel: plan.bridgeOptions.initialModel });
+	assertRuntimeAllowedForSession(runtime, plan.sandboxed);
+	plan.runtime = runtime;
+	const claudeCodeConfig = runtime === "claude-code" && ctx.preferencesStore
+		? readClaudeCodeConfig(ctx.preferencesStore, ctx.projectConfigStore)
+		: undefined;
+	plan.bridgeOptions = hydrateRuntimeOptions({ ...plan.bridgeOptions, runtime }, claudeCodeConfig);
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
@@ -980,8 +992,26 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 
 // ── Persistence ────────────────────────────────────────────────────────────
 
+function modelProviderFromModelString(model?: string): string | undefined {
+	if (!model) return undefined;
+	const slash = model.indexOf("/");
+	if (slash <= 0) return undefined;
+	return model.slice(0, slash);
+}
+
 /** Single store.put() with ALL structural fields. Called exactly once per session. */
 export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
+	const existing = store.get(session.id);
+	const runtime = plan.runtime ?? runtimeFromModelString(plan.initialModel) ?? "pi";
+	const claudeCodeModelAlias = runtime === "claude-code"
+		? (plan.bridgeOptions.claudeCodeModelAlias || modelAliasFromModelString(plan.bridgeOptions.initialModel) || modelAliasFromModelString(plan.initialModel) || "default")
+		: undefined;
+	const persistedModelProvider = runtime === "claude-code"
+		? "claude-code"
+		: modelProviderFromModelString(plan.bridgeOptions.initialModel || plan.initialModel);
+	const persistedModelId = runtime === "claude-code"
+		? claudeCodeModelAlias
+		: modelAliasFromModelString(plan.bridgeOptions.initialModel || plan.initialModel);
 	store.put({
 		id: session.id,
 		title: session.title,

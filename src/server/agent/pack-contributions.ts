@@ -36,6 +36,7 @@ import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { validateRuntimeManifest } from "../runtime/manifest.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -111,6 +112,15 @@ export interface McpPackContribution {
 }
 
 export type McpContributionTransportType = "stdio" | "http";
+
+export interface RuntimeContribution {
+	id: string;
+	title?: string;
+	description?: string;
+	manifest: Record<string, unknown>;
+	sourceFile: string;
+	packRoot: string;
+}
 
 export interface NormalizeMcpContributionOptions {
 	listName: string;
@@ -274,6 +284,8 @@ export interface PackContributions {
 	providers: ProviderContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
+	/** Runtime descriptors listed by contents.runtimes[]. */
+	runtimes: RuntimeContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -308,6 +320,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
+		runtimes: loadRuntimes(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -495,6 +508,60 @@ function resolveContributionFile(dir: string, listName: string): string {
 	if (fs.existsSync(yaml)) return yaml;
 	const yml = path.join(dir, `${listName}.yml`);
 	return fs.existsSync(yml) ? yml : yaml;
+}
+
+/** Load `runtimes/<name>.yaml` ONLY for names listed in contents.runtimes[].
+ *  Invalid runtime manifests are warned and dropped; deep validation happens
+ *  again at supervisor start/status boundaries. */
+export function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribution[] {
+	const listNames = manifest.contents.runtimes ?? [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: RuntimeContribution[] = [];
+	const seen = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let raw: unknown;
+		try {
+			raw = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] failed to read runtime '${listName}' (${sourceFile}):`, err);
+			continue;
+		}
+		const problems: string[] = [];
+		const runtime = validateRuntimeManifest(raw, sourceFile, packRoot, problems);
+		if (!runtime) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is invalid: ${problems.join("; ") || "unknown error"}`);
+			continue;
+		}
+		if (runtime.id !== listName) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) id ${JSON.stringify(runtime.id)} does not match contents.runtimes entry; skipping`);
+			continue;
+		}
+		if (seen.has(runtime.id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares runtime "${runtime.id}" more than once; runtime ids must be unique within a pack`,
+			);
+		}
+		seen.add(runtime.id);
+		out.push({
+			id: runtime.id,
+			title: runtime.title,
+			description: runtime.description,
+			manifest: raw as Record<string, unknown>,
+			sourceFile,
+			packRoot,
+		});
+	}
+	return out;
 }
 
 /** Load `channels/<name>.yaml` ONLY for names listed in contents.channels[].
