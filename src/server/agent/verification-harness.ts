@@ -821,11 +821,21 @@ export interface ActiveVerification {
 		errorPattern?: string;
 		/** Host cwd used for targeted artifact retention after a command finishes. */
 		commandCwd?: string;
+		/** Durable kill/cancel intent for restart-safe cleanup of detached command trees. */
+		killRequestedAt?: number;
+		killReason?: "cancelled" | "timeout";
+		killSignal?: NodeJS.Signals;
+		killAttempts?: number;
+		killLastAttemptAt?: number;
+		killCompletedAt?: number;
+		killUnsafeReason?: string;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
 	cancelled?: boolean;
+	cancelRequestedAt?: number;
+	cancelReason?: string;
 }
 
 type TerminalGateSignalStepStatus = "passed" | "failed" | "skipped";
@@ -1177,7 +1187,7 @@ export class VerificationHarness {
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
-		const all = [...this.activeVerifications.values()];
+		const all = [...this.activeVerifications.values()].filter(v => !v.cancelled && v.overallStatus !== "cancelled");
 		return goalId ? all.filter(v => v.goalId === goalId) : all;
 	}
 
@@ -1189,7 +1199,8 @@ export class VerificationHarness {
 	 * "Fix WS event ordering: signal_received must precede verification_started".
 	 */
 	getActiveVerification(signalId: string): ActiveVerification | undefined {
-		return this.activeVerifications.get(signalId);
+		const active = this.activeVerifications.get(signalId);
+		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
 	}
 
 	/**
@@ -1282,7 +1293,7 @@ export class VerificationHarness {
 	 */
 	areVerificationSessionsAlive(signalId: string): boolean {
 		const active = this.activeVerifications.get(signalId);
-		if (!active) return false;
+		if (!active || active.cancelled || active.overallStatus === "cancelled") return false;
 		// If any step is still waiting to start, the verification is not a zombie
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
@@ -1374,10 +1385,29 @@ export class VerificationHarness {
 			return;
 		}
 
-		const running = persisted.filter(v => v.overallStatus === "running");
+		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
+		for (const v of cancelled) {
+			const active = this.activeVerifications.get(v.signalId) ?? v;
+			active.cancelled = true;
+			active.overallStatus = "cancelled";
+			this.activeVerifications.set(active.signalId, active);
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
+			if (settled) {
+				if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
+			} else {
+				this._scheduleCancelledCommandKillRetry(active.signalId);
+			}
+			this._persistActive();
+		}
+
+		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
 		if (running.length === 0) {
-			// Clean up stale file
-			try { fs.unlinkSync(this._persistPath); } catch {}
+			// Clean up stale file only after cancelled kill intents are settled.
+			if (this.activeVerifications.size === 0) {
+				try { fs.unlinkSync(this._persistPath); } catch {}
+			} else {
+				this._persistActive();
+			}
 			return;
 		}
 
@@ -1529,6 +1559,7 @@ export class VerificationHarness {
 		cwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
+		goalBranch?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
 		gate?: WorkflowGate;
 	} | null> {
@@ -1570,7 +1601,43 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, builtinVars, goalSpec: goal.spec, allGateStates, gate: rerunGate };
+		return { signal, cwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+	}
+
+	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
+		const stepIndex = v.steps.indexOf(step);
+		if (stepIndex < 0) return;
+		const status = persistedStatusForStep(result);
+		Object.assign(v.steps[stepIndex], {
+			status,
+			phase: result.phase ?? step.phase ?? 0,
+			durationMs: result.duration_ms,
+			output: result.output,
+			sessionId: step.sessionId,
+		});
+		if (status === "skipped") v.steps[stepIndex].output = result.output || "Skipped — earlier phase failed";
+		this._persistActive();
+		if (status === "waiting" || status === "running") return;
+		this.broadcastFn(v.goalId, {
+			type: "gate_verification_step_complete",
+			goalId: v.goalId,
+			gateId: v.gateId,
+			signalId: v.signalId,
+			stepIndex,
+			stepName: result.name,
+			status,
+			durationMs: result.duration_ms,
+			output: result.output,
+			phase: result.phase ?? step.phase ?? 0,
+		});
+	}
+
+	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
+		const ctx = await this._gatherRerunContext(v.goalId, v.gateId, v.signalId);
+		if (!ctx?.signal || !ctx.gate) return false;
+		if (!this._isResumeStillActive(v)) return true;
+		await this.verifyGateSignal(ctx.signal, ctx.gate, ctx.cwd, ctx.goalBranch, undefined, ctx.allGateStates, ctx.goalSpec);
+		return true;
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
@@ -1632,14 +1699,16 @@ export class VerificationHarness {
 					av.steps[stepIndex].awaitingHuman = false;
 					this._persistActive();
 				}
-				resolvedSteps.push({
+				const signedOffStep: ResumedVerificationStep = {
 					name: step.name, type: step.type,
 					passed,
 					status: passed ? "passed" : "failed",
 					phase: step.phase ?? 0,
 					output,
 					duration_ms: Date.now() - step.startedAt,
-				});
+				};
+				resolvedSteps.push(signedOffStep);
+				this._updateActiveStepFromResumedResult(v, step, signedOffStep);
 				continue;
 			}
 
@@ -1672,7 +1741,9 @@ export class VerificationHarness {
 			}
 
 			if (resumeResult) {
-				resolvedSteps.push({ ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 });
+				const resumedStep = { ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 };
+				resolvedSteps.push(resumedStep);
+				this._updateActiveStepFromResumedResult(v, step, resumedStep);
 			} else {
 				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({
@@ -1694,6 +1765,18 @@ export class VerificationHarness {
 			const phase = step.phase ?? 0;
 			return earliest === undefined || phase < earliest ? phase : earliest;
 		}, undefined);
+		const firstRestartInterruptedPhase = firstRealFailedPhase === undefined
+			? resolvedSteps.reduce<number | undefined>((earliest, step) => {
+				// Empty waiting rows are never-run downstream placeholders. They are
+				// not themselves restart interruptions; after recovered success they
+				// must execute via normal phase semantics.
+				if (step.status === "waiting" && !step.output.trim()) return earliest;
+				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
+				const phase = step.phase ?? 0;
+				return earliest === undefined || phase < earliest ? phase : earliest;
+			}, undefined)
+			: undefined;
+
 		if (firstRealFailedPhase !== undefined) {
 			for (const step of resolvedSteps) {
 				const phase = step.phase ?? 0;
@@ -1705,20 +1788,15 @@ export class VerificationHarness {
 					step.duration_ms = 0;
 				}
 			}
-		} else {
-			const firstRestartInterruptedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
+		} else if (firstRestartInterruptedPhase !== undefined) {
+			for (const step of resolvedSteps) {
 				const phase = step.phase ?? 0;
-				return earliest === undefined || phase < earliest ? phase : earliest;
-			}, undefined);
-			if (firstRestartInterruptedPhase !== undefined) {
-				for (const step of resolvedSteps) {
-					const phase = step.phase ?? 0;
-					if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
-						step.output = "Step was interrupted by server restart before this phase could run.";
-					}
+				if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
+					step.output = "Step was interrupted by server restart before this phase could run.";
 				}
 			}
+		} else if (resolvedSteps.some(step => step.status === "waiting")) {
+			if (await this._continueResumeWithRemainingPhases(v)) return;
 		}
 
 		if (!this._isResumeStillActive(v)) return;
@@ -2398,18 +2476,116 @@ export class VerificationHarness {
 		};
 	}
 
-	private _killPersistedCommandSteps(active: ActiveVerification, signal: NodeJS.Signals = "SIGKILL"): void {
+	private _mergePersistedActiveVerifications(predicate: (v: ActiveVerification) => boolean): void {
+		for (const persisted of this._loadActive()) {
+			if (!predicate(persisted)) continue;
+			if (!this.activeVerifications.has(persisted.signalId)) {
+				this.activeVerifications.set(persisted.signalId, persisted);
+			}
+		}
+	}
+
+	private _markPersistedCommandKillIntent(active: ActiveVerification, signal: NodeJS.Signals, reason: "cancelled" | "timeout"): void {
+		const now = Date.now();
+		active.cancelRequestedAt ??= now;
+		active.cancelReason ??= reason;
 		for (const step of active.steps) {
 			if (step.type !== "command" || step.status !== "running") continue;
-			const identity = this._verifyPersistedCommandIdentity(step);
+			step.killRequestedAt ??= now;
+			step.killReason = reason;
+			step.killSignal = signal;
+		}
+	}
+
+	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (!isPidAlive(pid)) return true;
+			await new Promise(r => setTimeout(r, 50));
+		}
+		return !isPidAlive(pid);
+	}
+
+	private _cancelKillRetryTimers = new Map<string, NodeJS.Timeout>();
+
+	private _scheduleCancelledCommandKillRetry(signalId: string): void {
+		if (this._cancelKillRetryTimers.has(signalId)) return;
+		const timer = setTimeout(async () => {
+			this._cancelKillRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (!active?.cancelled) return;
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			if (settled) {
+				if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
+				this._persistActive();
+			} else {
+				this._persistActive();
+				this._scheduleCancelledCommandKillRetry(signalId);
+			}
+		}, 1_000);
+		timer.unref?.();
+		this._cancelKillRetryTimers.set(signalId, timer);
+	}
+
+	private async _killPersistedCommandSteps(
+		active: ActiveVerification,
+		signal: NodeJS.Signals = "SIGKILL",
+		options: { waitForIdentity?: boolean; markIntent?: boolean; reason?: "cancelled" | "timeout" } = {},
+	): Promise<boolean> {
+		if (options.markIntent !== false) {
+			this._markPersistedCommandKillIntent(active, signal, options.reason ?? "cancelled");
+			this._persistActive();
+		}
+
+		let allSettled = true;
+		for (const step of active.steps) {
+			if (step.type !== "command" || step.status !== "running") continue;
+			if (step.exitFile && fs.existsSync(step.exitFile)) {
+				step.killCompletedAt ??= Date.now();
+				continue;
+			}
+			if (step.restartRecoveryMode === "unsupported" || step.containerId || (!step.pidFile && !step.pid)) {
+				step.killUnsafeReason = step.restartRecoveryUnsupportedReason ?? "command path has no restart-safe persisted process identity";
+				step.killCompletedAt ??= Date.now();
+				continue;
+			}
+
+			const identityFile = options.waitForIdentity
+				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && !!active.cancelled)
+				: this._readCommandIdentityFile(step);
+			let identity = this._verifyPersistedCommandIdentity(step, identityFile);
 			if (!identity.verified || !identity.pid) {
+				step.killUnsafeReason = identity.reason;
+				if (identity.reason === "command process is no longer alive") {
+					step.killCompletedAt ??= Date.now();
+					continue;
+				}
+				const retryUnverifiedIdentity = identityFile.retryable || (!!identity.pid && isPidAlive(identity.pid) && /heartbeat|fresh identity/i.test(identity.reason));
+				if (retryUnverifiedIdentity) allSettled = false;
 				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
 					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
 				}
 				continue;
 			}
+
+			step.killAttempts = (step.killAttempts ?? 0) + 1;
+			step.killLastAttemptAt = Date.now();
 			try { killTreeByPid(identity.pid, signal); } catch { /* best-effort */ }
+			const exited = await this._waitForPidToExit(identity.pid);
+			if (exited) {
+				step.killCompletedAt = Date.now();
+				continue;
+			}
+
+			identity = this._verifyPersistedCommandIdentity(step);
+			if (identity.verified && identity.pid) {
+				allSettled = false;
+				step.killUnsafeReason = "verified command process was still alive after kill attempt; will retry";
+			} else {
+				step.killCompletedAt = Date.now();
+			}
 		}
+		return allSettled;
 	}
 
 	/**
@@ -2461,13 +2637,17 @@ export class VerificationHarness {
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
 	async cancelAllVerifications(goalId: string): Promise<void> {
-		for (const [signalId, active] of this.activeVerifications) {
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
+		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+			active.cancelRequestedAt ??= Date.now();
 
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+			this._persistActive();
 			this._killTrackedForSignal(signalId);
-			this._killPersistedCommandSteps(active);
+			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -2479,7 +2659,11 @@ export class VerificationHarness {
 				}
 			}
 
-			this.activeVerifications.delete(signalId);
+			if (commandKillsSettled) {
+				this.activeVerifications.delete(signalId);
+			} else {
+				this._scheduleCancelledCommandKillRetry(signalId);
+			}
 			this._persistActive();
 
 			this.broadcastFn(goalId, {
@@ -2508,18 +2692,26 @@ export class VerificationHarness {
 	 */
 	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
 		const gateIdSet = new Set(gateIds);
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
 		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
 
-		for (const [signalId, active] of this.activeVerifications) {
+		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
 
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+			active.cancelRequestedAt ??= Date.now();
 
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+			this._persistActive();
 			this._killTrackedForSignal(signalId);
-			this._killPersistedCommandSteps(active);
+			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
-			this.activeVerifications.delete(signalId);
+			if (commandKillsSettled) {
+				this.activeVerifications.delete(signalId);
+			} else {
+				this._scheduleCancelledCommandKillRetry(signalId);
+			}
 
 			cancellations.push({
 				signalId,
@@ -2753,9 +2945,34 @@ export class VerificationHarness {
 				});
 			}
 
-			// If ALL active steps can be served from cache, skip spawning agents entirely
-			if (canSkipAllSteps(cachedSteps, activeSteps)) {
-				console.log(`[verification] All ${activeSteps.length} active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
+			// A restart-resumed verification can re-enter this normal execution path
+			// with earlier phases already recovered as terminal rows. Preserve those
+			// results and execute only the still-waiting downstream phases.
+			for (let i = 0; i < steps.length; i++) {
+				if (allResults[i]) continue;
+				const activeStep = active.steps[i];
+				if (!activeStep || (activeStep.status !== "passed" && activeStep.status !== "failed" && activeStep.status !== "skipped")) continue;
+				const status = activeStep.status;
+				allResults[i] = {
+					name: steps[i].name,
+					type: steps[i].type as GateSignalStep["type"],
+					passed: status === "passed" || status === "skipped",
+					...(status === "skipped" ? { skipped: true } : {}),
+					status,
+					phase: activeStep.phase ?? steps[i].phase ?? 0,
+					output: activeStep.output || "",
+					duration_ms: activeStep.durationMs || 0,
+					expect: steps[i].expect,
+				};
+			}
+			const remainingActiveSteps = activeSteps.filter(step => {
+				const index = steps.indexOf(step);
+				return index < 0 || !allResults[index];
+			});
+
+			// If ALL remaining active steps can be served from cache, skip spawning agents entirely
+			if (canSkipAllSteps(cachedSteps, remainingActiveSteps)) {
+				console.log(`[verification] All ${remainingActiveSteps.length} remaining active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
 				const results: GateSignalStep[] = steps.map((s, i) => {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
 					const cached = cachedSteps.get(s.name)!;
@@ -2795,7 +3012,7 @@ export class VerificationHarness {
 			// Active steps are grouped by phase (default 0), and phases execute sequentially.
 			// All steps within a phase run concurrently by default. Skipped optional steps
 			// are excluded.
-			const phaseGroups = groupStepsByPhase(activeSteps, steps);
+			const phaseGroups = groupStepsByPhase(remainingActiveSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
 			// Sync the goal worktree with the latest commits before running verification.
@@ -2847,9 +3064,15 @@ export class VerificationHarness {
 			}
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
+			const earliestPreResolvedFailedPhase = allResults.reduce<number | undefined>((earliest, result) => {
+				if (!result || result.passed || result.skipped) return earliest;
+				const phase = result.phase ?? 0;
+				return earliest === undefined || phase < earliest ? phase : earliest;
+			}, undefined);
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
+				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
 				if (phaseFailed) {

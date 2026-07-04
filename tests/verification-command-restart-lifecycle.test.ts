@@ -409,6 +409,190 @@ test("cancelled or superseded resumed verification cannot update gate state afte
 	);
 });
 
+test("restart cancellation hydrates persisted active state and retries until command identity appears", async (t) => {
+	const { stateDir, harness } = makeHarness(t);
+	const child = spawnNode("setTimeout(() => {}, 30000)");
+	try {
+		const startedAt = Date.now();
+		const diagDir = path.join(stateDir, "verifications", "sig-cancel-late-identity");
+		fs.mkdirSync(diagDir, { recursive: true });
+		const outFile = path.join(diagDir, "stdout.log");
+		const errFile = path.join(diagDir, "stderr.log");
+		const exitFile = path.join(diagDir, "exit.txt");
+		const pidFile = path.join(diagDir, "process.pid");
+		const heartbeatFile = path.join(diagDir, "heartbeat.json");
+		fs.writeFileSync(outFile, "cancel:started\n");
+		fs.writeFileSync(errFile, "");
+
+		persistActive(stateDir, activeVerification("sig-cancel-late-identity", [commandStepFixture({
+			name: "Late identity cancellation",
+			startedAt,
+			pid: child.pid,
+			timeoutSec: 30,
+			outFile,
+			errFile,
+			exitFile,
+			identityFile: pidFile,
+			nonce: "cancel-late-nonce",
+			heartbeatFile,
+		})], startedAt));
+
+		setTimeout(() => {
+			try {
+				writeIdentityFile(pidFile, child.pid, "cancel-late-nonce");
+				writeHeartbeatFile(heartbeatFile, child.pid, "cancel-late-nonce");
+			} catch { /* test cleanup may have run */ }
+		}, 50);
+
+		await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]);
+		const exited = await waitForExit(child, 1_000);
+		assert.equal(
+			exited,
+			true,
+			`${MARKER}: cancellation after restart must load persisted active verifications and retry the pidfile create-window before giving up, so the command tree is not orphaned.`,
+		);
+		assert.equal(loadActiveVerifications(stateDir).length, 0, `${MARKER}: completed persisted cancellation cleanup should remove the durable active entry.`);
+	} finally {
+		await cleanupChild(child);
+	}
+});
+
+test("cancelled persisted command kill intent is processed on resume before active file cleanup", async (t) => {
+	const root = makeTmpDir("verif-command-cancel-resume-");
+	const stateDir = path.join(root, "state");
+	fs.mkdirSync(stateDir, { recursive: true });
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	const child = spawnNode("setTimeout(() => {}, 30000)");
+	try {
+		const startedAt = Date.now();
+		const diagDir = path.join(stateDir, "verifications", "sig-cancelled-resume");
+		fs.mkdirSync(diagDir, { recursive: true });
+		const outFile = path.join(diagDir, "stdout.log");
+		const errFile = path.join(diagDir, "stderr.log");
+		const exitFile = path.join(diagDir, "exit.txt");
+		const pidFile = path.join(diagDir, "process.pid");
+		const heartbeatFile = path.join(diagDir, "heartbeat.json");
+		fs.writeFileSync(outFile, "cancelled-before-restart\n");
+		fs.writeFileSync(errFile, "");
+		writeIdentityFile(pidFile, child.pid, "cancelled-resume-nonce");
+		writeHeartbeatFile(heartbeatFile, child.pid, "cancelled-resume-nonce");
+		const verification = activeVerification("sig-cancelled-resume", [commandStepFixture({
+			name: "Cancelled command survives restart",
+			startedAt,
+			pid: child.pid,
+			timeoutSec: 30,
+			outFile,
+			errFile,
+			exitFile,
+			identityFile: pidFile,
+			nonce: "cancelled-resume-nonce",
+			heartbeatFile,
+		})], startedAt);
+		verification.cancelled = true;
+		verification.overallStatus = "cancelled";
+		verification.cancelRequestedAt = Date.now() - 100;
+		verification.steps[0].killRequestedAt = verification.cancelRequestedAt;
+		persistActive(stateDir, verification);
+
+		const { harness } = makeHarnessForStateDir(stateDir);
+		await harness.resumeInterruptedVerifications();
+		const exited = await waitForExit(child, 1_000);
+		assert.equal(exited, true, `${MARKER}: boot resume must honor durable cancel/kill intent and reap the verified command tree before deleting active state.`);
+		assert.equal(loadActiveVerifications(stateDir).length, 0, `${MARKER}: cancelled kill intent should be removed only after the process is gone.`);
+	} finally {
+		await cleanupChild(child);
+	}
+});
+
+test("resumed command success delegates remaining waiting phases to normal verification", async (t) => {
+	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
+	const startedAt = Date.now() - 500;
+	const diagDir = path.join(stateDir, "verifications", "sig-resume-continue");
+	fs.mkdirSync(diagDir, { recursive: true });
+	const outFile = path.join(diagDir, "stdout.log");
+	const errFile = path.join(diagDir, "stderr.log");
+	const exitFile = path.join(diagDir, "exit.txt");
+	fs.writeFileSync(outFile, "recovered command passed\n");
+	fs.writeFileSync(errFile, "");
+	fs.writeFileSync(exitFile, "0\n");
+	const verification = activeVerification("sig-resume-continue", [
+		commandStepFixture({ name: "Recovered command", startedAt, outFile, errFile, exitFile }),
+		{ name: "Downstream review", type: "llm-review", status: "waiting", phase: 1, startedAt },
+	], startedAt);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
+
+	let continued = false;
+	(harness as any)._continueResumeWithRemainingPhases = async (v: any) => {
+		continued = true;
+		const recovered = v.steps.find((step: any) => step.name === "Recovered command");
+		const downstream = v.steps.find((step: any) => step.name === "Downstream review");
+		assert.equal(recovered?.status, "passed", `${MARKER}: recovered command success must be persisted on active state before downstream continuation.`);
+		assert.equal(downstream?.status, "waiting", `${MARKER}: downstream phase should remain waiting for normal verification to execute.`);
+		return true;
+	};
+
+	await (harness as any)._resumeOneVerification(verification);
+	assert.equal(continued, true, `${MARKER}: recovered command success must continue remaining phases instead of finalizing waiting rows as restart-interrupted.`);
+	assert.equal(gateStoreCalls.length, 0, `${MARKER}: resume should not persist a pending/failed final result when it successfully handed off to normal phase execution.`);
+});
+
+test("normal verification preserves recovered phase results and runs only downstream waiting phases", async (t) => {
+	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
+	const workDir = path.join(stateDir, "work-resume-downstream");
+	fs.mkdirSync(workDir, { recursive: true });
+	const shouldNotRunFile = path.join(workDir, "phase0-reran.txt");
+	const downstreamFile = path.join(workDir, "phase1-ran.txt");
+	const gate = {
+		id: GATE_ID,
+		name: "Implementation",
+		dependsOn: [],
+		verify: [
+			{
+				name: "Recovered phase command",
+				type: "command",
+				phase: 0,
+				timeout: 5,
+				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(shouldNotRunFile)}, 'reran')`),
+			},
+			{
+				name: "Downstream command",
+				type: "command",
+				phase: 1,
+				timeout: 5,
+				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(downstreamFile)}, 'ran'); console.log('downstream:ran')`),
+			},
+		],
+	} as any;
+	const signal = {
+		id: "sig-normal-continues-downstream",
+		goalId: GOAL_ID,
+		gateId: GATE_ID,
+		sessionId: "session-under-test",
+		timestamp: Date.now(),
+		commitSha: "HEAD",
+		verification: { status: "running", steps: [] },
+	} as any;
+	const startedAt = Date.now() - 250;
+	const active = activeVerification(signal.id, [
+		{ name: "Recovered phase command", type: "command", status: "passed", phase: 0, startedAt, durationMs: 12, output: "recovered-success" },
+		{ name: "Downstream command", type: "command", status: "waiting", phase: 1, startedAt },
+	], startedAt);
+	(harness as any).activeVerifications.set(signal.id, active);
+	(harness as any)._persistActive();
+
+	await harness.verifyGateSignal(signal, gate, workDir);
+	const update = latestSignalUpdate(gateStoreCalls);
+	const recovered = stepByName(update, "Recovered phase command");
+	const downstream = stepByName(update, "Downstream command");
+
+	assert.equal(latestGateStatus(gateStoreCalls), "passed", `${MARKER}: downstream continuation should allow the resumed gate to pass normally.`);
+	assert.equal(recovered?.status, "passed", `${MARKER}: recovered phase result should remain passed.`);
+	assert.equal(recovered?.output, "recovered-success", `${MARKER}: recovered phase output should not be replaced by a rerun.`);
+	assert.equal(fs.existsSync(shouldNotRunFile), false, `${MARKER}: normal continuation must not rerun already recovered phases.`);
+	assert.equal(downstream?.status, "passed", `${MARKER}: downstream waiting phase should execute and pass.`);
+	assert.equal(fs.existsSync(downstreamFile), true, `${MARKER}: downstream command should actually run.`);
+});
+
 test("mixed same-phase real failure and restart interruption notifies only the real failed step", async (t) => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
 	const startedAt = Date.now() - 1_000;
