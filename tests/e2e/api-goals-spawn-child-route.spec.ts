@@ -33,11 +33,13 @@ import {
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
+	registerProject,
 	seedTeamLeadHeader,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
+let gitProjectId: string;
 // The in-process gateway (worker-scoped) — captured in beforeAll so the
 // helpers below can reach `gateway.teamManager` to establish a team-lead.
 let gw: any;
@@ -45,6 +47,12 @@ let gw: any;
 test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
+	const project = await registerProject({
+		name: `spawn-child-git-${Date.now()}`,
+		rootPath: gitCwd(),
+		upsert: true,
+	});
+	gitProjectId = project.id;
 });
 
 /**
@@ -75,6 +83,7 @@ async function createParentGoal(): Promise<{ id: string; cwd: string; repoPath?:
 		body: JSON.stringify({
 			title: `spawn-child route parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			cwd: gitCwd(),
+			projectId: gitProjectId,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
@@ -501,6 +510,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			body: JSON.stringify({
 				title: `inherit parent ${Date.now()}`,
 				cwd: gitCwd(),
+				projectId: gitProjectId,
 				autoStartTeam: false,
 				workflowId: "feature",
 				inlineRoles: parentInline,
