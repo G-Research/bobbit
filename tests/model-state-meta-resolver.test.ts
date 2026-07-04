@@ -1,0 +1,74 @@
+/**
+ * Unit tests for `resolveModelStateMeta` in `src/server/agent/model-registry.ts`
+ * — the single source of truth for the metadata embedded in live per-session
+ * `state.model` frames.
+ *
+ * The resolver must return the SAME merged metadata the ModelSelector dropdown
+ * shows (built from `getAvailableModels` / `assembleModels`), so selecting a
+ * model never clobbers the correct pi-ai values with `inferMeta`'s heuristic
+ * catch-all. Regression target: Claude Fable 5 (1M context, `reasoning:true`,
+ * `thinkingLevelMap {off:null, xhigh:"xhigh"}`) rendered as a 200k
+ * non-reasoning model because live frames derived from `inferMeta` alone.
+ *
+ * Tiers exercised:
+ *   1. Registry cache (populate via getAvailableModels, then resolve).
+ *   2. pi-ai catalog via getModel (empty cache, known upstream provider).
+ *   3. inferMeta fallback (empty cache, unknown provider+id).
+ *
+ * node:test runs `it`s within a file sequentially, so the shared module-level
+ * cache is deterministic across tiers as long as each test sets up its own
+ * cache state (getAvailableModels to populate; invalidateModelCache to clear).
+ */
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-model-meta-resolver-"));
+
+const { PreferencesStore } = await import("../src/server/agent/preferences-store.ts");
+const { getAvailableModels, invalidateModelCache, resolveModelStateMeta } = await import("../src/server/agent/model-registry.ts");
+
+const prefs = new PreferencesStore(tmpDir);
+
+describe("resolveModelStateMeta", () => {
+	it("tier 1 (registry cache): returns Fable's merged pi-ai metadata after getAvailableModels", async () => {
+		invalidateModelCache();
+		// No aigw.url set → built-in providers (incl. anthropic) are assembled and cached.
+		const models = await getAvailableModels(prefs);
+		const fable = models.find(m => m.provider === "anthropic" && m.id === "claude-fable-5");
+		assert.ok(fable, "expected anthropic/claude-fable-5 in the assembled model list");
+
+		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
+		assert.equal(meta.contextWindow, 1_000_000, "Fable context window must be 1M");
+		assert.equal(meta.reasoning, true, "Fable must be reasoning:true");
+		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh" }, "Fable thinkingLevelMap must be preserved");
+		assert.equal(meta.maxTokens, 128_000, "Fable maxTokens must be 128k");
+		assert.deepEqual(meta.input, ["text", "image"]);
+	});
+
+	it("tier 2 (pi-ai catalog): resolves Fable with an EMPTY cache via getModel", () => {
+		invalidateModelCache();
+		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
+		assert.equal(meta.contextWindow, 1_000_000);
+		assert.equal(meta.reasoning, true);
+		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh" });
+	});
+
+	it("tier 3 (inferMeta fallback): unknown provider+id with empty cache carries no thinkingLevelMap", () => {
+		invalidateModelCache();
+		// provider "custom" skips the pi-ai catalog tier; the id is not in any catalog.
+		const meta = resolveModelStateMeta("custom", "totally-unknown-model-xyz-123");
+		assert.equal(meta.thinkingLevelMap, undefined, "inferMeta fallback must not fabricate a thinkingLevelMap");
+		assert.equal(meta.reasoning, false, "unknown id defaults to non-reasoning via inferMeta DEFAULT_META");
+		assert.equal(meta.contextWindow, 128_000, "unknown id uses inferMeta DEFAULT_META context window");
+	});
+
+	it("tier 3 (inferMeta fallback): empty provider also skips the catalog tier", () => {
+		invalidateModelCache();
+		const meta = resolveModelStateMeta("", "totally-unknown-model-xyz-123");
+		assert.equal(meta.thinkingLevelMap, undefined);
+		assert.equal(meta.reasoning, false);
+	});
+});

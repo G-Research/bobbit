@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels } from "@earendil-works/pi-ai";
+import { getProviders, getModels, getModel } from "@earendil-works/pi-ai";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
@@ -78,6 +78,97 @@ let cacheConfigVersion = 0;
 export function invalidateModelCache(): void {
 	cachedModels = null;
 	cacheExpiry = 0;
+}
+
+// ── Live model-state metadata resolver ─────────────────────────────
+
+/**
+ * The subset of model metadata that the live per-session `state.model` frame
+ * carries to the client. Kept intentionally narrow — this is what the context
+ * bar and thinking selector consume.
+ */
+export interface ResolvedModelStateMeta {
+	contextWindow: number;
+	maxTokens: number;
+	reasoning: boolean;
+	/** Present only when upstream metadata provides it (omitted otherwise). */
+	thinkingLevelMap?: Record<string, string | null>;
+	input: ("text" | "image")[];
+}
+
+/**
+ * SINGLE SOURCE OF TRUTH for the metadata embedded in live model-state frames.
+ *
+ * Every `state.model` broadcast (model select, spawn-pin, role/default pin,
+ * fallback, archived rehydration) must route through here so the values the
+ * client renders after selecting a model MATCH what the ModelSelector dropdown
+ * shows (which is built from `getAvailableModels` / `assembleModels`). Deriving
+ * live state from `inferMeta` alone clobbers the correct merged pi-ai metadata
+ * (e.g. Claude Fable 5's 1M context, `reasoning:true`, and
+ * `thinkingLevelMap {off:null, xhigh:"xhigh"}`).
+ *
+ * Resolution order (first hit wins):
+ *   1. Registry cache (`cachedModels`) keyed by exact provider+id — the same
+ *      merged list `getAvailableModels` returns. The 5s TTL is intentionally
+ *      IGNORED: model metadata is static per id, so a stale cache entry is
+ *      strictly better than dropping to inferMeta. Synchronous, so it serves
+ *      the sync broadcast sites (e.g. sendFallbackModelState).
+ *   2. pi-ai catalog via `getModel(provider, id)` for known upstream providers
+ *      (skip empty / `aigw` / `custom`; aigw strips prefixes and merges no
+ *      thinkingLevelMap, so it legitimately falls through to inferMeta). Any
+ *      missing numeric is filled from inferMeta.
+ *   3. `inferMeta(id)` — last resort for genuinely-unknown models. Carries no
+ *      thinkingLevelMap (the client then falls back to the family heuristic).
+ */
+export function resolveModelStateMeta(provider: string | undefined, modelId: string): ResolvedModelStateMeta {
+	// Tier 1: registry cache (ignore TTL — metadata is static per id).
+	if (cachedModels) {
+		const hit = cachedModels.find(m => m.provider === provider && m.id === modelId);
+		if (hit) {
+			return {
+				contextWindow: hit.contextWindow,
+				maxTokens: hit.maxTokens,
+				reasoning: hit.reasoning,
+				...(hit.thinkingLevelMap ? { thinkingLevelMap: hit.thinkingLevelMap } : {}),
+				input: hit.input,
+			};
+		}
+	}
+
+	// Tier 2: pi-ai catalog for known upstream providers (not aigw / custom).
+	const normalizedProvider = (provider ?? "").toLowerCase();
+	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
+		try {
+			const model = getModel(normalizedProvider as any, modelId as any) as {
+				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
+				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
+			} | undefined;
+			if (model) {
+				const inferred = inferMeta(modelId);
+				const contextWindow = typeof model.contextWindow === "number" && model.contextWindow > 0 ? model.contextWindow : inferred.contextWindow;
+				const maxTokens = typeof model.maxTokens === "number" && model.maxTokens > 0 ? model.maxTokens : inferred.maxTokens;
+				const input = (model.input && model.input.length > 0 ? model.input : inferred.input) as ("text" | "image")[];
+				return {
+					contextWindow,
+					maxTokens,
+					reasoning: model.reasoning ?? inferred.reasoning,
+					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+					input,
+				};
+			}
+		} catch {
+			// Unknown provider/id — fall through to inferMeta.
+		}
+	}
+
+	// Tier 3: inferMeta (no thinkingLevelMap).
+	const meta = inferMeta(modelId);
+	return {
+		contextWindow: meta.contextWindow,
+		maxTokens: meta.maxTokens,
+		reasoning: meta.reasoning,
+		input: meta.input,
+	};
 }
 
 /**

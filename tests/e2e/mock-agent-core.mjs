@@ -116,6 +116,12 @@ const DEFAULT_MODEL = { provider: "mock", id: "mock-model", contextWindow: 12800
 
 const KNOWN_MODELS = {
 	"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+	// Mirror pi-ai's authoritative Claude Fable 5 metadata so the mock's get_state
+	// reports the same shape the real agent does (1M context, reasoning, and the
+	// forced-adaptive-thinking map). Without this the mock would return the 128k
+	// unknown-model stub on reconnect, masking the real behaviour the Fable
+	// model-state e2e (tests/e2e/fable-model-state-frame.spec.ts) verifies.
+	"claude-fable-5": { provider: "anthropic", id: "claude-fable-5", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } },
 };
 
 export function mockModelFromString(modelString) {
