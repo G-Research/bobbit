@@ -196,6 +196,72 @@ describe("Headquarters directory migration", () => {
 		assert.equal(second.sanitizedHeadquartersRecords.length, 0);
 	});
 
+	// Regression: SessionStore persists sessions.json as a versioned envelope
+	// `{ version: 2, epoch, sessions: [...] }`. Sanitizing that store must round-trip
+	// the envelope. The earlier bug flattened it into a bare array whose top-level
+	// keys became `{ id: "version" | "epoch" | "sessions" }` pseudo-records that
+	// SessionStore could not load, so `/api/sessions?projectId=headquarters` returned
+	// [] after restart. This unit guard pins the envelope through sanitization.
+	it("preserves the sessions.json v2 envelope while sanitizing Headquarters session records", () => {
+		const root = tmpRoot();
+		const dirs = migrateDirs(root);
+		const epoch = 7;
+		const worktreePath = path.join(root, "..", "repo-wt", "goal-branch");
+		// Seed an existing Headquarters state sessions.json in the versioned envelope
+		// shape, with a session whose cwd/worktree/git fields require sanitization.
+		writeJson(path.join(dirs.headquartersStateDir, "sessions.json"), {
+			version: 2,
+			epoch,
+			sessions: [{
+				id: "hq-envelope-1",
+				title: "HQ session",
+				cwd: worktreePath,
+				agentSessionFile: "a.jsonl",
+				projectId: HEADQUARTERS_PROJECT_ID,
+				createdAt: 1,
+				lastActivity: 1,
+				worktreePath,
+				repoPath: root,
+				repoWorktrees: { ".": worktreePath },
+				branch: "goal/legacy",
+				worktreePushPolicy: "publish",
+				remotePublicationPolicy: "publish",
+				drafts: { keep: true },
+			}],
+		});
+
+		const diagnostics = migrateLegacyHeadquartersDirectory(dirs);
+
+		const sessionsFile = path.join(dirs.headquartersStateDir, "sessions.json");
+		const envelope = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(sessionsFile);
+		// Envelope shape must survive sanitization (never a bare array).
+		assert.equal(Array.isArray(envelope), false, "sessions.json must remain a v2 envelope, not a bare array");
+		assert.equal(envelope.version, 2, "version must be preserved");
+		assert.equal(envelope.epoch, epoch, "epoch must be preserved");
+		assert.equal(Array.isArray(envelope.sessions), true, "sessions must be an array under the envelope");
+		assert.equal(envelope.sessions.length, 1);
+
+		const session = envelope.sessions[0];
+		assert.equal(session.id, "hq-envelope-1");
+		assert.equal(session.projectId, HEADQUARTERS_PROJECT_ID);
+		assert.equal(path.resolve(String(session.cwd)), path.resolve(dirs.headquartersDir), "cwd should be normalized to the Headquarters directory");
+		for (const field of ["worktreePath", "repoPath", "repoWorktrees", "branch", "worktreePushPolicy", "remotePublicationPolicy"]) {
+			assert.equal(Object.hasOwn(session, field), false, `${field} should be removed from the Headquarters session`);
+		}
+		assert.deepEqual(session.drafts, { keep: true }, "non-git session fields must be preserved");
+		assert.ok(diagnostics.sanitizedHeadquartersRecords.some(entry => entry.file === "sessions.json" && entry.key === "hq-envelope-1"));
+
+		// Re-running migration is idempotent: file bytes are unchanged and nothing new is sanitized.
+		const firstBytes = fs.readFileSync(sessionsFile, "utf-8");
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(fs.readFileSync(sessionsFile, "utf-8"), firstBytes, "sessions.json must be byte-identical after re-running migration");
+		assert.equal(second.sanitizedHeadquartersRecords.length, 0);
+		const reread = readJson<{ version: number; epoch: number; sessions: unknown[] }>(sessionsFile);
+		assert.equal(reread.version, 2);
+		assert.equal(reread.epoch, epoch);
+		assert.equal(reread.sessions.length, 1);
+	});
+
 	it("does not promote same-root normal projects and quarantines ambiguous config", () => {
 		const root = tmpRoot();
 		const oldId = "server-root-project";
