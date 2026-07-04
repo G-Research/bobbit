@@ -1353,6 +1353,15 @@ export class VerificationHarness {
 	/** Persist active verifications to disk. */
 	private _persistActive(): void {
 		try {
+			// When there is nothing active, remove the persist file entirely rather
+			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
+			// semantics with resumeInterruptedVerifications() (which unlinks) so two
+			// concurrent harnesses sharing a stateDir cannot race between unlink and
+			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
+			if (this.activeVerifications.size === 0) {
+				try { fs.unlinkSync(this._persistPath); } catch {}
+				return;
+			}
 			const data = { verifications: [...this.activeVerifications.values()] };
 			// Defensive: ensure parent dir exists. It is created at startup but may
 			// be removed mid-run by external cleanup (test teardown, maintenance,
