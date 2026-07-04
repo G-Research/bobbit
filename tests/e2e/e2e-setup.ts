@@ -87,13 +87,17 @@ E2E_PI_DIR = bobbitDir();
  * This avoids creating real git worktrees (slow, leaky, conflicts between
  * parallel test runs that share the same repo).
  */
-let _nonGitCwd: string | undefined;
+const _nonGitCwdByHarnessRoot: Record<string, string> = {};
 export function nonGitCwd(): string {
-	if (!_nonGitCwd) {
-		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${port()}-${Date.now()}`);
-		mkdirSync(_nonGitCwd, { recursive: true });
+	const defaultRoot = harnessDefaultProjectRoot();
+	const key = `${port()}|${defaultRoot}`;
+	let cwd = _nonGitCwdByHarnessRoot[key];
+	if (!cwd) {
+		cwd = join(defaultRoot, ".e2e-workspaces", `non-git-${port()}`);
+		_nonGitCwdByHarnessRoot[key] = cwd;
 	}
-	return _nonGitCwd;
+	mkdirSync(cwd, { recursive: true });
+	try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 /**
@@ -968,6 +972,24 @@ export async function defaultProjectStateDir(): Promise<string> {
 	return projectStateDirForRoot(await defaultProjectRootPath());
 }
 
+async function projectRootForId(projectId: string): Promise<string | undefined> {
+	const state = await readLiveProjectState();
+	if (!state.ok) return undefined;
+	return state.projects.find(pr => pr.id === projectId && !pr.hidden)?.rootPath;
+}
+
+async function defaultExecutionCwdForProject(projectId: string | undefined): Promise<string> {
+	if (projectId) {
+		const rootPath = await projectRootForId(projectId);
+		if (rootPath) {
+			const canonicalRoot = canonicalPathForMatch(rootPath);
+			const canonicalDefaultRoot = canonicalPathForMatch(harnessDefaultProjectRoot());
+			return canonicalRoot === canonicalDefaultRoot ? nonGitCwd() : rootPath;
+		}
+	}
+	return nonGitCwd();
+}
+
 /**
  * Create a session via REST, return its ID. Defaults cwd to a non-git temp dir.
  *
@@ -977,19 +999,13 @@ export async function defaultProjectStateDir(): Promise<string> {
  * failures still surface via the second attempt.
  */
 export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
+	const projectId = opts?.projectId || (await defaultProjectId());
 	const body: Record<string, unknown> = {
-		cwd: opts?.cwd || nonGitCwd(),
+		cwd: opts?.cwd || await defaultExecutionCwdForProject(projectId),
 		goalId: opts?.goalId,
 	};
-	if (opts?.projectId) {
-		body.projectId = opts.projectId;
-	} else {
-		// Server requires an explicit project (or cwd matching a registered
-		// project). Auto-inject the harness default projectId whenever the
-		// caller didn't specify one — safe because the server prefers
-		// projectId over cwd. Tests that deliberately exercise the 400 path
-		// call rawApiFetch("/api/sessions", ...) and bypass this helper.
-		body.projectId = await defaultProjectId();
+	if (projectId) {
+		body.projectId = projectId;
 	}
 	// Retry on transient server 500s. Under heavy parallel test load the
 	// server occasionally fails session creation with a 500 (e.g. worktree
@@ -1103,12 +1119,15 @@ export async function createGoal(opts: {
 	// helper supplies a sensible default. Tests that exercise SPEC_REQUIRED call
 	// apiFetch("/api/goals", ...) directly and bypass this helper.
 	const defaultSpec = "E2E harness goal — spec autopopulated by createGoal() helper for tests that do not exercise spec content.";
-	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, spec: defaultSpec, ...opts };
+	const body: Record<string, unknown> = { worktree: false, spec: defaultSpec, ...opts };
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path
 		// call rawApiFetch("/api/goals", ...) and bypass this helper.
 		body.projectId = await defaultProjectId();
+	}
+	if (!body.cwd) {
+		body.cwd = await defaultExecutionCwdForProject(typeof body.projectId === "string" ? body.projectId : undefined);
 	}
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
