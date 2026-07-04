@@ -87,6 +87,33 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
+	it("server.ts wires goalCompletedDispatcher into the TeamManager construction (restored by this EXT-01 fix)", () => {
+		const text = read("src/server/server.ts");
+		assertTextInOrder(
+			text,
+			[
+				"new TeamManager(sessionManager, {",
+				"goalCompletedDispatcher:",
+				"dispatchGoalCompleted(",
+				"hasGoalCompletedProviders:",
+				"resolveGoalPullRequest:",
+			],
+			"src/server/server.ts must pass goalCompletedDispatcher (bridging to\n" +
+			"LifecycleHub.dispatchGoalCompleted), hasGoalCompletedProviders and\n" +
+			"resolveGoalPullRequest into the TeamManager construction. Without this\n" +
+			"wiring TeamManager.dispatchGoalCompletedOnce() returns immediately and\n" +
+			"the `goalCompleted` provider hook (e.g. the Hindsight memory pack's\n" +
+			"outcome retention) NEVER fires in production, even though the loader\n" +
+			"accepts the hook and team-manager unit tests pass — only the server.ts\n" +
+			"wiring is dropped. Originally added in 00301569, silently dropped by\n" +
+			"merge b687d93d (origin/master into aj-current took master's side of the\n" +
+			"hunk), restored by this EXT-01 fix. The same merge also dropped the\n" +
+			"loader allowlist entry, which is behaviourally pinned by\n" +
+			"tests/pack-providers-loader.test.ts. DO NOT delete this pin — restore\n" +
+			"the dropped wiring instead.",
+		);
+	});
+
 	it("proposal-panels.ts contains goal-form-subgoals-toggle testid (restored by a35d7f34)", () => {
 		const text = read("src/app/proposal-panels.ts");
 		assert.ok(

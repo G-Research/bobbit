@@ -2378,6 +2378,33 @@ export function createGateway(config: GatewayConfig) {
 		taskManager: new TaskManager(taskStore),
 		roleStore,
 		projectContextManager,
+		// Goal-completion lifecycle wiring (originally added in 00301569, silently
+		// dropped by merge b687d93d — pinned by
+		// tests/source-pin-merge-invariants.test.ts; DO NOT remove). Bridges
+		// TeamManager's post-completion dispatch to the LifecycleHub so providers
+		// declaring the `goalCompleted` hook (e.g. the Hindsight memory pack) fire
+		// after a goal is durably marked complete. The hub is read lazily via the
+		// closure — it is constructed earlier in createGateway but must not be
+		// captured by value here.
+		goalCompletedDispatcher: async (ctx) => {
+			await sessionManager.lifecycleHub?.dispatchGoalCompleted(ctx);
+		},
+		hasGoalCompletedProviders: (goalId, projectId) =>
+			!!sessionManager.lifecycleHub?.hasProvidersForHooks(projectId, ["goalCompleted"], goalId),
+		resolveGoalPullRequest: (goalId) => {
+			const pr = prStatusStore.get(goalId);
+			if (!pr) return undefined;
+			// headSha is not part of the current PrStatusEntry shape but may exist on
+			// persisted cache entries written by earlier versions — read defensively.
+			const headSha = (pr as { headSha?: unknown }).headSha;
+			return {
+				url: pr.url,
+				number: pr.number,
+				title: pr.title,
+				state: pr.state,
+				headSha: typeof headSha === "string" ? headSha : undefined,
+			};
+		},
 		toolManager,
 		orchestrationCore,
 	});
