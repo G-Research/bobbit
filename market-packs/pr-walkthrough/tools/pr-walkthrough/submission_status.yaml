@@ -7,4 +7,8 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Call after compaction, retry, restart, or compact submit_pr_walkthrough_chunk saves to read the full saved-chunk state, missing required sections, next required work, validation issues, and finalization status. Compact chunk saves intentionally return only a small status object; this tool is the complete status read.
+  Call after compaction, retry, restart, compact submit_pr_walkthrough_chunk saves, or before finalization to read the complete durable draft state. Compact chunk saves intentionally return only a small progress hint; this tool is the full status read.
+
+  Status includes saved chunk ids, missing required sections, next required work, validation/finalization issues, and final payload state. In the V2 review flow it also reports bounded read-receipt and coverage summaries when available: hunk ids read, unread or truncated reads, primary-reviewed counts, secondary/repeated references, explicit skips, completion-sweep remaining hunks, and deterministic major_remaining blockers.
+
+  Use status to resume without rereading broad diffs. If a hunk already has a file-slice read receipt, continue from the saved receipt/coverage summary unless a narrower follow-up read is needed for a specific comment anchor.

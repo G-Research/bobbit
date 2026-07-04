@@ -793,17 +793,56 @@ function formatFileSummary(file: unknown, index?: number): string {
 	const oldPath = stringValue(file.old_path);
 	if (oldPath && oldPath !== filePath) parts.push(`previous_path=${oldPath}`);
 	parts.push(`status=${stringValue(file.status) ?? "unknown"}${additionDeletionSuffix(file)}`);
+	const category = stringValue(file.category);
+	if (category) parts.push(`category=${category}`);
 	if (numberValue(file.hunks) !== undefined) parts.push(`hunks=${numberValue(file.hunks)}`);
+	if (Boolean(file.hunk_manifest_truncated)) parts.push(`hunk_manifest_truncated=true`);
 	parts.push(`truncated=${Boolean(file.is_truncated ?? file.truncated)}`);
 	parts.push(`binary=${Boolean(file.is_binary)}`);
 	parts.push(`generated=${Boolean(file.is_generated)}`);
 	return parts.join(" ");
 }
 
+function formatHunkSummary(hunk: unknown): string {
+	if (!isRecord(hunk)) return `  - ${compactJson(hunk)}`;
+	const hunkIndex = numberValue(hunk.hunk_index);
+	const hunkId = stringValue(hunk.hunk_id) ?? stringValue(hunk.id) ?? "<unknown-hunk>";
+	const header = stringValue(hunk.header) ?? "<no header>";
+	const additions = numberValue(hunk.additions) ?? 0;
+	const deletions = numberValue(hunk.deletions) ?? 0;
+	const changed = numberValue(hunk.changed_lines) ?? additions + deletions;
+	const coords = [`old=${hunk.old_start ?? "?"},${hunk.old_lines ?? "?"}`, `new=${hunk.new_start ?? "?"},${hunk.new_lines ?? "?"}`].join(" ");
+	const flags = `category=${stringValue(hunk.category) ?? "unknown"} generated=${Boolean(hunk.is_generated)} binary=${Boolean(hunk.is_binary)} truncated=${Boolean(hunk.is_truncated)}`;
+	return `  h${hunkIndex ?? "?"} ${hunkId} ${header} +${additions}/-${deletions} changed=${changed} ${coords} ${flags}`;
+}
+
+function appendManifestHunkSummaries(lines: string[], file: unknown): void {
+	if (!isRecord(file) || !Array.isArray(file.hunk_manifest) || file.hunk_manifest.length === 0) return;
+	for (const hunk of file.hunk_manifest) lines.push(formatHunkSummary(hunk));
+	if (Boolean(file.hunk_manifest_truncated)) {
+		lines.push(`  ... hunk manifest truncated at ${file.hunk_manifest.length} of ${file.hunks ?? "?"}; read mode=file with hunkOffset/hunkLimit for more`);
+	}
+}
+
 function appendWarnings(lines: string[], warnings: unknown): void {
 	if (!Array.isArray(warnings) || warnings.length === 0) return;
 	lines.push("warnings:");
 	for (const warning of warnings) lines.push(`- ${typeof warning === "string" ? warning : compactJson(warning)}`);
+}
+
+function appendReadReceiptSummary(lines: string[], data: Record<string, unknown>): void {
+	const receipt = isRecord(data.read_receipt) ? data.read_receipt : undefined;
+	const summary = isRecord(data.read_receipts) ? data.read_receipts : undefined;
+	if (!receipt && !summary) return;
+	lines.push("read_receipts:");
+	if (receipt) {
+		const hunkIds = Array.isArray(receipt.hunkIds) ? receipt.hunkIds : [];
+		lines.push(`- current id=${receipt.id ?? "?"} mode=${receipt.mode ?? "?"} format=${receipt.format ?? "?"} hunkIds=${hunkIds.slice(0, 10).join(",") || "none"}${Boolean(receipt.hunkIdsTruncated) ? ",..." : ""} truncated=${Boolean(receipt.truncated)}`);
+	}
+	if (summary) {
+		const bodyHunks = Array.isArray(summary.bodyReadHunkIds) ? summary.bodyReadHunkIds : [];
+		lines.push(`- total=${summary.total ?? "?"} body_read_hunks=${bodyHunks.slice(0, 10).join(",") || "none"}${Boolean(summary.bodyReadHunkIdsTruncated) ? ",..." : ""} truncated_reads=${summary.truncatedReads ?? 0}`);
+	}
 }
 
 function formatCompactManifest(data: Record<string, unknown>, mode: string): string {
@@ -821,8 +860,12 @@ function formatCompactManifest(data: Record<string, unknown>, mode: string): str
 	if (files.length > 0) {
 		lines.push("file_summaries:");
 		const base = numberValue(data.fileOffset) ?? numberValue(data.offset) ?? 0;
-		files.forEach((file, i) => lines.push(formatFileSummary(file, base + i)));
+		files.forEach((file, i) => {
+			lines.push(formatFileSummary(file, base + i));
+			appendManifestHunkSummaries(lines, file);
+		});
 	}
+	appendReadReceiptSummary(lines, data);
 	return lines.join("\n");
 }
 
@@ -838,6 +881,7 @@ function formatCompactFileList(data: Record<string, unknown>, mode: string): str
 		lines.push("file_summaries:");
 		files.forEach((file, i) => lines.push(formatFileSummary(file, offset + i)));
 	}
+	appendReadReceiptSummary(lines, data);
 	return lines.join("\n");
 }
 
@@ -885,11 +929,15 @@ function formatCompactFile(data: Record<string, unknown>): string {
 	};
 
 	outer: for (const [hunkIndex, hunk] of hunks.entries()) {
-		const warningHunk = hunkOffset + hunkIndex + 1;
+		const absoluteHunkOffset = hunkOffset + hunkIndex;
+		const warningHunk = absoluteHunkOffset + 1;
 		if (!isRecord(hunk)) {
 			formatterWarnings.push(`hunk ${warningHunk} was not an object; omitted because no legacy lines were present`);
 			continue;
 		}
+		const hunkId = stringValue(hunk.id) ?? stringValue(hunk.hunk_id) ?? "<unknown-hunk>";
+		const hunkStats = `hunk: h${absoluteHunkOffset} id=${hunkId} hunkOffset=${absoluteHunkOffset} old=${hunk.old_start ?? "?"},${hunk.old_lines ?? "?"} new=${hunk.new_start ?? "?"},${hunk.new_lines ?? "?"}`;
+		if (!appendBodyLine(hunkStats)) break;
 		if (typeof hunk.header === "string") {
 			if (!appendBodyLine(hunk.header)) break;
 		} else formatterWarnings.push(`hunk ${warningHunk} had missing header`);
@@ -929,6 +977,7 @@ function formatCompactFile(data: Record<string, unknown>): string {
 		lines.push("", "formatter_warnings:");
 		for (const warning of formatterWarnings) lines.push(`- ${warning}`);
 	}
+	appendReadReceiptSummary(lines, data);
 	return finalizeCompactFileOutput(lines);
 }
 
@@ -1129,7 +1178,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "Start PR walkthrough analysis with mode=manifest format=compact, then read individual files by path or index with format=compact. Use format=legacy only for exact line ids/old_line/new_line metadata.",
 		parameters: Type.Object({
 			mode: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("manifest"), Type.Literal("files"), Type.Literal("file")], { description: "Bounded read mode. Default manifest." })),
-			format: Type.Optional(Type.Union([Type.Literal("compact"), Type.Literal("legacy")], { description: "Output format. Omitted or legacy preserves the legacy JSON result exactly; compact returns a concise unified-diff-like model-facing view." })),
+			format: Type.Optional(Type.Union([Type.Literal("compact"), Type.Literal("legacy")], { description: "Output format. Omitted preserves legacy JSON exactly; compact returns concise review text; legacy returns JSON with exact line metadata." })),
 			path: Type.Optional(Type.String({ description: "File path for mode=file." })),
 			index: Type.Optional(Type.Number({ description: "File index for mode=file when path is omitted." })),
 			offset: Type.Optional(Type.Number({ description: "File or hunk offset. Default 0." })),
@@ -1149,6 +1198,7 @@ const extension: ExtensionFactory = (pi) => {
 
 			const readArgs = {
 				mode: args.mode,
+				format: args.format,
 				path: args.path,
 				index: args.index,
 				offset: args.offset,

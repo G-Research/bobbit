@@ -42,7 +42,7 @@ read_pr_walkthrough_bundle mode=file path=src/example.ts format=compact hunkOffs
 
 For non-windowed content, compact output preserves the diff information reviewers need: file identity/status, hunk headers, context lines, additions, deletions, and truncation indicators. It omits redundant per-line addressing fields such as line object ids, `old_line`, and `new_line`. Request `format="legacy"` only when exact legacy anchors or per-line metadata are required.
 
-The compact manifest remains the authoritative envelope read: target metadata, SHAs, stats, warnings, limits, export metadata, and file summaries appear there. Compact follow-up reads (`summary`, `files`, and `file`) include only a short bundle reference plus the requested file or hunk data, so repeated target/changeset/limits blocks do not re-enter the model context.
+The compact manifest remains the authoritative envelope read: target metadata, SHAs, stats, warnings, limits, export metadata, file summaries, and hunk planning metadata appear there. V2 reviewers use manifest hunk ids, file categories, generated/truncated flags, hunk counts, and offsets to plan logical cards before reading code bodies. Compact follow-up reads (`summary`, `files`, and `file`) include only a short bundle reference plus the requested file or hunk data, so repeated target/changeset/limits blocks do not re-enter the model context.
 
 ### Compact file read bounds
 
@@ -89,6 +89,68 @@ Reviewer agents should spend context on source changes that can affect behavior:
 - If inspection is necessary, use a path-specific compact read with a very small hunk window, usually `hunkLimit=1`, and stop once there is enough evidence.
 - Do not repeatedly reread large generated/truncated output. Treat `read_window` guidance and inline truncation markers as instructions to narrow the slice, not as a reason to request a broader one.
 
+### Logical review chunks and V2 narrative
+
+Durable chunks now describe the review as logical cards instead of file dumps. A `chunk:<id>` record is one functional, architectural, risk, or verification theme. The chunk still lists `files` for navigation, but `files` does not render code by itself; rendered diffs come only from explicit hunk references or the derived completion sweep.
+
+A V2 review chunk uses ordered `narrative` entries so the panel can interleave short explanation, diff blocks, notes, and suggested comments:
+
+```yaml
+id: auth-flow
+phase: significant
+title: Auth flow
+files: [src/auth/session.ts]
+narrative:
+  - id: setup
+    type: text
+    body: Session creation and refresh now share the expiry guard.
+  - id: create-session-expiry
+    type: diff
+    hunks:
+      - hunk_id: block:1:src__auth__session.ts:h0
+        placement: primary
+        why_relevant: Expiry is validated before the session is stored.
+  - id: skew-question
+    type: suggested_comment
+    severity: question
+    intent: inline
+    anchor: { hunk_id: block:1:src__auth__session.ts:h0, line_range: "+15..+22" }
+    body: Should this tolerate bounded clock skew before rejecting the token?
+```
+
+Supported narrative entry types are `text`, `diff`, `note`, `suggested_comment`, and `checklist`. Entries must have stable ids unique within the chunk. Narrative entries never embed raw diff bodies; they reference hunk ids/headers and concise commentary, and the finalizer pulls code from the bundle.
+
+A chunk's top-level `relevant_hunks` and its `narrative[].diff` entries share the same hunk universe. If a non-`skip` top-level hunk reference is never placed in a `narrative[].diff` entry, the finalizer appends a deterministic `additional-referenced-hunks` diff entry so narrative-first rendering cannot silently hide a hunk the reviewer explicitly cited. This keeps referenced code visible and counted in coverage even when the author forgets to interleave it.
+
+### Hunk placement and coverage
+
+Every hunk reference can declare `placement`:
+
+- `primary` is the default and means the hunk's main expanded card. A hunk can have only one primary placement.
+- `secondary` is a later mention of an already-primary hunk. It renders collapsed by default with a pointer to the primary card and does not change the hunk's primary coverage state.
+- `skip` marks a generated, binary, mechanical, unread, superseded, or otherwise low-signal hunk as intentionally not rendered. It requires `skip_reason`.
+
+Prefer manifest `hunk_id` values. Legacy `file` + `hunk_header` references remain compatibility fallbacks only when they resolve to exactly one hunk after any supplied index or coordinates are considered. Ambiguous references fail closed so reviewers do not accidentally assign ownership to the wrong hunk.
+
+A `placement: skip` reference may name just a `file` with no `hunk_header`, index, or coordinates. This is the only way to reference a hunkless changed block (see below) that exposes no header to anchor on. The resolver stays strict for that shortcut: a file-only reference that matches more than one hunk still fails closed with `PRW_HUNK_REF_UNRESOLVED`, so it can only skip a file whose change is a single (or synthetic block-level) hunk.
+
+Finalization derives coverage from the manifest, read receipts, and normalized hunk placements. Each changed hunk is classified as primary-reviewed, secondary-referenced, skipped with reason, unread, or completion-sweep remaining. Repeated secondary references are tracked separately from primary coverage so the same hunk can be reviewed once and cited later without duplicating full diffs.
+
+### Hunkless and binary blocks
+
+Some changed files produce no textual hunks: binary files, pure mode or rename changes, and empty diffs. These still represent a change the reviewer is accountable for, so finalization indexes a **synthetic block-level hunk** for every hunkless changed block. Without it, the diff-reference mapper — which builds its hunk index from a block's textual hunks — would drop these files from the coverage universe entirely, so a binary change could vanish from finalization coverage and the completion-sweep audit card.
+
+The synthetic hunk carries the block's own flags (binary, generated, truncated) and a descriptive header (`Binary file (no textual diff)` or `File change (no textual hunks)`) with zero changed lines. Because it has `changed_lines: 0` and inherits the binary/generated flags, it is never a completion-sweep `major_remaining` candidate. It is therefore classified as:
+
+- `completion-sweep-remaining` by default — it appears on the derived audit/completion card as a low-signal remaining item; or
+- `skipped` with a reason when a reviewer names it with a file-only `placement: skip` — it then shows in the audit skip list (for example `assets/logo.png (binary)`) with its `skip_reason`.
+
+Either way the changed file stays visible in coverage and audit metadata rather than disappearing.
+
+Read receipts are written for successful bundle reads. Manifest receipts prove planning context was read; file/hunk receipts prove code bodies were returned to the reviewer. Windowed or truncated receipts remain visible in status so reviewers can decide whether a narrower read is needed.
+
+The completion sweep is deterministic and derived. Non-major remaining hunks can appear on the final audit card as plumbing/shrapnel/completeness. The first-pass major-remaining policy blocks unassigned reviewable hunks with `changed_lines >= 8` unless they are generated, binary, source-truncated, explicitly skipped, or in low-risk categories such as tests, docs, lockfiles, assets, vendor, or generated output. Major remaining hunks that would first appear in the sweep block finalization with `PRW_MAJOR_REMAINING_HUNKS`; the reviewer must promote them to a logical card or explicitly skip them with a reason.
+
 ### Chunk saves and status
 
 `submit_pr_walkthrough_chunk` still persists one idempotent section record, but successful tool output is intentionally small:
@@ -97,7 +159,7 @@ Reviewer agents should spend context on source changes that can affect behavior:
 { "saved": true, "section_id": "context", "nextRequired": "merge_assessment", "missing": ["audit"] }
 ```
 
-The save result is a progress hint, not the complete draft state. Call `read_pr_walkthrough_submission_status` after compaction, retry, restart, or before finalization to read the full saved chunk list, missing required sections, validation issues, and finalization status. This prevents chunk saves from growing with every prior section while keeping durable status available on demand.
+The save result is a progress hint, not the complete draft state. Call `read_pr_walkthrough_submission_status` after compaction, retry, restart, compact chunk saves, or before finalization to read the full saved chunk list, missing required sections, validation issues, read-receipt summaries, coverage counts, repeated references, skipped/remaining hunks, and finalization status. This prevents chunk saves from growing with every prior section while keeping durable status available on demand.
 
 ### Read-only shell guidance
 
@@ -114,6 +176,7 @@ New PR Walkthrough writes are rooted by `jobId`:
 | `reviewers/<childSessionId>` | Small O(1) reviewer-session index used by tools and lifecycle hooks to find the job. | Removed on reviewer shutdown/archive. |
 | `reviews/<jobId>/binding/<childSessionId>` | Binding for the reviewer child: job, target, parent, changeset, base/head SHAs. | Removed with the review prefix. |
 | `reviews/<jobId>/draft/chunks/<sectionId>` | Idempotent durable chunk records written as analysis completes. | Removed after successful finalization or shutdown. |
+| `reviews/<jobId>/draft/read-receipts/<receiptId>` | Bounded records of manifest/file/hunk reads used to avoid broad rereads and compute coverage. | Removed with draft cleanup. |
 | `reviews/<jobId>/draft/status` | Bounded chunk summary/readback cache. | Removed with draft cleanup. |
 | `reviews/<jobId>/draft/checkpoint` | Bounded `beforeCompact` safety checkpoint. | Removed with draft cleanup. |
 | `reviews/<jobId>/staging/...` | Optional finalization staging space. Readers ignore it. | Best-effort deleted after final commit; otherwise shutdown cleanup removes it. |
@@ -163,7 +226,7 @@ PR Walkthrough uses these scoped profiles:
 
 | Data | Key or prefix | Profile |
 |---|---|---|
-| Draft chunks, status, checkpoints | `reviews/<jobId>/draft/` | `review-draft` |
+| Draft chunks, read receipts, status, checkpoints | `reviews/<jobId>/draft/` | `review-draft` |
 | Final payload | `reviews/<jobId>/final/` via `FINAL_QUOTA(jobId)` | `review-final` |
 | Reviewer index | exact `reviewers/<childSessionId>` key | `default` |
 | Review-scoped binding | `reviews/<jobId>/` via `REVIEW_BINDING_QUOTA(jobId)` | `default` |
@@ -219,6 +282,14 @@ Chunk validation is intentionally light:
 
 Full schema validation remains part of finalization.
 
+Section chunks should stay concise:
+
+- `metadata`, `context`, `merge_assessment`, and `audit` provide orientation and assessment inputs; the finalizer derives trusted PR identity, display defaults, stats overlays, coverage summaries, and completion-sweep boilerplate.
+- `decision:<id>` records one design decision and can reference hunks with the same `hunk_id`/placement fields used by review chunks.
+- `chunk:<id>` records one logical card. Use ordered `narrative` entries for interleaved text, diff, note, suggested comment, and checklist content. Do not create one chunk per file unless that file is the logical change.
+- `omissions_and_followups` covers expected artifacts that were checked and still need attention. It is separate from hunk skips; skipped hunks remain visible through placement/coverage metadata.
+- `display` is optional. Prefer deterministic defaults unless the authored order needs to differ from the finalizer's derived order.
+
 ## Finalization flow
 
 `finalize_pr_walkthrough_submission()` resolves the caller's reviewer binding, reads chunks from `reviews/<jobId>/draft/chunks/`, validates the assembled document, synthesizes cards, and commits the final payload.
@@ -239,10 +310,18 @@ There are two source modes:
 
 Minimum section-mode input is `metadata`, `context`, `merge_assessment`, `audit`, and either at least one `chunk:*` review chunk or an audit `reviewer_checklist`. Missing input fails with `PRW_FINALIZE_INCOMPLETE` and includes the missing sections.
 
+Validation is layered:
+
+1. Schema validation checks section shape, ids, enum values, launch identity, navigation labels, and V2 narrative entry shape.
+2. Hunk resolution normalizes each reference to a stable hunk id, preferring `hunk_id` and only using file/header/index/coordinate fallbacks when they resolve to exactly one hunk.
+3. Placement validation rejects duplicate primary ownership, secondary references without a primary owner, and skips without a reason.
+4. Coverage derivation combines normalized placements with read receipts, repeated references, explicit skips, unread primary references, and completion-sweep remaining hunks.
+5. Completion-sweep validation blocks deterministic major remaining hunks before publication.
+
 Finalization is commit-record atomic:
 
-1. Validate the YAML.
-2. Build the final record, including canonical YAML, job/change metadata, synthesized changeset/cards, warnings, `persistedAt`, `finalizedAt`, and `cardCount`.
+1. Validate YAML, hunk references, placement ownership, coverage, and completion-sweep policy.
+2. Build the final record, including canonical YAML, job/change metadata, synthesized changeset/cards, ordered narrative, hunk-sliced diff blocks, warnings, coverage summaries, `persistedAt`, `finalizedAt`, and `cardCount`.
 3. Write `reviews/<jobId>/final/payload` last with `FINAL_QUOTA(jobId)`, where the
    quota scope prefix is `reviews/<jobId>/final/` and the profile is `review-final`.
 4. Best-effort delete `reviews/<jobId>/staging/` and `reviews/<jobId>/draft/`.
@@ -256,7 +335,7 @@ Readers treat only `reviews/<jobId>/final/payload` as submitted/finalized. Stagi
 1. Resolve the reviewer binding.
 2. Reject with `PRW_CHUNK_CONFLICT` if section chunks already exist.
 3. Save the full YAML as the `document` chunk.
-4. Finalize through the same path as `finalize_pr_walkthrough_submission()`.
+4. Finalize through the same validation path as `finalize_pr_walkthrough_submission()`, including V2 hunk placement, duplicate-primary rejection, read-receipt-aware coverage, and completion-sweep policy.
 
 The `publish` route is compatibility-only for panel and legacy callers. When called by an authorized review-scoped caller, it writes the same final payload. When called without an authorized scoped binding, it falls back to legacy `cards/<changesetId>` and `job/<jobId>` artifacts so older direct flows continue to work, but it does not overwrite a review-scoped final payload. Those legacy artifact writes use exact-key `default` quota scopes because they are still first-party durable review metadata.
 
@@ -280,6 +359,12 @@ Common codes include:
 - `PRW_CHUNK_CONFLICT`
 - `PRW_FINALIZE_INCOMPLETE`
 - `PRW_SCHEMA_INVALID`
+- `PRW_DUPLICATE_PRIMARY_HUNK`
+- `PRW_HUNK_REF_UNRESOLVED`
+- `PRW_SECONDARY_WITHOUT_PRIMARY`
+- `PRW_SKIP_REASON_REQUIRED`
+- `PRW_MAJOR_REMAINING_HUNKS`
+- `PRW_COVERAGE_INCOMPLETE`
 - `PRW_MISSING_BINDING`
 - `PRW_REVIEW_MISSING`
 - `PRW_REVIEW_DRAFT`
@@ -315,6 +400,7 @@ Before reviewer prompts, the provider injects one small `ContextBlock` with auth
 - job id and changeset id when known;
 - whether `reviews/<jobId>/final/payload` exists;
 - saved chunk IDs, bounded to avoid prompt bloat;
+- read-receipt and coverage summaries when present;
 - draft status/checkpoint details if present;
 - the next required step;
 - a reminder to call `read_pr_walkthrough_submission_status` before resuming.
@@ -357,8 +443,8 @@ Durable behavior is pinned by focused unit and browser tests:
 - `tests/extension-host-server-host-api.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
 - `tests/extension-host-module-isolation.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
 - `tests/client-host-api.spec.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
-- `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum.
+- `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum, coverage/read-receipt status, repeated references, completion-sweep behavior, and large-card-count publication.
 - `tests/pr-walkthrough-lifecycle-provider.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.
-- `tests/pr-walkthrough-role-tools-policy.test.ts` and `tests/pr-walkthrough-tool-metadata.test.ts` — reviewer prompt/tool metadata for the durable chunk flow.
-- `tests/pr-walkthrough-compact-bundle-format.test.ts` — compact bundle formatting, preserved legacy/default output, envelope suppression, compact chunk-save output, and full status readback.
+- `tests/pr-walkthrough-role-tools-policy.test.ts` and `tests/pr-walkthrough-tool-metadata.test.ts` — reviewer prompt/tool metadata for the durable V2 chunk flow, hunk placement contract, status coverage, and exact PRW tool boundary.
+- `tests/pr-walkthrough-compact-bundle-format.test.ts` — compact bundle formatting, preserved legacy/default output, envelope suppression, hunk identity in compact reads, compact chunk-save output, read receipts, and full status readback.
 - `tests/pr-walkthrough-panel-parity.spec.ts` and `tests/e2e/ui/pr-walkthrough-pack.spec.ts` — panel draft/missing/quota error states and pack launch/render behavior.

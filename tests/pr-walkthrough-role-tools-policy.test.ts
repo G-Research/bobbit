@@ -138,6 +138,22 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 		assert.match(prompt, /Do not repeatedly reread large low-signal bundle output/);
 	});
 
+	it("the pr-reviewer prompt documents the V2 logical hunk placement contract", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		const prompt = reviewer.promptTemplate ?? "";
+		assert.match(prompt, /logical review card/i);
+		assert.match(prompt, /review_chunks\[\]\.files.*metadata\/navigation only/s);
+		assert.match(prompt, /narrative\[\]\.diff\.hunks\[\]/);
+		assert.match(prompt, /Do not include raw diff bodies in YAML/);
+		assert.match(prompt, /hunk_id/);
+		assert.match(prompt, /placement: primary/);
+		assert.match(prompt, /placement: secondary/);
+		assert.match(prompt, /placement: skip/);
+		assert.match(prompt, /skip_reason/);
+		assert.match(prompt, /read hunk ids, unread\/truncated receipts, coverage counts, repeated references/);
+		assert.match(prompt, /PRW_MAJOR_REMAINING_HUNKS/);
+	});
+
 	for (const tool of PR_WALKTHROUGH_TOOLS) {
 		it(`pr-reviewer role resolves ${tool} to allow`, () => {
 			const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);

@@ -514,8 +514,19 @@ function removePackPanelTab(packId: string, panelId: string): void {
  * de-dupes concurrent/repeat renders so at most one fetch runs, and the loader
  * repaints via `renderApp()` on resolve to swap in the real content. This loads
  * only the panel module the user already had open — no auto-invoke beyond that.
+ *
+ * SESSION BINDING (`boundSessionId`): the host MUST bind to the session the TAB
+ * belongs to — its `source.sessionId` — NOT whatever session happens to be
+ * `selectedSessionId` at render time. A PR-Walkthrough reviewer-child pane lives
+ * beside the CHILD session while the user may still be viewing the PARENT; if the
+ * host bound to the active/parent session, `host.callRoute` would carry the wrong
+ * `x-bobbit-session-id`, so the server would resolve `ctx.workingDir` against the
+ * wrong worktree and the child's `baseSha` would fail `git rev-parse` ("Invalid
+ * baseSha"). The caller (render layer) threads the tab's bound session here; we
+ * fall back to `currentSessionIdForPanel()` only when it is absent (legacy tabs /
+ * unit fixtures).
  */
-export function renderPackPanelContent(packId: string, panelId: string, params?: Record<string, unknown>): TemplateResult | unknown {
+export function renderPackPanelContent(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string): TemplateResult | unknown {
 	const key = panelKey(packId, panelId);
 	const panel = loadedPanels.get(key);
 	if (panel) {
@@ -524,16 +535,17 @@ export function renderPackPanelContent(packId: string, panelId: string, params?:
 			// §8.4) so the panel can rehydrate from `host.store.*` etc. `getHostApi` is
 			// supplied via the injected factory (host-api self-registers) to avoid an
 			// import cycle; when unset (unit fixtures) the panel renders with
-			// host === undefined.
-			const sessionId = currentSessionIdForPanel();
+			// host === undefined. Prefer the TAB's bound session so a reviewer-child pane
+			// binds to its OWN child session even when the parent is currently selected.
+			const sessionId = boundSessionId || currentSessionIdForPanel();
 			const host = panelHostFactory
 				? panelHostFactory(sessionId, packId, panelId)
 				: undefined;
 			// Thread the BOUND session id into the render params under a reserved key so
 			// a panel can scope its module-level state PER SESSION (the panel module is a
-			// single page-lived instance shared across sessions). Injected fresh each
-			// render — NOT persisted to the panel-workspace tab — so it always reflects
-			// the CURRENT session. Panels that ignore it are unaffected.
+			// single page-lived instance shared across sessions). This is the SAME bound
+			// session the host is scoped to, so recover/status/publish and the panel's
+			// per-session `byJob` key stay consistent. Panels that ignore it are unaffected.
 			const renderParams = sessionId ? { ...(params ?? {}), __sessionId: sessionId } : params;
 			return panel.render(renderParams, host);
 		} catch (err) {
