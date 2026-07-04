@@ -1,0 +1,265 @@
+/**
+ * Shared server route-surface extractor.
+ *
+ * Scans `src/server/server.ts` (plus the delegate route modules it imports —
+ * see DELEGATE_ROUTE_MODULES below) for its three route-matching idioms —
+ * exact `url.pathname === "..."`, regex `url.pathname.match(/.../)`, and
+ * prefix `url.pathname.startsWith("...")` — with best-effort HTTP-method
+ * attribution, mirroring the source-pinning approach in
+ * tests/tool-description-budget.test.ts.
+ *
+ * Originally written for tests/prompt-api-drift.test.ts (PR #12, since
+ * merged to aj-current). Factored out here so
+ * tests/client-api-orphan-pinning.test.ts can reuse the same extraction
+ * logic without duplicating it. prompt-api-drift.test.ts still carries its
+ * own inline copy; refactoring it to import from this module is a trivial
+ * follow-up (intentionally not done on this branch to keep it
+ * self-contained). Note this module's copy has diverged for the better —
+ * single-quoted matchers, multi-line `.match()` calls, delegate route
+ * modules (see comments below) — so that refactor should keep THIS version.
+ *
+ * DELEGATE MODULES: `handleApiRoute` in server.ts is not the only place
+ * `url.pathname` gets matched against `/api/...` — it delegates to sibling
+ * modules for whole route families (each imported and called conditionally
+ * from within `handleApiRoute`). Discovered while building
+ * tests/client-api-orphan-pinning.test.ts: scanning server.ts alone silently
+ * dropped ~9 real, live goal routes (pause/resume/policy/mutations/etc. in
+ * nested-goal-routes.ts), the side-panel-workspace routes, and the
+ * PR-walkthrough routes — all real, none orphaned — which would have made
+ * that test misreport them as new orphans. `grep -rl 'url\.pathname\.match(\|
+ * url\.pathname === "\|url\.pathname\.startsWith('  src/server/` is how
+ * these were found; re-run that if a future refactor adds another delegate.
+ */
+
+import fs from "node:fs";
+import path from "node:path";
+
+export const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+export const SERVER_SRC_PATH = path.join(REPO_ROOT, "src/server/server.ts");
+
+/** Sibling modules that `handleApiRoute` delegates whole route families to (see DELEGATE MODULES above). */
+export const DELEGATE_ROUTE_MODULE_PATHS = [
+	"src/server/side-panel-workspace-routes.ts",
+	"src/server/agent/nested-goal-routes.ts",
+	"src/server/pr-walkthrough/routes.ts",
+].map((rel) => path.join(REPO_ROOT, rel));
+
+/** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
+const REGEX_LITERAL_BODY = String.raw`(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\])*`;
+
+export type ServerRoute = {
+	kind: "exact" | "prefix" | "regex";
+	value: string | RegExp;
+	/** HTTP methods this dispatch is gated on; null = could not attribute → treat as any (documented limitation). */
+	methods: string[] | null;
+	/** Extra same-statement pathname constraints (prefix routes only), e.g. `.endsWith("/review/annotations")`. */
+	endsWith?: string[];
+	includes?: string[];
+};
+
+/**
+ * The single statement around `idx`: from the start of its line to the first
+ * `;` or `{` that follows (multi-line `if (...)` conditions included), capped
+ * at 400 chars. For `const x = ...;` assignments the `;` terminator matters —
+ * without it the window would run past the assignment into the next line's
+ * `if (...) {` and swallow a sibling statement.
+ */
+function statementWindow(src: string, idx: number): string {
+	const lineStart = src.lastIndexOf("\n", idx) + 1;
+	const brace = src.indexOf("{", idx);
+	const semi = src.indexOf(";", idx);
+	const candidates = [brace, semi].filter((i) => i !== -1 && i - lineStart <= 400);
+	const lineEnd = src.indexOf("\n", idx);
+	let end = candidates.length > 0 ? Math.min(...candidates) + 1 : lineEnd === -1 ? src.length : lineEnd;
+	if (end - lineStart > 400) end = lineStart + 400;
+	return src.slice(lineStart, end);
+}
+
+function methodsInWindow(w: string): string[] {
+	const out = new Set<string>();
+	// Both quote styles appear in server.ts (e.g. the session git/PR endpoints
+	// at ~line 12920+ use `req.method === 'GET'` with single quotes while most
+	// of the file uses double quotes) — both must be recognized or those
+	// routes' methods (and, via the callers below, their very existence)
+	// silently fail to attribute.
+	for (const m of w.matchAll(/req\.method === "([A-Z]+)"/g)) out.add(m[1]);
+	for (const m of w.matchAll(/req\.method === '([A-Z]+)'/g)) out.add(m[1]);
+	return [...out];
+}
+
+/**
+ * For the `const fooMatch = url.pathname.match(...)` / `const fooFlag =
+ * url.pathname === "..."` idioms: find every `if (...)` that references the
+ * variable and union the `req.method === "X"` checks found in those
+ * conditions. If ANY dispatching `if` uses the variable without a
+ * same-statement method check (e.g. `if (goalMatch) {` with method branching
+ * inside the block), give up and return null — conservative: any method.
+ */
+function methodsForVar(src: string, varName: string, defIdx: number): string[] | null {
+	const defWindow = statementWindow(src, defIdx);
+	const defStart = src.lastIndexOf("\n", defIdx) + 1;
+	// `const isX = url.pathname === "..." && req.method === "GET";` — the
+	// method gate is baked into the boolean itself; trust it directly.
+	const defMethods = methodsInWindow(defWindow);
+	if (defMethods.length > 0) return defMethods;
+	const usageRe = new RegExp(String.raw`\b${varName}\b`, "g");
+	const methods = new Set<string>();
+	let sawMethodless = false;
+	let sawUsage = false;
+	let m: RegExpExecArray | null;
+	while ((m = usageRe.exec(src))) {
+		// Skip the definition statement itself.
+		if (m.index >= defStart && m.index < defStart + defWindow.length) continue;
+		const w = statementWindow(src, m.index);
+		// Only `if (...)` conditions count as dispatch; skip destructuring,
+		// comments, negated guards (`if (!fooMatch)`).
+		if (!/\b(?:if|else if)\s*\(/.test(w)) continue;
+		if (new RegExp(String.raw`!\s*${varName}\b`).test(w)) continue;
+		sawUsage = true;
+		const ms = methodsInWindow(w);
+		if (ms.length === 0) sawMethodless = true;
+		else for (const x of ms) methods.add(x);
+	}
+	if (!sawUsage || sawMethodless) return null;
+	return [...methods];
+}
+
+/**
+ * Methods for a path-match found at `idx`: if the match sits inside an
+ * `if (...)` condition, read `req.method === "X"` from that same statement;
+ * if it's a `const NAME = ...` assignment, chase NAME's `if` usages.
+ * Empty/unattributable → null (any method — see module-header LIMITATION).
+ */
+function attributeMethods(src: string, idx: number): string[] | null {
+	const w = statementWindow(src, idx);
+	const assign = w.match(/^\s*const (\w+) =/);
+	if (assign) return methodsForVar(src, assign[1], idx);
+	if (/\b(?:if|else if)\s*\(/.test(w)) {
+		const ms = methodsInWindow(w);
+		return ms.length > 0 ? ms : null;
+	}
+	return null;
+}
+
+export function extractServerRoutes(src: string): ServerRoute[] {
+	const routes: ServerRoute[] = [];
+
+	// Both quote styles appear in server.ts. Discovered while building the
+	// client-orphan pinning test: the ~10 session git/PR/commits endpoints
+	// (git-pull, git-push, git-status, pr-merge, pr-status, commits, ...)
+	// are written as `url.pathname.startsWith('/api/sessions/') &&
+	// url.pathname.endsWith('/git-pull')` with SINGLE quotes, unlike the rest
+	// of the file's double-quoted idiom. An extractor that only matched
+	// double quotes silently dropped all of them, which would have made
+	// tests/client-api-orphan-pinning.test.ts misreport ~10 real, live routes
+	// as new orphans. Matching both quote styles here fixes that for every
+	// consumer of this module.
+	const exactRe = /url\.pathname === "(\/api\/[^"]+)"|url\.pathname === '(\/api\/[^']+)'/g;
+	let m: RegExpExecArray | null;
+	while ((m = exactRe.exec(src))) {
+		routes.push({ kind: "exact", value: m[1] ?? m[2], methods: attributeMethods(src, m.index) });
+	}
+
+	// NOTE: the auth guard `url.pathname.startsWith("/api/")` (bare "/api/")
+	// must never be captured as a route — it would make any drift assertion
+	// vacuous. The `[^"]+`/`[^']+` after `\/api\/` excludes it; callers
+	// should assert that too (see prompt-api-drift.test.ts's sanity check).
+	const startsRe = /url\.pathname\.startsWith\("(\/api\/[^"]+)"\)|url\.pathname\.startsWith\('(\/api\/[^']+)'\)/g;
+	while ((m = startsRe.exec(src))) {
+		const w = statementWindow(src, m.index);
+		const endsWith = [
+			...w.matchAll(/url\.pathname\.endsWith\("([^"]+)"\)/g),
+			...w.matchAll(/url\.pathname\.endsWith\('([^']+)'\)/g),
+		].map((x) => x[1]);
+		const includes = [
+			...w.matchAll(/url\.pathname\.includes\("([^"]+)"\)/g),
+			...w.matchAll(/url\.pathname\.includes\('([^']+)'\)/g),
+		].map((x) => x[1]);
+		routes.push({
+			kind: "prefix",
+			value: m[1] ?? m[2],
+			methods: attributeMethods(src, m.index),
+			...(endsWith.length ? { endsWith } : {}),
+			...(includes.length ? { includes } : {}),
+		});
+	}
+
+	// `\(\s*\/...\/\s*,?\s*\)` (not the tighter `\(\/...\/\)`): some call
+	// sites wrap onto multiple lines, e.g.
+	//   url.pathname.match(
+	//     /^\/api\/sessions\/([^/]+)\/transcript\/before-compaction$/,
+	//   )
+	// — discovered because the tighter form silently dropped this route
+	// (misreporting a live endpoint as an orphan) while building
+	// tests/client-api-orphan-pinning.test.ts.
+	const matchRe = new RegExp(String.raw`url\.pathname\.match\(\s*\/(${REGEX_LITERAL_BODY})\/\s*,?\s*\)`, "g");
+	while ((m = matchRe.exec(src))) {
+		if (!m[1].includes("/api/") && !m[1].includes("\\/api\\/")) continue;
+		let re: RegExp;
+		try {
+			re = new RegExp(m[1]);
+		} catch {
+			continue; // unparsable literal — not our concern here, would fail elsewhere
+		}
+		routes.push({ kind: "regex", value: re, methods: attributeMethods(src, m.index) });
+	}
+
+	return routes;
+}
+
+/**
+ * Turn a path template containing `:param` / `{param}` placeholders (or
+ * already-substituted `${...}` client template-literal segments normalized
+ * to a placeholder) into one concrete example path by substituting a
+ * slash-free dummy for every placeholder segment. The concrete path can then
+ * be tested against the server's exact/prefix/regex matchers exactly as a
+ * real request path would be.
+ */
+export function concretize(pathTemplate: string): string {
+	return pathTemplate.replace(/:[A-Za-z0-9_]+|\{[A-Za-z0-9_]+\}/g, "X");
+}
+
+export function pathMatches(r: ServerRoute, concretePath: string): boolean {
+	if (r.kind === "exact") return r.value === concretePath;
+	if (r.kind === "prefix") {
+		if (!concretePath.startsWith(r.value as string)) return false;
+		if (r.endsWith && !r.endsWith.every((s) => concretePath.endsWith(s))) return false;
+		if (r.includes && !r.includes.every((s) => concretePath.includes(s))) return false;
+		return true;
+	}
+	return (r.value as RegExp).test(concretePath);
+}
+
+export type RouteCheck = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Method-aware: pass `method: null` to check "is this path routed for ANY
+ * method" (used by the client-orphan pinning test, which doesn't know which
+ * HTTP method a given client call site uses without deeper parsing).
+ */
+export function isRouted(method: string | null, concretePath: string, routes: ServerRoute[]): RouteCheck {
+	const matching = routes.filter((r) => pathMatches(r, concretePath));
+	if (matching.length === 0) return { ok: false, reason: "no matching route" };
+	if (method === null) return { ok: true };
+	if (matching.some((r) => r.methods === null || r.methods.includes(method))) return { ok: true };
+	const allowed = [...new Set(matching.flatMap((r) => r.methods ?? []))].sort();
+	return { ok: false, reason: `path exists but not for ${method} (allowed: ${allowed.join(", ")})` };
+}
+
+let cachedRoutes: ServerRoute[] | null = null;
+
+/**
+ * Cached: `src/server/server.ts` is large (~16k lines); avoid re-parsing it
+ * (plus the delegate modules) per test file within a run. Concatenates
+ * server.ts with every DELEGATE_ROUTE_MODULE_PATHS file (joined by blank
+ * lines, which is harmless for the line/statement-window-relative regexes
+ * above) so routes registered in those sibling modules are part of the same
+ * surface — see the DELEGATE MODULES module-header note.
+ */
+export function getServerRoutes(): ServerRoute[] {
+	if (!cachedRoutes) {
+		const parts = [SERVER_SRC_PATH, ...DELEGATE_ROUTE_MODULE_PATHS].map((p) => fs.readFileSync(p, "utf8"));
+		cachedRoutes = extractServerRoutes(parts.join("\n\n"));
+	}
+	return cachedRoutes;
+}

@@ -274,6 +274,14 @@ E2E tests use `playwright-e2e.config.ts` which defines two projects:
 
 See [AGENTS.md](../AGENTS.md#testing) for harness selection guidance and test recipes.
 
+### Integration-merge discipline
+
+Merging a goal branch into `aj-current` (or any other multi-branch integration merge) must run the **full gate suite** (`npm run check`, `npm run test:unit`, `npm run test:e2e`) on the merged tree, not just on each branch independently — conflict resolution can silently drop code that no branch's own tests would ever catch.
+
+This is a real incident class, not a hypothetical: a forensic review of three back-to-back integration merges (`b687d93d`, `eef210f3`, `a34f27e6`) found at least 6 shipped features where a merge's conflict resolution dropped the **server route** while the **client caller and its tests survived** — e.g. `src/app/settings-page.ts` kept calling `/api/claude-code/status` and `tests/e2e/pack-runtimes-api.spec.ts` kept exercising `/api/pack-runtimes` after both routes had vanished from `src/server/server.ts`. Nothing failed at merge time: the client still built, its own unit tests still passed (they mock the network), and the break was only visible as a runtime 404.
+
+**Always run `tests/client-api-orphan-pinning.test.ts`** (part of `npm run test:unit`) after an integration merge — it asserts every `/api/...` path referenced from `src/app/`/`src/ui/` resolves to a real route in `src/server/server.ts` (or its delegate route modules), with a `KNOWN_ORPHANS` burn-down list for orphans that are genuinely pending restoration on an open PR. If the merge introduced a *new* orphan not on that list, the test fails — that's the signal a route was just dropped. See the test file header for the full design (extraction approach, scope decision, allowlist).
+
 ---
 
 ## Worktree branch namespaces
