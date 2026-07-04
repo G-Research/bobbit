@@ -18,7 +18,7 @@ process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });
 
-const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
+const { ProjectRegistry, SpecialProjectMutationError } = await import("../src/server/agent/project-registry.ts");
 const { resolveEntities, resolveScalarConfig, resolveConfig } = await import("../src/server/agent/config-resolver.ts");
 
 after(() => {
@@ -159,6 +159,88 @@ describe("ProjectRegistry", () => {
 	it("update throws for unknown id", () => {
 		const reg = new ProjectRegistry(stateDir);
 		assert.throws(() => reg.update("nonexistent", { name: "x" }), /not found/i);
+	});
+
+	it("update rejects changing rootPath onto another normal project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootB = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+		reg.register("b", rootB);
+
+		assert.throws(() => reg.update(projA.id, { rootPath: rootB }), /already registered/i);
+
+		// The rejected update must not have mutated the in-memory record.
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+		// And it must not have partially applied a co-supplied field change.
+		assert.throws(() => reg.update(projA.id, { name: "renamed", rootPath: rootB }), /already registered/i);
+		assert.strictEqual(reg.get(projA.id)?.name, "a");
+	});
+
+	it("update rejects changing rootPath onto a provisional project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootProv = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+		reg.registerProvisional("prov", rootProv);
+
+		assert.throws(() => reg.update(projA.id, { rootPath: rootProv }), /already registered/i);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("update rejects changing rootPath onto the Headquarters directory", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const hqRoot = freshProjectRoot();
+		reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		assert.throws(
+			() => reg.update(projA.id, { rootPath: hqRoot }),
+			(err: unknown) => err instanceof SpecialProjectMutationError && err.code === "HEADQUARTERS_IMMUTABLE",
+		);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("update rejects changing rootPath onto the hidden system project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const sysRoot = freshProjectRoot();
+		reg.registerSystemProject(sysRoot);
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		assert.throws(
+			() => reg.update(projA.id, { rootPath: sysRoot }),
+			(err: unknown) => err instanceof SpecialProjectMutationError && err.code === "SYSTEM_PROJECT_IMMUTABLE",
+		);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("update allows changing rootPath to a non-conflicting directory", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootC = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		const updated = reg.update(projA.id, { rootPath: rootC });
+		assert.strictEqual(updated.rootPath, path.resolve(rootC));
+
+		// Persisted across reload.
+		const reg2 = new ProjectRegistry(stateDir);
+		assert.strictEqual(reg2.get(projA.id)?.rootPath, path.resolve(rootC));
+	});
+
+	it("update accepts a no-op rootPath change to the project's own root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		const updated = reg.update(projA.id, { rootPath: rootA, name: "renamed" });
+		assert.strictEqual(updated.rootPath, path.resolve(rootA));
+		assert.strictEqual(updated.name, "renamed");
 	});
 
 	it("remove deletes a project from registry", () => {

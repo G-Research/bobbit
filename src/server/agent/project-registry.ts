@@ -238,6 +238,51 @@ export class ProjectRegistry {
     return positions.length > 0 ? Math.max(...positions) + 1 : 0;
   }
 
+  /**
+   * Guard: throw if another registered project already occupies `rootPath`
+   * (compared by canonical path), excluding `opts.excludeId`.
+   *
+   * Duplicate normal/provisional projects at the same canonical path are
+   * always rejected, and the physical Headquarters directory is always
+   * immutable. `opts.allowSpecialAnchors` controls hidden/system anchors:
+   *
+   * - `register()` passes `true` so the synthetic `system` anchor and other
+   *   hidden synthetic projects do not block registering a normal project
+   *   sharing their path (e.g. the server run directory).
+   * - `update()` passes `false` so a normal project can never be repointed
+   *   onto Headquarters, the system anchor, or any hidden/special workspace.
+   */
+  private assertRootPathAvailable(
+    rootPath: string,
+    opts: { excludeId?: string; allowSpecialAnchors: boolean },
+  ): void {
+    for (const existing of this.projects.values()) {
+      if (opts.excludeId !== undefined && existing.id === opts.excludeId) continue;
+      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
+      if (isHeadquartersProject(existing)) {
+        throw new SpecialProjectMutationError(
+          "HEADQUARTERS_IMMUTABLE",
+          `Headquarters owns ${rootPath}; choose the server run directory instead of the Headquarters directory.`,
+        );
+      }
+      if (isSystemProject(existing)) {
+        if (opts.allowSpecialAnchors) continue;
+        throw new SpecialProjectMutationError(
+          "SYSTEM_PROJECT_IMMUTABLE",
+          `The system workspace owns ${rootPath}; choose a different directory.`,
+        );
+      }
+      if (existing.hidden) {
+        if (opts.allowSpecialAnchors) continue;
+        throw new SpecialProjectMutationError(
+          "HIDDEN_PROJECT_IMMUTABLE",
+          `A server-managed workspace owns ${rootPath}; choose a different directory.`,
+        );
+      }
+      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+    }
+  }
+
   /** Read projects from disk. Missing file is treated as empty registry. */
   load(): void {
     let changed = false;
@@ -415,18 +460,7 @@ export class ProjectRegistry {
     // Check for duplicate normal projects by canonical path. Special hidden
     // anchors do not block registering the server run directory as a normal
     // project, but the physical Headquarters directory itself is immutable.
-    for (const existing of this.projects.values()) {
-      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
-      if (isHeadquartersProject(existing)) {
-        throw new SpecialProjectMutationError(
-          "HEADQUARTERS_IMMUTABLE",
-          `Headquarters owns ${rootPath}; choose the server run directory instead of the Headquarters directory.`,
-        );
-      }
-      if (!existing.hidden && !isSystemProject(existing)) {
-        throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
-      }
-    }
+    this.assertRootPathAvailable(rootPath, { allowSpecialAnchors: true });
 
     // Defense in depth: re-run preflight server-side. The REST endpoint may
     // have already shown the report to the user, but we never trust the
@@ -502,6 +536,20 @@ export class ProjectRegistry {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
     assertNormalMutableProject(project, "updated");
+
+    // Root-path collision guard. Reject repointing this normal project onto
+    // another visible normal/provisional project's canonical root or onto any
+    // server-owned special anchor (Headquarters, the system project, or a
+    // hidden synthetic anchor) before mutating any fields. Only Headquarters
+    // plus a single same-root normal project may share a directory
+    // relationship, and that is established via register(), never by editing a
+    // normal project onto a special anchor.
+    if (updates.rootPath !== undefined) {
+      this.assertRootPathAvailable(path.resolve(updates.rootPath), {
+        excludeId: id,
+        allowSpecialAnchors: false,
+      });
+    }
 
     if (updates.parentProjectId !== undefined) {
       const v = updates.parentProjectId;
