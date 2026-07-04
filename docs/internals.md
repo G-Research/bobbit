@@ -1578,6 +1578,25 @@ For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.
 
 ---
 
+## Anthropic prompt-cache retention (`BOBBIT_CACHE_RETENTION`)
+
+Every spawned pi-coding-agent session defaults to the **1-hour** Anthropic prompt-cache TTL instead of pi's 5-minute default. Bobbit's idle-then-nudged session pattern (team leads especially) routinely has inter-turn gaps over 5 minutes, so under pi's default the ~30-60KB system+tool-docs prefix expires between turns and is re-billed as a fresh cache write on every wake; the 1h TTL keeps it warm.
+
+**Operator config** (gateway environment):
+
+| Env var | Values | Default | Effect |
+|---|---|---|---|
+| `BOBBIT_CACHE_RETENTION` | `long` \| `short` \| `none` | `long` | Bobbit's knob. `short`/`none` both opt back into pi's 5-minute TTL (pi-ai's env var has no "none" tier — that only exists as an explicit per-request param). Case-insensitive; unrecognized values are ignored. |
+| `PI_CACHE_RETENTION` | pi-ai native (`long` recognized) | — | If set on the gateway process, propagated verbatim to spawned agents (both direct and docker-exec sandbox paths) — never clobbered by the Bobbit default. |
+
+**Precedence** (highest first): `BOBBIT_CACHE_RETENTION` → operator-set `PI_CACHE_RETENTION` in the gateway env → Bobbit default `long`. A caller-supplied per-session env (`toolEnv`) still overrides the resolved value, and explicit `cacheRetention` request params (e.g. `model-completion.ts`'s one-shot `"none"`) always win inside pi-ai regardless of env.
+
+**Cost tradeoff**: a 1h-retention cache *write* costs ~2x a 5-minute write (charged once per cache establishment); reads are priced the same. Net win once a session takes more than ~2 turns/hour; pure added cost for sessions that never get a second turn. Opt out with `BOBBIT_CACHE_RETENTION=short` to A/B.
+
+Resolution lives in `src/server/agent/cache-retention.ts` (`resolveCacheRetentionEnv`), wired in `session-setup.ts::_resolveBridgeOptions` and forwarded to sandboxes in `rpc-bridge.ts::spawnDockerExec`; pinned by `tests/cache-retention-env.test.ts` (including a guard against the installed pi-ai's `PI_CACHE_RETENTION` contract changing on a version bump). Full seam analysis, pricing math, and the `cacheWrite1h` telemetry gap: [docs/design/cache-retention-long.md](design/cache-retention-long.md).
+
+---
+
 ## Host agent provider key bridge
 
 Settings-saved provider API keys live in global preferences as `providerKey.<provider>`. The model registry uses those keys to mark providers authenticated; direct host agent processes must receive the same credentials or the UI can show an authenticated model that the spawned agent cannot use.
