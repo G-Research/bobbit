@@ -275,7 +275,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 		{
 			id: "modify",
 			label: staffId ? "Edit staff" : "Modify",
-			title: staffId ? "Open this staff agent's settings" : isTeamLead ? "Rename this team lead session" : "Rename this session",
+			title: staffId ? "Open this staff agent's settings" : "Modify session. Edit the name, colour, and Role",
 			icon: icon(Pencil, "xs"),
 			priority: BUILTIN_PRIORITIES["modify"],
 			quick: true,

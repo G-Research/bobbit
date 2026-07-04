@@ -176,7 +176,7 @@ test.describe("Sidebar actions menu", () => {
 
 		await row.hover();
 		await row.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]').click();
-		await expect(page.getByText("Edit Session").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Modify Session").first()).toBeVisible({ timeout: 5_000 });
 		await page.getByRole("button", { name: "Cancel" }).click();
 
 		await expect(row, "cancel keeps the session row in the sidebar").toBeVisible();
