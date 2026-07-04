@@ -769,6 +769,22 @@ function mapAuthoredNarrative(chunk: PrWalkthroughYamlReviewChunk, plan: HunkCar
 				break;
 		}
 	}
+	// Top-level relevant_hunks refs that the author did not also place in a
+	// narrative[].diff entry are still counted in coverage and appear in the flat
+	// diffBlocks. Append a deterministic diff entry so narrative-first rendering does
+	// not silently hide them.
+	const narrativeHunkIds = new Set(blocks.flatMap(block => (block.type === "diff" ? block.hunkIds : [])));
+	const orphanHunkIds = uniqueStrings(
+		plan.refs
+			.filter(ref => ref.placement !== "skip" && !narrativeHunkIds.has(ref.hunk.hunkId))
+			.map(ref => ref.hunk.hunkId),
+	);
+	if (orphanHunkIds.length > 0) {
+		const existingIds = new Set(blocks.map(block => block.id));
+		let entryId = "additional-referenced-hunks";
+		for (let suffix = 2; existingIds.has(entryId); suffix += 1) entryId = `additional-referenced-hunks-${suffix}`;
+		blocks.push({ type: "diff", id: entryId, hunkIds: orphanHunkIds });
+	}
 	return blocks;
 }
 
@@ -1143,8 +1159,14 @@ function parseHunkReference(root: Record<string, unknown>, errors: PrWalkthrough
 	const whyRelevant = options.requireWhy ? requiredString(root, "why_relevant", errors, `${path}.`) : optionalString(root, "why_relevant", errors, `${path}.`);
 	const primaryCardId = optionalString(root, "primary_card_id", errors, `${path}.`);
 	const skipReason = root.skip_reason === undefined ? undefined : requiredEnum(root, "skip_reason", HUNK_SKIP_REASONS, errors, `${path}.`);
-	if (!hunkId && !(file && hunkHeader) && !(file && (hunkIndex !== undefined || oldStart !== undefined || newStart !== undefined))) {
-		addError(errors, path, "Expected hunk_id or a file plus hunk_header/hunk_index/coordinates.");
+	// A `placement: skip` reference identifies a file/area to exclude from review.
+	// Hunkless changed blocks (binary files, mode-only changes) expose no
+	// header/index/coordinates, so a file-only skip is the only way to name them.
+	// The resolver stays strict: a file-only reference that matches more than one
+	// hunk still fails closed with PRW_HUNK_REF_UNRESOLVED.
+	const fileOnlySkip = placement === "skip" && Boolean(file);
+	if (!hunkId && !(file && hunkHeader) && !(file && (hunkIndex !== undefined || oldStart !== undefined || newStart !== undefined)) && !fileOnlySkip) {
+		addError(errors, path, "Expected hunk_id, a file plus hunk_header/hunk_index/coordinates, or a file for placement: skip.");
 	}
 	if (primaryCardId && !STABLE_ID_RE.test(primaryCardId)) addError(errors, `${path}.primary_card_id`, "Expected a stable card id.");
 	if (errorsForPrefix(errors, path)) return null;
@@ -1492,15 +1514,26 @@ class DiffReferenceMapper {
 
 	constructor(blocks: PrWalkthroughDiffBlock[]) {
 		for (const block of blocks) {
+			// Hunkless changed blocks (binary files, pure mode/rename changes, empty diffs)
+			// still represent a changed file. Index a synthetic block-level hunk so the
+			// coverage universe classifies it as skipped/completion-sweep-remaining rather
+			// than silently dropping it from audit/coverage metadata.
+			if (block.hunks.length === 0) {
+				this.registerHunk(indexHunklessBlock(block), block);
+				continue;
+			}
 			block.hunks.forEach((hunk, hunkIndex) => {
-				const indexed = indexHunk(block, hunk, hunkIndex);
-				this.hunks.push(indexed);
-				this.byHunkId.set(indexed.hunkId, indexed);
-				for (const file of [block.filePath, block.oldPath].filter((value): value is string => Boolean(value))) {
-					const key = normalizePath(file);
-					this.byFile.set(key, [...(this.byFile.get(key) ?? []), indexed]);
-				}
+				this.registerHunk(indexHunk(block, hunk, hunkIndex), block);
 			});
+		}
+	}
+
+	private registerHunk(indexed: IndexedHunk, block: PrWalkthroughDiffBlock): void {
+		this.hunks.push(indexed);
+		this.byHunkId.set(indexed.hunkId, indexed);
+		for (const file of [block.filePath, block.oldPath].filter((value): value is string => Boolean(value))) {
+			const key = normalizePath(file);
+			this.byFile.set(key, [...(this.byFile.get(key) ?? []), indexed]);
 		}
 	}
 
@@ -1566,6 +1599,39 @@ function indexHunk(block: PrWalkthroughDiffBlock, hunk: PrWalkthroughHunk, hunkI
 		deletions,
 		generated: Boolean(block.isGenerated),
 		binary: Boolean(block.isBinary || block.status === "binary"),
+		truncated: Boolean(block.isTruncated),
+		sourceTruncated: Boolean(sourceFlags.sourceIsTruncated ?? sourceFlags.source_is_truncated ?? block.isTruncated),
+		fileCategory: fileCategory(block.filePath, block),
+	};
+}
+
+function blockLevelHunkId(block: PrWalkthroughDiffBlock): string {
+	return `hunk-${hashString([block.filePath, block.oldPath ?? "", block.id, "block-level", block.status ?? ""].join("\u0000"))}`;
+}
+
+// Synthesizes an IndexedHunk for a changed block that produced no textual hunks
+// (binary files, mode-only changes, empty diffs). The synthetic hunk carries the
+// block-level flags so coverage can classify it (completion-sweep-remaining, or
+// skipped when a reviewer explicitly marks it) and surface it in audit metadata.
+function indexHunklessBlock(block: PrWalkthroughDiffBlock): IndexedHunk {
+	const binary = Boolean(block.isBinary || block.status === "binary");
+	const header = binary ? "Binary file (no textual diff)" : "File change (no textual hunks)";
+	const hunkId = blockLevelHunkId(block);
+	const sourceFlags = block as { sourceIsTruncated?: unknown; source_is_truncated?: unknown };
+	return {
+		hunkId,
+		blockId: block.id,
+		block,
+		hunk: { id: hunkId, header, lines: [] },
+		filePath: block.filePath,
+		...(block.oldPath ? { oldPath: block.oldPath } : {}),
+		hunkIndex: 0,
+		hunkHeader: header,
+		changedLines: 0,
+		additions: 0,
+		deletions: 0,
+		generated: Boolean(block.isGenerated),
+		binary,
 		truncated: Boolean(block.isTruncated),
 		sourceTruncated: Boolean(sourceFlags.sourceIsTruncated ?? sourceFlags.source_is_truncated ?? block.isTruncated),
 		fileCategory: fileCategory(block.filePath, block),

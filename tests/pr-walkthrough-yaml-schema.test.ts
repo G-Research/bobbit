@@ -476,6 +476,83 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(error.code, "PRW_MAJOR_REMAINING_HUNKS");
 		assert.equal(error.details?.major_remaining?.[0]?.hunkId, "block-major:h0");
 	});
+
+	it("classifies hunkless binary blocks in completion-sweep coverage and audit", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("code", "Code review", hunkRefYaml("block-a:h0"), "src/a.ts"),
+		].join("\n"), ["code"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, {
+			files: [logicalDiffBlock("block-a", "src/a.ts", 1), binaryDiffBlock("block-bin", "assets/logo.png")],
+		});
+
+		const record = payload.coverage?.records?.find(item => item.filePath === "assets/logo.png");
+		assert.ok(record, "expected the hunkless binary block to appear in coverage records");
+		assert.equal(record?.binary, true);
+		assert.equal(record?.primaryState, "completion-sweep-remaining");
+		assert.equal(payload.coverage?.majorRemaining?.some(item => item.filePath === "assets/logo.png"), false);
+
+		const audit = payload.cards.find(card => card.title === "Audit and review checklist");
+		assert.ok(audit?.diffBlocks.some(block => block.filePath === "assets/logo.png"), "expected the binary block on the audit/completion-sweep card");
+	});
+
+	it("lets reviewers explicitly skip a hunkless binary block with a reason", () => {
+		const validation = validatePrWalkthroughYaml(synthesisYaml([
+			reviewChunkYaml("code", "Code review", hunkRefYaml("block-a:h0"), "src/a.ts"),
+			reviewChunkYaml("skips", "Skips", skipRefYaml("assets/logo.png", "binary"), "assets/logo.png"),
+		].join("\n"), ["code", "skips"]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, {
+			files: [logicalDiffBlock("block-a", "src/a.ts", 1), binaryDiffBlock("block-bin", "assets/logo.png")],
+		});
+
+		const record = payload.coverage?.records?.find(item => item.filePath === "assets/logo.png");
+		assert.equal(record?.primaryState, "skipped");
+		assert.equal(record?.skippedReason, "binary");
+		const audit = payload.cards.find(card => card.title === "Audit and review checklist");
+		assert.match(audit?.rationale ?? "", /assets\/logo\.png \(binary\)/);
+	});
+
+	it("keeps top-level relevant_hunks visible in V2 narrative rendering", () => {
+		const yaml = synthesisYaml(`    - id: narrative
+      phase: significant
+      title: Narrative chunk
+      reviewer_goal: Follow the ordered narrative.
+      explanation: The narrative should drive rendering.
+      files:
+        - src/multi.ts
+      relevant_hunks:
+        - hunk_id: block-multi:h1
+          placement: primary
+          why_relevant: Authored top-level ref not repeated in the narrative diff.
+      narrative:
+        - id: setup
+          type: text
+          body: Start with setup.
+        - id: diff-one
+          type: diff
+          hunks:
+            - hunk_id: block-multi:h0
+              placement: primary
+              why_relevant: Shows the change.
+      suggested_concerns: []
+      positive_notes: []`, ["narrative"]);
+		const validation = validatePrWalkthroughYaml(yaml);
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(2)] });
+		const card = payload.cards.find(item => item.id === "significant-narrative");
+		const diffEntries = card?.narrative?.filter((block): block is { type: "diff"; id: string; hunkIds: string[] } => block.type === "diff") ?? [];
+		const authoredDiff = diffEntries.find(entry => entry.id === "diff-one");
+		assert.deepEqual(authoredDiff?.hunkIds, ["block-multi:h0"]);
+		assert.ok(diffEntries.some(entry => entry.hunkIds.includes("block-multi:h1")), "expected an appended narrative diff entry for the orphaned top-level ref");
+		assert.ok(card?.diffBlocks.some(block => block.hunks.some(hunk => hunk.id === "block-multi:h1")), "orphaned top-level ref should still be present in diffBlocks");
+	});
 });
 
 function synthesisYaml(reviewChunks: string, chunkOrder: string[]): string {
@@ -577,6 +654,17 @@ function logicalDiffBlock(id: string, filePath: string, changedLines: number): P
 			lines: Array.from({ length: changedLines }, (_, index) => ({ id: `${id}:h0:l${index}`, side: "new", newLine: index + 1, text: `change ${index}`, kind: "add" })),
 		}],
 	};
+}
+
+function binaryDiffBlock(id: string, filePath: string): PrWalkthroughDiffBlock {
+	return { id, filePath, status: "binary", isBinary: true, hunks: [] };
+}
+
+function skipRefYaml(file: string, reason: string): string {
+	return `        - file: ${file}
+          placement: skip
+          skip_reason: ${reason}
+          why_relevant: ${reason} change with no textual diff.`;
 }
 
 function captureError(fn: () => unknown): Error & { code?: string; retryable?: boolean; details?: any } {
