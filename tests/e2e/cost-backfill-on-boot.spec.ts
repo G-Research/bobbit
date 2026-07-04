@@ -311,18 +311,19 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 		// ── Boot 1 — register the default project + create goalA ─────────
 		let gw = await bootGateway(bobbitDir, { freshDir: true });
 		let goalAId: string;
+		let projectId = "";
 		try {
 			// Find the default project id (auto-assigned).
 			const projResp = await fetch(`${gw.baseURL}/api/projects`, {
 				headers: { Authorization: `Bearer ${gw.token}` },
 			});
 			const projects = await projResp.json() as Array<{ id: string; name: string }>;
-			const projectId = projects.find(p => p.name === "default")?.id;
+			projectId = projects.find(p => p.name === "default")?.id ?? "";
 			expect(projectId, "normal default project must exist after boot 1").toBeTruthy();
 
 			// Create goalA. We deliberately bypass the e2e-setup createGoal
 			// helper to keep this spec self-contained (no shared harness fixture).
-			const cwd = join(tmpdir(), `bobbit-cost-backfill-${gw.port}-${Date.now()}`);
+			const cwd = join(gw.defaultProjectRoot, ".e2e-workspaces", `cost-backfill-${gw.port}-${Date.now()}`);
 			mkdirSync(cwd, { recursive: true });
 			const goalResp = await fetch(`${gw.baseURL}/api/goals`, {
 				method: "POST",
@@ -345,6 +346,8 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 		//               sidecar fallback (record has no goalId/teamGoalId).
 		//   * s-ghost — no record anywhere. Stays unattributable.
 		const sideJsonl = writeSidecarPair(bobbitDir, "s-side", goalAId!);
+		const seededSessionCwd = join(defaultProjectRootForBobbitDir(bobbitDir), ".e2e-workspaces", "seeded-session-side");
+		mkdirSync(seededSessionCwd, { recursive: true });
 
 		// PersistedSession row for s-side. Fields chosen to satisfy the
 		// session-store loader without claiming a goal stamp.
@@ -352,7 +355,8 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 			{
 				id: "s-side",
 				title: "seeded session (sidecar-mappable)",
-				cwd: tmpdir(),
+				cwd: seededSessionCwd,
+				projectId,
 				agentSessionFile: sideJsonl,
 				createdAt: Date.now() - 60_000,
 				lastActivity: Date.now() - 60_000,
@@ -446,7 +450,7 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 			const projects = await projResp.json() as Array<{ id: string; name: string }>;
 			const projectId = projects.find(p => p.name === "default")?.id;
 			expect(projectId, "normal default project must exist after boot 1").toBeTruthy();
-			const cwd = join(tmpdir(), `bobbit-cost-backfill-clean-${gw.port}-${Date.now()}`);
+			const cwd = join(gw.defaultProjectRoot, ".e2e-workspaces", `cost-backfill-clean-${gw.port}-${Date.now()}`);
 			mkdirSync(cwd, { recursive: true });
 			const goalResp = await fetch(`${gw.baseURL}/api/goals`, {
 				method: "POST",

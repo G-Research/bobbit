@@ -350,8 +350,9 @@ test.describe("staff cwd parity regressions", () => {
 
 		expect(
 			created.status,
-			`STAFF_CWD_PARITY_MISMATCHED_CWD_400: projectId=${projectA.id} with cwd from projectId=${projectB.id} must be rejected. body=${created.text}`,
-		).toBe(400);
+			`STAFF_CWD_PARITY_MISMATCHED_CWD_422: projectId=${projectA.id} with cwd from projectId=${projectB.id} must be rejected. body=${created.text}`,
+		).toBe(422);
+		expect(created.json?.code).toBe("CWD_OUTSIDE_PROJECT");
 	});
 
 	test("PUT /api/staff/:id allows orphaned legacy field edits when cwd is unchanged", async ({ gateway }) => {
@@ -400,7 +401,7 @@ test.describe("staff cwd parity regressions", () => {
 		});
 		expect(
 			updated.status,
-			`STAFF_CWD_PARITY_ORPHAN_CHANGE_400: orphaned staff cwd changes must still be rejected. body=${updated.text}`,
+			`STAFF_CWD_PARITY_ORPHAN_CHANGE_400: orphaned staff cwd changes must still be rejected before cwd validation when no registered project is attached. body=${updated.text}`,
 		).toBe(400);
 
 		const storedRes = await apiFetch(`/api/staff/${staffId}`);
@@ -431,16 +432,17 @@ test.describe("staff cwd parity regressions", () => {
 		const staffId = created.json.id;
 		const originalCwd = created.json.cwd;
 
-		for (const [label, cwd] of [
-			["different registered project", projectB.rootPath],
-			["unregistered temp dir", arbitraryDir],
-			["blank cwd", "   "],
+		for (const [label, cwd, expectedStatus, expectedCode] of [
+			["different registered project", projectB.rootPath, 422, "CWD_OUTSIDE_PROJECT"],
+			["unregistered temp dir", arbitraryDir, 422, "CWD_OUTSIDE_PROJECT"],
+			["blank cwd", "   ", 400, undefined],
 		] as const) {
 			const updated = await putStaff(staffId, { cwd });
 			expect(
 				updated.status,
-				`STAFF_CWD_PARITY_UPDATE_GUARD_400: PUT cwd=${label} must be rejected. body=${updated.text}`,
-			).toBe(400);
+				`STAFF_CWD_PARITY_UPDATE_GUARD_${expectedStatus}: PUT cwd=${label} must be rejected. body=${updated.text}`,
+			).toBe(expectedStatus);
+			if (expectedCode) expect(updated.json?.code).toBe(expectedCode);
 
 			const storedRes = await apiFetch(`/api/staff/${staffId}`);
 			expect(storedRes.status, `STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: staff should remain readable after rejected ${label}`).toBe(200);
