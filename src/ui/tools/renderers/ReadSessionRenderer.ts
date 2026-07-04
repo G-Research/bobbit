@@ -24,13 +24,21 @@ interface ReadSessionParams {
 	verbose?: boolean;
 }
 
+interface CompactToolResult {
+	name?: string;
+	preview?: string;
+	omitted?: boolean;
+	status?: string;
+	size?: { type?: string; chars?: number; lines?: number; bytes?: number; blocks?: number };
+}
+
 interface CompactMessage {
 	index: number;
 	role: string;
 	ts: string | null;
 	text: string;
 	toolUses?: Array<{ name: string; inputPreview: string }>;
-	toolResults?: Array<{ name?: string; preview: string }>;
+	toolResults?: CompactToolResult[];
 }
 
 interface ReadSessionDetails {
@@ -60,6 +68,22 @@ function roleBadgeClass(role: string): string {
 	}
 }
 
+function formatToolResult(t: CompactToolResult): string {
+	if (typeof t.preview === "string") return t.preview;
+	if (!t.omitted) return "";
+	const size = t.size;
+	const parts: string[] = ["omitted"];
+	if (t.status && t.status !== "unknown") parts.push(t.status);
+	if (size?.type) {
+		const details: string[] = [size.type];
+		if (typeof size.lines === "number") details.push(`${size.lines} lines`);
+		if (typeof size.chars === "number") details.push(`${size.chars} chars`);
+		if (typeof size.blocks === "number") details.push(`${size.blocks} blocks`);
+		parts.push(details.join(", "));
+	}
+	return `[${parts.join("; ")}]`;
+}
+
 function renderCompactMessage(m: CompactMessage): TemplateResult {
 	return html`
 		<div class="border-l-2 border-border pl-2 py-1">
@@ -76,7 +100,7 @@ function renderCompactMessage(m: CompactMessage): TemplateResult {
 				: ""}
 			${m.toolResults?.length
 				? html`<div class="mt-1 text-xs text-muted-foreground">
-					${m.toolResults.map(t => html`<div class="font-mono">← ${t.name ?? "result"}: ${t.preview}</div>`)}
+					${m.toolResults.map(t => html`<div class="font-mono">← ${t.name ?? "result"}: ${formatToolResult(t)}</div>`)}
 				</div>`
 				: ""}
 		</div>
@@ -164,7 +188,7 @@ function openTranscriptModal(sessionId: string): void {
 					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolUses.map(t => `→ ${escapeHtml(t.name)}(${escapeHtml(t.inputPreview)})`).join("<br/>")}</div>`
 					: "";
 				const tr = m.toolResults?.length
-					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolResults.map(t => `← ${escapeHtml(t.name ?? "result")}: ${escapeHtml(t.preview)}`).join("<br/>")}</div>`
+					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolResults.map(t => `← ${escapeHtml(t.name ?? "result")}: ${escapeHtml(formatToolResult(t))}`).join("<br/>")}</div>`
 					: "";
 				div.innerHTML = head + text + tu + tr;
 				body.appendChild(div);
