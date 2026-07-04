@@ -3257,6 +3257,9 @@ export function createGateway(config: GatewayConfig) {
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
+							// Headquarters is no-worktree — never enter git discovery or the
+							// sweeper. It has no worktrees/branches to reclaim.
+							if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 							const repoNames = ctx.projectConfigStore.repoNames();
 							const components = ctx.projectConfigStore.getComponents();
 							const isMultiRepoProject = components.some(c => c.repo !== ".");
@@ -3333,7 +3336,11 @@ export function createGateway(config: GatewayConfig) {
 					// walks up to find the host repo and the pool would allocate
 					// `pool/_pool-*` branches there. See
 					// `tests/system-project-pool-leak.test.ts`.
-					const contexts = Array.from(projectContextManager.visible());
+					// Headquarters never participates in the worktree pool — filter it
+					// out before any git probe or pool init.
+					const contexts = Array.from(projectContextManager.visible()).filter(
+						(ctx) => ctx.project.id !== HEADQUARTERS_PROJECT_ID && ctx.project.kind !== "headquarters",
+					);
 					console.log(`[boot] pool init start (${contexts.length} projects)`);
 					await Promise.all(contexts.map(async (ctx) => {
 						const tStart = Date.now();
@@ -6147,6 +6154,13 @@ async function handleApiRoute(
 
 		if (!explicitCwd && !goalForSession && !reattemptGoalId && !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID)) {
 			cwd = resolvedProject.rootPath;
+		} else if (!explicitCwd && !goalForSession && !reattemptGoalId && isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID) {
+			// Server-scope assistants (role/tool) resolve to the hidden `system`
+			// project, which has no user-facing root. Default their cwd to the
+			// Headquarters workspace directory rather than the server run dir so
+			// they operate under the Headquarters scope. cwd validation is skipped
+			// for this system-assistant case below.
+			cwd = bobbitDir();
 		}
 
 		const shouldValidateCwd = !(isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID);
@@ -6217,7 +6231,9 @@ async function handleApiRoute(
 		// even though it isn't itself a git repo. Without this, the `isGitRepo(cwd)`
 		// check below returns false for the container directory and sessions would
 		// run with no worktree at all.
-		if (wantWorktree) {
+		// Headquarters is no-worktree: skip the git probe entirely so no worktree
+		// is ever resolved for HQ sessions (worktreeOpts stays undefined).
+		if (wantWorktree && resolvedProjectId !== HEADQUARTERS_PROJECT_ID) {
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
