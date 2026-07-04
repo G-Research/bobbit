@@ -224,11 +224,16 @@ export interface ProviderContribution {
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
 	/** Config-gated activation: the provider is omitted from the active provider
-	 *  listing until the EFFECTIVE flat config has a non-empty value for every
-	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
-	 *  truly dormant install — no provider bridge, no per-turn hook routes, no
-	 *  network — until configured. */
-	activation?: { requiresConfig: string[] };
+	 *  listing until its EFFECTIVE flat config satisfies the gate (DisabledRefs/pack
+	 *  activation still wins). Enables a truly dormant install — no provider bridge,
+	 *  no per-turn hook routes, no network — until configured.
+	 *
+	 *  - `requiresConfig`: every listed key must be present + (for strings) non-empty.
+	 *  - `activeWhenConfig`: an OR escape hatch for deployment-mode / runtime linkage
+	 *    — when the effective value of ANY listed key is in its allowed-value list the
+	 *    provider activates regardless of `requiresConfig`. Lets a managed deployment
+	 *    mode activate without an external URL while external mode still requires one. */
+	activation?: ProviderActivation;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -262,16 +267,41 @@ export function resolveProviderConfigDefaults(schema: Record<string, unknown>): 
 	return out;
 }
 
-/** Parse a provider `activation` block. Only `requiresConfig: string[]` is
- *  recognised; anything else is dropped (tolerant). Returns `undefined` when no
- *  usable gating keys are present so the provider stays unconditionally active. */
-function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | undefined {
+/** Provider activation gate (config-gated dormancy). See {@link ProviderContribution.activation}. */
+export interface ProviderActivation {
+	/** AND gate: every listed key must be present + (for strings) non-empty. */
+	requiresConfig?: string[];
+	/** OR escape hatch keyed by config key → allowed-value list (deployment-mode /
+	 *  runtime linkage). A match activates the provider regardless of `requiresConfig`. */
+	activeWhenConfig?: Record<string, string[]>;
+}
+
+/** Parse a provider `activation` block. `requiresConfig: string[]` and
+ *  `activeWhenConfig: { key: string|string[] }` are recognised; anything else is
+ *  dropped (tolerant). Returns `undefined` when no usable gating remains so the
+ *  provider stays unconditionally active. */
+function parseProviderActivation(raw: unknown): ProviderActivation | undefined {
 	if (!isPlainObject(raw)) return undefined;
+	const out: ProviderActivation = {};
 	const rc = raw.requiresConfig;
-	if (!Array.isArray(rc)) return undefined;
-	const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
-	if (keys.length === 0) return undefined;
-	return { requiresConfig: keys };
+	if (Array.isArray(rc)) {
+		const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
+		if (keys.length > 0) out.requiresConfig = keys;
+	}
+	if (isPlainObject(raw.activeWhenConfig)) {
+		const map: Record<string, string[]> = {};
+		for (const [key, value] of Object.entries(raw.activeWhenConfig)) {
+			const values = Array.isArray(value)
+				? value.filter((v): v is string => typeof v === "string" && v.length > 0)
+				: typeof value === "string" && value.length > 0
+					? [value]
+					: [];
+			if (values.length > 0) map[key] = values;
+		}
+		if (Object.keys(map).length > 0) out.activeWhenConfig = map;
+	}
+	if (!out.requiresConfig && !out.activeWhenConfig) return undefined;
+	return out;
 }
 
 /** All pack-scoped contributions for ONE installed pack. */
