@@ -90,7 +90,7 @@ function completeProjectOrderIds(projectIds: string[]): string[] {
 		complete.push(id);
 	}
 	for (const project of state.projects) {
-		if (seen.has(project.id)) continue;
+		if (!currentIds.has(project.id) || seen.has(project.id)) continue;
 		seen.add(project.id);
 		complete.push(project.id);
 	}
