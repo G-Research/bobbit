@@ -252,16 +252,102 @@ export function clearReviewSubmitted(sessionId: string): Promise<void> | void {
 
 // ── Aggregate helpers ────────────────────────────────────────────────
 
-type ReviewDocumentCollection = ReadonlyMap<string, Pick<ReviewDocumentModel, "title" | "markdown">>;
+type ReviewDocumentLike = Pick<ReviewDocumentModel, "title" | "markdown" | "documentId">;
+type ReviewDocumentCollection = ReadonlyMap<string, ReviewDocumentLike>;
 
-function _displayTitle(key: string, doc: Pick<ReviewDocumentModel, "title" | "markdown">): string {
+function _displayTitle(key: string, doc: ReviewDocumentLike): string {
   return doc.title || key;
+}
+
+function _uniquePush(values: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (!trimmed || values.includes(trimmed)) return;
+  values.push(trimmed);
+}
+
+function _isUniqueDocumentTitle(
+  doc: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): boolean {
+  const title = doc.title?.trim();
+  if (!title) return false;
+  if (!documents) return true;
+
+  let matches = 0;
+  for (const [candidateKey, candidate] of documents) {
+    const candidateTitle = candidate.title?.trim() || candidateKey;
+    if (candidateTitle === title) matches += 1;
+    if (matches > 1) return false;
+  }
+  return true;
+}
+
+function _annotationBucketCandidates(
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): string[] {
+  const candidates: string[] = [];
+  _uniquePush(candidates, documentKey);
+  _uniquePush(candidates, document.documentId);
+  if (_isUniqueDocumentTitle(document, documents)) {
+    _uniquePush(candidates, document.title);
+  }
+  return candidates;
+}
+
+export function getAnnotationBucketForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): string {
+  const candidates = _annotationBucketCandidates(documentKey, document, documents);
+  const sessionCache = _annotationCache.get(sessionId);
+  if (sessionCache) {
+    for (const bucket of candidates) {
+      if ((sessionCache.get(bucket) || []).length > 0) return bucket;
+    }
+  }
+  return candidates[0] || documentKey || document.title;
+}
+
+export function getAnnotationsForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): ReviewAnnotation[] {
+  const sessionCache = _annotationCache.get(sessionId);
+  if (!sessionCache) return [];
+
+  const seen = new Set<string>();
+  const annotations: ReviewAnnotation[] = [];
+  for (const bucket of _annotationBucketCandidates(documentKey, document, documents)) {
+    for (const ann of sessionCache.get(bucket) || []) {
+      const identity = ann.id || `${ann.start ?? ""}:${ann.end ?? ""}:${ann.quote}:${ann.comment}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      annotations.push(ann);
+    }
+  }
+  return annotations;
+}
+
+export function getDocumentAnnotationCountForDocument(
+  sessionId: string,
+  documentKey: string,
+  document: ReviewDocumentLike,
+  documents?: ReviewDocumentCollection,
+): number {
+  return getAnnotationsForDocument(sessionId, documentKey, document, documents).length;
 }
 
 function _documentForComment(
   comment: ReviewInlineCommentPayload,
   documents: ReviewDocumentCollection,
-): Pick<ReviewDocumentModel, "title" | "markdown"> | undefined {
+): ReviewDocumentLike | undefined {
   const directMatch = documents.get(comment.documentTitle);
   if (directMatch) return directMatch;
   for (const [key, doc] of documents) {
@@ -314,10 +400,8 @@ export function getTotalAnnotationCount(
   documents: ReviewDocumentCollection,
 ): number {
   let total = 0;
-  const sessionCache = _annotationCache.get(sessionId);
-  if (!sessionCache) return 0;
-  for (const [title] of documents) {
-    total += (sessionCache.get(title) || []).length;
+  for (const [title, doc] of documents) {
+    total += getDocumentAnnotationCountForDocument(sessionId, title, doc, documents);
   }
   return total;
 }
@@ -328,12 +412,13 @@ export function getDocumentAnnotationCount(sessionId: string, documentTitle: str
 
 function _inlineCommentPayloadsForEntries(
   sessionId: string,
-  entries: Iterable<readonly [string, Pick<ReviewDocumentModel, "title" | "markdown">]>,
+  entries: Iterable<readonly [string, ReviewDocumentLike]>,
+  documents?: ReviewDocumentCollection,
 ): ReviewInlineCommentPayload[] {
   const inlineComments: ReviewInlineCommentPayload[] = [];
 
   for (const [title, doc] of entries) {
-    for (const ann of getAnnotations(sessionId, title)) {
+    for (const ann of getAnnotationsForDocument(sessionId, title, doc, documents)) {
       inlineComments.push({
         documentTitle: _displayTitle(title, doc),
         quote: ann.quote,
@@ -357,15 +442,15 @@ export function getInlineCommentPayloads(
   sessionId: string,
   documents: ReviewDocumentCollection,
 ): ReviewInlineCommentPayload[] {
-  return _inlineCommentPayloadsForEntries(sessionId, documents);
+  return _inlineCommentPayloadsForEntries(sessionId, documents, documents);
 }
 
 export function getInlineCommentPayloadsForDocument(
   sessionId: string,
   documentTitle: string,
-  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+  document: ReviewDocumentLike,
 ): ReviewInlineCommentPayload[] {
-  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]]);
+  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]], new Map([[documentTitle, document]]));
 }
 
 /**

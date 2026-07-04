@@ -2,8 +2,8 @@ import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import {
   buildReviewDecisionPayloadForDocument,
-  getAnnotations,
-  getDocumentAnnotationCount,
+  getAnnotationBucketForDocument,
+  getDocumentAnnotationCountForDocument,
   getTotalAnnotationCount,
 } from "./AnnotationStore.js";
 import { ensureReviewComponents } from "../../../app/lazy-review.js";
@@ -67,10 +67,18 @@ export class ReviewPane extends LitElement {
     }
   }
 
+  private _annotationBucketFor(title: string, doc: ReviewDocumentModel): string {
+    return getAnnotationBucketForDocument(this.sessionId, title, doc, this.documents);
+  }
+
+  private _annotationCountFor(title: string, doc: ReviewDocumentModel): number {
+    return getDocumentAnnotationCountForDocument(this.sessionId, title, doc, this.documents);
+  }
+
   private _refreshCounts(): void {
     const counts = new Map<string, number>();
-    for (const [title] of this.documents) {
-      counts.set(title, getAnnotations(this.sessionId, title).length);
+    for (const [title, doc] of this.documents) {
+      counts.set(title, this._annotationCountFor(title, doc));
     }
     this._annotationCounts = counts;
   }
@@ -108,7 +116,9 @@ export class ReviewPane extends LitElement {
   }
 
   private _unsentCommentCountForDocument(title: string): number {
-    return getDocumentAnnotationCount(this.sessionId, title) + (this._hasFinalComment(title) ? 1 : 0);
+    const doc = this.documents.get(title);
+    const inlineCount = doc ? this._annotationCountFor(title, doc) : 0;
+    return inlineCount + (this._hasFinalComment(title) ? 1 : 0);
   }
 
   private _totalUnsentCommentCount(): number {
@@ -153,7 +163,8 @@ export class ReviewPane extends LitElement {
     if (!activeDoc) return;
 
     const finalComment = this._finalCommentFor(this.activeTab).trim();
-    const activeCount = getDocumentAnnotationCount(this.sessionId, this.activeTab);
+    const annotationBucket = this._annotationBucketFor(this.activeTab, activeDoc);
+    const activeCount = this._annotationCountFor(this.activeTab, activeDoc);
     if (decision === "reject" && activeCount === 0 && !finalComment) {
       this._validationError = "Add a final comment or at least one inline comment before rejecting.";
       return;
@@ -162,7 +173,7 @@ export class ReviewPane extends LitElement {
     this._validationError = "";
     const payload = buildReviewDecisionPayloadForDocument(
       this.sessionId,
-      this.activeTab,
+      annotationBucket,
       activeDoc,
       decision,
       finalComment,
@@ -238,7 +249,7 @@ export class ReviewPane extends LitElement {
   render() {
     const titles = Array.from(this.documents.keys());
     const activeDoc = this.documents.get(this.activeTab);
-    const activeCount = activeDoc ? getDocumentAnnotationCount(this.sessionId, this.activeTab) : 0;
+    const activeCount = activeDoc ? this._annotationCountFor(this.activeTab, activeDoc) : 0;
     const activeFinalComment = activeDoc ? this._finalCommentFor(this.activeTab) : "";
 
     // Split tabs: visible (first 5) and overflow (rest)
@@ -308,7 +319,7 @@ export class ReviewPane extends LitElement {
                 <review-document
                   .markdown=${activeDoc.markdown}
                   .sessionId=${this.sessionId}
-                  .docTitle=${this.activeTab}
+                  .docTitle=${this._annotationBucketFor(this.activeTab, activeDoc)}
                   @annotation-change=${this._onAnnotationChange}
                 ></review-document>
               `
