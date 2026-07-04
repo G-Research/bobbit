@@ -119,7 +119,12 @@ function setupOutsideRepo(): void {
 	outsideHeadSha = gitIn(outsideRepoDir, ["rev-parse", "HEAD"]);
 }
 
-const HUNK_HEADER = "@@ -2,3 +2,3 @@ export class SyncWorker {";
+// The REAL unified-diff hunk header git emits for setupSessionGitRepo's single
+// 5-line file (one changed line inside 3 lines of context ⇒ the whole file is one
+// hunk). It MUST match git's actual output: the strict placement resolver fails
+// closed with PRW_HUNK_REF_UNRESOLVED on a stale/hand-written header, so a wrong
+// header here would leave the pane stuck on the pending "PR Walkthrough" title.
+const HUNK_HEADER = "@@ -1,5 +1,5 @@";
 
 /** The RAW production walkthrough YAML the reviewer's submit_pr_walkthrough_yaml
  *  would emit (the rich `pr` + `walkthrough.{…}` schema). The pack's publish route

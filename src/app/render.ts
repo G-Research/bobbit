@@ -2812,9 +2812,18 @@ export function doRenderApp(): void {
 		if (!packId || !panelId) return "";
 		const params = (source.params as Record<string, unknown> | undefined)
 			|| (tabState.params as Record<string, unknown> | undefined);
+		// Bind the panel's host to the SESSION THE TAB BELONGS TO (its source.sessionId),
+		// not the currently-selected session. A reviewer-child pane lives beside the
+		// child session while the user may still view the parent; binding the host to
+		// the child keeps host.callRoute carrying the child's x-bobbit-session-id so the
+		// server resolves ctx.workingDir against the child's worktree (avoids "Invalid
+		// baseSha" when recover/publish recompute the live diff).
+		const boundSessionId = (typeof source.sessionId === "string" ? source.sessionId : "")
+			|| (typeof tabState.sessionId === "string" ? tabState.sessionId : "")
+			|| undefined;
 		return html`
 			<div class="flex-1 min-h-0 overflow-auto" data-testid="pack-panel-root" data-panel-tab-id=${tab.id} data-pack-panel-id=${panelId} data-pack-id=${packId}>
-				${renderPackPanelContent(packId, panelId, params)}
+				${renderPackPanelContent(packId, panelId, params, boundSessionId)}
 			</div>
 		`;
 	};
