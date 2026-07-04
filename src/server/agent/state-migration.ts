@@ -138,6 +138,7 @@ interface HeadquartersMigrationDiagnostics {
 	ambiguousRecords: Array<{ file: string; key: string; reason: string }>;
 	restoredNormalProjectIds: string[];
 	restoredNormalRecords: Array<{ file: string; key: string; projectId: string }>;
+	sanitizedHeadquartersRecords: Array<{ file: string; key: string; actions: string[] }>;
 	previousOverrideHints: string[];
 	failures: string[];
 }
@@ -204,6 +205,7 @@ function newHeadquartersDiagnostics(input: HeadquartersDirectoryMigrationInput):
 		ambiguousRecords: [],
 		restoredNormalProjectIds: [],
 		restoredNormalRecords: [],
+		sanitizedHeadquartersRecords: [],
 		previousOverrideHints: [],
 		failures: [],
 	};
@@ -280,6 +282,139 @@ function recordKeyForFile(fileName: string, record: Record<string, unknown>): st
 	if (fileName === "team-state.json" || fileName === "gateway-swarms.json") return String(record.goalId ?? "");
 	if (fileName === "session-costs.json" || fileName === "session-colors.json") return String(record.id ?? record.sessionId ?? "");
 	return String(record.id ?? record.goalId ?? record.staffId ?? "");
+}
+
+const HEADQUARTERS_EXECUTION_STORE_FILES = new Set(["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]);
+const HEADQUARTERS_GIT_WORKTREE_FIELDS = [
+	"worktreePath",
+	"repoPath",
+	"repoWorktrees",
+	"branch",
+	"setupStatus",
+	"setupError",
+	"worktreePushPolicy",
+	"remotePublicationPolicy",
+	"worktreeSetupCommand",
+	"worktreeSetupTimeoutMs",
+	"sandboxBranch",
+	"sandboxBaseBranch",
+	"baseSha",
+] as const;
+
+function isPathInsideOrEqual(candidate: string, root: string): boolean {
+	const rootKey = pathKey(root).replace(/[\\/]+$/, "");
+	const candidateKey = pathKey(candidate).replace(/[\\/]+$/, "");
+	return candidateKey === rootKey || candidateKey.startsWith(`${rootKey}${path.sep}`);
+}
+
+function isValidHeadquartersCwd(value: unknown, headquartersDirPath: string): value is string {
+	return typeof value === "string" && path.isAbsolute(value) && isPathInsideOrEqual(value, headquartersDirPath);
+}
+
+function pushSanitizedHeadquartersRecord(
+	diagnostics: HeadquartersMigrationDiagnostics,
+	fileName: string,
+	key: string,
+	actions: string[],
+): void {
+	if (actions.length === 0) return;
+	diagnostics.sanitizedHeadquartersRecords.push({ file: fileName, key, actions });
+}
+
+function sanitizeHeadquartersExecutionRecord(
+	fileName: string,
+	record: Record<string, unknown>,
+	headquartersDirPath: string,
+	opts: { stampProjectId?: boolean } = {},
+): { record: Record<string, unknown>; actions: string[] } {
+	if (!HEADQUARTERS_EXECUTION_STORE_FILES.has(fileName)) return { record, actions: [] };
+	const sanitized: Record<string, unknown> = { ...record };
+	const actions: string[] = [];
+	const projectId = typeof sanitized.projectId === "string" ? sanitized.projectId : undefined;
+	if (!projectId && opts.stampProjectId !== false) {
+		sanitized.projectId = HEADQUARTERS_PROJECT_ID;
+		actions.push(`set projectId ${HEADQUARTERS_PROJECT_ID}`);
+	}
+
+	if ((fileName !== "team-state.json" && fileName !== "gateway-swarms.json") || "cwd" in sanitized) {
+		if (!isValidHeadquartersCwd(sanitized.cwd, headquartersDirPath)) {
+			const previous = typeof sanitized.cwd === "string" && sanitized.cwd.length > 0 ? sanitized.cwd : "<missing>";
+			sanitized.cwd = headquartersDirPath;
+			actions.push(`cwd ${previous} -> ${headquartersDirPath}`);
+		}
+	}
+
+	for (const field of HEADQUARTERS_GIT_WORKTREE_FIELDS) {
+		if (field in sanitized) {
+			delete sanitized[field];
+			actions.push(`removed ${field}`);
+		}
+	}
+
+	if ((fileName === "team-state.json" || fileName === "gateway-swarms.json") && Array.isArray(sanitized.agents)) {
+		let agentsChanged = false;
+		sanitized.agents = sanitized.agents.map(agent => {
+			if (!isPlainRecord(agent)) return agent;
+			const cleanAgent: Record<string, unknown> = { ...agent };
+			const nestedActions: string[] = [];
+			if ("cwd" in cleanAgent && !isValidHeadquartersCwd(cleanAgent.cwd, headquartersDirPath)) {
+				const previous = typeof cleanAgent.cwd === "string" && cleanAgent.cwd.length > 0 ? cleanAgent.cwd : "<missing>";
+				cleanAgent.cwd = headquartersDirPath;
+				nestedActions.push(`agent cwd ${previous} -> ${headquartersDirPath}`);
+			}
+			for (const field of HEADQUARTERS_GIT_WORKTREE_FIELDS) {
+				if (field in cleanAgent) {
+					delete cleanAgent[field];
+					nestedActions.push(`removed agent.${field}`);
+				}
+			}
+			if (nestedActions.length > 0) {
+				agentsChanged = true;
+				actions.push(...nestedActions);
+			}
+			return cleanAgent;
+		});
+		if (agentsChanged) actions.push("sanitized team agents");
+	}
+
+	return { record: sanitized, actions };
+}
+
+function sanitizeHeadquartersStoreFile(
+	filePath: string,
+	fileName: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+	opts: { stampMissingProjectId?: boolean } = {},
+): void {
+	if (!fs.existsSync(filePath) || !HEADQUARTERS_EXECUTION_STORE_FILES.has(fileName)) return;
+	const records = readJsonRecords(filePath);
+	if (records.length === 0) return;
+	let changed = false;
+	const sanitizedRecords = records.map(record => {
+		const projectId = typeof record.projectId === "string" ? record.projectId : undefined;
+		if (projectId && projectId !== HEADQUARTERS_PROJECT_ID && fileName !== "team-state.json" && fileName !== "gateway-swarms.json") return record;
+		const key = recordKeyForFile(fileName, record);
+		const result = sanitizeHeadquartersExecutionRecord(fileName, record, headquartersDirPath, { stampProjectId: opts.stampMissingProjectId !== false });
+		if (result.actions.length > 0) {
+			changed = true;
+			pushSanitizedHeadquartersRecord(diagnostics, fileName, key, result.actions);
+		}
+		return result.record;
+	});
+	if (!changed) return;
+	fs.writeFileSync(filePath, JSON.stringify(sanitizedRecords, null, 2), "utf-8");
+}
+
+function sanitizeExistingHeadquartersStores(
+	headquartersStateDir: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+	opts: { stampMissingProjectId?: boolean } = {},
+): void {
+	for (const fileName of ["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]) {
+		sanitizeHeadquartersStoreFile(path.join(headquartersStateDir, fileName), fileName, headquartersDirPath, diagnostics, opts);
+	}
 }
 
 function readJsonRecords(filePath: string): Record<string, unknown>[] {
@@ -439,6 +574,7 @@ function routeLegacyProjectStoreFile(
 	fileName: string,
 	legacyFile: string,
 	targetFile: string,
+	headquartersDirPath: string,
 	projectEvidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
 	diagnostics: HeadquartersMigrationDiagnostics,
 ): void {
@@ -500,7 +636,19 @@ function routeLegacyProjectStoreFile(
 		}
 	}
 
-	mergeRecordsByKey(targetFile, fileName, hqRecords, diagnostics, "headquarters");
+	const existingHeadquartersKeys = new Set(readJsonRecords(targetFile)
+		.map(record => recordKeyForFile(fileName, record))
+		.filter(Boolean));
+	const sanitizedHeadquartersRecords = hqRecords.map(record => {
+		const key = recordKeyForFile(fileName, record);
+		const result = sanitizeHeadquartersExecutionRecord(fileName, record, headquartersDirPath);
+		if (result.actions.length > 0 && key && !existingHeadquartersKeys.has(key)) {
+			pushSanitizedHeadquartersRecord(diagnostics, fileName, key, result.actions);
+		}
+		return result.record;
+	});
+	mergeRecordsByKey(targetFile, fileName, sanitizedHeadquartersRecords, diagnostics, "headquarters");
+	sanitizeHeadquartersStoreFile(targetFile, fileName, headquartersDirPath, diagnostics, { stampMissingProjectId: projectEvidence.sameRootIds.size === 0 });
 	for (const [projectId, records] of normalRecordsByProject) {
 		const project = projectsById.get(projectId);
 		if (!project || typeof project.rootPath !== "string") continue;
@@ -593,7 +741,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 				}
 				continue;
 			}
-			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, evidence, diagnostics);
+			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
 		}
 	}
 
@@ -607,6 +755,8 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	} else if (usingOverride) {
 		diagnostics.skipped.push("legacy default .bobbit/config: Headquarters override config is used in place");
 	}
+
+	sanitizeExistingHeadquartersStores(headquartersStateDir, headquartersDirPath, diagnostics, { stampMissingProjectId: !sameRootEvidence });
 
 	try {
 		fs.writeFileSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER), new Date().toISOString(), "utf-8");

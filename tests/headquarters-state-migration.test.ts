@@ -88,6 +88,114 @@ describe("Headquarters directory migration", () => {
 		assert.ok(second.skipped.some(entry => entry.includes("destination differs") || entry.includes("already present")), "migration should be idempotent and preserve existing HQ files");
 	});
 
+	it("sanitizes migrated Headquarters execution records and is idempotent", () => {
+		const root = tmpRoot();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		const dirs = migrateDirs(root);
+		const worktreePath = path.join(root, "..", "repo-wt", "goal-branch");
+		const repoWorktrees = { ".": worktreePath };
+		seedProject(legacyStateDir, hqProject(root));
+		writeJson(path.join(legacyStateDir, "sessions.json"), [{
+			id: "s1",
+			title: "Legacy HQ",
+			cwd: root,
+			agentSessionFile: "a.jsonl",
+			projectId: HEADQUARTERS_PROJECT_ID,
+			createdAt: 1,
+			lastActivity: 1,
+			worktreePath,
+			repoPath: root,
+			repoWorktrees,
+			branch: "goal/legacy",
+			worktreePushPolicy: "publish",
+			remotePublicationPolicy: "publish",
+			drafts: { keep: true },
+		}]);
+		writeJson(path.join(legacyStateDir, "goals.json"), [{
+			id: "g1",
+			title: "Legacy goal",
+			cwd: root,
+			state: "todo",
+			spec: "keep",
+			projectId: HEADQUARTERS_PROJECT_ID,
+			createdAt: 1,
+			updatedAt: 1,
+			worktreePath,
+			repoPath: root,
+			repoWorktrees,
+			branch: "goal/legacy",
+			setupStatus: "preparing",
+			setupError: "boom",
+			metadata: { keep: true },
+		}]);
+		writeJson(path.join(legacyStateDir, "staff.json"), [{
+			id: "staff1",
+			name: "Staff",
+			description: "keep",
+			systemPrompt: "keep",
+			cwd: root,
+			state: "active",
+			triggers: [],
+			memory: "keep",
+			accessory: "none",
+			createdAt: 1,
+			updatedAt: 1,
+			projectId: HEADQUARTERS_PROJECT_ID,
+			worktreePath,
+			repoPath: root,
+			repoWorktrees,
+			branch: "goal/legacy",
+		}]);
+		writeJson(path.join(legacyStateDir, "team-state.json"), [{
+			goalId: "g1",
+			teamLeadSessionId: "s1",
+			maxConcurrent: 1,
+			agents: [{
+				sessionId: "s2",
+				role: "coder",
+				task: "keep",
+				createdAt: 1,
+				worktreePath,
+				branch: "goal/member",
+				baseSha: "abc123",
+			}],
+		}]);
+
+		const diagnostics = migrateLegacyHeadquartersDirectory(dirs);
+		const sessionFile = path.join(dirs.headquartersStateDir, "sessions.json");
+		const goalFile = path.join(dirs.headquartersStateDir, "goals.json");
+		const staffFile = path.join(dirs.headquartersStateDir, "staff.json");
+		const teamFile = path.join(dirs.headquartersStateDir, "team-state.json");
+		const session = readJson<Array<Record<string, unknown>>>(sessionFile)[0];
+		const goal = readJson<Array<Record<string, unknown>>>(goalFile)[0];
+		const staff = readJson<Array<Record<string, unknown>>>(staffFile)[0];
+		const team = readJson<Array<Record<string, unknown>>>(teamFile)[0];
+		const unsafeFields = ["worktreePath", "repoPath", "repoWorktrees", "branch", "setupStatus", "setupError", "worktreePushPolicy", "remotePublicationPolicy"];
+
+		for (const record of [session, goal, staff]) {
+			assert.equal(path.resolve(String(record.cwd)), path.resolve(dirs.headquartersDir));
+			assert.equal(record.projectId, HEADQUARTERS_PROJECT_ID);
+			for (const field of unsafeFields) {
+				assert.equal(Object.hasOwn(record, field), false, `${field} should be removed from ${String(record.id)}`);
+			}
+		}
+		assert.deepEqual(session.drafts, { keep: true });
+		assert.deepEqual(goal.metadata, { keep: true });
+		assert.equal(staff.memory, "keep");
+		assert.equal(Object.hasOwn((team.agents as Array<Record<string, unknown>>)[0], "worktreePath"), false);
+		assert.equal(Object.hasOwn((team.agents as Array<Record<string, unknown>>)[0], "branch"), false);
+		assert.equal(Object.hasOwn((team.agents as Array<Record<string, unknown>>)[0], "baseSha"), false);
+		assert.equal((team.agents as Array<Record<string, unknown>>)[0].task, "keep");
+		assert.ok(diagnostics.sanitizedHeadquartersRecords.some(entry => entry.file === "sessions.json" && entry.key === "s1"));
+		assert.ok(readJson<{ sanitizedHeadquartersRecords: Array<{ file: string; key: string }> }>(path.join(dirs.headquartersStateDir, "headquarters-migration-diagnostics.json"))
+			.sanitizedHeadquartersRecords.some(entry => entry.file === "sessions.json" && entry.key === "s1"));
+
+		const firstStores = [sessionFile, goalFile, staffFile, teamFile].map(file => fs.readFileSync(file, "utf-8"));
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+		assert.deepEqual([sessionFile, goalFile, staffFile, teamFile].map(file => fs.readFileSync(file, "utf-8")), firstStores);
+		assert.equal(second.sanitizedHeadquartersRecords.length, 0);
+	});
+
 	it("does not promote same-root normal projects and quarantines ambiguous config", () => {
 		const root = tmpRoot();
 		const oldId = "server-root-project";
