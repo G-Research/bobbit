@@ -270,6 +270,33 @@ describe("ProjectRegistry", () => {
 		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
 	});
 
+	it("ensureHeadquartersProject records carry NO hidden key (hide/show is preference-only)", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const hqRoot = freshProjectRoot();
+		const hq = reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		// Repair must delete the field entirely, never pin `hidden: false`.
+		assert.ok(!("hidden" in hq), "fresh HQ record must not carry a hidden key");
+
+		// A legacy record with `hidden` set (either value) must be stripped on
+		// the next ensure pass — not preserved and not pinned to false.
+		(hq as { hidden?: boolean }).hidden = true;
+		const hq2 = reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		assert.ok(!("hidden" in hq2), "re-ensured HQ record must have hidden removed");
+
+		// And the persisted record on disk must not carry a hidden key either
+		// (projects.json is a flat array of project records).
+		const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf8")) as Array<{ id: string }>;
+		const hqPersisted = persisted.find((p) => p.id === "headquarters");
+		assert.ok(hqPersisted, "HQ record must be persisted");
+		assert.ok(!("hidden" in hqPersisted!), "persisted HQ record must not carry a hidden key");
+	});
+
 	it("update rejects changing rootPath onto the hidden system project's root", () => {
 		const reg = new ProjectRegistry(stateDir);
 		const sysRoot = freshProjectRoot();

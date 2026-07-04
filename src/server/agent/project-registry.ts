@@ -784,7 +784,10 @@ export class ProjectRegistry {
     project.name = HEADQUARTERS_PROJECT_NAME;
     project.rootPath = canonicalRoot;
     project.kind = "headquarters";
-    project.hidden = false;
+    // hide/show is presentation-only preference state — remove the field rather
+    // than pinning `hidden: false` here, consistent with the position/provisional/
+    // parentProjectId cleanup below.
+    delete project.hidden;
     delete project.provisional;
     delete project.position;
     delete project.parentProjectId;
