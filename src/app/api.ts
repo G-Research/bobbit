@@ -36,6 +36,7 @@ import {
 import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
+import { isHeadquartersProject } from "./headquarters.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -1604,7 +1605,9 @@ export async function fetchGoalGitStatus(
 export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
 	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
-		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
+		const body: Record<string, any> = { title, spec, team: true, worktree: !isHeadquartersProject(projectId) };
+		const trimmedCwd = typeof cwd === "string" ? cwd.trim() : "";
+		if (trimmedCwd) body.cwd = trimmedCwd;
 		if (workflowId) body.workflowId = workflowId;
 		if (reattemptOf) body.reattemptOf = reattemptOf;
 		if (sandboxed !== undefined) body.sandboxed = !!sandboxed;
@@ -2763,6 +2766,7 @@ export async function createRole(role: {
 	model?: string;
 	thinkingLevel?: string;
 	description?: string;
+	projectId?: string;
 }): Promise<RoleData | null> {
 	try {
 		// Strip undefined fields so the wire payload stays minimal and the
@@ -2775,6 +2779,7 @@ export async function createRole(role: {
 			accessory: role.accessory,
 		};
 		if (role.toolPolicies !== undefined) body.toolPolicies = role.toolPolicies;
+		if (role.projectId !== undefined && role.projectId !== "") body.projectId = role.projectId;
 		if (role.model !== undefined && role.model !== "") body.model = role.model;
 		if (role.thinkingLevel !== undefined && role.thinkingLevel !== "") body.thinkingLevel = role.thinkingLevel;
 		if (role.description !== undefined && role.description !== "") body.description = role.description;

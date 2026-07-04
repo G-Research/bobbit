@@ -45,7 +45,7 @@ import {
 	resetSidebarTreeIndentPreference,
 	applySidebarTreeLayoutVars,
 } from "./state.js";
-import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
@@ -3299,7 +3299,10 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 				@click=${() => { setHashRoute("settings", headquartersTarget, true); }}
 			>
 				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent(HEADQUARTERS_PROJECT_ID), "xs")}</span>
-				${HEADQUARTERS_PROJECT_NAME}
+				<span class="inline-flex flex-col items-start leading-tight">
+					<span>${HEADQUARTERS_PROJECT_NAME}</span>
+					<span class="text-[11px] text-muted-foreground">${HEADQUARTERS_HELPER_TEXT}</span>
+				</span>
 			</button>
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;

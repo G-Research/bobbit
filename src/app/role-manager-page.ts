@@ -14,6 +14,7 @@ import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { renderModelRow, formatModelPref } from "./settings-page.js";
+import { HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession } from "./headquarters.js";
 
 // ============================================================================
 // HELPERS
@@ -195,11 +196,12 @@ async function createRoleAssistantSession(): Promise<void> {
 	renderApp();
 	try {
 		const bodyObj: Record<string, any> = { assistantType: "role" };
-		const projectId = getConfigProjectId();
+		const projectId = getConfigProjectId({ preserveHeadquarters: true }) || HEADQUARTERS_PROJECT_ID;
 		if (projectId) {
 			bodyObj.projectId = projectId;
 			const project = state.projects.find(p => p.id === projectId);
-			if (project) bodyObj.cwd = project.rootPath;
+			const cwd = defaultCwdForProjectSession(project);
+			if (cwd) bodyObj.cwd = cwd;
 		}
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",

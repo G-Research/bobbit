@@ -51,6 +51,7 @@ export function showProjectPickerPopover(
 		id: p.id,
 		name: p.name,
 		kind: p.kind,
+		rootPath: p.rootPath,
 		colorLight: p.colorLight,
 		colorDark: p.colorDark,
 		color: p.color,

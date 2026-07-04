@@ -1,7 +1,7 @@
 name: propose_goal
 description: "Submit goal proposal with title, spec, workflow"
 summary: "Propose a goal for user review"
-params: [title, spec, cwd?, workflow?, options?, parentGoalId?, subgoalsAllowed?, maxNestingDepth?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, inlineWorkflow?, metadata?]
+params: [title, spec, projectId?, cwd?, workflow?, options?, parentGoalId?, subgoalsAllowed?, maxNestingDepth?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, inlineWorkflow?, metadata?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -11,8 +11,9 @@ docs: >-
   names and the sidebar), spec (the full specification including acceptance
   criteria — agents will use this to drive workflow gates and verification).
 
-  Optional parameters: cwd (project path the goal runs against — defaults to
-  the registered project for this session), workflow (workflow id to use; see
+  Optional parameters: projectId (registered project id; defaults to this
+  session's project and is the authoritative project scope), cwd (working
+  directory override inside that project — never used to choose the project), workflow (workflow id to use; see
   GET /api/workflows?projectId=... for available workflows; REQUIRED when this
   session's project has workflows; if omitted/blank, propose_goal returns
   MISSING_WORKFLOW with valid IDs), options (comma-separated optional

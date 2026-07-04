@@ -22,6 +22,7 @@ export interface ProjectPickerItem {
 	id: string;
 	name: string;
 	kind?: string;
+	rootPath?: string;
 	colorLight?: string;
 	colorDark?: string;
 	color?: string;
@@ -224,6 +225,7 @@ export class ProjectPickerPopover extends LitElement {
 					type="button"
 					role="option"
 					data-project-id=${p.id}
+					title=${p.rootPath || p.name}
 					aria-selected=${highlighted ? "true" : "false"}
 					class="bobbit-project-picker-row"
 					style=${`display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 10px;border:0;background:${highlighted ? "var(--accent, rgba(127,127,127,0.15))" : "transparent"};color:inherit;cursor:pointer;font-size:13px;border-radius:4px;`}

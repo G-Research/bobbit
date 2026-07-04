@@ -20,22 +20,22 @@ export interface ProposalParser {
 export const PROPOSAL_PARSERS: ProposalParser[] = [
 	{
 		tag: "goal_proposal",
-		fields: ["title", "spec", "cwd", "workflow", "options"],
+		fields: ["title", "spec", "projectId", "cwd", "workflow", "options"],
 		requiredFields: ["title", "spec"],
 	},
 	{
 		tag: "role_proposal",
-		fields: ["name", "label", "prompt", "tools", "accessory"],
+		fields: ["name", "label", "prompt", "projectId", "tools", "accessory"],
 		requiredFields: ["name", "label", "prompt"],
 	},
 	{
 		tag: "tool_proposal",
-		fields: ["tool", "action", "content"],
+		fields: ["tool", "action", "content", "projectId"],
 		requiredFields: ["tool", "action", "content"],
 	},
 	{
 		tag: "staff_proposal",
-		fields: ["name", "description", "prompt", "triggers", "cwd"],
+		fields: ["name", "description", "prompt", "projectId", "triggers", "cwd"],
 		requiredFields: ["name", "prompt"],
 	},
 	{
