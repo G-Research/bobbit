@@ -18,6 +18,17 @@ const COMMAND_IDENTITY_PIDFILE_RETRY_MS = 2_000;
 const COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS = 100;
 const COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES = Math.min(MAX_RETAINED_LOG_BYTES, 1024 * 1024);
 
+class PendingCommandCleanupError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PendingCommandCleanupError";
+	}
+}
+
+function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanupError {
+	return err instanceof PendingCommandCleanupError || (err as any)?.name === "PendingCommandCleanupError";
+}
+
 function readProcessStartToken(pid: number): string | undefined {
 	if (process.platform !== "linux") return undefined;
 	try {
@@ -1395,7 +1406,7 @@ export class VerificationHarness {
 			if (settled) {
 				if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
 			} else {
-				this._scheduleCancelledCommandKillRetry(active.signalId);
+				this._scheduleCommandKillCleanupRetry(active.signalId);
 			}
 			this._persistActive();
 		}
@@ -1432,7 +1443,10 @@ export class VerificationHarness {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume of ${v.signalId} stopped after cancellation/supersession: ${errMsg}`);
 					continue;
 				}
-				if (isRestartInterruptError(errMsg)) {
+				if (isPendingCommandCleanupError(err)) {
+					console.warn(`[verification] Resume of ${v.signalId} is waiting for command cleanup before finalizing: ${errMsg}`);
+					this._scheduleCommandKillCleanupRetry(v.signalId);
+				} else if (isRestartInterruptError(errMsg)) {
 					// A restart-induced resume error (cold-agent RPC timeout, agent
 					// process not yet up) must NEVER surface as a hard gate failure.
 					// Leave the gate `pending` so the team-lead re-signals, and send
@@ -1492,8 +1506,9 @@ export class VerificationHarness {
 			} finally {
 				// Drop only the entry this resume owns. If a cancellation/re-signal
 				// already removed it (or a future path replaced it), do not clobber
-				// that newer active state.
-				if (this.activeVerifications.get(v.signalId) === v) {
+				// that newer active state. A timeout/cancel kill intent that has not
+				// been verified complete must remain durable for retry after restart.
+				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
 					this.activeVerifications.delete(v.signalId);
 				}
 				this._persistActive();
@@ -2485,12 +2500,25 @@ export class VerificationHarness {
 		}
 	}
 
+	private _hasPendingCommandKillCleanup(active: ActiveVerification): boolean {
+		return active.steps.some(step =>
+			step.type === "command" &&
+			!!step.killRequestedAt &&
+			!step.killCompletedAt,
+		);
+	}
+
+	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
+		return step.type === "command" && (step.status === "running" || (!!step.killRequestedAt && !step.killCompletedAt));
+	}
+
 	private _markPersistedCommandKillIntent(active: ActiveVerification, signal: NodeJS.Signals, reason: "cancelled" | "timeout"): void {
 		const now = Date.now();
 		active.cancelRequestedAt ??= now;
 		active.cancelReason ??= reason;
 		for (const step of active.steps) {
-			if (step.type !== "command" || step.status !== "running") continue;
+			if (step.type !== "command") continue;
+			if (step.status !== "running" && !step.killRequestedAt) continue;
 			step.killRequestedAt ??= now;
 			step.killReason = reason;
 			step.killSignal = signal;
@@ -2506,25 +2534,45 @@ export class VerificationHarness {
 		return !isPidAlive(pid);
 	}
 
-	private _cancelKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
 
-	private _scheduleCancelledCommandKillRetry(signalId: string): void {
-		if (this._cancelKillRetryTimers.has(signalId)) return;
+	private _scheduleCommandKillCleanupRetry(signalId: string): void {
+		if (this._commandKillRetryTimers.has(signalId)) return;
 		const timer = setTimeout(async () => {
-			this._cancelKillRetryTimers.delete(signalId);
+			this._commandKillRetryTimers.delete(signalId);
 			const active = this.activeVerifications.get(signalId);
-			if (!active?.cancelled) return;
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
-			if (settled) {
-				if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
+			if (!active || !this._hasPendingCommandKillCleanup(active)) return;
+			try {
+				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
+				const signal = pendingStep?.killSignal ?? "SIGKILL";
+				const settled = await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
+				if (!settled) {
+					this._persistActive();
+					this._scheduleCommandKillCleanupRetry(signalId);
+					return;
+				}
+
+				if (active.cancelled || active.overallStatus === "cancelled") {
+					if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
+					this._persistActive();
+					return;
+				}
+
+				if (this.activeVerifications.get(signalId) === active) {
+					await this._resumeOneVerification(active);
+					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
+						this.activeVerifications.delete(signalId);
+					}
+					this._persistActive();
+				}
+			} catch (err) {
+				console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
 				this._persistActive();
-			} else {
-				this._persistActive();
-				this._scheduleCancelledCommandKillRetry(signalId);
+				if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
 			}
 		}, 1_000);
 		timer.unref?.();
-		this._cancelKillRetryTimers.set(signalId, timer);
+		this._commandKillRetryTimers.set(signalId, timer);
 	}
 
 	private async _killPersistedCommandSteps(
@@ -2539,29 +2587,35 @@ export class VerificationHarness {
 
 		let allSettled = true;
 		for (const step of active.steps) {
-			if (step.type !== "command" || step.status !== "running") continue;
+			if (!this._commandStepRequiresKillCleanup(step)) continue;
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
 				step.killCompletedAt ??= Date.now();
 				continue;
 			}
 			if (step.restartRecoveryMode === "unsupported" || step.containerId || (!step.pidFile && !step.pid)) {
 				step.killUnsafeReason = step.restartRecoveryUnsupportedReason ?? "command path has no restart-safe persisted process identity";
-				step.killCompletedAt ??= Date.now();
+				allSettled = false;
 				continue;
 			}
 
 			const identityFile = options.waitForIdentity
-				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && !!active.cancelled)
+				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && this._hasPendingCommandKillCleanup(active))
 				: this._readCommandIdentityFile(step);
 			let identity = this._verifyPersistedCommandIdentity(step, identityFile);
 			if (!identity.verified || !identity.pid) {
 				step.killUnsafeReason = identity.reason;
 				if (identity.reason === "command process is no longer alive") {
-					step.killCompletedAt ??= Date.now();
+					if (step.killReason === "timeout" && (step.killAttempts ?? 0) === 0 && !step.killLastAttemptAt) {
+						step.killUnsafeReason = "command process exited before Bobbit could verify a timeout kill; no command verdict was obtained";
+						delete step.killRequestedAt;
+						delete step.killReason;
+						delete step.killSignal;
+					} else {
+						step.killCompletedAt ??= Date.now();
+					}
 					continue;
 				}
-				const retryUnverifiedIdentity = identityFile.retryable || (!!identity.pid && isPidAlive(identity.pid) && /heartbeat|fresh identity/i.test(identity.reason));
-				if (retryUnverifiedIdentity) allSettled = false;
+				allSettled = false;
 				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
 					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
 				}
@@ -2578,14 +2632,70 @@ export class VerificationHarness {
 			}
 
 			identity = this._verifyPersistedCommandIdentity(step);
-			if (identity.verified && identity.pid) {
-				allSettled = false;
-				step.killUnsafeReason = "verified command process was still alive after kill attempt; will retry";
-			} else {
+			if (identity.reason === "command process is no longer alive") {
 				step.killCompletedAt = Date.now();
+			} else {
+				allSettled = false;
+				step.killUnsafeReason = identity.verified && identity.pid
+					? "verified command process was still alive after kill attempt; will retry"
+					: `command cleanup could not be verified after kill attempt: ${identity.reason}`;
 			}
 		}
+		this._persistActive();
 		return allSettled;
+	}
+
+	private async _killVerifiedCommandStepForTimeout(
+		active: ActiveVerification,
+		step: ActiveVerification["steps"][number],
+	): Promise<{ status: "settled" | "pending" | "unverifiable"; reason?: string }> {
+		const hadPriorKillAttempt = (step.killAttempts ?? 0) > 0 || !!step.killLastAttemptAt || !!step.killCompletedAt;
+		let identity = this._verifyPersistedCommandIdentity(step);
+
+		if (!identity.verified || !identity.pid) {
+			step.killUnsafeReason = identity.reason;
+			if (identity.reason === "command process is no longer alive") {
+				step.killCompletedAt ??= Date.now();
+				this._persistActive();
+				return hadPriorKillAttempt
+					? { status: "settled" }
+					: {
+						status: "unverifiable",
+						reason: "The command process was no longer alive at its timeout deadline before Bobbit could verify cleanup, and no durable exit status was recorded.",
+					};
+			}
+
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			step.killUnsafeReason = `timeout cleanup is pending until command identity can be verified safely: ${identity.reason}`;
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
+		}
+
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+		step.killAttempts = (step.killAttempts ?? 0) + 1;
+		step.killLastAttemptAt = Date.now();
+		try { killTreeByPid(identity.pid, "SIGKILL"); } catch { /* best-effort */ }
+		const exited = await this._waitForPidToExit(identity.pid);
+		if (exited) {
+			step.killCompletedAt = Date.now();
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return { status: "settled" };
+		}
+
+		identity = this._verifyPersistedCommandIdentity(step);
+		if (identity.reason === "command process is no longer alive") {
+			step.killCompletedAt = Date.now();
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return { status: "settled" };
+		}
+
+		step.killUnsafeReason = identity.verified && identity.pid
+			? "verified command process was still alive after timeout kill attempt; will retry before finalizing the timeout"
+			: `timeout cleanup could not be verified after kill attempt: ${identity.reason}`;
+		this._persistActive();
+		return { status: "pending", reason: step.killUnsafeReason };
 	}
 
 	/**
@@ -2662,7 +2772,7 @@ export class VerificationHarness {
 			if (commandKillsSettled) {
 				this.activeVerifications.delete(signalId);
 			} else {
-				this._scheduleCancelledCommandKillRetry(signalId);
+				this._scheduleCommandKillCleanupRetry(signalId);
 			}
 			this._persistActive();
 
@@ -2710,7 +2820,7 @@ export class VerificationHarness {
 			if (commandKillsSettled) {
 				this.activeVerifications.delete(signalId);
 			} else {
-				this._scheduleCancelledCommandKillRetry(signalId);
+				this._scheduleCommandKillCleanupRetry(signalId);
 			}
 
 			cancellations.push({
@@ -5148,6 +5258,9 @@ export class VerificationHarness {
 			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
 			return finalize(readExitFile());
 		}
+		if (step.killReason === "timeout" && step.killCompletedAt) {
+			return timeoutResult();
+		}
 
 		const unsupportedRecoveryReason = (): string | undefined => {
 			if (step.restartRecoveryUnsupportedReason) return step.restartRecoveryUnsupportedReason;
@@ -5177,18 +5290,19 @@ export class VerificationHarness {
 		const timeoutSec = step.timeoutSec ?? 300;
 		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + timeoutSec * 1000);
 
-		const killVerifiedForTimeout = () => {
-			const current = this._verifyPersistedCommandIdentity(step);
-			if (current.verified && current.pid) {
-				try { killTreeByPid(current.pid, "SIGKILL"); } catch { /* already gone */ }
-				return true;
+		const finalizeTimeoutAfterVerifiedCleanup = async (unsafeReason: string): Promise<ResumedVerificationStep> => {
+			if (step.killReason === "timeout" && step.killCompletedAt) return timeoutResult();
+			const cleanup = await this._killVerifiedCommandStepForTimeout(v, step);
+			if (cleanup.status === "settled") return timeoutResult();
+			if (cleanup.status === "pending") {
+				this._scheduleCommandKillCleanupRetry(v.signalId);
+				throw new PendingCommandCleanupError(cleanup.reason ?? "Timeout cleanup is still pending for a verified command process.");
 			}
-			return false;
+			return restartInterrupted(cleanup.reason ?? unsafeReason);
 		};
 
 		if (Date.now() >= deadline) {
-			if (killVerifiedForTimeout()) return timeoutResult();
-			return restartInterrupted("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
+			return await finalizeTimeoutAfterVerifiedCleanup("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
 		}
 
 		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
@@ -5222,8 +5336,7 @@ export class VerificationHarness {
 				return finalize(readExitFile());
 			}
 			if (Date.now() >= deadline) {
-				if (killVerifiedForTimeout()) return timeoutResult();
-				return restartInterrupted("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
+				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
 			}
 
 			// The process was alive and verified when resume started, but it exited or

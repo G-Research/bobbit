@@ -159,6 +159,12 @@ function loadActiveVerifications(stateDir: string): any[] {
 	}
 }
 
+function clearKillRetryTimers(harness: any): void {
+	const timers: Map<string, NodeJS.Timeout> | undefined = harness._commandKillRetryTimers;
+	for (const timer of timers?.values?.() ?? []) clearTimeout(timer);
+	timers?.clear?.();
+}
+
 function nodeShellCommand(script: string): string {
 	const b64 = Buffer.from(script, "utf8").toString("base64");
 	return `"${process.execPath}" -e "eval(Buffer.from('${b64}','base64').toString())"`;
@@ -354,6 +360,100 @@ test("timeout after restart kills a process only when matching identity is verif
 			`${MARKER}: timeout recovery should surface timeout/deadline diagnostics rather than a generic restart interruption.`,
 		);
 	} finally {
+		await cleanupChild(child);
+	}
+});
+
+test("cancel cleanup without restart-safe identity remains durable and unverifiable", async (t) => {
+	const { stateDir, harness } = makeHarness(t);
+	t.after(() => clearKillRetryTimers(harness));
+	const child = spawnNode("setTimeout(() => {}, 30000)");
+	try {
+		const startedAt = Date.now();
+		const diagDir = path.join(stateDir, "verifications", "sig-unsupported-cancel");
+		fs.mkdirSync(diagDir, { recursive: true });
+		const outFile = path.join(diagDir, "stdout.log");
+		const errFile = path.join(diagDir, "stderr.log");
+		const exitFile = path.join(diagDir, "exit.txt");
+		fs.writeFileSync(outFile, "attached:still-running\n");
+		fs.writeFileSync(errFile, "");
+
+		const verification = activeVerification("sig-unsupported-cancel", [commandStepFixture({
+			name: "Unsupported attached cancellation",
+			startedAt,
+			pid: child.pid,
+			timeoutSec: 30,
+			outFile,
+			errFile,
+			exitFile,
+		})], startedAt);
+		verification.cancelled = true;
+		verification.overallStatus = "cancelled";
+		verification.cancelRequestedAt = Date.now() - 100;
+		verification.steps[0].restartRecoveryMode = "unsupported";
+		verification.steps[0].restartRecoveryUnsupportedReason = "Attached command execution cannot be recovered after gateway restart.";
+		persistActive(stateDir, verification);
+
+		await harness.resumeInterruptedVerifications();
+		clearKillRetryTimers(harness);
+
+		const active = loadActiveVerifications(stateDir);
+		const step = active[0]?.steps?.[0];
+		assert.equal(active.length, 1, `${MARKER}: unverifiable cancellation cleanup must remain durable instead of deleting the active verification.`);
+		assert.ok(step?.killRequestedAt, `${MARKER}: cancellation should persist a kill intent for later inspection/retry.`);
+		assert.equal(step?.killCompletedAt, undefined, `${MARKER}: unsupported cleanup must not be recorded complete when Bobbit cannot prove the tree was killed.`);
+		assert.match(step?.killUnsafeReason ?? "", /attached|restart-safe|recover/i, `${MARKER}: pending cleanup should explain why Bobbit refused an unsafe PID/container kill.`);
+	} finally {
+		clearKillRetryTimers(harness);
+		await cleanupChild(child);
+	}
+});
+
+test("timeout resume keeps cleanup pending when the kill cannot be verified", async (t) => {
+	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
+	t.after(() => clearKillRetryTimers(harness));
+	const child = spawnNode("setTimeout(() => {}, 30000)");
+	try {
+		const startedAt = Date.now() - 2_000;
+		const diagDir = path.join(stateDir, "verifications", "sig-timeout-unverified-kill");
+		fs.mkdirSync(diagDir, { recursive: true });
+		const outFile = path.join(diagDir, "stdout.log");
+		const errFile = path.join(diagDir, "stderr.log");
+		const exitFile = path.join(diagDir, "exit.txt");
+		const pidFile = path.join(diagDir, "process.pid");
+		fs.writeFileSync(outFile, "timeout:still-running\n");
+		fs.writeFileSync(errFile, "");
+		writeIdentityFile(pidFile, child.pid, "timeout-pending-nonce");
+
+		persistActive(stateDir, activeVerification("sig-timeout-unverified-kill", [commandStepFixture({
+			name: "Unverified timeout cleanup",
+			startedAt,
+			pid: child.pid,
+			timeoutSec: 1,
+			outFile,
+			errFile,
+			exitFile,
+			identityFile: pidFile,
+			nonce: "timeout-pending-nonce",
+		})], startedAt));
+
+		(harness as any)._waitForPidToExit = async () => false;
+		(harness as any)._verifyPersistedCommandIdentity = () => ({ verified: true, pid: child.pid, reason: "test identity remains alive" });
+
+		await harness.resumeInterruptedVerifications();
+		clearKillRetryTimers(harness);
+
+		const active = loadActiveVerifications(stateDir);
+		const step = active[0]?.steps?.[0];
+		assert.equal(active.length, 1, `${MARKER}: timeout cleanup that cannot be verified must keep active state for retry.`);
+		assert.ok(step?.killRequestedAt, `${MARKER}: timeout recovery should persist cleanup intent before attempting a kill.`);
+		assert.equal(step?.killReason, "timeout", `${MARKER}: pending cleanup should remain classified as timeout cleanup.`);
+		assert.equal(step?.killCompletedAt, undefined, `${MARKER}: timeout cleanup must not complete until the process is verified gone.`);
+		assert.match(step?.killUnsafeReason ?? "", /still alive|retry|pending/i, `${MARKER}: pending timeout cleanup should explain that finalization is waiting on verified process exit.`);
+		assert.equal(latestSignalUpdate(gateStoreCalls), undefined, `${MARKER}: timeout should not be finalized as a gate result before cleanup is verified.`);
+		assert.equal(latestGateStatus(gateStoreCalls), undefined, `${MARKER}: gate status should not change while timeout cleanup remains pending.`);
+	} finally {
+		clearKillRetryTimers(harness);
 		await cleanupChild(child);
 	}
 });
