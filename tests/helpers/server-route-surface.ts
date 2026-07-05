@@ -69,6 +69,9 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/marketplace-routes.ts",
 	// STR-01 cohort 5 (staff inbox).
 	"src/server/routes/staff-inbox-routes.ts",
+	// STR-01 cohort 4 (pack-runtimes; server-scope project-config trio).
+	"src/server/routes/pack-runtimes-routes.ts",
+	"src/server/routes/project-config-server-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
