@@ -2,7 +2,7 @@
 //
 // CLF-W2 — tool auto-approve/deny decision seam HARNESS at
 // `SessionManager.requestToolGrant`. See
-// ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md §3
+// the CLF classifier-framework design note (Fable program) §3
 // (the `tool-call` interception point), §6 (RO vs RW is a *mount* property —
 // observe vs enforce), §8.3 ("consult at the top of `requestToolGrant`
 // (abstain→existing human widget)"), and §10 Wave 2 ("tool auto-approve/deny
