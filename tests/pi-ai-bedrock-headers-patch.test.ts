@@ -22,11 +22,14 @@ function packageRootFromResolved(specifier: string): string {
 
 function installedAmazonBedrockProviderFile(): string {
 	const root = packageRootFromResolved("@earendil-works/pi-ai");
-	return path.join(root, "dist", "providers", "amazon-bedrock.js");
+	// pi-ai 0.80 moved the Bedrock stream implementation from
+	// dist/providers/amazon-bedrock.js (now a thin provider-factory wrapper
+	// with neither patch anchor) to dist/api/bedrock-converse-stream.js.
+	return path.join(root, "dist", "api", "bedrock-converse-stream.js");
 }
 
 describe("Pi AI Bedrock headers patch compatibility", () => {
-	it("patches the installed amazon-bedrock.js provider or detects it already patched", () => {
+	it("patches the installed bedrock-converse-stream.js implementation or detects it already patched", () => {
 		const providerFile = installedAmazonBedrockProviderFile();
 		assert.ok(fs.existsSync(providerFile), `installed pi-ai Bedrock provider missing: ${providerFile}`);
 
@@ -35,11 +38,11 @@ describe("Pi AI Bedrock headers patch compatibility", () => {
 		if (!alreadyPatched) {
 			assert.ok(
 				before.includes(`import { transformMessages } from "./transform-messages.js";\n`),
-				"pi-ai amazon-bedrock.js import anchor changed before Bobbit patch could apply",
+				"pi-ai bedrock-converse-stream.js import anchor changed before Bobbit patch could apply",
 			);
 			assert.ok(
 				before.includes("            const client = new BedrockRuntimeClient(config);\n"),
-				"pi-ai amazon-bedrock.js client-construction anchor changed before Bobbit patch could apply",
+				"pi-ai bedrock-converse-stream.js client-construction anchor changed before Bobbit patch could apply",
 			);
 		}
 
@@ -52,7 +55,7 @@ describe("Pi AI Bedrock headers patch compatibility", () => {
 		);
 		assert.ok(
 			after.includes("applyBobbitBedrockRequestHeaders(client, model, options);"),
-			"Bobbit Bedrock request-header hook was not inserted into pi-ai amazon-bedrock.js",
+			"Bobbit Bedrock request-header hook was not inserted into pi-ai bedrock-converse-stream.js",
 		);
 	});
 });
