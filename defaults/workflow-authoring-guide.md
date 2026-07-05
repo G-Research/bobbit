@@ -238,6 +238,18 @@ Common optional fields (apply to all three shapes):
 | `expect: success \| failure` | flips pass/fail (use `failure` for TDD reproducing-tests) |
 | `timeout: <seconds>` | per-step timeout (default 300s) |
 | `optional: true` + `optionalLabel:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+| `cacheInputGlobs: [<glob>, ...]` | opts a `command` step into content-keyed gate-cache reuse (`BOBBIT_GATE_CACHE=content`) — see below |
+
+> **Content-keyed step cache.** By default, a re-signalled gate only reuses a
+> previously-passed step when the commit SHA is byte-identical to a prior
+> signal (a fix commit always invalidates the whole gate). Declaring
+> `cacheInputGlobs` on a `command` step (paths relative to the step's
+> resolved cwd, `*`/`**` glob syntax) opts that step into reuse across
+> *different* SHAs — under `BOBBIT_GATE_CACHE=content` — whenever none of the
+> declared globs changed between the two commits. Omitting the field keeps
+> the step sha-exact-only in every mode; `llm-review` / `agent-qa` /
+> `human-signoff` steps do not support it at all (their inputs aren't a
+> static file set). See `docs/design/gate-step-cache.md` (finding VER-01).
 
 > **Field split.** `optionalLabel:` is the goal-creation opt-in toggle
 > label for any `optional: true` step. `label:` is reserved exclusively

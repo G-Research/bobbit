@@ -17,6 +17,11 @@ import {
 	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
 	buildStepCache,
+	resolveGateCacheMode,
+	globToRegExp,
+	pathMatchesAnyGlob,
+	anyPathMatchesGlobs,
+	buildContentStepCache,
 	canSkipAllSteps,
 	computeAllPassed,
 	TRANSIENT_ERROR_PATTERNS,
@@ -935,6 +940,159 @@ describe("buildStepCache", () => {
 		assert.equal(cache.size, 1, "only the command step should be cached");
 		assert.ok(cache.has("build"), "command step must still be reused");
 		assert.ok(!cache.has("approve-design"), "human-signoff step must NOT be reused");
+	});
+});
+
+// ===================================================================
+// VER-01: content-keyed gate cache (resolveGateCacheMode, globToRegExp,
+// buildContentStepCache)
+// ===================================================================
+
+describe("resolveGateCacheMode", () => {
+	it("defaults to sha for undefined, empty, and unrecognized values", () => {
+		assert.equal(resolveGateCacheMode(undefined), "sha");
+		assert.equal(resolveGateCacheMode(""), "sha");
+		assert.equal(resolveGateCacheMode("Content"), "sha"); // case-sensitive on purpose
+		assert.equal(resolveGateCacheMode("garbage"), "sha");
+	});
+
+	it("only the exact literal 'content' selects content mode", () => {
+		assert.equal(resolveGateCacheMode("content"), "content");
+	});
+});
+
+describe("globToRegExp / pathMatchesAnyGlob / anyPathMatchesGlobs", () => {
+	it("`**` crosses path segments", () => {
+		const re = globToRegExp("src/**");
+		assert.ok(re.test("src/a.ts"));
+		assert.ok(re.test("src/sub/deeper/b.ts"));
+		assert.ok(!re.test("docs/readme.md"));
+		assert.ok(!re.test("srcx/a.ts"));
+	});
+
+	it("a lone `*` stays within one path segment", () => {
+		const re = globToRegExp("tsconfig*.json");
+		assert.ok(re.test("tsconfig.server.json"));
+		assert.ok(!re.test("tsconfig.server.json.bak"));
+		assert.ok(!re.test("nested/tsconfig.server.json"));
+	});
+
+	it("literal patterns match exactly and escape regex metacharacters", () => {
+		const re = globToRegExp("package.json");
+		assert.ok(re.test("package.json"));
+		assert.ok(!re.test("packageXjson"), "the literal `.` must not act as regex any-char");
+	});
+
+	it("pathMatchesAnyGlob matches against any of several globs", () => {
+		assert.ok(pathMatchesAnyGlob("tests/e2e/foo.spec.ts", ["src/**", "tests/e2e/**"]));
+		assert.ok(!pathMatchesAnyGlob("docs/readme.md", ["src/**", "tests/e2e/**"]));
+	});
+
+	it("anyPathMatchesGlobs is true iff at least one tracked path matches", () => {
+		assert.ok(anyPathMatchesGlobs(["docs/readme.md", "src/a.ts"], ["src/**"]));
+		assert.ok(!anyPathMatchesGlobs(["docs/readme.md"], ["src/**"]));
+		assert.ok(!anyPathMatchesGlobs([], ["src/**"]));
+	});
+});
+
+describe("buildContentStepCache", () => {
+	function fakeDeps(opts: { trackedPaths?: string[]; diffClean?: boolean | ((globs: string[]) => boolean); throwOnDiff?: boolean } = {}) {
+		const calls: { listTrackedPaths: number; diffIsClean: number } = { listTrackedPaths: 0, diffIsClean: 0 };
+		return {
+			calls,
+			deps: {
+				async listTrackedPaths(_cwd: string, _sha: string) {
+					calls.listTrackedPaths++;
+					return opts.trackedPaths ?? ["src/a.ts"];
+				},
+				async diffIsClean(_cwd: string, _prior: string, _current: string, globs: string[]) {
+					calls.diffIsClean++;
+					if (opts.throwOnDiff) throw new Error("git diff failed");
+					if (typeof opts.diffClean === "function") return opts.diffClean(globs);
+					return opts.diffClean ?? true;
+				},
+			},
+		};
+	}
+
+	it("exact-SHA match still short-circuits to a hit without touching content deps", async () => {
+		const sigs = [signal("sig-0", "abc", { status: "passed", steps: [{ name: "build", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("build", { cacheInputGlobs: ["src/**"] })];
+		const { deps, calls } = fakeDeps();
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "abc", undefined, steps, new Map([["build", "/repo"]]), deps);
+		assert.equal(cache.size, 1);
+		assert.equal(calls.diffIsClean, 0, "exact-SHA reuse must not need a content check at all");
+		assert.deepEqual(decisions, [{ stepName: "build", keyKind: "sha", result: "hit" }]);
+	});
+
+	it("unrelated-file commit (docs-only fix) → content hit for a step with declared globs", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "unit", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("unit", { cacheInputGlobs: ["src/**"] })];
+		const { deps } = fakeDeps({ trackedPaths: ["src/a.ts", "docs/readme.md"], diffClean: true });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["unit", "/repo"]]), deps);
+		assert.equal(cache.size, 1);
+		assert.ok(cache.has("unit"));
+		assert.deepEqual(decisions, [{ stepName: "unit", keyKind: "content", result: "hit" }]);
+	});
+
+	it("dependent-file commit (fix touches a globbed path) → miss, step re-runs", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "unit", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("unit", { cacheInputGlobs: ["src/**"] })];
+		const { deps } = fakeDeps({ trackedPaths: ["src/a.ts"], diffClean: false });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["unit", "/repo"]]), deps);
+		assert.equal(cache.size, 0);
+		assert.deepEqual(decisions, [{ stepName: "unit", keyKind: "content", result: "miss" }]);
+	});
+
+	it("a step without cacheInputGlobs is always sha-exact only, never consults content deps", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "bug-hunt", type: "llm-review", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("bug-hunt", { type: "llm-review" })];
+		const { deps, calls } = fakeDeps();
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["bug-hunt", "/repo"]]), deps);
+		assert.equal(cache.size, 0, "no declared globs ⇒ different SHA can never reuse in content mode either");
+		assert.equal(calls.listTrackedPaths, 0);
+		assert.equal(calls.diffIsClean, 0);
+		assert.deepEqual(decisions, [{ stepName: "bug-hunt", keyKind: "sha", result: "miss", reason: "no cacheInputGlobs declared on step — sha-exact only" }]);
+	});
+
+	it("conservative fallback: globs matching no tracked paths never count as unchanged, even if diffIsClean would say so", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "e2e", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("e2e", { cacheInputGlobs: ["nonexistent/**"] })];
+		// diffClean would (dangerously) report true for a pathspec matching nothing —
+		// the existence guard must refuse to treat that as a real "unchanged" verdict.
+		const { deps, calls } = fakeDeps({ trackedPaths: ["src/a.ts"], diffClean: true });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["e2e", "/repo"]]), deps);
+		assert.equal(cache.size, 0);
+		assert.equal(calls.diffIsClean, 0, "diff must not even be consulted once the existence guard fails");
+		assert.deepEqual(decisions, [{ stepName: "e2e", keyKind: "content", result: "miss", reason: "cacheInputGlobs matched no tracked paths — cannot verify" }]);
+	});
+
+	it("conservative fallback: a git lookup failure (e.g. unreachable SHA after force-push) is a miss, never a hit", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "unit", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("unit", { cacheInputGlobs: ["src/**"] })];
+		const { deps } = fakeDeps({ trackedPaths: ["src/a.ts"], throwOnDiff: true });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["unit", "/repo"]]), deps);
+		assert.equal(cache.size, 0);
+		assert.equal(decisions[0].result, "miss");
+		assert.match(decisions[0].reason ?? "", /git lookup failed/);
+	});
+
+	it("human-signoff steps are never reusable via content globs either", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "approve", type: "human-signoff", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("approve", { type: "human-signoff", cacheInputGlobs: ["src/**"] })];
+		const { deps } = fakeDeps({ diffClean: true });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map([["approve", "/repo"]]), deps);
+		assert.equal(cache.size, 0);
+		assert.equal(decisions.length, 0, "human-signoff steps produce no decision at all — hard-excluded upstream of the glob check");
+	});
+
+	it("a step's cwd failing to resolve is a conservative miss, not a crash", async () => {
+		const sigs = [signal("sig-0", "shaA", { status: "passed", steps: [{ name: "unit", passed: true, output: "ok", duration_ms: 1 }] })];
+		const steps = [step("unit", { cacheInputGlobs: ["src/**"] })];
+		const { deps } = fakeDeps({ diffClean: true });
+		const { cache, decisions } = await buildContentStepCache(sigs, "sig-1", "shaB", undefined, steps, new Map(), deps); // no cwd entry
+		assert.equal(cache.size, 0);
+		assert.deepEqual(decisions, [{ stepName: "unit", keyKind: "content", result: "miss", reason: "step cwd could not be resolved" }]);
 	});
 });
 

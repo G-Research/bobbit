@@ -71,6 +71,23 @@ export interface VerifyStep {
 	command?: string;
 	/** Subgoal step descriptor (only when type === "subgoal"). */
 	subgoal?: VerifyStepSubgoal;
+	/**
+	 * Path globs (matched against tracked files, relative to the step's
+	 * resolved cwd — the component root for `{component,...}` steps, the
+	 * branch-container root for free-form `{run}` steps) that this step's
+	 * result actually depends on. Supports `*` (within a path segment) and
+	 * `**` (across segments); see `globToRegExp` in verification-logic.ts.
+	 *
+	 * Declaring this opts the step into content-keyed gate-cache reuse under
+	 * `BOBBIT_GATE_CACHE=content`: a prior passed result at a *different*
+	 * commit SHA is reusable when none of these globs differ between the two
+	 * commits (`git diff --quiet -- <globs>`), instead of requiring an exact
+	 * SHA match. Steps that omit this field always require an exact
+	 * commit-SHA match in every cache mode — the safe default for steps whose
+	 * real inputs cannot be soundly expressed as static path globs (LLM
+	 * reviews, agent-qa, subgoal steps). See docs/design/gate-step-cache.md.
+	 */
+	cacheInputGlobs?: string[];
 }
 
 export interface WorkflowGate {
@@ -178,6 +195,10 @@ function normalizeStep(raw: unknown): VerifyStep {
 		if (suggestedRole !== undefined) subgoal.suggestedRole = suggestedRole;
 		if (dependsOn !== undefined) subgoal.dependsOn = dependsOn;
 		step.subgoal = subgoal;
+	}
+	if (Array.isArray(r.cacheInputGlobs)) {
+		const globs = r.cacheInputGlobs.filter((g): g is string => typeof g === "string" && g.length > 0);
+		if (globs.length > 0) step.cacheInputGlobs = globs;
 	}
 	return step;
 }
@@ -371,6 +392,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
+	if (s.cacheInputGlobs !== undefined && s.cacheInputGlobs.length > 0) out.cacheInputGlobs = s.cacheInputGlobs;
 	if (s.subgoal) {
 		const sg: Record<string, unknown> = {
 			planId: s.subgoal.planId,
