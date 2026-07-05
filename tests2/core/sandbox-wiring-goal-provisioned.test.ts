@@ -4,7 +4,9 @@
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
 import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
 guardProcessEnv();
+enableTsWorkerResolver();
 
 /**
  * Regression: sandboxed worktree provisioning must dispatch `goalProvisioned`
