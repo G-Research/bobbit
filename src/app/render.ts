@@ -2278,6 +2278,24 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const staleSessionStoreBanner = () => {
+		const status = state.sessionStoreStaleRecovery;
+		if (!status || (!status.tripped && status.recoveries <= 0)) return "";
+		const label = status.tripped
+			? "Session storage could not recover from a stale snapshot — some changes may not be saved. See gateway logs."
+			: "Session storage recovered from a stale snapshot — verify recent session activity. See gateway logs.";
+		return html`
+			<div
+				class="shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium
+					${status.tripped ? "bg-red-500/15 text-red-700 dark:text-red-400" : "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"}"
+				data-testid="session-store-stale-recovery-banner"
+				title="A second gateway, cloud sync, or antivirus may have rewritten sessions.json under this running gateway. See docs/design/session-store-crash-safety.md."
+			>
+				<span>${label}</span>
+			</div>
+		`;
+	};
+
 	const reconnectBanner = () => {
 		if (!connected || state.connectionStatus === "connected") return "";
 		return html`
@@ -2939,14 +2957,14 @@ export function doRenderApp(): void {
 		}
 
 		if (route.view === "session" && route.panelTabId) {
-			if (!connected) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			if (!connected) return html`${reconnectBanner()}${staleSessionStoreBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
 			const sid = workspaceSessionId();
 			const workspace = state.sidePanelWorkspaceBySession?.[sid];
-			if (!workspace) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			if (!workspace) return html`${reconnectBanner()}${staleSessionStoreBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
 			const tab = workspace.tabs.find((candidate) => candidate.id === route.panelTabId);
 			if (!tab) {
 				return html`
-					${reconnectBanner()}
+					${reconnectBanner()}${staleSessionStoreBanner()}
 					<div class="flex-1 min-h-0 flex items-center justify-center p-8 text-center" data-testid="side-panel-route-missing">
 						<div class="max-w-sm rounded-lg border border-border bg-card p-5 shadow-sm">
 							<div class="text-sm font-semibold text-foreground mb-2">Panel is closed</div>
@@ -2957,7 +2975,7 @@ export function doRenderApp(): void {
 				`;
 			}
 			if (workspace.activeTabId !== tab.id) setActivePanelTabIdForSession(state, sid, tab.id);
-			return html`${reconnectBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen")}</div>`;
+			return html`${reconnectBanner()}${staleSessionStoreBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen")}</div>`;
 		}
 
 		const staffInboxOpenAffordance = () => {
@@ -2977,7 +2995,7 @@ export function doRenderApp(): void {
 			const mode = sidePanelSizeMode();
 			if (desktop && mode === "fullscreen") {
 				return html`
-					${reconnectBanner()}
+					${reconnectBanner()}${staleSessionStoreBanner()}
 					${staffInboxOpenAffordance()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						${renderSidePanelWorkspace("fullscreen")}
@@ -2991,7 +3009,7 @@ export function doRenderApp(): void {
 			if (desktop) {
 				const collapsed = isSidePanelCollapsed();
 				return html`
-					${reconnectBanner()}
+					${reconnectBanner()}${staleSessionStoreBanner()}
 					${staffInboxOpenAffordance()}
 					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
 						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
@@ -3006,7 +3024,7 @@ export function doRenderApp(): void {
 			const trackW = count * 100;
 			const paneW = 100 / count;
 			return html`
-				${reconnectBanner()}
+				${reconnectBanner()}${staleSessionStoreBanner()}
 				${staffInboxOpenAffordance()}
 				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
 					<div class="side-panel-slider__track preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
@@ -3015,7 +3033,7 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${staleSessionStoreBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`

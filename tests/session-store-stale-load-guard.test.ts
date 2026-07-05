@@ -3,8 +3,21 @@
  *
  * If `sessions.json` on disk has a HIGHER epoch than what we last loaded
  * (e.g. cloud sync / antivirus restored a newer file under a running
- * gateway, or the primary was repaired manually), saveNow() must refuse to
- * write — otherwise we'd clobber newer state with stale in-memory data.
+ * gateway, or a second gateway is running against the same state dir), the
+ * store must not blindly clobber the newer on-disk file with stale
+ * in-memory data.
+ *
+ * CON-05 (Fable refactor audit, 2026-07-05): the ORIGINAL fix for this
+ * latched permanently — one refused write, then silent, total persistence
+ * loss for the rest of the process's lifetime while the UI kept behaving as
+ * if writes were landing. The current behavior instead merge-recovers
+ * inline: on the very save that detects the trip, it folds the on-disk
+ * sessions we don't already know about into memory, keeps this process's
+ * own in-memory copy for any id both sides have, and resumes persisting —
+ * so it neither clobbers the newer file nor goes dark forever. The event
+ * stays visible afterward via `getStaleGuardStatus()` (surfaced through
+ * `GET /api/health` and a UI banner) even though the store has self-healed.
+ * See docs/design/session-store-crash-safety.md §3.3.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -39,16 +52,24 @@ function clearDir() {
 	}
 }
 
+function captureConsoleError(): { errors: string[]; restore: () => void } {
+	const errors: string[] = [];
+	const orig = console.error;
+	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+	return { errors, restore: () => { console.error = orig; } };
+}
+
 describe("SessionStore stale-snapshot guard", () => {
 	beforeEach(() => clearDir());
 	afterEach(() => clearDir());
 
-	it("refuses to save when on-disk epoch is newer than loaded epoch", () => {
+	it("merge-recovers when on-disk epoch is newer than loaded epoch, instead of clobbering or latching forever", () => {
 		// Start fresh, no sessions.json on disk.
 		const store = new SessionStore(stateDir);
 		assert.equal(store.getLoadedEpoch(), 0);
 
-		// External writer puts a v2 file with epoch 50 after we constructed.
+		// External writer (second gateway / cloud-sync restore) puts a v2 file
+		// with epoch 50 after we constructed, holding a session we don't know about.
 		const externalPayload = {
 			version: 2,
 			epoch: 50,
@@ -63,29 +84,108 @@ describe("SessionStore stale-snapshot guard", () => {
 		};
 		fs.writeFileSync(STORE_FILE, JSON.stringify(externalPayload, null, 2), "utf-8");
 
-		// Capture console.error
-		const errors: string[] = [];
-		const origErr = console.error;
-		console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
-
+		const { errors, restore } = captureConsoleError();
 		try {
-			// Trigger a save with an in-memory put.
+			// Trigger a save with an in-memory put — this is the save that detects
+			// the stale-snapshot condition.
 			store.put(makeSession("s-stale"));
 
-			// On-disk file must be unchanged (still epoch 50, external-1).
+			// The on-disk file must now hold BOTH the external-only session
+			// (adopted — nothing the other writer created is lost) and the
+			// in-memory session we just added, at an epoch advanced past 50.
 			const onDisk = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
-			assert.equal(onDisk.epoch, 50, "on-disk epoch must remain 50 — write refused");
-			assert.equal(onDisk.sessions.length, 1);
-			assert.equal(onDisk.sessions[0].id, "external-1");
+			assert.equal(onDisk.epoch, 51, "epoch advances past the adopted on-disk epoch");
+			const ids = onDisk.sessions.map((s: PersistedSession) => s.id).sort();
+			assert.deepEqual(ids, ["external-1", "s-stale"], "merged: on-disk-only session kept, new in-memory session written");
 		} finally {
-			console.error = origErr;
+			restore();
+		}
+
+		assert.ok(errors.some(e => /Stale-snapshot RECOVERED/.test(e)), `expected a RECOVERED log line, got: ${errors.join("\n")}`);
+		// Recovered, not permanently latched: isStaleGuardTripped() reflects
+		// only the genuinely-unrecoverable case (see next test), not "we hit a
+		// stale snapshot at some point".
+		assert.equal(store.isStaleGuardTripped(), false, "guard is not left tripped after a successful merge-recovery");
+		assert.equal(store.getWrittenEpoch(), 51, "the merge-recovery write itself succeeded");
+
+		const status = store.getStaleGuardStatus();
+		assert.equal(status.tripped, false);
+		assert.equal(status.recoveries, 1, "recovery event stays visible via getStaleGuardStatus() for /api/health");
+		assert.ok(status.lastRecoveredAt !== null && status.lastRecoveredAt <= Date.now());
+
+		// Subsequent put — persistence resumed normally, no permanent outage.
+		const errsBefore = errors.length;
+		store.put(makeSession("s-stale-2"));
+		const onDisk2 = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+		assert.equal(onDisk2.epoch, 52, "writes continue to land after recovery");
+		const ids2 = onDisk2.sessions.map((s: PersistedSession) => s.id).sort();
+		assert.deepEqual(ids2, ["external-1", "s-stale", "s-stale-2"]);
+		assert.equal(errors.length, errsBefore, "no repeat trip/recovery logging on subsequent normal saves");
+	});
+
+	it("prefers the in-memory row over the on-disk row for a session id both sides hold (in-memory wins per-session)", () => {
+		// Seed an initial v2 file this store will load from construction.
+		const initialPayload = {
+			version: 2,
+			epoch: 5,
+			sessions: [{ ...makeSession("shared-id"), title: "Original (loaded)" }],
+		};
+		fs.writeFileSync(STORE_FILE, JSON.stringify(initialPayload, null, 2), "utf-8");
+
+		const store = new SessionStore(stateDir);
+		assert.equal(store.getLoadedEpoch(), 5);
+		assert.equal(store.get("shared-id")?.title, "Original (loaded)");
+
+		// External writer rewrites the file at a higher epoch BEFORE this
+		// process's first save, changing "shared-id" and adding a new id.
+		const externalPayload = {
+			version: 2,
+			epoch: 6,
+			sessions: [
+				{ ...makeSession("shared-id"), title: "On-disk external (should NOT win)" },
+				{ ...makeSession("external-only"), title: "External only" },
+			],
+		};
+		fs.writeFileSync(STORE_FILE, JSON.stringify(externalPayload, null, 2), "utf-8");
+
+		const { errors, restore } = captureConsoleError();
+		try {
+			store.put(makeSession("other-new-id"));
+			const onDisk = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			const shared = onDisk.sessions.find((s: PersistedSession) => s.id === "shared-id");
+			const externalOnly = onDisk.sessions.find((s: PersistedSession) => s.id === "external-only");
+			assert.equal(shared.title, "Original (loaded)", "in-memory copy wins for an id both sides hold — the external edit to it is not adopted");
+			assert.ok(externalOnly, "on-disk-only session is still adopted (not lost)");
+			assert.ok(onDisk.sessions.some((s: PersistedSession) => s.id === "other-new-id"));
+		} finally {
+			restore();
+		}
+		assert.ok(errors.some(e => /Stale-snapshot RECOVERED/.test(e)));
+	});
+
+	it("falls back to refusing (does not merge) when the on-disk content can't be safely parsed", () => {
+		const store = new SessionStore(stateDir);
+		assert.equal(store.getLoadedEpoch(), 0);
+
+		// A payload with a valid numeric epoch (so peekDiskEpoch trips the
+		// guard) but missing the `version`/`sessions` shape readDiskSnapshotForMerge
+		// requires — e.g. a torn read mid-external-write, or hand-corrupted file.
+		fs.writeFileSync(STORE_FILE, JSON.stringify({ epoch: 50 }), "utf-8");
+
+		const { errors, restore } = captureConsoleError();
+		try {
+			store.put(makeSession("s-stale"));
+			const onDisk = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(onDisk.epoch, 50, "on-disk epoch must remain 50 — write refused, no merge attempted");
+		} finally {
+			restore();
 		}
 
 		assert.ok(errors.some(e => /REFUSING to save/.test(e)), `expected REFUSING-to-save log line, got: ${errors.join("\n")}`);
-		assert.equal(store.isStaleGuardTripped(), true);
-		assert.equal(store.getWrittenEpoch(), 0, "no write succeeded");
+		assert.equal(store.isStaleGuardTripped(), true, "genuinely unmergeable content still latches (protective property preserved)");
+		assert.equal(store.getWrittenEpoch(), 0);
 
-		// Subsequent put — still no write.
+		// Subsequent put — still no write, still no additional log spam.
 		const errsBefore = errors.length;
 		store.put(makeSession("s-stale-2"));
 		const onDisk2 = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));

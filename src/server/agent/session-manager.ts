@@ -1593,6 +1593,24 @@ export class SessionManager {
 		throw new Error("No project context manager or test store available");
 	}
 
+	/**
+	 * CON-05: aggregate stale-snapshot-guard status across every project's
+	 * `SessionStore` (or the single test store on non-PCM paths). Surfaced via
+	 * `GET /api/health` (`sessionStoreStaleRecovery`) so a merge-recovery event
+	 * — which self-heals the store but previously vanished the instant it
+	 * happened — stays visible to an operator instead of only appearing once
+	 * in the server log.
+	 */
+	getStaleSessionStoreStatus(): { tripped: boolean; recoveries: number; lastRecoveredAt: number | null } {
+		if (this.projectContextManager) {
+			return this.projectContextManager.getStaleSessionStoreStatus();
+		}
+		if (this._testStore) {
+			return this._testStore.getStaleGuardStatus();
+		}
+		return { tripped: false, recoveries: 0, lastRecoveredAt: null };
+	}
+
 	/** Resolve the BgProcessStore for a given project. Requires projectId when PCM is active. */
 	getBgProcessStore(projectId?: string): BgProcessStore {
 		if (this.projectContextManager) {

@@ -118,25 +118,63 @@ Why 5 backups: enough to survive a few "bad save" cycles in a row (e.g.
 the stale-guard tripping on every save while the user diagnoses a sync
 client) without filling the disk for state that is at most a few MB.
 
-### 3.3 Stale-snapshot guard
+### 3.3 Stale-snapshot guard (with merge-recovery — CON-05, updated 2026-07-05)
 
 On every `saveNow()`, before writing, peek the on-disk epoch. If it is
 **higher** than what we loaded AND we have not yet written this process
-(`writtenEpoch === 0`), refuse to save and trip a one-shot latch:
+(`writtenEpoch === 0`), something rewrote `sessions.json` out from under us.
+
+**Original design (superseded):** refuse to save and trip a one-shot,
+process-lifetime latch — no further writes, ever, until the user
+investigates and restarts. This over-corrected: the guard's job is to
+avoid clobbering newer state, but converting that into a *silent,
+permanent, whole-store persistence outage* meant a user could keep
+creating/archiving sessions and queuing prompts in a perfectly responsive
+UI while literally nothing landed on disk for the rest of the gateway's
+uptime — a much larger, harder-to-diagnose loss window than the one-time
+event that triggered it (see CON-05 in the Fable refactor audit).
+
+**Current behavior:** merge-recover inline, in the same `saveNow()` call
+that detected the trip, instead of latching:
+
+1. Fully read+parse the on-disk file (not just its epoch). If it doesn't
+   parse as a well-shaped v2 payload (torn read mid-external-write, corrupt
+   shape), fall back to the original refuse-and-latch behavior — we don't
+   trust content we can't validate.
+2. Otherwise **merge, don't clobber**: adopt every on-disk session whose id
+   we don't already hold in memory (the other writer's sessions are kept
+   intact); for any id present in both, keep our in-memory copy (assumed to
+   hold this process's own newer, unsaved mutation for that specific row).
+3. Rebase `loadedEpoch` to the on-disk epoch we just folded in, and fall
+   through to the normal write path — the merged state is written this
+   same call, so the recovery is one atomic step, not a retry loop.
+4. Record the event (`staleGuardRecoveries` count + `lastStaleGuardRecoveredAt`
+   timestamp) so it stays visible via `getStaleGuardStatus()` — surfaced
+   through `GET /api/health` (`sessionStoreStaleRecovery`) and a splash-screen
+   UI banner — even though the store itself has already self-healed.
 
 ```
-[session-store] REFUSING to save: on-disk epoch <N> is newer than loaded
-epoch <M>. Possible stale-snapshot recovery (cloud sync / antivirus /
-.pre-migration). In-memory state has K sessions; on-disk has more
-recent. Manual intervention required: inspect sessions.json and
-sessions.json.bak.*
+[session-store] Stale-snapshot RECOVERED: on-disk epoch <N> was newer than
+loaded epoch <M> (second gateway / cloud-sync / antivirus / .pre-migration
+restore?). Merged <A> on-disk-only session(s) into memory, kept this
+process's <K> in-memory session(s) as-is, and resumed persistence. Verify
+recent session activity — see docs/design/session-store-crash-safety.md.
 ```
 
-The latch is intentionally process-lifetime: once tripped, no further
-writes happen until the user investigates and restarts. The alternative
-— retrying on every save — would just flood the log and eventually
-clobber the newer file when the gate happened to pass on a transient
-read.
+Why this doesn't reintroduce the "retrying on every save... clobbers the
+newer file" risk the original design worried about: that concern was about
+a *blind* retry-write racing a transient bad read. This is not a retry loop
+— it's a single deliberate merge that folds the disk content in rather than
+discarding it, and it only fires once: after this save either the merge
+succeeded (so `writtenEpoch` is now non-zero and the guard's precondition
+`writtenEpoch === 0` can never hold again for this process) or the file
+was unparseable and the original permanent-latch fallback still applies.
+
+Per-id conflict resolution (in-memory wins) is a deliberate choice: the
+in-memory row for an id we already track is assumed to be *this* process's
+own subsequent edit to that session, which the guard exists to protect —
+not the external writer's. Only sessions this process has never heard of
+are adopted verbatim from disk.
 
 The guard checks `writtenEpoch === 0` so it only catches the
 load-then-clobber sequence. Once we've written once, our in-memory state
@@ -232,43 +270,65 @@ not worth the surface area for the failure rates we're defending against.
 Production:
 
 - `src/server/agent/session-store.ts` — v2 on-disk shape, atomic write,
-  `.bak.1..5` rotation, `peekDiskEpoch()`, stale-guard latch in
-  `saveNow()`, `getLoadedEpoch()` / `getWrittenEpoch()` /
-  `isStaleGuardTripped()` test hooks.
+  `.bak.1..5` rotation, `peekDiskEpoch()`, stale-guard merge-recovery in
+  `saveNow()` via `readDiskSnapshotForMerge()` (CON-05), `getLoadedEpoch()` /
+  `getWrittenEpoch()` / `isStaleGuardTripped()` / `getStaleGuardStatus()`
+  test hooks.
 - `src/server/agent/orphan-cleanup.ts` (new) — `shouldKeepDespiteOrphan()`
   and `scanOrphanedTranscripts()` extracted from `session-manager.ts` so
   unit tests can exercise the helpers without dragging in the rest of
   `SessionManager`.
 - `src/server/agent/session-manager.ts` — five archive sites gated on
   `shouldKeepDespiteOrphan`; post-`restoreSessions()` orphan-transcript
-  scan; `orphanedTranscriptsCount` field.
+  scan; `orphanedTranscriptsCount` field; `getStaleSessionStoreStatus()`
+  (CON-05) aggregating every project's `SessionStore.getStaleGuardStatus()`.
+- `src/server/agent/project-context-manager.ts` — `getStaleSessionStoreStatus()`
+  aggregation across `this.contexts` (CON-05).
 - `src/server/server.ts` — `GET /api/health` now returns
-  `orphanedTranscripts`.
+  `orphanedTranscripts` and `sessionStoreStaleRecovery` (CON-05).
 - `src/app/state.ts` / `src/app/session-manager.ts` /
-  `src/app/render.ts` — splash-screen banner gated on
-  `state.orphanedTranscriptsCount`.
+  `src/app/render.ts` — splash-screen banners gated on
+  `state.orphanedTranscriptsCount` and `state.sessionStoreStaleRecovery`
+  (CON-05).
 
 Tests:
 
 - `tests/session-manager-orphan-keep.test.ts` — `shouldKeepDespiteOrphan`
   truth table.
 - `tests/session-store-*` — atomic-write crash simulation, stale-load
-  guard, backup fallback, v1→v2 migration.
+  guard + merge-recovery (CON-05), backup fallback, v1→v2 migration.
 
 ## 7. Operator runbook
 
-If you see `[session-store] REFUSING to save …` in the logs:
+If you see `[session-store] Stale-snapshot RECOVERED …` in the logs, the
+store already merged and resumed persisting on its own — this is a
+visibility signal, not an outage:
 
-1. **Stop the gateway.** Do not restart it — the latch is by design
-   process-lifetime, but a clean stop makes step 2 cleaner.
+1. **Don't panic-restart.** The gateway is still durably persisting; a
+   restart is not required to restore write capability.
+2. **Verify no data loss.** Compare `.bobbit/state/sessions.json` against
+   `.bak.1..5` from around the recovery time. The log line states how many
+   on-disk-only sessions were adopted and how many in-memory sessions were
+   kept as-is — spot-check a couple of each if the counts look surprising.
+3. **Find out who rewrote the file** (informational, not urgent): the usual
+   culprits are a second gateway/CLI instance against the same state dir,
+   OneDrive/Dropbox/iCloud sync restoring a stale copy, antivirus
+   quarantine-and-restore, or a manual `.pre-migration` restore. If it's a
+   second gateway, stop the duplicate instance.
+4. Check `GET /api/health`'s `sessionStoreStaleRecovery` field (or the
+   splash-screen banner) — it stays populated for the process's lifetime so
+   this is discoverable after the fact, not just in the log scrollback.
+
+If you instead see `[session-store] REFUSING to save …` (the on-disk file
+existed but could not be parsed well enough to merge — a genuinely rare
+case, e.g. a torn read mid-external-write), the original process-lifetime
+latch applies:
+
+1. **Stop the gateway.**
 2. **Inspect the on-disk state.** Compare `.bobbit/state/sessions.json`
    against `.bak.1..5`. The `epoch` and `sessions.length` of each tells
    you which is newest.
-3. **Find out who rewrote the file.** The most common culprits are
-   OneDrive / Dropbox / iCloud sync clients restoring a stale copy,
-   antivirus quarantine-and-restore, or a manual restore from a
-   `.pre-migration` backup while the gateway was up. Disable or
-   reconfigure that source.
+3. **Find out who rewrote the file** — see step 3 above.
 4. **Pick the canonical file** (usually the one with the highest
    `epoch`), copy it to `sessions.json`, restart the gateway.
 

@@ -4095,6 +4095,12 @@ async function handleApiRoute(
 			aigw: !!getAigwUrl(preferencesStore),
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
+			// CON-05: stale-snapshot-guard status, so a merge-recovery event
+			// (session-store self-healed after an external rewrite) stays
+			// visible to the UI/operator instead of only appearing once in
+			// the server log. `tripped` is only true in the rare unrecoverable
+			// case (see session-store.ts saveNow()).
+			sessionStoreStaleRecovery: sessionManager.getStaleSessionStoreStatus(),
 		});
 		return;
 	}

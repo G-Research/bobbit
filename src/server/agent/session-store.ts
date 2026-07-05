@@ -239,8 +239,18 @@ export class SessionStore {
 	private loadedEpoch = 0;
 	/** Epoch we have successfully written to disk this process. */
 	private writtenEpoch = 0;
-	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
+	/**
+	 * True only while the guard is genuinely unable to persist right now (the
+	 * on-disk snapshot outraced us AND could not be safely parsed for
+	 * merge-recovery — see saveNow()). The common case — a parseable newer
+	 * snapshot — recovers inline within the same saveNow() call and never
+	 * sets this; it only reflects the rare "can't even merge" fallback.
+	 */
 	private staleGuardTripped = false;
+	/** CON-05: how many times this process has recovered from a stale-snapshot trip via merge. */
+	private staleGuardRecoveries = 0;
+	/** CON-05: wall-clock time of the most recent stale-snapshot recovery, for /api/health surfacing. */
+	private lastStaleGuardRecoveredAt: number | null = null;
 
 	constructor(stateDir: string) {
 		this.storeDir = stateDir;
@@ -378,6 +388,40 @@ export class SessionStore {
 		}
 	}
 
+	/**
+	 * CON-05: full read+parse of `sessions.json` (epoch AND rows), used by the
+	 * stale-snapshot guard to merge-recover instead of latching forever. Only
+	 * returns non-null for a fully well-shaped v2 payload (version 2, numeric
+	 * epoch, `sessions` array of objects with a string `id`) — anything else
+	 * (torn read, legacy v1, corrupt shape) returns null so the caller falls
+	 * back to refusing rather than trusting content it can't validate.
+	 */
+	private readDiskSnapshotForMerge(): { epoch: number; sessions: PersistedSession[] } | null {
+		try {
+			if (!fs.existsSync(this.storeFile)) return null;
+			const raw = fs.readFileSync(this.storeFile, "utf-8");
+			const parsed = JSON.parse(raw);
+			if (
+				!parsed || typeof parsed !== "object" ||
+				(parsed as { version?: unknown }).version !== 2 ||
+				typeof (parsed as { epoch?: unknown }).epoch !== "number" ||
+				!Array.isArray((parsed as { sessions?: unknown }).sessions)
+			) {
+				return null;
+			}
+			const obj = parsed as { epoch: number; sessions: unknown[] };
+			const rows: PersistedSession[] = [];
+			for (const row of obj.sessions) {
+				if (row && typeof row === "object" && typeof (row as { id?: unknown }).id === "string") {
+					rows.push(row as PersistedSession);
+				}
+			}
+			return { epoch: obj.epoch, sessions: rows };
+		} catch {
+			return null;
+		}
+	}
+
 	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
 	private rotateBackups(): void {
 		try {
@@ -407,6 +451,22 @@ export class SessionStore {
 		return this.staleGuardTripped;
 	}
 
+	/**
+	 * CON-05 status surface for /api/health and the UI. `tripped` reflects the
+	 * rare unrecoverable case (see `staleGuardTripped` doc comment); `recoveries`
+	 * / `lastRecoveredAt` stay populated for the lifetime of the process even
+	 * after a successful merge-recovery, so an operator can tell "this store
+	 * hit a stale snapshot tonight" instead of the event vanishing the instant
+	 * it self-heals.
+	 */
+	getStaleGuardStatus(): { tripped: boolean; recoveries: number; lastRecoveredAt: number | null } {
+		return {
+			tripped: this.staleGuardTripped,
+			recoveries: this.staleGuardRecoveries,
+			lastRecoveredAt: this.lastStaleGuardRecoveredAt,
+		};
+	}
+
 	/** Epoch read from disk at construction. Test-visible. */
 	getLoadedEpoch(): number {
 		return this.loadedEpoch;
@@ -425,21 +485,58 @@ export class SessionStore {
 				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 
-			// Stale-snapshot guard: if the on-disk epoch is HIGHER than what we
-			// last loaded AND we have not yet written anything this process, refuse
-			// — we'd be clobbering newer state (e.g. cloud-sync / antivirus / manual
-			// restore from .pre-migration backup under a running gateway).
+			// Stale-snapshot guard (CON-05): if the on-disk epoch is HIGHER than
+			// what we last loaded AND we have not yet written anything this
+			// process, something rewrote sessions.json out from under us (a
+			// second gateway on the same state dir, cloud-sync/antivirus
+			// restore, a manual .pre-migration restore). We must not blindly
+			// overwrite it with our stale in-memory snapshot — but we also must
+			// not latch into a silent, permanent, whole-store outage: every
+			// mutation after a one-shot latch used to look like it landed while
+			// nothing was actually persisted for the rest of the process
+			// lifetime. Instead: fold the on-disk rows into memory (recovering
+			// this save) and keep the event visible via getStaleGuardStatus() /
+			// isStaleGuardTripped() for /api/health even after recovery.
 			const onDiskEpoch = this.peekDiskEpoch();
 			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
-				console.error(
-					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
-					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
-					`recovery (cloud sync / antivirus / .pre-migration). ` +
-					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
-					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
-				);
-				this.staleGuardTripped = true;
-				return;
+				const snapshot = this.readDiskSnapshotForMerge();
+				if (snapshot) {
+					// Merge, don't clobber: adopt any on-disk session we don't
+					// already know about (the other writer's state); for any id we
+					// both have, keep OUR in-memory copy — it's this process's own
+					// unsaved mutation for that session and is assumed newer for
+					// that specific row. Nothing on-disk-only is dropped.
+					let adopted = 0;
+					for (const row of snapshot.sessions) {
+						if (!this.sessions.has(row.id)) {
+							this.sessions.set(row.id, row);
+							adopted++;
+						}
+					}
+					console.error(
+						`[session-store] Stale-snapshot RECOVERED: on-disk epoch ${onDiskEpoch} was newer ` +
+						`than loaded epoch ${this.loadedEpoch} (second gateway / cloud-sync / antivirus / ` +
+						`.pre-migration restore?). Merged ${adopted} on-disk-only session(s) into memory, ` +
+						`kept this process's ${this.sessions.size - adopted} in-memory session(s) as-is, ` +
+						`and resumed persistence. Verify recent session activity — see ` +
+						`docs/design/session-store-crash-safety.md.`,
+					);
+					this.loadedEpoch = onDiskEpoch;
+					this.staleGuardRecoveries++;
+					this.lastStaleGuardRecoveredAt = Date.now();
+					// Fall through to the normal write path below, rebased on the
+					// on-disk epoch we just adopted.
+				} else {
+					console.error(
+						`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
+						`newer than loaded epoch ${this.loadedEpoch}, and the on-disk file could not be ` +
+						`safely parsed for merge-recovery (unexpected shape). ` +
+						`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
+						`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
+					);
+					this.staleGuardTripped = true;
+					return;
+				}
 			}
 
 			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;

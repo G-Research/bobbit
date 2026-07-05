@@ -771,6 +771,9 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	if (typeof healthData.orphanedTranscripts === "number") {
 		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
 	}
+	if (healthData.sessionStoreStaleRecovery && typeof healthData.sessionStoreStaleRecovery === "object") {
+		state.sessionStoreStaleRecovery = healthData.sessionStoreStaleRecovery;
+	}
 	const shouldCheckOAuthExpiry = !healthData.localhost && !healthData.aigw;
 
 	state.appView = "authenticated";
