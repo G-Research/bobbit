@@ -81,6 +81,8 @@ import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
 import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
 // STR-01 cohort 7: background-process, draft, abort, and prompt-section routes.
 import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
+import { registerLspRoutes } from "./routes/lsp-routes.js";
+import { TsServerSupervisor } from "./lsp/supervisor.js";
 // STR-01 cohort 8: maintenance and search-admin routes.
 import { registerMaintenanceRoutes } from "./routes/maintenance-routes.js";
 // STR-01 cohort 9: early server/system status routes.
@@ -2156,6 +2158,11 @@ export function createGateway(config: GatewayConfig) {
 	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
+	// Wave 1 of the `code_*` product tool group (docs/design/lsp-product-tools.md):
+	// one gateway-owned tsserver instance per worktree root, lazily spawned on
+	// first use. See src/server/routes/lsp-routes.ts for the HTTP surface
+	// `defaults/tools/code/extension.ts` proxies to.
+	const lspSupervisor = new TsServerSupervisor();
 	const rateLimiter = new RateLimiter();
 
 	const cleanupInterval = setInterval(() => {
@@ -2340,6 +2347,7 @@ export function createGateway(config: GatewayConfig) {
 					packContributionRegistry,
 					extensionChannelServices,
 					packRuntimeSupervisor: getActivePackRuntimeSupervisor(),
+					lspSupervisor,
 				});
 			} catch (err) {
 				// Central backstop: a route handler that throws (e.g. a durable
@@ -3330,6 +3338,7 @@ export function createGateway(config: GatewayConfig) {
 				await sandboxManager.shutdownAll();
 			}
 			await sessionManager.cleanupSandboxNetwork();
+			await lspSupervisor.shutdownAll();
 		},
 	};
 }
@@ -3434,6 +3443,7 @@ registerPreferencesRoutes(coreRouteTable);
 registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
 registerDirectoryBrowserRoutes(coreRouteTable);
+registerLspRoutes(coreRouteTable);
 registerSkillsRoutes(coreRouteTable);
 registerModelProviderRoutes(coreRouteTable);
 
@@ -3473,6 +3483,7 @@ interface HandleApiRouteDeps {
 	packContributionRegistry: PackContributionRegistry;
 	extensionChannelServices?: ExtensionChannelServices;
 	packRuntimeSupervisor?: PackRuntimeSupervisorLike;
+	lspSupervisor?: TsServerSupervisor;
 }
 
 async function handleApiRoute(
@@ -3517,6 +3528,7 @@ async function handleApiRoute(
 		packContributionRegistry,
 		extensionChannelServices,
 		packRuntimeSupervisor,
+		lspSupervisor,
 	} = deps;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
@@ -3749,6 +3761,8 @@ async function handleApiRoute(
 				defaultCwd: config.defaultCwd,
 				// Cohort 15 (model/provider routes) additions — append-only.
 				sandboxScope,
+				// Wave 1 LSP routes additions — append-only.
+				lspSupervisor,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;

@@ -97,6 +97,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/skills-routes.ts",
 	// STR-01 cohort 15 (model/provider settings routes).
 	"src/server/routes/model-provider-routes.ts",
+	// Wave 1 LSP product tools (docs/design/lsp-product-tools.md, F6).
+	"src/server/routes/lsp-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
