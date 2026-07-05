@@ -145,6 +145,9 @@ import {
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
+	computeEarlyReviewPhases,
+	isParallelReviewsEnabled,
+	type PhaseGroup,
 	isCommandStepSkippable,
 	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
@@ -2740,6 +2743,36 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * VER-07: an early-started review phase's command track failed. Discard
+	 * whatever verdicts the phase computed (or is still computing) — the
+	 * caller's skip branch writes the authoritative "Skipped — earlier phase
+	 * failed" result immediately after this returns, matching the fully-serial
+	 * path's persisted output exactly. Terminates any reviewer session that is
+	 * still running for this phase's steps so the discarded work stops
+	 * consuming provider time/tokens, using the same terminate + unregister
+	 * pattern as `cancelAllVerifications`/`cancelStaleVerifications`.
+	 */
+	private async _discardEarlyReviewPhase(
+		phaseSteps: PhaseGroup[],
+		promise: Promise<Array<{ index: number; stepResult: GateSignalStep }>>,
+		active: ActiveVerification,
+		goalId: string,
+	): Promise<void> {
+		for (const { index } of phaseSteps) {
+			const sessionId = active.steps[index]?.sessionId;
+			if (sessionId && active.steps[index]?.status === "running") {
+				try { await this.sessionManager?.terminateSession(sessionId); } catch { /* best-effort */ }
+				if (this.teamManager) {
+					try { await this.teamManager.unregisterReviewerSession(goalId, sessionId); } catch { /* ignore */ }
+				}
+			}
+		}
+		// The result (pass, fail, or thrown error) is irrelevant now — the
+		// caller is about to overwrite these steps with a skip result.
+		await promise.catch(() => { /* discarded */ });
+	}
+
+	/**
 	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
 	 * orphan chromium / playwright descendants don't survive the gateway exit.
 	 */
@@ -3186,11 +3219,455 @@ export class VerificationHarness {
 			}, undefined);
 			let phaseFailed = false;
 
+			// Run a single step within a phase. Extracted to a local const (rather
+			// than inlined in the phase loop below) so the exact same logic can be
+			// invoked either in its normal serial turn, or early — concurrently
+			// with the command phases that precede it — under BOBBIT_PARALLEL_REVIEWS
+			// (VER-07, see below). `phase` is passed explicitly (rather than closed
+			// over from a loop variable) for the same reason.
+			const runOneStep = async (
+				phaseStep: PhaseGroup,
+				phase: number,
+			): Promise<{ index: number; stepResult: GateSignalStep }> => {
+				const { step, index } = phaseStep;
+				const cached = cachedSteps.get(step.name);
+				if (cached) {
+					const cachedStatus = terminalStatusForStep(cached);
+					const cachedResult: GateSignalStep = { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? phase, output: `[cached from prior signal] ${cached.output}` };
+					if (!active.cancelled) this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_complete",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						stepIndex: index, stepName: step.name,
+						status: cachedResult.status ?? terminalStatusForStep(cachedResult),
+						durationMs: cachedResult.duration_ms || 0, output: cachedResult.output,
+						phase: cachedResult.phase ?? phase,
+					});
+					const av = this.activeVerifications.get(signal.id);
+					if (av && av.steps[index]) {
+						av.steps[index] = { ...av.steps[index], status: cachedResult.status ?? terminalStatusForStep(cachedResult), phase: cachedResult.phase ?? phase, durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+						this._persistActive();
+					}
+					return { index, stepResult: cachedResult };
+				}
+
+				let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
+				let artifact: GateSignalStep["artifact"];
+				const startTime = Date.now();
+
+				// Pre-generate sessionId for LLM review and agent-qa steps so we can broadcast it before the step starts
+				let stepSessionId: string | undefined;
+				if (step.type === "llm-review" || step.type === "agent-qa") {
+					const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
+					stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
+					active.steps[index].startedAt = Date.now();
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_started",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						stepIndex: index, stepName: step.name,
+						startedAt: active.steps[index].startedAt,
+						sessionId: stepSessionId, phase,
+					});
+					const av = this.activeVerifications.get(signal.id);
+					if (av && av.steps[index]) {
+						av.steps[index].sessionId = stepSessionId;
+						this._persistActive();
+					}
+				}
+
+				if (step.type === "command") {
+					active.steps[index].startedAt = Date.now();
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_started",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						stepIndex: index, stepName: step.name,
+						startedAt: active.steps[index].startedAt,
+						phase,
+					});
+					// Structural step resolution — see resolveStep() above.
+					// Component-linked steps run from the component's root path
+					// and resolve their shell command via components[name].commands.
+					// Free-form { run } steps run at the branch-container root (cwd).
+					let resolvedRun: string;
+					let resolvedCwd = cwd;
+					try {
+						const components = projectConfigStore?.getComponents() ?? [];
+						const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+						const r = resolveStep(step, components, cwd, {
+							workflow: goalForCtx?.workflowId ?? signal.goalId,
+							gate: signal.gateId,
+							stepIndex: index,
+						});
+						resolvedRun = r.runString ?? "";
+						resolvedCwd = r.cwd;
+					} catch (resolveErr) {
+						const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+						result = { passed: false, output: msg };
+						const duration_ms = Date.now() - startTime;
+						return { index, stepResult: { name: step.name, type: step.type, passed: false, status: "failed" as const, phase, output: msg, duration_ms, expect: step.expect } };
+					}
+					const cmd = this.substituteVars(resolvedRun, builtinVars, projectVars, agentVars, allGateStates);
+					// Auto-skip command steps whose run string is empty or contains
+					// unresolved template vars (e.g. {{project.build_command}} when the
+					// project has no build_command configured). Skipped-as-passed so
+					// optional infrastructure steps (build, custom commands) don't fail
+					// the gate for projects that don't define them.
+					const requiredBuiltinFailure = readyToMergeUnresolvedBuiltinFailure(signal.gateId, cmd);
+					const skipReason = requiredBuiltinFailure ? null : isCommandStepSkippable(cmd);
+					if (requiredBuiltinFailure) {
+						result = { passed: false, output: requiredBuiltinFailure };
+					} else if (skipReason) {
+						result = { passed: true, skipped: true, output: skipReason };
+					} else {
+						const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
+						if (!pushSafety.ok) {
+							result = { passed: false, output: pushSafety.reason };
+						} else {
+							const expectFailure = step.expect === "failure";
+
+							// Look up error_pattern for expect: failure steps
+							let errorPattern: string | undefined;
+							if (expectFailure) {
+								errorPattern = agentVars["error_pattern"];
+								if (!errorPattern && allGateStates) {
+									for (const [, gs] of allGateStates) {
+										if (gs.metadata?.["error_pattern"]) {
+											errorPattern = gs.metadata["error_pattern"];
+											break;
+										}
+									}
+								}
+							}
+
+							const streamCtx = {
+								goalId: signal.goalId, gateId: signal.gateId,
+								signalId: signal.id, stepIndex: index,
+							};
+
+							// For sandboxed goals, resolve the project container ID
+							// so the command runs inside the container (where the code lives).
+							// Also resolve the container-internal worktree path so the command
+							// runs on the goal's branch, not /workspace (the main branch).
+							let commandContainerId: string | undefined;
+							let commandCwd = resolvedCwd;
+							const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+							const isSandboxedGoal = sandboxedGoal?.sandboxed;
+							if (isSandboxedGoal && this.sessionManager) {
+								const sandboxMgr = this.sessionManager.getSandboxManager();
+								const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
+								if (sandboxMgr && goalCtx) {
+									const projectSandbox = sandboxMgr.get(goalCtx.project.id);
+									if (projectSandbox) {
+										try {
+											commandContainerId = await projectSandbox.getContainerId();
+											// Resolve the container worktree path for this goal's branch.
+											// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
+											const goalBranchName = sandboxedGoal?.branch;
+											if (goalBranchName) {
+												commandCwd = `/workspace-wt/${goalBranchName}`;
+											} else {
+												commandCwd = "/workspace";
+											}
+										} catch {
+											// Container unavailable — fall through to warning
+										}
+									}
+								}
+								if (!commandContainerId) {
+									const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
+									console.warn(warning);
+									this.broadcastFn(streamCtx.goalId, {
+										type: "gate_verification_step_output",
+										goalId: streamCtx.goalId, gateId: streamCtx.gateId,
+										signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
+										stream: "stderr", text: warning + "\n", ts: Date.now(),
+									});
+								}
+							}
+
+							if (this.commandSemaphore.available === 0) {
+								console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
+							}
+							await this.commandSemaphore.acquire();
+							try {
+								result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+							} finally {
+								this.commandSemaphore.release();
+							}
+						}
+					}
+				} else if (step.type === "subgoal") {
+					active.steps[index].startedAt = Date.now();
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_started",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						stepIndex: index, stepName: step.name,
+						startedAt: active.steps[index].startedAt,
+						phase,
+					});
+					result = await this.runSubgoalStep(step, signal, active, index);
+				} else if (step.type === "agent-qa") {
+					// agent-qa — spawn a one-shot test-engineer sub-agent
+					if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+						result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
+					} else {
+						const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+						// Non-backoff transients (JSON glitches, ECONNRESET, etc.) keep
+						// the legacy 3-attempt cap. Provider rate-limit / overload
+						// errors retry indefinitely with exponential backoff capped at
+						// 15 min — user corporate-subscription quotas can exceed any
+						// finite bound, and the right answer is to wait, not fail.
+						const maxBoundedAttempts = 3;
+						for (let attempt = 1; ; attempt++) {
+							if (active.cancelled) break;
+							const qaResult = await this.runAgentQaStep(
+								{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
+								cwd, signal.goalId, builtinVars,
+								signal.content, signal.metadata,
+								goalSpec, allGateStates, stepSessionId,
+							);
+							result = qaResult;
+							if (qaResult.artifact) {
+								artifact = qaResult.artifact;
+							}
+							const decision = shouldRetryVerificationStep({
+								passed: qaResult.passed, output: qaResult.output,
+								attempt, maxBoundedAttempts,
+								isTransient: isTransientQaError,
+							});
+							if (decision === "break") break;
+							const isBackoff = isProviderBackoffError(qaResult.output);
+							const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+							const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+							console.log(`[verification] Agent QA "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+							await this._sleepCancellable(delayMs, () => !!active.cancelled);
+						}
+					}
+				} else if (step.type === "human-signoff") {
+					// human-signoff — park on a deferred resolver until the user
+					// POSTs /signoff with a decision. No subprocess, no session.
+					//
+					// Bypass logic: ONLY `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a
+					// human-signoff step. There is intentionally NO fallback to
+					// BOBBIT_LLM_REVIEW_SKIP — a "human" gate must not share a
+					// bypass with `agent-qa` / `llm-review`, otherwise the global
+					// E2E harness (which sets BOBBIT_LLM_REVIEW_SKIP=1) would
+					// silently auto-approve every human gate. Removing the
+					// fallback was the Bug-1 defense-in-depth fix in the
+					// "Re-attempt: Sign-Off Gates" goal.
+					//
+					// Both `BOBBIT_HUMAN_SIGNOFF_SKIP` unset and `=0` park.
+					const skipHumanSignoff = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP === "1";
+					if (skipHumanSignoff) {
+						result = { passed: true, output: "Human sign-off skipped (BOBBIT_HUMAN_SIGNOFF_SKIP=1)." };
+					} else {
+						const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+						const label = step.label || step.name;
+						const startedAt = Date.now();
+						active.steps[index].startedAt = startedAt;
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index].awaitingHuman = true;
+							av.steps[index].humanPrompt = prompt;
+							av.steps[index].humanLabel = label;
+							this._persistActive();
+						}
+						if (!active.cancelled) this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_started",
+							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+							stepIndex: index, stepName: step.name,
+							startedAt, phase,
+						});
+						if (!active.cancelled) this.broadcastFn(signal.goalId, {
+							type: "gate_verification_awaiting_human",
+							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+							stepIndex: index, stepName: step.name,
+							label, prompt,
+						});
+						const key = `${signal.id}::${step.name}`;
+						const { promise, resolve: resolver } = deferred<SignoffOutcome>();
+						this.pendingSignoffs.set(key, resolver);
+						const outcome = await promise;
+						this.pendingSignoffs.delete(key);
+						if ("decision" in outcome) {
+							const fb = outcome.feedback?.trim();
+							result = {
+								passed: outcome.decision === "pass",
+								output: outcome.decision === "pass"
+									? (fb ? `Approved.\n\n${fb}` : "Approved.")
+									: (fb ? `Rejected.\n\n${fb}` : "Rejected."),
+							};
+						} else {
+							result = { passed: false, output: "Sign-off cancelled." };
+						}
+						const av2 = this.activeVerifications.get(signal.id);
+						if (av2 && av2.steps[index]) {
+							av2.steps[index].awaitingHuman = false;
+							this._persistActive();
+						}
+					}
+				} else {
+					// llm-review — spawn a one-shot reviewer sub-agent
+					if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+						result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
+					} else {
+						const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+						// See agent-qa branch above for the bounded vs. unbounded
+						// retry rationale — kept symmetric so both review paths
+						// survive a long provider rate-limit / overload window.
+						const maxBoundedAttempts = 3;
+						let finalAttempt = 0;
+						for (let attempt = 1; ; attempt++) {
+							finalAttempt = attempt;
+							if (active.cancelled) break;
+							result = await this.runLlmReviewStep(
+								{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+								cwd, builtinVars,
+								signal.content, signal.metadata,
+								goalSpec, allGateStates, signal.goalId, stepSessionId,
+								gate,
+							);
+							const decision = shouldRetryVerificationStep({
+								passed: result.passed, output: result.output,
+								attempt, maxBoundedAttempts,
+								isTransient: isTransientReviewError,
+							});
+							if (decision === "break") break;
+							const isBackoff = isProviderBackoffError(result.output);
+							const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+							const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+							console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+							await this._sleepCancellable(delayMs, () => !!active.cancelled);
+						}
+						if (!result.passed && !active.cancelled) {
+							result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
+						}
+					}
+				}
+
+				const duration_ms = Date.now() - startTime;
+
+				// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
+				// Failed sign-offs surface their feedback to the team lead via the same
+				// markdown-artifact channel as failed reviews — no extra steer plumbing needed.
+				if (!artifact && (step.type === "llm-review" || step.type === "human-signoff") && result.output && result.output.length > 0) {
+					artifact = {
+						content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
+						contentType: "text/markdown",
+					};
+				}
+
+				const resultStatus: TerminalGateSignalStepStatus = result.skipped ? "skipped" : result.passed ? "passed" : "failed";
+				if (!active.cancelled) this.broadcastFn(signal.goalId, {
+					type: "gate_verification_step_complete",
+					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+					stepIndex: index, stepName: step.name,
+					status: resultStatus,
+					durationMs: duration_ms, output: result.output || "",
+					sessionId: result.sessionId, phase,
+				});
+				const av = this.activeVerifications.get(signal.id);
+				if (av && av.steps[index]) {
+					av.steps[index] = { ...av.steps[index], status: resultStatus, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
+					this._persistActive();
+				}
+				const stepResult: GateSignalStep = {
+					name: step.name,
+					type: step.type,
+					passed: result.passed,
+					...(result.skipped ? { skipped: true } : {}),
+					status: resultStatus,
+					phase,
+					output: result.output,
+					duration_ms,
+					expect: step.expect,
+				};
+				if (artifact) stepResult.artifact = artifact;
+				if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
+				return { index, stepResult };
+			};
+
+			// --- VER-07: opt-in early start for test-independent llm-review phases ---
+			//
+			// llm-review steps only ever read the branch diff plus allGateStates
+			// (upstream-gate metadata resolved once, above, before any phase runs)
+			// — never a same-gate command step's output; the harness has no
+			// plumbing to feed phase-N output into a phase-(N+1) prompt. So the
+			// leading contiguous block of homogeneous llm-review phases (e.g.
+			// "Gap analysis"/"Code quality review"/"Bug hunt" at phase 2 in the
+			// default workflows) has no DATA dependency on the command phases
+			// (Build/typecheck/unit/e2e) that precede it — only the decision to
+			// keep its verdict does. Under BOBBIT_PARALLEL_REVIEWS=1, start that
+			// block concurrently with the command phases and join right where it
+			// would naturally run in the loop below.
+			//
+			// Safety: verdicts are never committed directly from the early
+			// promise. The join point re-enters the exact same `if (phaseFailed)`
+			// skip branch used today; on command failure it discards the
+			// concurrently-computed verdicts (terminating any reviewer session
+			// still in flight first) and writes the identical "Skipped — earlier
+			// phase failed" result the fully-serial path would have written. When
+			// the command track passes, the real verdicts are committed exactly
+			// as the serial path would have. Default OFF: earlyPhasePromises stays
+			// empty, so every phase falls through to the unchanged `else` branch
+			// below — byte-identical to pre-VER-07 behavior.
+			const parallelReviewsFlag = isParallelReviewsEnabled(process.env.BOBBIT_PARALLEL_REVIEWS);
+			const earlyReviewPhases = parallelReviewsFlag
+				? computeEarlyReviewPhases(sortedPhases, phaseGroups)
+				: new Set<number>();
+			const earlyPhasePromises = new Map<number, Promise<Array<{ index: number; stepResult: GateSignalStep }>>>();
+
+			if (earlyReviewPhases.size > 0) {
+				// If a restart-resumed signal already knows an earlier (non-review)
+				// phase failed, the review block will be discarded the instant the
+				// loop below reaches it — don't spawn reviewer sessions just to
+				// throw the verdicts away.
+				const minEarlyPhase = Math.min(...earlyReviewPhases);
+				const alreadyDoomed = earliestPreResolvedFailedPhase !== undefined && earliestPreResolvedFailedPhase < minEarlyPhase;
+				if (!alreadyDoomed) {
+					const orderedEarlyPhases = [...earlyReviewPhases].sort((a, b) => a - b);
+					for (const phase of orderedEarlyPhases) {
+						const phaseSteps = phaseGroups.get(phase)!;
+						const stepIndices = phaseSteps.map(ps => ps.index);
+						active.currentPhase = phase;
+						for (const { index } of phaseSteps) {
+							if (active.steps[index]?.status === "waiting") {
+								active.steps[index].status = "running";
+								active.steps[index].startedAt = Date.now();
+							}
+						}
+						this._persistActive();
+						this.broadcastFn(signal.goalId, {
+							type: "gate_verification_phase_started",
+							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+							phase, stepIndices,
+						});
+						const early = runVerificationPhaseSteps(phaseSteps, (ps) => runOneStep(ps, phase));
+						// Prevent an unhandledRejection while the command track is
+						// still running — the real outcome (success or failure) is
+						// observed later at the join point in the loop below.
+						early.catch(() => { /* observed at join */ });
+						earlyPhasePromises.set(phase, early);
+					}
+					console.log(`[verification] BOBBIT_PARALLEL_REVIEWS=1 — started review phase(s) [${orderedEarlyPhases.join(", ")}] concurrently with the command track for gate ${signal.gateId}`);
+				}
+			}
+
 			for (const phase of sortedPhases) {
 				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
+				const earlyPromise = earlyPhasePromises.get(phase);
+				if (earlyPromise) earlyPhasePromises.delete(phase);
+
 				if (phaseFailed) {
+					if (earlyPromise) {
+						// The command track failed — discard whatever this
+						// concurrently-started review phase computed (or is still
+						// computing) and stop any reviewer session still running.
+						// The skip results written just below are what actually
+						// get persisted, matching the fully-serial path exactly.
+						await this._discardEarlyReviewPhase(phaseGroups.get(phase)!, earlyPromise, active, signal.goalId);
+					}
 					// Skip all steps in this and subsequent phases
 					const phaseSteps = phaseGroups.get(phase)!;
 					for (const { step, index } of phaseSteps) {
@@ -3225,382 +3702,31 @@ export class VerificationHarness {
 				const phaseSteps = phaseGroups.get(phase)!;
 				const stepIndices = phaseSteps.map(ps => ps.index);
 
-				// Broadcast phase started — transition waiting steps in this phase to running
-				active.currentPhase = phase;
-				for (const { index } of phaseSteps) {
-					if (active.steps[index]?.status === "waiting") {
-						active.steps[index].status = "running";
-						active.steps[index].startedAt = Date.now();
+				let phaseResults: Array<{ index: number; stepResult: GateSignalStep }>;
+				if (earlyPromise) {
+					// Already broadcast + running since before the command track
+					// started (see the early-kickoff block above) — just join.
+					phaseResults = await earlyPromise;
+				} else {
+					// Broadcast phase started — transition waiting steps in this phase to running
+					active.currentPhase = phase;
+					for (const { index } of phaseSteps) {
+						if (active.steps[index]?.status === "waiting") {
+							active.steps[index].status = "running";
+							active.steps[index].startedAt = Date.now();
+						}
 					}
+					this._persistActive();
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_phase_started",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						phase, stepIndices,
+					});
+
+					// Run every step in this phase concurrently. Sequencing is expressed
+					// only by assigning steps to different phase numbers.
+					phaseResults = await runVerificationPhaseSteps(phaseSteps, (ps) => runOneStep(ps, phase));
 				}
-				this._persistActive();
-				this.broadcastFn(signal.goalId, {
-					type: "gate_verification_phase_started",
-					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-					phase, stepIndices,
-				});
-
-				// Run every step in this phase concurrently. Sequencing is expressed
-				// only by assigning steps to different phase numbers.
-				const phaseResults = await runVerificationPhaseSteps(
-					phaseSteps,
-					async ({ step, index }) => {
-						const cached = cachedSteps.get(step.name);
-						if (cached) {
-							const cachedStatus = terminalStatusForStep(cached);
-							const cachedResult: GateSignalStep = { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? phase, output: `[cached from prior signal] ${cached.output}` };
-							if (!active.cancelled) this.broadcastFn(signal.goalId, {
-								type: "gate_verification_step_complete",
-								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-								stepIndex: index, stepName: step.name,
-								status: cachedResult.status ?? terminalStatusForStep(cachedResult),
-								durationMs: cachedResult.duration_ms || 0, output: cachedResult.output,
-								phase: cachedResult.phase ?? phase,
-							});
-							const av = this.activeVerifications.get(signal.id);
-							if (av && av.steps[index]) {
-								av.steps[index] = { ...av.steps[index], status: cachedResult.status ?? terminalStatusForStep(cachedResult), phase: cachedResult.phase ?? phase, durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
-								this._persistActive();
-							}
-							return { index, stepResult: cachedResult };
-						}
-
-						let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
-						let artifact: GateSignalStep["artifact"];
-						const startTime = Date.now();
-
-						// Pre-generate sessionId for LLM review and agent-qa steps so we can broadcast it before the step starts
-						let stepSessionId: string | undefined;
-						if (step.type === "llm-review" || step.type === "agent-qa") {
-							const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
-							stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
-							active.steps[index].startedAt = Date.now();
-							this.broadcastFn(signal.goalId, {
-								type: "gate_verification_step_started",
-								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-								stepIndex: index, stepName: step.name,
-								startedAt: active.steps[index].startedAt,
-								sessionId: stepSessionId, phase,
-							});
-							const av = this.activeVerifications.get(signal.id);
-							if (av && av.steps[index]) {
-								av.steps[index].sessionId = stepSessionId;
-								this._persistActive();
-							}
-						}
-
-						if (step.type === "command") {
-							active.steps[index].startedAt = Date.now();
-							this.broadcastFn(signal.goalId, {
-								type: "gate_verification_step_started",
-								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-								stepIndex: index, stepName: step.name,
-								startedAt: active.steps[index].startedAt,
-								phase,
-							});
-							// Structural step resolution — see resolveStep() above.
-							// Component-linked steps run from the component's root path
-							// and resolve their shell command via components[name].commands.
-							// Free-form { run } steps run at the branch-container root (cwd).
-							let resolvedRun: string;
-							let resolvedCwd = cwd;
-							try {
-								const components = projectConfigStore?.getComponents() ?? [];
-								const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-								const r = resolveStep(step, components, cwd, {
-									workflow: goalForCtx?.workflowId ?? signal.goalId,
-									gate: signal.gateId,
-									stepIndex: index,
-								});
-								resolvedRun = r.runString ?? "";
-								resolvedCwd = r.cwd;
-							} catch (resolveErr) {
-								const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
-								result = { passed: false, output: msg };
-								const duration_ms = Date.now() - startTime;
-								return { index, stepResult: { name: step.name, type: step.type, passed: false, status: "failed" as const, phase, output: msg, duration_ms, expect: step.expect } };
-							}
-							const cmd = this.substituteVars(resolvedRun, builtinVars, projectVars, agentVars, allGateStates);
-							// Auto-skip command steps whose run string is empty or contains
-							// unresolved template vars (e.g. {{project.build_command}} when the
-							// project has no build_command configured). Skipped-as-passed so
-							// optional infrastructure steps (build, custom commands) don't fail
-							// the gate for projects that don't define them.
-							const requiredBuiltinFailure = readyToMergeUnresolvedBuiltinFailure(signal.gateId, cmd);
-							const skipReason = requiredBuiltinFailure ? null : isCommandStepSkippable(cmd);
-							if (requiredBuiltinFailure) {
-								result = { passed: false, output: requiredBuiltinFailure };
-							} else if (skipReason) {
-								result = { passed: true, skipped: true, output: skipReason };
-							} else {
-								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
-								if (!pushSafety.ok) {
-									result = { passed: false, output: pushSafety.reason };
-								} else {
-									const expectFailure = step.expect === "failure";
-
-									// Look up error_pattern for expect: failure steps
-									let errorPattern: string | undefined;
-									if (expectFailure) {
-										errorPattern = agentVars["error_pattern"];
-										if (!errorPattern && allGateStates) {
-											for (const [, gs] of allGateStates) {
-												if (gs.metadata?.["error_pattern"]) {
-													errorPattern = gs.metadata["error_pattern"];
-													break;
-												}
-											}
-										}
-									}
-
-									const streamCtx = {
-										goalId: signal.goalId, gateId: signal.gateId,
-										signalId: signal.id, stepIndex: index,
-									};
-
-									// For sandboxed goals, resolve the project container ID
-									// so the command runs inside the container (where the code lives).
-									// Also resolve the container-internal worktree path so the command
-									// runs on the goal's branch, not /workspace (the main branch).
-									let commandContainerId: string | undefined;
-									let commandCwd = resolvedCwd;
-									const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-									const isSandboxedGoal = sandboxedGoal?.sandboxed;
-									if (isSandboxedGoal && this.sessionManager) {
-										const sandboxMgr = this.sessionManager.getSandboxManager();
-										const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
-										if (sandboxMgr && goalCtx) {
-											const projectSandbox = sandboxMgr.get(goalCtx.project.id);
-											if (projectSandbox) {
-												try {
-													commandContainerId = await projectSandbox.getContainerId();
-													// Resolve the container worktree path for this goal's branch.
-													// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
-													const goalBranchName = sandboxedGoal?.branch;
-													if (goalBranchName) {
-														commandCwd = `/workspace-wt/${goalBranchName}`;
-													} else {
-														commandCwd = "/workspace";
-													}
-												} catch {
-													// Container unavailable — fall through to warning
-												}
-											}
-										}
-										if (!commandContainerId) {
-											const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
-											console.warn(warning);
-											this.broadcastFn(streamCtx.goalId, {
-												type: "gate_verification_step_output",
-												goalId: streamCtx.goalId, gateId: streamCtx.gateId,
-												signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
-												stream: "stderr", text: warning + "\n", ts: Date.now(),
-											});
-										}
-									}
-
-									if (this.commandSemaphore.available === 0) {
-										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-									}
-									await this.commandSemaphore.acquire();
-									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
-									} finally {
-										this.commandSemaphore.release();
-									}
-								}
-							}
-						} else if (step.type === "subgoal") {
-							active.steps[index].startedAt = Date.now();
-							this.broadcastFn(signal.goalId, {
-								type: "gate_verification_step_started",
-								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-								stepIndex: index, stepName: step.name,
-								startedAt: active.steps[index].startedAt,
-								phase,
-							});
-							result = await this.runSubgoalStep(step, signal, active, index);
-						} else if (step.type === "agent-qa") {
-							// agent-qa — spawn a one-shot test-engineer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
-								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
-							} else {
-								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								// Non-backoff transients (JSON glitches, ECONNRESET, etc.) keep
-								// the legacy 3-attempt cap. Provider rate-limit / overload
-								// errors retry indefinitely with exponential backoff capped at
-								// 15 min — user corporate-subscription quotas can exceed any
-								// finite bound, and the right answer is to wait, not fail.
-								const maxBoundedAttempts = 3;
-								for (let attempt = 1; ; attempt++) {
-									if (active.cancelled) break;
-									const qaResult = await this.runAgentQaStep(
-										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
-										cwd, signal.goalId, builtinVars,
-										signal.content, signal.metadata,
-										goalSpec, allGateStates, stepSessionId,
-									);
-									result = qaResult;
-									if (qaResult.artifact) {
-										artifact = qaResult.artifact;
-									}
-									const decision = shouldRetryVerificationStep({
-										passed: qaResult.passed, output: qaResult.output,
-										attempt, maxBoundedAttempts,
-										isTransient: isTransientQaError,
-									});
-									if (decision === "break") break;
-									const isBackoff = isProviderBackoffError(qaResult.output);
-									const delayMs = verificationRetryDelayMs(attempt, isBackoff);
-									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
-									console.log(`[verification] Agent QA "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
-									await this._sleepCancellable(delayMs, () => !!active.cancelled);
-								}
-							}
-						} else if (step.type === "human-signoff") {
-							// human-signoff — park on a deferred resolver until the user
-							// POSTs /signoff with a decision. No subprocess, no session.
-							//
-							// Bypass logic: ONLY `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a
-							// human-signoff step. There is intentionally NO fallback to
-							// BOBBIT_LLM_REVIEW_SKIP — a "human" gate must not share a
-							// bypass with `agent-qa` / `llm-review`, otherwise the global
-							// E2E harness (which sets BOBBIT_LLM_REVIEW_SKIP=1) would
-							// silently auto-approve every human gate. Removing the
-							// fallback was the Bug-1 defense-in-depth fix in the
-							// "Re-attempt: Sign-Off Gates" goal.
-							//
-							// Both `BOBBIT_HUMAN_SIGNOFF_SKIP` unset and `=0` park.
-							const skipHumanSignoff = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP === "1";
-							if (skipHumanSignoff) {
-								result = { passed: true, output: "Human sign-off skipped (BOBBIT_HUMAN_SIGNOFF_SKIP=1)." };
-							} else {
-								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								const label = step.label || step.name;
-								const startedAt = Date.now();
-								active.steps[index].startedAt = startedAt;
-								const av = this.activeVerifications.get(signal.id);
-								if (av && av.steps[index]) {
-									av.steps[index].awaitingHuman = true;
-									av.steps[index].humanPrompt = prompt;
-									av.steps[index].humanLabel = label;
-									this._persistActive();
-								}
-								if (!active.cancelled) this.broadcastFn(signal.goalId, {
-									type: "gate_verification_step_started",
-									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-									stepIndex: index, stepName: step.name,
-									startedAt, phase,
-								});
-								if (!active.cancelled) this.broadcastFn(signal.goalId, {
-									type: "gate_verification_awaiting_human",
-									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-									stepIndex: index, stepName: step.name,
-									label, prompt,
-								});
-								const key = `${signal.id}::${step.name}`;
-								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
-								this.pendingSignoffs.set(key, resolver);
-								const outcome = await promise;
-								this.pendingSignoffs.delete(key);
-								if ("decision" in outcome) {
-									const fb = outcome.feedback?.trim();
-									result = {
-										passed: outcome.decision === "pass",
-										output: outcome.decision === "pass"
-											? (fb ? `Approved.\n\n${fb}` : "Approved.")
-											: (fb ? `Rejected.\n\n${fb}` : "Rejected."),
-									};
-								} else {
-									result = { passed: false, output: "Sign-off cancelled." };
-								}
-								const av2 = this.activeVerifications.get(signal.id);
-								if (av2 && av2.steps[index]) {
-									av2.steps[index].awaitingHuman = false;
-									this._persistActive();
-								}
-							}
-						} else {
-							// llm-review — spawn a one-shot reviewer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
-								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
-							} else {
-								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								// See agent-qa branch above for the bounded vs. unbounded
-								// retry rationale — kept symmetric so both review paths
-								// survive a long provider rate-limit / overload window.
-								const maxBoundedAttempts = 3;
-								let finalAttempt = 0;
-								for (let attempt = 1; ; attempt++) {
-									finalAttempt = attempt;
-									if (active.cancelled) break;
-									result = await this.runLlmReviewStep(
-										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-										cwd, builtinVars,
-										signal.content, signal.metadata,
-										goalSpec, allGateStates, signal.goalId, stepSessionId,
-										gate,
-									);
-									const decision = shouldRetryVerificationStep({
-										passed: result.passed, output: result.output,
-										attempt, maxBoundedAttempts,
-										isTransient: isTransientReviewError,
-									});
-									if (decision === "break") break;
-									const isBackoff = isProviderBackoffError(result.output);
-									const delayMs = verificationRetryDelayMs(attempt, isBackoff);
-									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
-									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
-									await this._sleepCancellable(delayMs, () => !!active.cancelled);
-								}
-								if (!result.passed && !active.cancelled) {
-									result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
-								}
-							}
-						}
-
-						const duration_ms = Date.now() - startTime;
-
-						// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
-						// Failed sign-offs surface their feedback to the team lead via the same
-						// markdown-artifact channel as failed reviews — no extra steer plumbing needed.
-						if (!artifact && (step.type === "llm-review" || step.type === "human-signoff") && result.output && result.output.length > 0) {
-							artifact = {
-								content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
-								contentType: "text/markdown",
-							};
-						}
-
-						const resultStatus: TerminalGateSignalStepStatus = result.skipped ? "skipped" : result.passed ? "passed" : "failed";
-						if (!active.cancelled) this.broadcastFn(signal.goalId, {
-							type: "gate_verification_step_complete",
-							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-							stepIndex: index, stepName: step.name,
-							status: resultStatus,
-							durationMs: duration_ms, output: result.output || "",
-							sessionId: result.sessionId, phase,
-						});
-						const av = this.activeVerifications.get(signal.id);
-						if (av && av.steps[index]) {
-							av.steps[index] = { ...av.steps[index], status: resultStatus, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
-							this._persistActive();
-						}
-						const stepResult: GateSignalStep = {
-							name: step.name,
-							type: step.type,
-							passed: result.passed,
-							...(result.skipped ? { skipped: true } : {}),
-							status: resultStatus,
-							phase,
-							output: result.output,
-							duration_ms,
-							expect: step.expect,
-						};
-						if (artifact) stepResult.artifact = artifact;
-						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
-						return { index, stepResult };
-					},
-				);
 
 				// Store phase results
 				for (const { index, stepResult } of phaseResults) {
