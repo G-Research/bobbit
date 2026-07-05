@@ -189,7 +189,7 @@ Practical implications when authoring workflows:
   short-circuits later phases when an earlier phase fails, so the Ralph loop spends
   its iterations on the cheapest signal that's still red.
 - **Always include a gap-analysis step at design-time AND post-implementation**
-  (except quick-fix). Design-time gap analysis catches missing requirements before
+  (except `quick-fix` and `solo-fast`, which skip design-time review entirely). Design-time gap analysis catches missing requirements before
   the agent burns iterations; post-impl gap analysis catches drift between design
   and code. The `general`, `feature`, and per-component templates in this guide include both — use them as starting points when they fit the project.
   **Post-impl gap analysis must explicitly tell the reviewer to ignore documentation
@@ -337,7 +337,7 @@ Unrecognized free-form tokens are generally treated as runtime typos. Optional c
 
 These are the typical gate sets per workflow style. Generators MAY extend, prune, or reorder freely.
 
-> All non-quick-fix flows below include **both** a design-time gap-analysis step
+> All flows below except `quick-fix` and `solo-fast` include **both** a design-time gap-analysis step
 > (in `design-doc` / `issue-analysis`) and a post-implementation gap-analysis step
 > (in `implementation`, phase 2). See §3.1 — these two checks bracket the Ralph loop.
 
@@ -376,7 +376,16 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 - ready-to-merge
 ```
 
-### 6.5 Per-component & all-components flows (multi-component projects)
+### 6.5 `solo-fast` — deterministic solo/fast path
+
+```yaml
+- implementation   (build/check/unit in phase 1; one consolidated `reviewer` llm-review in phase 2)   # Ralph loop, no e2e
+- ready-to-merge
+```
+
+Leaner than `quick-fix`: no `e2e` step and a single consolidated review (`role: reviewer`) instead of the code-review + bug-hunt fan-out. Intended for low-risk, single-agent changes where one competent reviewer covering both quality and correctness is enough. Opt-in only — a goal must explicitly select this workflow; nothing auto-routes a goal here based on diff size or risk (automatic risk classification, if built, is separate machinery — see the verification-persona findings for the risk-ladder context). Do not extend this template with additional review steps or reintroduce e2e — if a goal needs more coverage, use `quick-fix` or `general` instead.
+
+### 6.6 Per-component & all-components flows (multi-component projects)
 
 When `components.length > 1`, the project assistant's workflow-suggestion checklist may offer two derived families on top of the canonical templates (no options are pre-checked — the assistant picks them only when they fit the project):
 
@@ -385,7 +394,7 @@ When `components.length > 1`, the project assistant's workflow-suggestion checkl
 
 Both helpers reuse the canonical prompts and `readyToMergeGate()` exported by `seed-default-workflows.ts` so gate semantics stay in one place. Don't hand-roll variants in `project.yaml::workflows` — derive from these helpers instead so renaming a step prompt updates every flow.
 
-### 6.5 `pr-review` (opt-in)
+### 6.7 `pr-review` (opt-in)
 
 ```yaml
 - review           (llm-review against an existing PR)

@@ -1,6 +1,6 @@
 /**
- * Canonical inline-workflow definitions for the four built-in workflow IDs:
- * `general`, `feature`, `bug-fix`, `quick-fix`.
+ * Canonical inline-workflow definitions for the built-in workflow IDs:
+ * `general`, `feature`, `bug-fix`, `quick-fix`, `solo-fast`.
  *
  * Used by the project.yaml migration (`migrate-project-yaml.ts`) to seed
  * workflows for legacy projects that previously relied on the now-deleted
@@ -171,6 +171,27 @@ Focus on correctness, edge cases, error paths, cross-system interactions, concur
 
 For every finding, include file:line, reproduction conditions, consequence, and why it is a bug.`;
 
+/**
+ * `solo-fast` workflow's single consolidated review — merges the code-quality
+ * and bug-hunt lenses (normally two separate reviewer sessions, see
+ * CODE_REVIEW_PROMPT / BUG_HUNT_PROMPT above) into one pass, for low-risk
+ * changes where a single competent reviewer is enough. See VER-05/W3.3.
+ */
+export const SOLO_FAST_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{baseBranch}}. This is the ONLY review this change gets before merge — cover both quality and correctness in one pass.
+
+Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
+Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
+For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
+
+Check:
+1. Correctness — logic errors, off-by-one, race conditions, edge cases (null/undefined, empty arrays, boundary values)
+2. Actionable bugs — error paths, cross-system interactions, concurrency/lifecycle, dangerous behavior. Fail only for critical/high actionable bugs.
+3. Error handling — missing try/catch, unhandled promise rejections
+4. Code style — consistent naming, no dead code, clear intent
+5. Test coverage — are new behaviors tested?
+
+For every bug finding, include file:line, reproduction conditions, consequence, and why it is a bug.`;
+
 export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
@@ -307,7 +328,7 @@ export function buildParentWorkflow(): SeededWorkflow {
 	};
 }
 
-/** Build the four canonical workflows targeting `componentName` (typically the project name). */
+/** Build the canonical workflows targeting `componentName` (typically the project name). */
 export function buildDefaultWorkflows(componentName: string): Record<string, SeededWorkflow> {
 	const c = componentName;
 
@@ -495,11 +516,54 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 		],
 	};
 
+	// VER-05/W3.3 — deterministic, workflow-level fast path (not an LLM risk
+	// judgment): opt-in per goal, selected the same way any other workflow is.
+	// Deliberately narrower than quick-fix: no e2e (900s) and one consolidated
+	// review instead of a 2-reviewer fan-out. Nothing changes for existing
+	// workflows/goals unless a goal explicitly picks "solo-fast".
+	//
+	// Automatic risk-based selection of this path (classifying a diff as
+	// low-risk and routing it here without the user asking) is explicitly out
+	// of scope — that is CLF-W3's classifier territory. This workflow only
+	// makes the fast path *available*; nothing auto-selects it.
+	//
+	// The "unit" step below still runs the full suite. TEST-01 landed
+	// explicit-path filtering (`npm run test:unit -- <paths>`) but there is no
+	// automatic diff→affected-files computation yet (that's diff-risk-model
+	// territory, same CLF-W3 seam) — wiring the unit step to auto-derive
+	// "affected" files from the branch diff belongs there, not here.
+	const soloFast: SeededWorkflow = {
+		id: "solo-fast",
+		name: "Solo Fast",
+		description: "Deterministic fast path for low-risk, single-agent changes — skip design/docs gates, drop e2e, and replace the reviewer fan-out with one consolidated review. Opt-in: select this workflow explicitly per goal.",
+		gates: [
+			{
+				id: "implementation",
+				name: "Implementation",
+				description: "Solo-fast Ralph loop (minimal): build, typecheck, unit, one consolidated review.",
+				verify: [
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Solo review", type: "llm-review", role: "reviewer", phase: 2, prompt: SOLO_FAST_REVIEW_PROMPT },
+				],
+			},
+			// No documentation gate (mirrors quick-fix) — wire ready-to-merge directly off implementation.
+			{
+				id: "ready-to-merge",
+				name: "Ready to Merge",
+				depends_on: ["implementation"],
+				verify: readyToMergeGate().verify,
+			},
+		],
+	};
+
 	return {
 		general,
 		feature,
 		"bug-fix": bugFix,
 		"quick-fix": quickFix,
+		"solo-fast": soloFast,
 		parent: buildParentWorkflow(),
 	};
 }

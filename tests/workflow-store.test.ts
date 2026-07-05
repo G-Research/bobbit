@@ -328,3 +328,37 @@ describe("InlineWorkflowStore — round-trip", () => {
 		assert.ok(!step.docGate);
 	});
 });
+
+// VER-05/W3.3 — the new `solo-fast` seed workflow (see
+// tests/seed-default-workflows.test.ts for its shape assertions) goes
+// through the exact same put()->normalizeWorkflow->serializeWorkflow->
+// getAll() round trip every other seeded workflow does; pin that its
+// snake_case `depends_on` / phased llm-review step survive that round trip
+// intact, same as the other four built-ins.
+describe("solo-fast seed workflow round-trips through put/getAll", () => {
+	it("preserves gates, depends_on, and the single consolidated review step", async () => {
+		const { buildDefaultWorkflows } = await import("../src/server/state-migration/seed-default-workflows.ts");
+		const seeded = buildDefaultWorkflows("myproj")["solo-fast"];
+
+		writeProjectYaml(projectFor([]));
+		const store = makeStore();
+		store.put(seeded as unknown as Parameters<InlineWorkflowStore["put"]>[0]);
+
+		const roundTripped = makeStore().get("solo-fast");
+		assert.ok(roundTripped, "solo-fast should round-trip through the store");
+		assert.equal(roundTripped!.name, "Solo Fast");
+
+		const gateIds = roundTripped!.gates.map((g) => g.id);
+		assert.deepEqual(gateIds, ["implementation", "ready-to-merge"]);
+
+		const readyToMerge = roundTripped!.gates.find((g) => g.id === "ready-to-merge")!;
+		assert.deepEqual(readyToMerge.dependsOn, ["implementation"]);
+
+		const impl = roundTripped!.gates.find((g) => g.id === "implementation")!;
+		const reviews = (impl.verify ?? []).filter((s) => s.type === "llm-review");
+		assert.equal(reviews.length, 1, "exactly one review step should survive the round trip");
+		assert.equal(reviews[0]!.role, "reviewer");
+		assert.equal(reviews[0]!.phase, 2);
+		assert.ok(!(impl.verify ?? []).some((s) => s.name === "E2E tests"), "e2e should stay absent after round trip");
+	});
+});
