@@ -8,7 +8,7 @@ import { ContextTraceStore } from "../src/server/agent/context-trace-store.ts";
 import { LifecycleHub, type HookCtx } from "../src/server/agent/lifecycle-hub.ts";
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.ts";
-import { ModuleHost } from "../src/server/extension-host/module-host-worker.ts";
+import { ModuleHost, type InvokeRequest } from "../src/server/extension-host/module-host-worker.ts";
 import { createServerHostApi } from "../src/server/extension-host/server-host-api.ts";
 import { createPackStore } from "../src/server/extension-host/pack-store.ts";
 
@@ -35,6 +35,24 @@ function fixtureProvider(tmp: string, id: string, body: string, budget: { maxTok
 		module: path.basename(file),
 		hooks: ["sessionSetup"],
 		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs ?? 30_000 },
+		config: { enabled: true },
+		listName: id,
+		sourceFile: path.join(tmp, "pack.yaml"),
+		packRoot: tmp,
+	};
+}
+
+/** Provider contribution for tests that stub `moduleHost.invoke` — no module
+ * file is ever imported, so none is written. The module basename IS the
+ * provider id, which is how the deferred-controlled stub host identifies which
+ * invocation belongs to which provider (via `req.url`). */
+function stubProvider(tmp: string, id: string, budget: { maxTokens?: number; timeoutMs: number }): ProviderContribution {
+	return {
+		id,
+		kind: "memory",
+		module: `${id}.mjs`,
+		hooks: ["sessionSetup"],
+		budget: { maxTokens: budget.maxTokens ?? 400, timeoutMs: budget.timeoutMs },
 		config: { enabled: true },
 		listName: id,
 		sourceFile: path.join(tmp, "pack.yaml"),
@@ -233,66 +251,126 @@ describe("LifecycleHub", () => {
 	// (b) merged block/trace ORDER still reflects registration order, never
 	// completion timing — the two properties the CLF coordination note calls out
 	// as the ones a future parallel-dispatch consumer must not break.
+	//
+	// The concurrency seam is `moduleHost.invoke` — `dispatch()` either fans the
+	// invokes out (`Promise.allSettled`) or awaits them one at a time; ModuleHost
+	// itself spawns an independent worker PER invoke with no internal queue, so
+	// LifecycleHub is the only place serialization could creep back in. These two
+	// pins therefore stub ModuleHost with CONTROLLABLE DEFERREDS (the VER-07
+	// precedent — see tests/verification-harness-parallel-reviews.test.ts): an
+	// invocation only completes when the test releases it, so concurrency and
+	// completion order are proven BY CONSTRUCTION. The former versions raced real
+	// worker-thread spawn + tsx transpile against fixed wall-clock margins
+	// (1200ms / 400ms sleeps), which flaked under full-suite concurrent load —
+	// worker startup routinely ate the margin.
 	it("dispatches providers concurrently against a shared deadline, not serial timeout-stacking", async () => {
 		const tmp = tmpDir();
-		const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
 		try {
-			// Each provider records its OWN start wall-clock (Date.now() — comparable
-			// across worker threads, unlike performance.now() which has a per-thread
-			// origin) before sleeping. Serial dispatch would show the SECOND
-			// provider's start offset from `dispatchT0` inflated by ~sleepMs (it would
-			// only begin after the first fully completed); concurrent dispatch shows
-			// both starting within ordinary worker-spinup jitter of `dispatchT0`.
-			const sleepMs = 1200;
-			const mk = (id: string) => fixtureProvider(
-				tmp,
-				id,
-				`export default { async sessionSetup() { const start = Date.now(); await new Promise((r) => setTimeout(r, ${sleepMs})); return { blocks: [{ id: "${id}", title: "${id}", authority: "memory", content: String(start), reason: "r", priority: 1 }] }; } };`,
-				{ timeoutMs: 10_000 },
-			);
-			const first = mk("first");
-			const second = mk("second");
+			// Deferred-controlled module host: records each invocation's provider id
+			// + the per-invoke timeout it was handed, and holds the invocation OPEN
+			// until the test releases it.
+			const started: string[] = [];
+			const timeouts = new Map<string, number | undefined>();
+			const releases = new Map<string, (result: unknown) => void>();
+			let onBothInFlight!: () => void;
+			const bothInFlight = new Promise<void>((resolve) => { onBothInFlight = resolve; });
+			const stubHost = {
+				invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown> {
+					const id = path.basename(new URL(req.url).pathname, ".mjs");
+					started.push(id);
+					timeouts.set(id, timeoutMs);
+					if (started.length === 2) onBothInFlight();
+					return new Promise((resolve) => { releases.set(id, resolve); });
+				},
+				dispose() {},
+			} as unknown as ModuleHost;
 
-			const dispatchT0 = Date.now();
-			const result = await hub(tmp, [first, second], moduleHost).dispatch("sessionSetup", base(tmp));
-			const startsById = new Map(result.blocks.map((b) => [b.id, Number(b.content)]));
+			const first = stubProvider(tmp, "first", { timeoutMs: 1_000 });
+			const second = stubProvider(tmp, "second", { timeoutMs: 2_000 });
 
-			const firstOffset = startsById.get("first")! - dispatchT0;
-			const secondOffset = startsById.get("second")! - dispatchT0;
-			assert.ok(firstOffset < sleepMs, `first should start well before ${sleepMs}ms, got ${firstOffset}ms`);
-			assert.ok(secondOffset < sleepMs, `second should start well before ${sleepMs}ms under concurrent dispatch, got ${secondOffset}ms (serial dispatch would stack this by ~${sleepMs}ms)`);
+			const dispatched = hub(tmp, [first, second], stubHost).dispatch("sessionSetup", base(tmp));
+			let dispatchSettled = false;
+			void dispatched.finally(() => { dispatchSettled = true; });
+
+			// (a) CONCURRENCY, by construction: BOTH invocations are observed
+			// in-flight while NEITHER has been released. Serial await-one-at-a-time
+			// dispatch could never call invoke() for `second` until `first`
+			// resolved — this await would deadlock (test timeout), it cannot
+			// spuriously pass under load.
+			await bothInFlight;
+			assert.deepEqual([...started].sort(), ["first", "second"], "both providers in flight before any completion");
+
+			// (b) SHARED deadline, not stacking: each invocation carries its OWN
+			// provider budget as the per-invoke timeout (deadline enforcement is
+			// delegated to ModuleHost per invoke, measured from its own start) —
+			// there is no hub-level serial accumulation to stack.
+			assert.equal(timeouts.get("first"), 1_000);
+			assert.equal(timeouts.get("second"), 2_000);
+
+			// Releasing only ONE provider must NOT settle dispatch — it waits for
+			// the slowest (max of deadlines), not the first completion.
+			releases.get("second")!({ blocks: [{ id: "second", title: "second", authority: "memory", content: "s", reason: "r", priority: 1 }] });
+			await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+			assert.equal(dispatchSettled, false, "dispatch must still be pending while a provider is in flight");
+
+			releases.get("first")!({ blocks: [{ id: "first", title: "first", authority: "memory", content: "f", reason: "r", priority: 1 }] });
+			const result = await dispatched;
+			assert.deepEqual(result.diagnostics, []);
+			// Registration order preserved even though `second` completed first.
+			assert.deepEqual(result.blocks.map((b) => b.id), ["first", "second"]);
 		} finally {
-			moduleHost.dispose();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
 
 	it("keeps registration-order determinism when a later-registered provider finishes first", async () => {
 		const tmp = tmpDir();
-		const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
 		try {
 			const trace = new ContextTraceStore(path.join(tmp, "state"));
 			// `slow` is registered FIRST but finishes LAST; `fast` is registered
-			// SECOND but finishes immediately. Equal priority ⇒ the tie-break is
-			// original registration index, so both the returned blocks AND the
-			// persisted trace row order must reflect registration, never completion.
-			const slow = fixtureProvider(tmp, "slow", `export default { async sessionSetup() { await new Promise((r) => setTimeout(r, 400)); return { blocks: [{ id: "slow", title: "slow", authority: "memory", content: "s", reason: "r", priority: 5 }] }; } };`, { timeoutMs: 10_000 });
-			const fast = fixtureProvider(tmp, "fast", `export default { async sessionSetup() { return { blocks: [{ id: "fast", title: "fast", authority: "memory", content: "f", reason: "r", priority: 5 }] }; } };`, { timeoutMs: 10_000 });
+			// SECOND but finishes FIRST — sequencing FORCED by deferreds (the old
+			// version used a real 400ms sleep, which under load could invert and
+			// silently stop exercising the finishes-first scenario). Equal
+			// priority ⇒ the tie-break is original registration index, so both the
+			// returned blocks AND the persisted trace row order must reflect
+			// registration, never completion.
+			const releases = new Map<string, (result: unknown) => void>();
+			let onBothInFlight!: () => void;
+			const bothInFlight = new Promise<void>((resolve) => { onBothInFlight = resolve; });
+			const stubHost = {
+				invoke(req: InvokeRequest): Promise<unknown> {
+					const id = path.basename(new URL(req.url).pathname, ".mjs");
+					return new Promise((resolve) => {
+						releases.set(id, resolve);
+						if (releases.size === 2) onBothInFlight();
+					});
+				},
+				dispose() {},
+			} as unknown as ModuleHost;
+
+			const slow = stubProvider(tmp, "slow", { timeoutMs: 10_000 });
+			const fast = stubProvider(tmp, "fast", { timeoutMs: 10_000 });
 
 			const lifecycleHub = new LifecycleHub({
 				registry: registry([slow, fast]),
-				moduleHost,
+				moduleHost: stubHost,
 				trace,
 				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
 			});
 
-			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "order-sess"));
+			const dispatched = lifecycleHub.dispatch("sessionSetup", base(tmp, "order-sess"));
+			await bothInFlight;
+			// GUARANTEED completion inversion: fast (registered second) fully
+			// resolves before slow is released.
+			releases.get("fast")!({ blocks: [{ id: "fast", title: "fast", authority: "memory", content: "f", reason: "r", priority: 5 }] });
+			releases.get("slow")!({ blocks: [{ id: "slow", title: "slow", authority: "memory", content: "s", reason: "r", priority: 5 }] });
+
+			const result = await dispatched;
 			assert.deepEqual(result.blocks.map((b) => b.id), ["slow", "fast"]);
 
 			const rows = trace.readTrace("order-sess");
 			assert.deepEqual(rows[0].providers.map((p) => p.id), ["slow", "fast"]);
 		} finally {
-			moduleHost.dispose();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
