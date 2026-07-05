@@ -19,6 +19,34 @@ import type { ProjectRegistry, RegisteredProject } from "../agent/project-regist
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
 import type { ProjectContext } from "../agent/project-context.js";
 import type { ProjectConfigStore } from "../agent/project-config-store.js";
+import type { ConfigCascade } from "../agent/config-cascade.js";
+import type { MarketplaceInstaller } from "../agent/marketplace-install.js";
+import type { MarketplaceSourceStore } from "../agent/marketplace-source-store.js";
+import type { McpReloadResult } from "../mcp/mcp-manager.js";
+import type { InstallScope } from "../agent/marketplace-install.js";
+import type { PackRuntimeStatus, PackRuntimeCapabilitySummary } from "../runtimes/index.js";
+import type { PackEntry } from "../agent/pack-types.js";
+import type { SkillMarketContext } from "../skills/slash-skills.js";
+import type { ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "../agent/session-setup.js";
+/**
+ * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
+ * there, not in a leaf module — it can't be imported here without recreating
+ * the server.ts import cycle this file exists to avoid). A pure interface
+ * shape, not logic: the two are kept in sync by TypeScript itself — any
+ * divergence between this copy and server.ts's is a structural-assignability
+ * compile error at the `coreCtx` construction site in `handleApiRoute`, not a
+ * silent behavioral drift.
+ */
+export interface PackRuntimeSupervisorLike {
+	list(projectId?: string): Promise<PackRuntimeStatus[]>;
+	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
+	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
+	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
+	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeStatus>;
+	down(packId: string, runtimeId: string, opts?: { projectId?: string; volumes?: boolean; removeState?: boolean }): Promise<PackRuntimeStatus>;
+	capabilitySummary(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeCapabilitySummary>;
+	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
+}
 
 export interface CoreRouteCtx {
 	req: http.IncomingMessage;
@@ -67,4 +95,54 @@ export interface CoreRouteCtx {
 	legacyQaTopLevelKeys: readonly string[];
 	/** The SERVER-scope ProjectConfigStore (handleApiRoute's `projectConfigStore` param) — the middle rung of the "resolved" view's project → server → default source cascade. */
 	serverProjectConfigStore: ProjectConfigStore;
+	// STR-01 cohort 2 (marketplace): appended, never reorder the fields above —
+	// a parallel cohort (project-config) is also appending to this interface.
+	// See src/server/routes/marketplace-routes.ts.
+	/** Per-gateway-instance singletons, threaded exactly like sessionManager/
+	 *  projectRegistry above (built fresh per request, same value for the life
+	 *  of one gateway). Both are optional because handleApiRoute's own params
+	 *  are (a pre-existing gateway-wiring detail, not request-shaped). */
+	marketplaceInstaller?: MarketplaceInstaller;
+	marketplaceSourceStore?: MarketplaceSourceStore;
+	packRuntimeSupervisor?: PackRuntimeSupervisorLike;
+	configCascade: ConfigCascade;
+	/** The server/default-scope config store (handleApiRoute's own `projectConfigStore` param). */
+	projectConfigStore: ProjectConfigStore;
+	// Small per-request closures already defined once in handleApiRoute and
+	// shared with not-yet-migrated legacy routes (mirrors the projects-cohort
+	// fields above).
+	invalidateResolverCaches(): void;
+	reloadMcpAfterMarketplaceMutation(scope?: InstallScope, projectId?: string): Promise<McpReloadResult | undefined>;
+	resolveProjectConfigStore(pid: string | null): ProjectConfigStore;
+	resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string;
+	skillMarketContext(projectId: string | null | undefined): SkillMarketContext;
+	// Pure module-level helpers in server.ts that are ALSO still called by
+	// not-yet-migrated legacy routes (e.g. /api/pack-runtimes/*) — stay defined
+	// once, in server.ts, threaded through here rather than duplicated or
+	// imported back (would recreate the import cycle STR-04 removed).
+	safeString(value: unknown): string | undefined;
+	readYamlMapping(file: string): Record<string, unknown> | null;
+	readConcretePackToolsFromGroups(packDir: string, toolGroups: readonly string[]): { tools: string[]; descriptions: Record<string, string> };
+	/** Returns non-null iff `packName` is a default-disabled built-in pack at server scope. Only the null-ness is observed by migrated callers. */
+	getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStore): unknown | null;
+	readForceEnabledPacks(store: ProjectConfigStore): Set<string>;
+	writeForceEnabledPacks(store: ProjectConfigStore, set: Set<string>): void;
+	loadPiExtensionContributionsFromRuntime(packRoot: string, manifest: NonNullable<PackEntry["manifest"]>): ResolvedPiExtensionContribution[];
+	piExtensionDiagnostic(status: PiExtensionDiagnostic["status"], code: string, message: string): PiExtensionDiagnostic;
+	normalisePiExtensionCatalogueRefs(entries: readonly (string | Record<string, unknown>)[] | undefined): Set<string>;
+	activationMcpContributionId(
+		entry: PackEntry,
+		mcp: { listName: string; serverName: string; subNamespace?: string },
+		metaDetails: Record<string, unknown>,
+		fallbackSourceId?: string,
+	): string;
+	operationMetadataForMcpContribution(
+		mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown },
+		metaDetails: Record<string, unknown>,
+	): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }>;
+	resolveRuntimeStartPlan(deploymentConfig: Record<string, unknown>): { start: boolean; mode?: string; config: Record<string, unknown> };
+	providerCarriesDeploymentMode(
+		provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
+		effectiveConfig?: Record<string, unknown>,
+	): boolean;
 }
