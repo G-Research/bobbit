@@ -12,6 +12,7 @@ import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
+import type { SwarmGroupStore } from "./swarm-group-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
@@ -145,10 +146,14 @@ export class GoalManager {
 	 * setupWorktreeAndStartTeam to create the worktree from the right base
 	 * branch. Set by server.ts on startup. */
 	private baseRefResolver?: (projectId: string) => string | undefined;
+	private swarmGroupStore?: SwarmGroupStore;
 	private liveSessionResolver?: () => WorktreeReferenceRecord[];
 	private readonly diagnosticsStateDir?: string;
 	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
 		this.baseRefResolver = resolver;
+	}
+	setSwarmGroupStore(store: SwarmGroupStore): void {
+		this.swarmGroupStore = store;
 	}
 	/** Returns the configured base ref for a project, if set. */
 	getBaseRef(projectId: string): string | undefined {
@@ -867,7 +872,7 @@ export class GoalManager {
 		// default, opts omitted) still gets the unconditional skip above —
 		// zero behavior change for the existing SWARM-W0 auto-merge-suppression
 		// contract and its pinning tests.
-		if (child.swarmGroup && !opts?.forceIntegrateSwarmWinner) {
+		if (child.swarmGroup && !opts?.forceIntegrateSwarmWinner && this.swarmGroupStore?.get(child.swarmGroup)?.reconcileMode !== "merge-all") {
 			return {
 				merged: false,
 				alreadyMerged: false,

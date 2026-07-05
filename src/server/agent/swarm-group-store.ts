@@ -89,6 +89,12 @@ export interface SwarmGroupRecord {
 	 * the first `recordArtifact` call's parameter, exactly as before.
 	 */
 	expectedSiblingIds?: string[];
+	/**
+	 * SWARM-W4.6: "pick-best" (default, absent = today's behavior byte-for-byte)
+	 * suppresses auto-merge for every swarmGroup child. "merge-all" lets
+	 * swarmGroup children merge exactly like ordinary non-swarm subgoals.
+	 */
+	reconcileMode?: "pick-best" | "merge-all";
 	/** SWARM-W1: opaque per-group config (token/wall-clock budgets, verify command) the governor/verifier read. Not interpreted by this store. */
 	config?: Record<string, unknown>;
 	/**
@@ -226,6 +232,7 @@ export class SwarmGroupStore {
 			allFailed: false,
 			updatedAt: Date.now(),
 			expectedSiblingIds: [...expectedSiblingIds],
+			reconcileMode: config?.reconcileMode === "merge-all" || config?.reconcileMode === "pick-best" ? config.reconcileMode : undefined,
 			config,
 		};
 		this.groups.set(swarmGroup, record);
@@ -270,6 +277,7 @@ export class SwarmGroupStore {
 			allFailed,
 			updatedAt: Date.now(),
 			expectedSiblingIds: existing?.expectedSiblingIds,
+			reconcileMode: existing?.reconcileMode,
 			config: existing?.config,
 			lastVerify: existing?.lastVerify,
 			integratedGoalId: existing?.integratedGoalId,

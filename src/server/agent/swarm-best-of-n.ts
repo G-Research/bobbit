@@ -41,8 +41,10 @@ import type { VerificationHarness } from "./verification-harness.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import type { PromptProfile } from "./system-prompt.js";
 
-/** Per-sibling override — the SAME prompt (`spec`) is shared by every sibling; only role varies. */
+/** Per-sibling override — best-of-N shares the same prompt; orchestrator-worker uses title/spec overrides for disjoint shards. */
 export interface BestOfNSiblingSpec {
+	title?: string;
+	spec?: string;
 	/** Optional per-sibling role override — omitted siblings resolve their role the normal way (goal/team defaults). Lets a best-of-N run vary role/model/thinking across candidates per design §4. */
 	suggestedRole?: string;
 }
@@ -89,7 +91,9 @@ export interface BestOfNSwarmOptions {
 	 * `"best-of-n"` — every existing caller is unaffected; only
 	 * `swarm-plan-fan-in.ts` passes `"plan-fan-in"`.
 	 */
-	topology?: "best-of-n" | "plan-fan-in";
+	topology?: "best-of-n" | "plan-fan-in" | "orchestrator-worker";
+	/** SWARM-W4.6 — top-level group merge semantics. Absent means pick-best behavior. */
+	reconcileMode?: "pick-best" | "merge-all";
 	/**
 	 * SWARM-W4.5 — narrow, opt-in F2/F22 prompt-slimming profile stamped onto
 	 * EVERY sibling goal created by this call (see `PersistedGoal.
@@ -123,9 +127,13 @@ export interface BestOfNSwarmDeps {
  * other child-spawn path uses.
  */
 export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSwarmOptions): Promise<BestOfNSwarmResult> {
-	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand, earlyKill, topology, siblingPromptProfile } = opts;
-	if (!Array.isArray(siblings) || siblings.length < 2) {
-		throw new Error("createBestOfNSwarm requires at least 2 siblings (N>=2) — one candidate is `solo`, not best-of-N");
+	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand, earlyKill, topology, reconcileMode, siblingPromptProfile } = opts;
+	const resolvedTopology = topology ?? "best-of-n";
+	const minSiblings = resolvedTopology === "orchestrator-worker" ? 1 : 2;
+	if (!Array.isArray(siblings) || siblings.length < minSiblings) {
+		throw new Error(resolvedTopology === "orchestrator-worker"
+			? "createBestOfNSwarm requires at least 1 orchestrator-worker shard"
+			: "createBestOfNSwarm requires at least 2 siblings (N>=2) — one candidate is `solo`, not best-of-N");
 	}
 	const ctx = deps.getContextForGoal(parentGoalId);
 	if (!ctx) throw new Error(`createBestOfNSwarm: project context not found for parent goal ${parentGoalId}`);
@@ -162,8 +170,9 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 	// carry-forward fix this module exists to close.
 	const created: PersistedGoal[] = [];
 	for (let i = 0; i < siblings.length; i++) {
-		const child = await goalManager.createGoal(`${title} (candidate ${i + 1})`, childCwd, {
-			spec,
+		const sibling = siblings[i];
+		const child = await goalManager.createGoal(sibling.title ?? `${title} (candidate ${i + 1})`, childCwd, {
+			spec: sibling.spec ?? spec,
 			workflowId,
 			resolvedWorkflow: resolvedWorkflowForChild,
 			projectId: parent.projectId,
@@ -188,7 +197,8 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 		wallClockMsPerNode,
 		verifyCommand,
 		earlyKill: earlyKill === true,
-		topology: topology ?? "best-of-n",
+		topology: resolvedTopology,
+		reconcileMode,
 	});
 
 	// Route the start through the SAME per-root scheduler every other

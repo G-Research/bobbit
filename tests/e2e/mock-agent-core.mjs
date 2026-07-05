@@ -623,6 +623,27 @@ export class MockAgentCore {
 
 		if (lower.includes("mock_error")) return { mockError: true };
 
+		if (text.includes("Decompose the following goal into 3 to 5 DISJOINT sub-question shards.")) {
+			return {
+				text: [
+					"```json",
+					JSON.stringify([
+						{
+							title: "Audit API surface",
+							spec: "Review the API route surface for the requested merge-all flow and report any required changes.",
+							rationale: "This shard is limited to REST/API behavior and does not need UI or storage changes.",
+						},
+						{
+							title: "Audit persistence path",
+							spec: "Review the swarm group persistence path for merge-all metadata and barrier convergence.",
+							rationale: "This shard is limited to stored group state and terminal artifact behavior.",
+						},
+					], null, 2),
+					"```",
+				].join("\n"),
+			};
+		}
+
 		// Extension-host litmus (tests/e2e/ui/extension-host.spec.ts): emit a
 		// `sample_action` tool call so the retry-demo pack's PACK renderer mounts in
 		// the live session view. The toolId is STABLE so the browser E2E can write a
