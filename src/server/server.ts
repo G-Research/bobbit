@@ -1,8 +1,8 @@
-import { exec, execFile as execFileCb } from "node:child_process";
+import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
-import { resolveGatewayDeps, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { configureLegacyTestRuntimeFlags, getLegacyTestRuntimeFlags, resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -100,7 +100,7 @@ import {
 } from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
-import { recordElapsed } from "./agent/profiling.js";
+import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
@@ -119,7 +119,7 @@ import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -518,7 +518,7 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
@@ -593,7 +593,9 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 const execAsync = promisify(exec);
-const execFileAsync = promisify(execFileCb);
+let serverCommandRunner: CommandRunner = realCommandRunner;
+let serverRemoteGitPolicy: RemoteGitPolicy = {};
+let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 
 function oneLineDescription(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -924,6 +926,7 @@ async function deleteRemoteGoalBranches(
 	extraBranches: readonly string[],
 	repoPath: string,
 	commandRunner: CommandRunner,
+	remotePolicy: RemoteGitPolicy = {},
 ): Promise<void> {
 	const branches = new Set<string>();
 	if (goal.branch) branches.add(goal.branch);
@@ -931,7 +934,7 @@ async function deleteRemoteGoalBranches(
 		if (b) branches.add(b);
 	}
 	if (branches.size === 0) return;
-	if (shouldSkipRemotePush()) return;
+	if (shouldSkipRemotePush(remotePolicy)) return;
 
 	// Multi-repo: iterate all configured repos and run `git push --delete` in
 	// each one in parallel. Single-repo collapses to a single repoPath.
@@ -1019,7 +1022,7 @@ export function buildGhPrMergeArgs(branch: string | undefined, method: string, a
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
 	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
-	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	const { stdout } = await serverCommandRunner.execFile("gh", [...args], { cwd, encoding: "utf-8", timeout });
 	return String(stdout);
 }
 
@@ -1189,22 +1192,16 @@ function splitGitShellCommand(cmd: string): string[] {
 }
 
 async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
-	if (commandRunner) {
-		if (containerId) {
-			const { stdout } = await commandRunner.execFile("docker", [
-				"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
-			], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-			return String(stdout).trim();
-		}
-		const { stdout } = await commandRunner.execFile("git", splitGitShellCommand(cmd), { cwd, encoding: "utf-8", timeout });
-		return String(stdout).trim();
-	}
+	const runner = commandRunner ?? serverCommandRunner;
 	if (containerId) {
-		// Run inside Docker container
-		const { stdout } = await execFileAsync("docker", [
+		const { stdout } = await runner.execFile("docker", [
 			"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
 		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		return stdout.trim();
+		return String(stdout).trim();
+	}
+	if (cmd.trim().startsWith("git ")) {
+		const { stdout } = await runner.execFile("git", splitGitShellCommand(cmd), { cwd, encoding: "utf-8", timeout });
+		return String(stdout).trim();
 	}
 	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
 	return stdout.trim();
@@ -1214,24 +1211,15 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 }
 
 async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
-	if (commandRunner) {
-		if (containerId) {
-			const { stdout } = await commandRunner.execFile("docker", [
-				"exec", "-w", cwd, containerId, "git", ...args,
-			], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-			return String(stdout).trim();
-		}
-		const { stdout } = await commandRunner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
-		return String(stdout).trim();
-	}
+	const runner = commandRunner ?? serverCommandRunner;
 	if (containerId) {
-		const { stdout } = await execFileAsync("docker", [
+		const { stdout } = await runner.execFile("docker", [
 			"exec", "-w", cwd, containerId, "git", ...args,
 		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		return stdout.trim();
+		return String(stdout).trim();
 	}
-	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
-	return stdout.trim();
+	const { stdout } = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
+	return String(stdout).trim();
 }
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
 async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
@@ -1791,14 +1779,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		...deps,
 		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
 	});
+	serverCommandRunner = gatewayDeps.commandRunner;
 	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
-	const configRuntimeOverrides = {
-		skipRemotePush: config.skipRemotePush,
-		skipNonLocalRemoteGit: config.skipNonLocalRemoteGit,
-		skipMcp: config.skipMcp,
-		skipWorktreePool: config.skipWorktreePool,
-		skipTitleGeneration: config.skipTitleGeneration,
-	};
 	const gatewayRuntimeFlags = {
 		...envRuntimeFlags,
 		skipRemotePush: config.skipRemotePush ?? envRuntimeFlags.skipRemotePush,
@@ -1815,7 +1797,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		skipWorktreePool: gatewayRuntimeFlags.skipWorktreePool,
 		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
 	};
-	const previousLegacyRuntimeFlags = configureLegacyTestRuntimeFlags(configRuntimeOverrides);
+	const remoteGitPolicy: RemoteGitPolicy = {
+		skipRemotePush: gatewayRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: gatewayRuntimeFlags.skipNonLocalRemoteGit,
+		e2eTmpRoot: gatewayRuntimeFlags.e2eTmpRoot,
+	};
+	serverRemoteGitPolicy = remoteGitPolicy;
+	serverRuntimeFlags = { e2e: gatewayRuntimeFlags.e2e, testNoExternal: gatewayRuntimeFlags.testNoExternal };
+	const worktreeSetupRuntime = {
+		skipNpmCi: gatewayRuntimeFlags.skipNpmCi,
+		recordSetupPath: gatewayRuntimeFlags.testRecordSetup,
+	};
+	configureProfilingRuntime({ e2eProfile: gatewayRuntimeFlags.e2eProfile, e2eProfileFlushMs: gatewayRuntimeFlags.e2eProfileFlushMs });
+	configureAigwRuntimeFlags({ skipAigwDiscovery: gatewayRuntimeFlags.skipAigwDiscovery, testNoExternal: gatewayRuntimeFlags.testNoExternal, e2e: gatewayRuntimeFlags.e2e });
 	let rpcBridgeFactoryRestored = false;
 	const restoreExplicitRpcBridgeFactory = () => {
 		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
@@ -1889,6 +1883,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		fsImpl: gatewayDeps.fsImpl,
 		clock: gatewayDeps.clock,
 		commandRunner: gatewayDeps.commandRunner,
+		remotePolicy: remoteGitPolicy,
+		worktreeSetupRuntime,
 	});
 	projectContextManager.initAll();
 
@@ -1984,6 +1980,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		clock: gatewayDeps.clock,
 		commandRunner: gatewayDeps.commandRunner,
 		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
+		remoteGitPolicy,
+		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
+		worktreeSetupRuntime,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -2353,7 +2352,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 	});
 
-	const staffManager = new StaffManager(projectContextManager);
+	const staffManager = new StaffManager(projectContextManager, { remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
 	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -2989,7 +2988,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -3134,8 +3133,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
-						const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
-						return stdout.trim() || null;
+						const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
+						return String(stdout).trim() || null;
 					} catch {
 						return null;
 					}
@@ -3234,7 +3233,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -3529,7 +3528,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				await sessionManager.cleanupSandboxNetwork();
 			} finally {
 				restoreExplicitRpcBridgeFactory();
-				configureLegacyTestRuntimeFlags(previousLegacyRuntimeFlags);
 			}
 		},
 	};
@@ -3895,6 +3893,8 @@ async function handleApiRoute(
 		orchestrationCore,
 		packStore: getPackStore(),
 		sessionSecretStore: sessionManager.sessionSecretStore,
+		commandRunner: serverCommandRunner,
+		noExternal: serverRuntimeFlags.testNoExternal || serverRuntimeFlags.e2e,
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
@@ -4108,7 +4108,7 @@ async function handleApiRoute(
 	// dedupe by seq and the message list stays stable.
 	const replayMatch = url.pathname.match(/^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/);
 	if (replayMatch && req.method === "POST") {
-		if (!getLegacyTestRuntimeFlags().e2e) { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
+		if (!serverRuntimeFlags.e2e) { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
 		const sessionId = replayMatch[1];
 		const session = sessionManager.getSession(sessionId);
 		if (!session) { json({ error: "session not found" }, 404); return; }
@@ -4782,7 +4782,7 @@ async function handleApiRoute(
 					const primaryRepoPath = isMultiRepo
 						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(body.rootPath);
-					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Only pin when the detected ref is grammar-valid AND present in
 					// every component repo — otherwise a manual save would reject it
 					// and it could break worktree creation for the lacking component.
@@ -4955,7 +4955,7 @@ async function handleApiRoute(
 					const primaryRepoPath = isMultiRepo
 						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(rootPath);
-					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Pin only if the detected ref exists in every component repo
 					// (mirrors save-time validation). See POST /api/projects above.
 					if (
@@ -5005,7 +5005,7 @@ async function handleApiRoute(
 			// checks add-time pinning applies (grammar + cross-component existence).
 			// The Settings "Detect from remote" button fills this value, so a
 			// non-saveable value here would be rejected by the normal Save path.
-			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			let detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 			if (
 				detected
 				&& (!isValidBaseRefBranchGrammar(detected)
@@ -5187,14 +5187,14 @@ async function handleApiRoute(
 						// repo, fail with the tag-specific message rather than the generic
 						// "not present" error.
 						try {
-							await execFileAsync("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
+							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
 							tagDetected = true;
 							break;
 						} catch {
 							// Not a tag in this repo — continue with branch-ref check below.
 						}
 						try {
-							await execFileAsync("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
+							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
 						} catch {
 							failures.push({
 								component: c.name,
@@ -6910,7 +6910,7 @@ async function handleApiRoute(
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
 			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!).catch(err => {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
@@ -10548,7 +10548,7 @@ async function handleApiRoute(
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
 		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
-		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer).catch(() => "master"));
+		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
@@ -11218,12 +11218,12 @@ async function handleApiRoute(
 
 		const remoteCwd = goal.repoPath || goal.cwd;
 		try {
-			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+			const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
 				cwd: remoteCwd,
 				encoding: "utf-8",
 				timeout: 5_000,
 			});
-			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(String(stdout).trim()), goal.branch);
 			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
 			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
 		} catch {
@@ -11264,7 +11264,7 @@ async function handleApiRoute(
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
 		try {
-			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -13147,7 +13147,7 @@ async function handleApiRoute(
 			// upstream config. Local-only sessions are explicitly durable via their
 			// local worktree and must not publish just because status was queried.
 			const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-			if (publishDecision && !shouldSkipRemotePush()) {
+			if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
 				publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
 					containerId: cid,
 					setUpstream: publishDecision.setUpstream,
@@ -13215,7 +13215,7 @@ async function handleApiRoute(
 		// explicitly durable via their local worktree and must not publish just
 		// because status was queried.
 		const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-		if (publishDecision && !shouldSkipRemotePush()) {
+		if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
 			publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
 				containerId: cid,
 				setUpstream: publishDecision.setUpstream,
@@ -13517,7 +13517,7 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-push — push local commits to remote
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
+		if (shouldSkipRemotePush(serverRemoteGitPolicy)) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
@@ -13539,7 +13539,7 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to project primary
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
+		if (shouldSkipRemotePush(serverRemoteGitPolicy)) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
@@ -13598,7 +13598,7 @@ async function handleApiRoute(
 			// For sandboxed sessions, write temp file inside container
 			const msgFile = cid ? `/tmp/SQUASH_MSG_${Date.now()}` : path.join(cwd, ".git", "SQUASH_MSG");
 			if (cid) {
-				await execFileAsync("docker", [
+				await serverCommandRunner.execFile("docker", [
 					"exec", "-w", cwd, cid, "/bin/sh", "-c", `cat > ${msgFile} << 'BOBBIT_EOF'\n${fullMessage}\nBOBBIT_EOF`,
 				], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
 			} else {
@@ -13717,7 +13717,7 @@ async function handleApiRoute(
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execFileAsync("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
@@ -15566,7 +15566,7 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
-	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager, commandRunner: serverCommandRunner, remotePolicy: serverRemoteGitPolicy });
 
 	// GET /api/maintenance/worktrees
 	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {

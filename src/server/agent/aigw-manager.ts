@@ -19,7 +19,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -625,9 +624,14 @@ export function applyPiOfflineEnv(hasInternet: boolean): void {
  * well-known LLM API endpoints. Returns true if any responds.
  * Called once — not repeated after startup.
  */
+let runtimeFlags = { skipAigwDiscovery: false, testNoExternal: false, e2e: false };
+
+export function configureAigwRuntimeFlags(flags: Partial<typeof runtimeFlags>): void {
+	runtimeFlags = { ...runtimeFlags, ...flags };
+}
+
 function externalNetworkBlockedForTests(): boolean {
-	const flags = getLegacyTestRuntimeFlags();
-	return flags.testNoExternal || flags.e2e;
+	return runtimeFlags.testNoExternal || runtimeFlags.e2e;
 }
 
 function isLocalHttpUrl(raw: string): boolean {
@@ -671,7 +675,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		// Users with a local aigw are typically offline; probe the public
 		// internet once and wire PI_OFFLINE accordingly. The probe is short
 		// (≤4s) and runs in parallel with no other startup work below.
-		if (!getLegacyTestRuntimeFlags().skipAigwDiscovery) {
+		if (!runtimeFlags.skipAigwDiscovery) {
 			try {
 				const hasInternet = await checkInternetAvailable();
 				applyPiOfflineEnv(hasInternet);
@@ -679,7 +683,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 				applyPiOfflineEnv(false);
 			}
 		}
-		if (getLegacyTestRuntimeFlags().skipAigwDiscovery) {
+		if (runtimeFlags.skipAigwDiscovery) {
 			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
 			return true;
 		}
@@ -697,7 +701,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	// Skip network probing + local-gateway auto-discovery when tests/CI opt out.
 	// Tests that exercise the /api/aigw/* endpoints configure the gateway
 	// explicitly and don't rely on the startup probe.
-	if (getLegacyTestRuntimeFlags().skipAigwDiscovery) return false;
+	if (runtimeFlags.skipAigwDiscovery) return false;
 
 	// Check internet
 	const hasInternet = await checkInternetAvailable();

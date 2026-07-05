@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult, type RemoteGitPolicy } from "../skills/git.js";
 import { runComponentSetups, resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
@@ -267,6 +267,8 @@ export class WorktreePool {
 	private worktreeRoot?: string;
 	/** Resolved once from the project root; never re-resolved against component repo paths. */
 	private resolvedWorktreeRoot: string;
+	private readonly remotePolicy: RemoteGitPolicy;
+	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
 
 	/**
 	 * Construct a worktree pool.
@@ -278,7 +280,7 @@ export class WorktreePool {
 	 * construction, `this.repoPath` is always the git root (or, when the
 	 * supplied path isn't a git working tree at all, the original input).
 	 */
-	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string; projectRoot?: string; commandRunner?: CommandRunner }) {
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string; projectRoot?: string; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } }) {
 		this.commandRunner = opts.commandRunner ?? realCommandRunner;
 		this.repoPath = resolveRepoToplevel(opts.repoPath, this.commandRunner);
 		this.targetSize = opts.targetSize ?? 2;
@@ -286,6 +288,8 @@ export class WorktreePool {
 		this.baseRefResolver = opts.baseRefResolver;
 		this.setupTimeoutResolver = opts.setupTimeoutResolver;
 		this.worktreeRoot = opts.worktreeRoot;
+		this.remotePolicy = opts.remotePolicy ?? {};
+		this.worktreeSetupRuntime = opts.worktreeSetupRuntime ?? {};
 		this.resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: opts.projectRoot ?? opts.repoPath, worktreeRoot: opts.worktreeRoot });
 	}
 
@@ -425,7 +429,7 @@ export class WorktreePool {
 		} catch (err) {
 			if (counters) counters.branchRenameErrors = 1;
 			console.error(`[worktree-pool] Branch rename failed (${entry.branchName} → ${targetBranch}):`, err);
-			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
+			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy).catch(() => {});
 			recordClaimTimer();
 			return null;
 		}
@@ -441,7 +445,7 @@ export class WorktreePool {
 					timeout: 10_000,
 				});
 			} catch { /* best-effort */ }
-			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
+			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy).catch(() => {});
 			recordClaimTimer();
 			return null;
 		}
@@ -470,7 +474,7 @@ export class WorktreePool {
 						timeout: 10_000,
 					});
 				} catch { /* best-effort */ }
-				cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
+				cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy).catch(() => {});
 				recordClaimTimer();
 				return null;
 			}
@@ -512,7 +516,7 @@ export class WorktreePool {
 			} catch (err) {
 				console.warn(`[worktree-pool] multi-repo claim aborted: container rename ${entry.worktreePath} → ${newContainer} failed: ${err instanceof Error ? err.message : err}`);
 				for (const w of worktrees) {
-					cleanupWorktree(w.repoPath, w.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
+					cleanupWorktree(w.repoPath, w.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy).catch(() => {});
 				}
 				return null;
 			}
@@ -599,7 +603,7 @@ export class WorktreePool {
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? { calls: 1, fetchResetErrors: 0, success: 0 } : undefined;
 		try {
-			const skipRemoteGitForTests = await shouldSkipRemoteGitForTests(worktreePath, "origin", this.commandRunner);
+			const skipRemoteGitForTests = await shouldSkipRemoteGitForTests(worktreePath, "origin", this.commandRunner, this.remotePolicy);
 			if (!skipRemoteGitForTests) {
 				try {
 					await this.execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
@@ -798,6 +802,7 @@ export class WorktreePool {
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
 							commandRunner: this.commandRunner,
+							remotePolicy: this.remotePolicy,
 							pushPolicy: "local-only",
 						});
 						if (set.worktrees.length === 0) {
@@ -822,6 +827,7 @@ export class WorktreePool {
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
 							commandRunner: this.commandRunner,
+							remotePolicy: this.remotePolicy,
 						});
 						container = result.worktreePath;
 						entry = {
@@ -852,6 +858,8 @@ export class WorktreePool {
 								branchContainer: container,
 								primaryWorktreeRoot: this.repoPath,
 								timeoutMs: setupTimeoutMs,
+								skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
+								recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
 								exec: async (cmd, cwd, env) => {
 									await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
 								},
@@ -901,7 +909,7 @@ export class WorktreePool {
 			return;
 		}
 		await Promise.allSettled(
-			entries.map(e => cleanupWorktree(this.repoPath, e.worktreePath, e.branchName, true, this.commandRunner)),
+			entries.map(e => cleanupWorktree(this.repoPath, e.worktreePath, e.branchName, true, this.commandRunner, this.remotePolicy)),
 		);
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: entries.length });
 		console.log(`[worktree-pool] Drained ${entries.length} pre-built worktree(s)`);

@@ -6,6 +6,7 @@ import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
+import type { RemoteGitPolicy } from "../skills/git.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -43,7 +44,7 @@ export class ProjectContextManager {
 
   constructor(
     registry: ProjectRegistry,
-    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner } = {},
+    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
   ) {
     this.registry = registry;
   }

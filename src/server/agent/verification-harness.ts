@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -2055,7 +2054,7 @@ export class VerificationHarness {
 	private async _rerunLlmReviewStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (getLegacyTestRuntimeFlags().skipLlmReview) {
+		if (this.skipLlmReview) {
 			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -2131,7 +2130,7 @@ export class VerificationHarness {
 	private async _rerunAgentQaStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (getLegacyTestRuntimeFlags().skipLlmReview) {
+		if (this.skipLlmReview) {
 			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -2215,6 +2214,7 @@ export class VerificationHarness {
 	private readonly broadcastFn: (goalId: string, event: any) => void;
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
+	private readonly skipLlmReview: boolean;
 
 	constructor(
 		stateDir: string,
@@ -2228,10 +2228,11 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; clock?: Clock } = {},
+		deps: { commandRunner?: CommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.clock = deps.clock ?? realClock;
+		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
 		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
@@ -3422,7 +3423,7 @@ export class VerificationHarness {
 							result = await this.runSubgoalStep(step, signal, active, index);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
-							if (getLegacyTestRuntimeFlags().skipLlmReview) {
+							if (this.skipLlmReview) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
@@ -3522,7 +3523,7 @@ export class VerificationHarness {
 							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
-							if (getLegacyTestRuntimeFlags().skipLlmReview) {
+							if (this.skipLlmReview) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);

@@ -1,5 +1,3 @@
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
-
 export type GithubReviewEvent = "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
 export type GithubReviewSide = "RIGHT" | "LEFT";
 
@@ -129,6 +127,7 @@ export interface SubmitGithubReviewOptions {
 	fetch?: FetchLike;
 	apiBaseUrl?: string;
 	token?: string;
+	noExternal?: boolean;
 }
 
 export interface GithubReviewSubmitResult {
@@ -219,11 +218,6 @@ export function buildGithubReviewPreview(
 	};
 }
 
-function externalNetworkBlockedForTests(): boolean {
-	const flags = getLegacyTestRuntimeFlags();
-	return flags.testNoExternal || flags.e2e;
-}
-
 function isLocalHttpUrl(raw: string): boolean {
 	try {
 		const host = new URL(raw).hostname.toLowerCase();
@@ -252,7 +246,7 @@ export async function submitGithubReview(
 
 	const payload = createGithubReviewPayload(preview, confirmation.event ?? "COMMENT");
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? "https://api.github.com";
-	if (externalNetworkBlockedForTests() && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
+	if (options.noExternal && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
 		return { ok: false, status: 403, submitted: false, message: `External GitHub API access is disabled in tests: ${apiBaseUrl}`, warnings: preview.warnings };
 	}
 	const url = `${apiBaseUrl}/repos/${encodeURIComponent(preview.target.owner)}/${encodeURIComponent(preview.target.repo)}/pulls/${preview.target.prNumber}/reviews`;
