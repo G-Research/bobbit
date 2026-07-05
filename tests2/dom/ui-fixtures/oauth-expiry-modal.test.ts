@@ -10,6 +10,8 @@ __syncBeforeAll(() => __syncCE());
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let authenticateGateway: typeof import("../../../src/app/session-manager.js").authenticateGateway;
+let stopSessionPolling: () => void = () => {};
+let stopSessionListPushSync: () => void = () => {};
 let renderAccountTab: typeof import("../../../src/app/settings-page.js").renderAccountTab;
 let __testResetAccountTab: typeof import("../../../src/app/settings-page.js").__testResetAccountTab;
 let setRenderApp: typeof import("../../../src/app/state.js").setRenderApp;
@@ -173,6 +175,12 @@ beforeAll(async () => {
 	({ render } = await import("lit"));
 	await import("../../../src/app/session-manager.js");
 	({ authenticateGateway } = await import("../../../src/app/session-manager.js"));
+	// authenticateGateway() starts background session pollers (setInterval poll +
+	// push-sync WebSocket + reconnect timers) that otherwise leak across files and
+	// throw fire-and-forget "document/localStorage is not defined" / "Connection
+	// timed out" stragglers under isolate:false. Capture their stop fns to shut
+	// them down in teardown.
+	({ stopSessionPolling, stopSessionListPushSync } = await import("../../../src/app/api.js"));
 	({ renderAccountTab, __testResetAccountTab } = await import("../../../src/app/settings-page.js"));
 	({ setRenderApp } = await import("../../../src/app/state.js"));
 	(window as any).open = () => null;
@@ -187,6 +195,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	stopSessionPolling();
+	stopSessionListPushSync();
 	await sleep(30);
 	closeModalIfOpen();
 	document.body.innerHTML = "";
@@ -198,7 +208,7 @@ afterEach(async () => {
 // once here (not per-test) — otherwise a debounced straggler render scheduled by
 // this file fires renderAccountFixture into a torn-down / foreign container
 // under isolate:false (the state module is shared across files).
-afterAll(() => { setRenderApp(() => {}); });
+afterAll(() => { setRenderApp(() => {}); stopSessionPolling(); stopSessionListPushSync(); });
 
 describe("OAuth expiry modal fixture (v2-dom)", () => {
 	const expired = (expires: number): OAuthStatus => ({ authenticated: false, expires });
