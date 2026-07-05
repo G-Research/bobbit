@@ -549,7 +549,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -3045,6 +3045,18 @@ export function createGateway(config: GatewayConfig) {
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
+			// Re-discover configured custom local providers (Ollama/LM Studio/vLLM/
+			// llama.cpp/manual) and refresh their models.json entries so restarts
+			// pick up whatever's currently running without requiring a manual
+			// re-save in Settings. Best-effort — an unreachable local server here
+			// just means that provider's models stay stale/absent this run.
+			if (!process.env.BOBBIT_SKIP_CUSTOM_PROVIDER_SYNC) {
+				try {
+					await syncCustomProviderModelsJson(preferencesStore);
+				} catch (err) {
+					console.warn("[custom-providers] Startup models.json sync failed:", (err as Error).message);
+				}
+			}
 			await initExtensionChannelsOnce();
 
 			// Initialize MCP servers (skip in test environments)
@@ -9301,6 +9313,18 @@ async function handleApiRoute(
 			configs.push(config);
 		}
 		preferencesStore.set("customProviders", configs);
+		// Mirror this config into ~/.bobbit/agent/models.json so the spawned
+		// pi-coding-agent runtime (which has its own model registry, separate
+		// from getAvailableModels()) can actually resolve set_model() for it —
+		// otherwise the model shows up "authenticated" in the picker but every
+		// session that selects it fails at spawn. Best-effort: a discovery
+		// failure here shouldn't fail the save (the config is still persisted
+		// and will be retried on next server startup / provider save).
+		try {
+			await syncCustomProviderModelsJson(preferencesStore);
+		} catch (err) {
+			console.error(`[custom-providers] Failed to sync "${config.name}" to models.json:`, err);
+		}
 		json({ ok: true, config });
 		return;
 	}
@@ -9313,8 +9337,16 @@ async function handleApiRoute(
 			return;
 		}
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
+		const removed = configs.find((c: CustomProviderConfig) => c.id === providerId);
 		const filtered = configs.filter((c: CustomProviderConfig) => c.id !== providerId);
 		preferencesStore.set("customProviders", filtered);
+		if (removed) {
+			try {
+				removeCustomProviderModelsJsonEntry(removed);
+			} catch (err) {
+				console.error(`[custom-providers] Failed to remove "${removed.name}" from models.json:`, err);
+			}
+		}
 		json({ ok: true });
 		return;
 	}

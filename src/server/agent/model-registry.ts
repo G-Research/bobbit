@@ -15,7 +15,7 @@ import https from "node:https";
 import { getProviders, getModels } from "@earendil-works/pi-ai";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
-import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
+import { inferMeta, discoverAigwModels, getAigwUrl, readModelsJson, writeModelsJson } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { CLAUDE_CODE_MODEL_ALIASES } from "./claude-code-config.js";
@@ -429,6 +429,118 @@ async function discoverCustomProviderModels(prefs: PreferencesStore): Promise<Ap
 		}
 	}
 	return results;
+}
+
+// ── Custom Provider → models.json sync ──────────────────────────────
+//
+// Discovery above (`discoverFromSingleConfig` et al.) only feeds
+// `getAvailableModels()`, i.e. what the browser's model picker and
+// server-side one-shot completions (title-gen, image-gen) can see. The
+// actual spawned `pi-coding-agent` subprocess that runs a session has its
+// own, separate model registry sourced from `~/.bobbit/agent/models.json`
+// (see aigw-manager.ts's `writeAigwModelsJson` for the equivalent aigw
+// path) — it does NOT read Bobbit's `customProviders` preference. Without
+// this sync, a configured Ollama/LM Studio/vLLM/llama.cpp/manual provider
+// shows up as "authenticated" in the picker but a session that selects it
+// fails at spawn with `Model "<provider>/<id>" not found. Use --list-models
+// to see available models.` — the model existed only in Bobbit's registry,
+// never in the file the agent binary actually consults.
+//
+// Bookkeeping: unlike aigw (one fixed "aigw" key), each custom provider
+// config owns its own models.json key (`config.name || config.id`), and
+// there can be several. We track the set of keys we last wrote so renames/
+// deletes/unreachable-provider syncs can prune stale entries without
+// touching keys owned by other writers (aigw, openai-model-additions,
+// built-ins).
+const CUSTOM_PROVIDER_KEYS_FIELD = "_bobbitCustomProviderKeys";
+
+// Conservative OpenAI-compat flags for local/self-hosted servers — mirrors
+// the non-Claude `openaiCompat` block in aigw-manager.ts's
+// `writeAigwModelsJson` (local servers generally don't support the newer
+// OpenAI-specific request fields).
+const LOCAL_OPENAI_COMPAT = {
+	supportsDeveloperRole: false,
+	supportsStore: false,
+	supportsUsageInStreaming: false,
+	supportsReasoningEffort: false,
+	supportsStrictMode: false,
+	maxTokensField: "max_tokens",
+} as const;
+
+/**
+ * Discover and write all configured custom local providers into
+ * `~/.bobbit/agent/models.json` so `pi-coding-agent` subprocesses can
+ * resolve `set_model(provider, id)` for them. Call after any
+ * `customProviders` preference change and once at server startup
+ * (mirrors `startupAigwCheck`'s re-discovery-on-boot behavior).
+ */
+export async function syncCustomProviderModelsJson(prefs: PreferencesStore): Promise<void> {
+	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
+	const data = readModelsJson();
+	const previousKeys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
+
+	// Common case: no custom providers configured, and none ever were —
+	// nothing to discover or prune, skip the read-modify-write entirely.
+	if (configs.length === 0 && previousKeys.length === 0) return;
+
+	if (!data.providers) data.providers = {};
+	const nextKeys: string[] = [];
+
+	for (const config of configs) {
+		// Image-generation-only provider types are not session models; leave
+		// their models.json wiring (if any) to image-generation.ts.
+		if (config.type === "openai-images" || config.type === "gemini-images" || config.type === "google-imagen") continue;
+
+		const key = config.name || config.id;
+		try {
+			const models = await discoverFromSingleConfig(config);
+			if (models.length === 0) continue;
+			data.providers[key] = {
+				baseUrl: `${config.baseUrl.replace(/\/+$/, "")}/v1`,
+				apiKey: config.apiKey || "none",
+				api: "openai-completions",
+				models: models.map(m => ({
+					id: m.id,
+					name: m.name,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					reasoning: m.reasoning,
+					input: m.input,
+					cost: m.cost,
+					compat: LOCAL_OPENAI_COMPAT,
+				})),
+			};
+			nextKeys.push(key);
+		} catch (err) {
+			console.error(`[model-registry] Failed to sync custom provider "${key}" to models.json:`, err);
+		}
+	}
+
+	// Prune keys we previously wrote whose owning config is now gone entirely
+	// (deleted or renamed to a different key). Conservative: a key whose
+	// config still exists but failed discovery this round (transient
+	// unreachable server) is left untouched — its models.json entry is stale
+	// but harmless, and will self-heal on the next successful sync.
+	for (const staleKey of previousKeys) {
+		if (!nextKeys.includes(staleKey) && !configs.some(c => (c.name || c.id) === staleKey)) {
+			delete data.providers[staleKey];
+		}
+	}
+	data[CUSTOM_PROVIDER_KEYS_FIELD] = nextKeys;
+
+	writeModelsJson(data);
+}
+
+/** Remove a single custom provider's entry from models.json immediately (used by the DELETE route so removal doesn't wait for the next full sync). */
+export function removeCustomProviderModelsJsonEntry(config: CustomProviderConfig): void {
+	const key = config.name || config.id;
+	const data = readModelsJson();
+	if (data.providers?.[key]) {
+		delete data.providers[key];
+		const keys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
+		data[CUSTOM_PROVIDER_KEYS_FIELD] = keys.filter(k => k !== key);
+		writeModelsJson(data);
+	}
 }
 
 async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<ApiModel[]> {

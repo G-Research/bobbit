@@ -621,6 +621,40 @@ The canary for `--tools` allowlist regressions has two layers, both pinning the 
 
 Run the unit pin on every commit and the integration canary before and after any `@earendil-works/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
 
+## Testing with local/cheap models
+
+Anthropic credentials are **not** required to use or test Bobbit — see [docs/internals.md](internals.md) ("Custom local providers" section) for the full investigation (there is no hard gate anywhere; `isSetupComplete()` is unrelated to provider credentials). For manual/exploratory testing — especially integration flows that don't need to assert on exact model output — pointing a real session at a local or cheap model avoids Anthropic rate limits, cost, and the OAuth/API-key hoop entirely.
+
+**When to use which:**
+
+| Need | Use |
+|---|---|
+| Unit/E2E CI assertions on agent behavior (tool calls, streaming, retries, …) | The RPC-protocol mock agent (`tests/e2e/mock-agent-core.mjs`) — see "Mock agent keywords" above. No real model call, deterministic, fast. Do **not** point CI tests at a real local model; `set_model` on the mock agent accepts any provider/id string without validating it against `models.json`, so it cannot catch model-registry wiring bugs — only a real agent binary does that (see the manual recipe below). |
+| Manual smoke-testing a real session end-to-end without burning Anthropic credits/limits | A local model via Ollama/LM Studio/vLLM (recipe below), or the NVIDIA aigw alternative. Good for `qa-spot`/exploratory passes where you need a **real** completion loop but don't care which model answers. |
+| Asserting on real model behavior/quality (real reasoning, real tool-choice quality) | `npm run test:manual` (`tests/manual-integration/**`) — the only gate-exempt real-LLM path; typically still uses your configured default provider, not a local model. |
+| A cheap-but-real model for `test:manual` runs to control cost | Configure `default.sessionModel` to a cheap/small model of whichever provider you already use, or an aigw/local model — `tests/manual-integration/**` doesn't hardcode a provider. |
+
+**Recipe: local Ollama, config-only, no code changes.** Ollama exposes an OpenAI-compatible surface at `<host>/v1`. Register it as a custom local provider (see [docs/internals.md](internals.md) for the full `customProviders` shape and the `models.json` bridge that makes the model actually session-selectable, not just visible in the picker):
+
+```bash
+ollama serve &                      # if not already running
+ollama pull qwen3:0.6b              # any small tool-use-capable model
+
+curl -X POST http://localhost:3001/api/custom-providers \
+  -H "Authorization: Bearer $(bobbit --show-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"local-ollama","name":"local-ollama","type":"vllm","baseUrl":"http://localhost:11434"}'
+
+curl -X PUT http://localhost:3001/api/preferences \
+  -H "Authorization: Bearer $(bobbit --show-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"default.sessionModel":"local-ollama/qwen3:0.6b"}'
+```
+
+New sessions now spawn against the local model with zero Anthropic credentials anywhere in the process. Verified live against a real `ollama serve` instance for this change (see the PR description for the transcript) — not something CI asserts on, since it's a real network call to a real local process.
+
+**NVIDIA aigw alternative.** If you already run an AI Gateway (`aigw.url` configured, see the "AI Gateway" sections in [docs/internals.md](internals.md)), any OpenAI-compatible or Bedrock-routed model it exposes works the same way — configure `default.sessionModel` to `aigw/<model-id>` instead of standing up a local server. Prefer this when you want a shared, team-wide cheap-model config rather than a per-machine local server.
+
 ## Target State
 
 | Layer | Tests | Runtime | Confidence |
