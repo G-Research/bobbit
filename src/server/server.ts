@@ -2765,8 +2765,8 @@ export function createGateway(config: GatewayConfig) {
 					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
 				}
 			}
-			writeContextWindowOverrides();
-			writeOpenAIModelAdditions();
+			await writeContextWindowOverrides();
+			await writeOpenAIModelAdditions();
 			// Re-discover configured custom local providers (Ollama/LM Studio/vLLM/
 			// llama.cpp/manual) and refresh their models.json entries so restarts
 			// pick up whatever's currently running without requiring a manual
@@ -7547,7 +7547,7 @@ async function handleApiRoute(
 		preferencesStore.set("customProviders", filtered);
 		if (removed) {
 			try {
-				removeCustomProviderModelsJsonEntry(removed);
+				await removeCustomProviderModelsJsonEntry(removed);
 			} catch (err) {
 				console.error(`[custom-providers] Failed to remove "${removed.name}" from models.json:`, err);
 			}
@@ -7655,7 +7655,7 @@ async function handleApiRoute(
 
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
-		removeAigw(preferencesStore);
+		await removeAigw(preferencesStore);
 		invalidateModelCache();
 		broadcastPreferencesChanged();
 		json({ ok: true });
