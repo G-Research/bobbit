@@ -77,6 +77,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/review-annotations-routes.ts",
 	// STR-01 cohort 7 (session utility routes).
 	"src/server/routes/session-utility-routes.ts",
+	// STR-01 cohort 8 (maintenance + search-admin routes).
+	"src/server/routes/maintenance-routes.ts",
 	// STR-01 cohort 9 (server/system routes).
 	"src/server/routes/server-system-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
