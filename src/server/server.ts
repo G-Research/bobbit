@@ -566,7 +566,8 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
+import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
@@ -772,6 +773,69 @@ export function readConcretePackToolsFromGroups(
 		}
 	}
 	return { tools, descriptions };
+}
+
+// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────────
+// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+// provider, entrypoints, runtime all absent) on a fresh server until the user
+// enables it OR it is "already configured" (live-setup preservation). The
+// overlay is injected into the SERVER-scope ProjectConfigStore so the single
+// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+// Marketplace endpoints) all observe the same effective state; it is never
+// persisted, so the dormancy invariant holds and an explicit user toggle (a
+// persisted record, or the force-enabled marker) always wins.
+//
+// These helpers are MODULE-scoped (not closed over createGateway) so the
+// activation PUT inside the top-level handleApiRoute shares them. The static
+// per-pack info is memoized and cleared on any pack-list mutation via
+// clearDefaultDisabledInfoCache(); the live gates (force-enabled marker +
+// persisted provider config) are read each call.
+interface DefaultDisabledInfo { allDisabled: DisabledRefs; packId: string; providerIds: string[] }
+const defaultDisabledInfoCache = new Map<string, DefaultDisabledInfo | null>();
+function clearDefaultDisabledInfoCache(): void { defaultDisabledInfoCache.clear(); }
+/** Resolve + memoize the default-disabled info for a SERVER-scope pack name, or
+ *  `null` when the pack is not default-disabled. An installed server market pack
+ *  wins over the built-in band (mirrors buildActivationCatalogue's resolution). */
+function getDefaultDisabledInfo(packName: string, serverStore: ProjectConfigStore): DefaultDisabledInfo | null {
+	const cached = defaultDisabledInfoCache.get(packName);
+	if (cached !== undefined) return cached;
+	let info: DefaultDisabledInfo | null = null;
+	const base = getProjectRoot();
+	let entry = scopeMarketPackEntries("server" as PackScope, base, serverStore.getPackOrder("server"))
+		.find((e) => e.manifest?.name === packName);
+	if (!entry || !entry.manifest) {
+		entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+	}
+	if (entry?.manifest?.defaultDisabled === true) {
+		const concrete = readConcretePackToolsFromGroups(entry.path, entry.manifest.contents.tools).tools;
+		let providerIds: string[] = [];
+		try { providerIds = loadPackContributions(entry.path, entry.manifest).providers.map((p) => p.id); }
+		catch { /* contributions optional; configured-check just sees no providers */ }
+		info = {
+			allDisabled: buildAllDisabledRefs(entry.manifest, concrete),
+			packId: packIdFromRoot(entry.path),
+			providerIds,
+		};
+	}
+	defaultDisabledInfoCache.set(packName, info);
+	return info;
+}
+/** Persisted marker key: pack names the user EXPLICITLY enabled. An explicit
+ *  enable clears all disabled refs (an empty record, indistinguishable from
+ *  "never touched"), so the marker disambiguates it from the default-disabled
+ *  baseline and makes the enable survive reboots. */
+const PACK_FORCE_ENABLED_KEY = "pack_force_enabled";
+function readForceEnabledPacks(store: ProjectConfigStore): Set<string> {
+	try {
+		const raw = store.get(PACK_FORCE_ENABLED_KEY);
+		const arr = raw ? (JSON.parse(raw) as unknown) : [];
+		return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
+	} catch { return new Set(); }
+}
+function writeForceEnabledPacks(store: ProjectConfigStore, set: Set<string>): void {
+	if (set.size === 0) store.remove(PACK_FORCE_ENABLED_KEY);
+	else store.set(PACK_FORCE_ENABLED_KEY, JSON.stringify([...set].sort()));
 }
 
 export function buildMarketToolRootsForProject(options: {
@@ -1726,6 +1790,44 @@ export function createGateway(config: GatewayConfig) {
 		disabled(scope, projectId, packName) {
 			return packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 		},
+	});
+
+	// ── Default-disabled built-in packs (e.g. Hindsight) ─────────────────────
+	// A built-in first-party pack may ship `defaultDisabled: true` in its manifest:
+	// it lists in the Marketplace built-in band but resolves DORMANT (tools,
+	// provider, entrypoints, runtime all absent) on a fresh server until the user
+	// enables it OR it is "already configured" (live-setup preservation). We inject
+	// a READ-TIME overlay into the SERVER-scope activation store so the single
+	// getPackActivation seam (cascade, registry, tool-manager, slash-skills,
+	// Marketplace endpoints) all observe the same effective state. The overlay is
+	// never persisted, so the dormancy invariant holds and an explicit user toggle
+	// (a persisted record, or the force-enabled marker) always wins.
+	//
+	// The static per-pack info + force-enabled marker live in module-scope helpers
+	// (getDefaultDisabledInfo / readForceEnabledPacks / writeForceEnabledPacks) so
+	// the activation PUT in handleApiRoute (a top-level function) shares them. Here
+	// we only INJECT the overlay resolver into the SERVER-scope store: it consults
+	// the memoized static info plus the live gates (force-enabled marker + persisted
+	// provider config) on each call (cheap, and only for default-disabled packs).
+	projectConfigStore.setDefaultActivationResolver((scope, packName, stored): DisabledRefs | undefined => {
+		if (scope !== "server") return undefined;
+		const info = getDefaultDisabledInfo(packName, projectConfigStore);
+		if (!info) return undefined;
+		const isForceEnabled = readForceEnabledPacks(projectConfigStore).has(packName);
+		let isConfigured = false;
+		if (!isForceEnabled && Object.keys(stored).length === 0) {
+			for (const pid of info.providerIds) {
+				const cfg = getPackStore().getSync<Record<string, unknown>>(info.packId, providerConfigStoreKey(pid));
+				if (isProviderConfigConfigured(cfg)) { isConfigured = true; break; }
+			}
+		}
+		return resolveDefaultActivationOverlay({
+			scope, packName, stored,
+			isDefaultDisabled: true,
+			isForceEnabled,
+			isConfigured,
+			allDisabledRefs: info.allDisabled,
+		});
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -3257,7 +3359,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); clearDefaultDisabledInfoCache(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -8732,6 +8834,12 @@ async function handleApiRoute(
 					// "update available" (they update with the app upgrade, §4.2).
 					updateAvailable: false,
 					sourceStatus: "ok" as const,
+					// Default-disabled built-in packs (manifest `defaultDisabled: true`, e.g.
+					// Hindsight) surface a stable wire field the Marketplace UI keys on
+					// (`defaultDisabled`) and the UI intent alias (`requiresGuidedSetup`) so the
+					// guided-setup wizard routes an explicit enable through configuration first.
+					defaultDisabled: e.manifest!.defaultDisabled === true,
+					requiresGuidedSetup: e.manifest!.defaultDisabled === true,
 				}));
 				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
 			} catch (err) { jsonError(500, err); }
@@ -9182,6 +9290,24 @@ async function handleApiRoute(
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
+			// Default-disabled built-in packs (e.g. Hindsight): maintain the explicit
+			// force-enabled marker so an explicit ENABLE persists. Enabling clears all
+			// disabled refs (an empty record — indistinguishable from "never touched",
+			// which the default-disabled overlay would otherwise re-disable), so we record
+			// the pack name in a marker that the overlay honours. Disabling-all (or any
+			// partial disable) drops the marker; the persisted record then wins verbatim.
+			// Only server-scope built-in packs are default-disabled, so this is inert for
+			// everything else.
+			if (targetScope === "server" && getDefaultDisabledInfo(packName, cfgStore) !== null) {
+				const nowAllEnabled = [
+					normalized.roles, normalized.tools, normalized.skills, normalized.entrypoints,
+					normalized.providers, normalized.mcp, normalized.piExtensions, normalized.runtimes,
+				].every((refs) => refs.length === 0) && !normalized.mcpOperations;
+				const marker = readForceEnabledPacks(cfgStore);
+				if (nowAllEnabled) marker.add(packName);
+				else marker.delete(packName);
+				writeForceEnabledPacks(cfgStore, marker);
+			}
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
 			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
@@ -13685,8 +13811,6 @@ async function handleApiRoute(
 		// Resolve target session (live or persisted).
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-
 
 		// Parse query params.
 		const qp = url.searchParams;
@@ -13724,7 +13848,25 @@ async function handleApiRoute(
 			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
-				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+				readContent: async () => {
+					if (targetPs.agentSessionFile) return sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager);
+					// Claude Code local-runtime sessions may have no on-disk
+					// agentSessionFile yet (the CLI owns its own transcript) — fall
+					// back to the live bridge's in-process `get_messages` so the
+					// transcript endpoint still resolves instead of 404ing.
+					const live = sessionManager.getSession(targetId);
+					const isClaudeCode = targetPs.runtime === "claude-code" || targetPs.modelProvider === "claude-code";
+					if (!isClaudeCode || !live?.rpcClient?.getMessages) return null;
+					const msgsResp = await live.rpcClient.getMessages();
+					const messages = Array.isArray(msgsResp?.data) ? msgsResp.data : msgsResp?.data?.messages;
+					if (!msgsResp?.success || !Array.isArray(messages) || messages.length === 0) return null;
+					return messages.map((message: any) => JSON.stringify({
+						type: "message",
+						id: message?.id,
+						ts: new Date().toISOString(),
+						message,
+					})).join("\n") + "\n";
+				},
 			});
 			json(envelope);
 		} catch (err) {

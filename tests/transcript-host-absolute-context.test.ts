@@ -60,7 +60,12 @@ describe("sandboxed persisted host-absolute transcript paths", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src", "server", "server.ts"), "utf-8");
 		assert.doesNotMatch(source, /SessionFsContext = \{ sandboxed: (?:targetPs|ps|extPs)\.sandboxed/);
 		assert.doesNotMatch(source, /const (?:srcCtx|dstCtx|copyCtx) = \{ sandboxed: !!ps\.sandboxed/);
-		assert.match(source, /readContent: \(\) => sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager\)/);
+		// GET /api/sessions/:id/transcript's readContent is async (it falls back to
+		// the live Claude Code bridge's get_messages when there is no on-disk
+		// agentSessionFile yet — see the Claude Code live-session fallback below),
+		// but it must still route the on-disk case through the host-absolute-aware
+		// `ctx` from `sessionFsContextForAgentFile`, never a raw sandboxed read.
+		assert.match(source, /if \(targetPs\.agentSessionFile\) return sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager\);/);
 		assert.match(source, /const srcCtx = sessionFsContextForAgentFile\(ps, sourceJsonl\)/);
 	});
 });
