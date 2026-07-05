@@ -6,7 +6,6 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import { caCertPath } from "../auth/tls.js";
-import { readToken } from "../auth/token.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -261,14 +260,11 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * env: BOBBIT_TOKEN + BOBBIT_GATEWAY_URL.
  *
  * Sandbox children receive these via `-e` in spawnDockerExec (from
- * options.gatewayToken / gatewayUrl); direct children previously got nothing.
- * After the S1 secret relocation the on-disk `<dir>/state/token` fallback in the
- * agent-side helpers (defaults/tools/_shared/gateway.ts, tool-guard-extension.ts,
- * tool-activation.ts) no longer resolves, so direct children could not call back
- * into the gateway. We mirror the sandbox behavior here, preferring any explicit
- * caller-supplied values, then the relocation-aware readToken() and the
- * gateway-url state file. The token is only ever passed via env — never written
- * to a project-reachable file.
+ * options.gatewayToken / gatewayUrl). Direct children use the same option, but
+ * only when SessionManager supplied a scoped token. Never fall back to the
+ * gateway admin token here: if no scoped token is provided, BOBBIT_TOKEN is
+ * omitted. The gateway URL still resolves from explicit options, env, or the
+ * gateway-url state file.
  *
  * Exported (with injectable deps) for deterministic unit testing without a real
  * spawn. Pinned by tests/rpc-bridge-gateway-env.test.ts.
@@ -276,18 +272,15 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
 export function resolveDirectGatewayEnv(
 	opts: { gatewayToken?: string; gatewayUrl?: string },
 	deps: {
-		readToken?: () => string | null;
 		stateDir?: () => string;
 		envGatewayUrl?: string;
 	} = {},
 ): Record<string, string> {
-	const readTokenFn = deps.readToken ?? readToken;
 	const stateDirFn = deps.stateDir ?? bobbitStateDir;
 	const envGatewayUrl = deps.envGatewayUrl ?? process.env.BOBBIT_GATEWAY_URL;
 
 	const env: Record<string, string> = {};
-	const token = opts.gatewayToken ?? readTokenFn();
-	if (token) env.BOBBIT_TOKEN = token;
+	if (opts.gatewayToken) env.BOBBIT_TOKEN = opts.gatewayToken;
 
 	let gwUrl = opts.gatewayUrl ?? envGatewayUrl;
 	if (!gwUrl) {
@@ -520,12 +513,9 @@ export class RpcBridge {
 	 * child's env: BOBBIT_TOKEN + BOBBIT_GATEWAY_URL.
 	 *
 	 * Sandbox children receive these via `-e` in spawnDockerExec (from
-	 * this.options.gatewayToken / gatewayUrl); direct children got nothing, and
-	 * after the S1 secret relocation the on-disk `<dir>/state/token` fallback in
-	 * the agent-side helpers no longer resolves. We mirror the sandbox behavior
-	 * here, preferring any explicit caller-supplied values, then the
-	 * relocation-aware readToken() and the gateway-url state file. The token is
-	 * only ever passed via env — never written to a project-reachable file.
+	 * this.options.gatewayToken / gatewayUrl). Direct children use the same option,
+	 * but only when SessionManager supplied a scoped token. Never fall back to the
+	 * gateway admin token in the agent env.
 	 */
 	private _resolveDirectGatewayEnv(): Record<string, string> {
 		return resolveDirectGatewayEnv({
