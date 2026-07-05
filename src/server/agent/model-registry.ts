@@ -12,7 +12,10 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels, getModel } from "@earendil-works/pi-ai";
+// Pure static-catalog reads — the durable pi-ai 0.80 replacement for the old
+// root `getProviders`/`getModels`/`getModel`. No `/compat` needed here since
+// none of these calls stream/complete a request.
+import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl, readModelsJson, writeModelsJson } from "./aigw-manager.js";
@@ -154,7 +157,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getModel(normalizedProvider as any, modelId as any) as {
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
 				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
 				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
 			} | undefined;
@@ -191,7 +194,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
  * Results are cached for 5 seconds.
  */
 export function getBuiltInProviderIds(): string[] {
-	return getProviders().map(provider => String(provider));
+	return getBuiltinProviders().map(provider => String(provider));
 }
 
 export async function getAvailableModels(
@@ -269,9 +272,9 @@ async function assembleModels(prefs: PreferencesStore, projectConfig?: { get(key
 	if (!aigwExclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
-			const providers = getProviders();
+			const providers = getBuiltinProviders();
 			for (const providerId of providers) {
-				const models = getModels(providerId as any);
+				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
 				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
 				const mergedModels = [

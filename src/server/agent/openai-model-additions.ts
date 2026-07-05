@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { getModels } from "@earendil-works/pi-ai";
+// Pure static-catalog read — durable pi-ai 0.80 replacement, no /compat needed.
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
 import { globalAgentDir } from "../bobbit-dir.js";
 import type { ApiModel } from "./model-registry.js";
@@ -172,7 +173,7 @@ function valuesEqual(a: unknown, b: unknown): boolean {
 
 function getBuiltInModel(provider: string, id: string): Record<string, unknown> | undefined {
 	try {
-		return (getModels(provider as any) as unknown as Array<Record<string, unknown>>).find((m) => m.id === id);
+		return (getBuiltinModels(provider as any) as unknown as Array<Record<string, unknown>>).find((m) => m.id === id);
 	} catch {
 		return undefined;
 	}
