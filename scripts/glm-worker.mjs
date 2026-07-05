@@ -19,9 +19,16 @@
  * the primary git worktree root). The key is NEVER logged, NEVER echoed,
  * and NEVER written anywhere other than the Authorization header.
  *
+ * Reasoning effort: defaults to high (`chat_template_kwargs: { thinking: true }` on every
+ * request), verified empirically against this endpoint — see the GLM_EFFORT/
+ * GLM_THINKING_ENABLED comment above chatCompletion() for the evidence and the knobs that
+ * were tried and rejected/no-opped. Override with env var BOBBIT_GLM_EFFORT=off (or
+ * low/false) to disable thinking mode, e.g. for cheap smoke calls.
+ *
  * Usage:
  *   node scripts/glm-worker.mjs --spec <spec.json> [--workdir <dir>]
  *     [--env-file <path>] [--max-rounds N] [--max-tokens N]
+ *   BOBBIT_GLM_EFFORT=off node scripts/glm-worker.mjs ...   # disable thinking mode
  *
  * spec.json:
  *   {
@@ -50,6 +57,26 @@ const DEFAULT_MAX_ROUNDS = 4;
 const DEFAULT_MAX_TOKENS = 8192;
 const TEST_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 4000;
+
+// Reasoning-effort knob, verified empirically against NVIDIA NIM's OpenAI-compatible
+// endpoint for z-ai/glm-5.2 (smoke-tested 2026-07-05, see PR history for the transcript):
+//   - `chat_template_kwargs: { thinking: true }` (vLLM/SGLang-style chat-template flag) —
+//     WORKS: accepted (200) and produces an observable behavior change — a `reasoning_content`
+//     field appears on the message and completion tokens rose ~4-5x on a reasoning-shaped
+//     prompt (947 vs 178 baseline tokens; 737 vs 178 on a second variant) vs. the same call
+//     without it.
+//   - `thinking: { type: "enabled" }` also works (same signal), but `chat_template_kwargs` is
+//     the documented vLLM/SGLang mechanism, so it's the one wired in as the default.
+//   - `reasoning_effort: "high"` (top-level) — a PLACEBO on this endpoint: accepted with no
+//     400, but produced no observable change (no `reasoning_content`, completion tokens within
+//     noise of baseline). Deliberately not used, to avoid a no-op knob masquerading as one that
+//     works.
+//   - `extra_body: {...}` and `reasoning: { effort: "high" }` — both rejected with HTTP 400
+//     ("Unsupported parameter(s)"); this endpoint does not implement either shape.
+// BOBBIT_GLM_EFFORT env var overrides the default ("high" = thinking enabled): set to
+// "off"/"low"/"false" to disable thinking mode (e.g. for cheap/fast smoke calls).
+const GLM_EFFORT = (process.env.BOBBIT_GLM_EFFORT || "high").toLowerCase();
+const GLM_THINKING_ENABLED = !["off", "low", "false", "0", "disable", "disabled"].includes(GLM_EFFORT);
 
 function printUsage() {
   console.error(
@@ -125,18 +152,22 @@ function loadKey(envFileArg, workdir) {
 }
 
 async function chatCompletion(key, messages, maxTokens) {
+  const body = {
+    model: MODEL,
+    messages,
+    max_tokens: maxTokens,
+    temperature: 0,
+  };
+  if (GLM_THINKING_ENABLED) {
+    body.chat_template_kwargs = { thinking: true };
+  }
   const res = await fetch(NVIDIA_CHAT_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      max_tokens: maxTokens,
-      temperature: 0,
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -144,7 +175,12 @@ async function chatCompletion(key, messages, maxTokens) {
   }
   const data = await res.json();
   const msg = data.choices?.[0]?.message;
-  return { content: msg?.content ?? "", usage: data.usage ?? {} };
+  const reasoningContent = msg?.reasoning_content ?? null;
+  return {
+    content: msg?.content ?? "",
+    usage: data.usage ?? {},
+    reasoningContentLen: reasoningContent ? String(reasoningContent).length : 0,
+  };
 }
 
 /** Parse `FILE: <path>` headers followed by a fenced code block. */
@@ -257,7 +293,17 @@ async function main() {
   const t0 = Date.now();
   const log = (obj) => console.log(JSON.stringify({ tMs: Date.now() - t0, ...obj }));
 
-  log({ event: "start", model: MODEL, workdir, editableFiles, contextFiles, testCommand, maxRounds });
+  log({
+    event: "start",
+    model: MODEL,
+    workdir,
+    editableFiles,
+    contextFiles,
+    testCommand,
+    maxRounds,
+    glmEffort: GLM_EFFORT,
+    glmThinkingEnabled: GLM_THINKING_ENABLED,
+  });
 
   let { code: rc, output: testOut } = runTests();
   let passed = rc === 0;
@@ -295,9 +341,9 @@ async function main() {
     for (round = 1; round <= maxRounds && !passed; round++) {
       roundsUsed = round;
       const roundStart = Date.now();
-      let content, usage;
+      let content, usage, reasoningContentLen;
       try {
-        ({ content, usage } = await chatCompletion(key, messages, maxTokens));
+        ({ content, usage, reasoningContentLen } = await chatCompletion(key, messages, maxTokens));
       } catch (err) {
         log({ event: "round_error", round, error: String((err && err.message) || err) });
         break;
@@ -313,7 +359,7 @@ async function main() {
           content:
             "No `FILE: <path>` blocks found in your reply. Reply with `FILE: <path>` followed by a fenced code block for each changed file.",
         });
-        log({ event: "round_no_blocks", round, ms: Date.now() - roundStart, usage });
+        log({ event: "round_no_blocks", round, ms: Date.now() - roundStart, usage, reasoningContentLen });
         continue;
       }
 
@@ -336,7 +382,15 @@ async function main() {
 
       ({ code: rc, output: testOut } = runTests());
       passed = rc === 0;
-      log({ event: "round_result", round, changed: roundChanged, testsPassed: passed, ms: Date.now() - roundStart, usage });
+      log({
+        event: "round_result",
+        round,
+        changed: roundChanged,
+        testsPassed: passed,
+        ms: Date.now() - roundStart,
+        usage,
+        reasoningContentLen,
+      });
 
       if (!passed) {
         messages.push({ role: "assistant", content });
