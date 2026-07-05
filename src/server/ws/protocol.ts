@@ -1,5 +1,30 @@
+import type { WebSocket } from "ws";
 import type { InboxEntry } from "../agent/inbox-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+
+/**
+ * Connection-scoped auth/session-binding state stamped directly onto the `ws`
+ * socket object (not tracked in a side map) so broadcast loops that already
+ * hold a `WebSocket` reference (`wss.clients`, `session.clients`) can read it
+ * in O(1) without a session lookup. Previously carried entirely through
+ * `(ws as any).<prop>` bags across ws/handler.ts and server.ts — see CQ-01.
+ * Fields are set once at auth time in handler.ts and read on the hot
+ * broadcast path in server.ts; a typo in either place now fails `npm run
+ * check` instead of silently reading `undefined` at runtime.
+ */
+export interface AuthenticatedWS extends WebSocket {
+	/** Set true once the connection completes the `auth` handshake. */
+	authenticated?: boolean;
+	/** Bound session id for a regular (non-viewer) connection. Never set on
+	 *  viewer sockets — goal broadcasts identify those via `isViewer`/`viewerGoalIds` instead. */
+	sessionId?: string;
+	/** True for a `/ws/viewer` (goal-dashboard) connection with no bound session. */
+	isViewer?: boolean;
+	/** Goal ids this viewer socket has explicitly subscribed to (viewer sockets only). */
+	viewerGoalIds?: Set<string>;
+	/** True when `sessionId` refers to an archived (read-only) session. */
+	isArchived?: boolean;
+}
 
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';

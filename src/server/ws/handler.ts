@@ -8,7 +8,7 @@ import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
-import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
+import type { AuthenticatedWS, ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
@@ -210,10 +210,11 @@ function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
 }
 
 function getViewerGoalIds(ws: WebSocket): Set<string> {
-	const existing = (ws as any).viewerGoalIds;
+	const authWs = ws as AuthenticatedWS;
+	const existing = authWs.viewerGoalIds;
 	if (existing instanceof Set) return existing;
 	const next = new Set<string>();
-	(ws as any).viewerGoalIds = next;
+	authWs.viewerGoalIds = next;
 	return next;
 }
 
@@ -324,6 +325,9 @@ export function handleWebSocketConnection(
 	channelRegistry?: ExtensionChannelRegistry,
 	channelOpenPermits?: ChannelOpenPermitService,
 ): void {
+	// Single typed cast at function entry — reused for every auth/session-binding
+	// field write/read below (see AuthenticatedWS in ws/protocol.ts, CQ-01).
+	const authWs = ws as AuthenticatedWS;
 	const ip = getClientIp(req);
 	let authenticated = false;
 	const clientId = randomUUID();
@@ -413,18 +417,18 @@ export function handleWebSocketConnection(
 
 			clearTimeout(authTimeout);
 			authenticated = true;
-			(ws as any).authenticated = true;
+			authWs.authenticated = true;
 
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
-				(ws as any).isViewer = true;
-				(ws as any).viewerGoalIds = new Set<string>();
+				authWs.isViewer = true;
+				authWs.viewerGoalIds = new Set<string>();
 				const initialGoalId = (msg as unknown as { goalId?: unknown }).goalId;
 				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
 					getViewerGoalIds(ws).add(initialGoalId);
 				}
 				send(ws, { type: "auth_ok" });
-				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
+				// Do NOT set authWs.sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
 			}
@@ -434,8 +438,8 @@ export function handleWebSocketConnection(
 				// Check if it's an archived session
 				const archived = sessionManager.getArchivedSession(sessionId);
 				if (archived) {
-					(ws as any).sessionId = sessionId;
-					(ws as any).isArchived = true;
+					authWs.sessionId = sessionId;
+					authWs.isArchived = true;
 					send(ws, { type: "auth_ok" });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
@@ -456,7 +460,7 @@ export function handleWebSocketConnection(
 			// Register client in session. Server-level broadcast helpers use this
 			// tag to avoid falling back regular session sockets into unrelated goal
 			// dashboard events.
-			(ws as any).sessionId = sessionId;
+			authWs.sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
 			// Pack-bound surface-token minting uses an app-connection protocol key so
@@ -603,13 +607,13 @@ export function handleWebSocketConnection(
 		}
 
 		// Viewer-only connections receive project broadcasts plus explicitly subscribed goal broadcasts.
-		if ((ws as any).isViewer) {
+		if (authWs.isViewer) {
 			handleViewerMessage(ws, msg);
 			return;
 		}
 
 		// Handle archived session commands (read-only)
-		if ((ws as any).isArchived) {
+		if (authWs.isArchived) {
 			switch (msg.type) {
 				case "get_state": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
