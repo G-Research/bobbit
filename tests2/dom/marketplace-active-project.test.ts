@@ -23,6 +23,12 @@ beforeEach(() => {
 		if (url.includes("/renderer")) {
 			return new Response(RENDERER_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
 		}
+		if (url.includes("/side-panel-workspace")) {
+			// Valid workspace body so the app's fire-and-forget hydrate/settleMutation
+			// (session-selection path, server-authoritative under happy-dom's http
+			// origin) resolves instead of throwing a run-failing unhandled rejection.
+			return new Response(JSON.stringify({ version: 1, tabs: [], activeTabId: "", sizeMode: "split" }), { status: 200, headers: { "Content-Type": "application/json" } });
+		}
 		return new Response(JSON.stringify({ tools: toolsResponse, packs: [] }), {
 			status: 200,
 			headers: { "Content-Type": "application/json" },

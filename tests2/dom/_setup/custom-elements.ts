@@ -61,6 +61,36 @@ if (proto && !proto.__bobbitDomBridge) {
 	proto.__bobbitDomBridge = true;
 }
 
+// Some app timers (e.g. render.ts's 2500ms header-toast timer, armed by a
+// module-level `bobbit-launcher-feedback` listener) call `renderApp()` — which
+// references the GLOBAL `requestAnimationFrame` — well after the test that armed
+// them. happy-dom's per-window RAF is torn down between files, so such a
+// straggler throws "requestAnimationFrame is not defined" as a run-failing
+// unhandled error even though the render callback itself is a no-op in tests.
+// Install a persistent setTimeout-backed fallback on globalThis so these
+// harmless stragglers never crash the run. (No assertion depends on RAF timing;
+// tests that need a real frame await it.)
+// vitest's happy-dom environment defines window globals (incl.
+// requestAnimationFrame) as OWN properties on globalThis at each file's setup and
+// `delete`s them at teardown (populateGlobal). A straggler node timer firing in
+// the teardown gap therefore hits an undefined bare `requestAnimationFrame` and
+// crashes the run. We install setTimeout-backed fallbacks on globalThis's
+// PROTOTYPE (non-enumerable): during a test the per-file own property shadows
+// them; in the teardown gap the own property is gone and bare-identifier lookup
+// falls through to the prototype — so `requestAnimationFrame` is ALWAYS a
+// function. (No assertion depends on RAF timing; tests that need a real frame
+// await it.) The render callback these stragglers invoke is a no-op in tests.
+function ensureAnimationFrame(): void {
+	const gproto = Object.getPrototypeOf(globalThis as any);
+	if (!gproto || (gproto as any).__bobbitFrameFallback) return;
+	const def = (name: string, value: (arg: any) => any) =>
+		Object.defineProperty(gproto, name, { value, configurable: true, writable: true, enumerable: false });
+	def("requestAnimationFrame", (cb: FrameRequestCallback) => setTimeout(() => cb(Date.now()), 0) as unknown as number);
+	def("cancelAnimationFrame", (id: any) => clearTimeout(id as ReturnType<typeof setTimeout>));
+	(gproto as any).__bobbitFrameFallback = true;
+}
+ensureAnimationFrame();
+
 function defineAllInto(ce: CustomElementRegistry | undefined): void {
 	if (!ce) return;
 	for (const [tag, cls] of recorded) {
@@ -75,6 +105,7 @@ function defineAllInto(ce: CustomElementRegistry | undefined): void {
  * component imports so anything defined during those imports is present.
  */
 export function syncCustomElements(): void {
+	ensureAnimationFrame();
 	defineAllInto((globalThis as any).customElements);
 	if (litCustomElements && litCustomElements !== (globalThis as any).customElements) defineAllInto(litCustomElements);
 	const dvCE = (litDocument as any)?.defaultView?.customElements;
