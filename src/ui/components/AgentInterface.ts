@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
+import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Info, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -183,6 +183,7 @@ export class AgentInterface extends LitElement {
 	 * "Continue in new session" button.
 	 */
 	@state() private _archivedProposalTypes: string[] = [];
+	@state() private _claudeCodeNoticeExpanded = false;
 	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
 	private _archivedProposalsFetchedFor: string | null = null;
 
@@ -220,6 +221,118 @@ export class AgentInterface extends LitElement {
 		if (this._archivedProposalsFetchedFor === sid) return;
 		// Fire-and-forget — render() does not await.
 		void this._refreshArchivedProposalTypes(sid);
+	}
+
+	private _modelRuntime(model: any): "pi" | "claude-code" {
+		return model?.runtime === "claude-code" || model?.provider === "claude-code" ? "claude-code" : "pi";
+	}
+
+	private _currentRuntime(): "pi" | "claude-code" {
+		if (this.sessionRuntime === "claude-code" || this.sessionRuntime === "pi") return this.sessionRuntime;
+		const stateRuntime = (this.session?.state as any)?.runtime;
+		if (stateRuntime === "claude-code" || stateRuntime === "pi") return stateRuntime;
+		return this._modelRuntime(this.session?.state?.model);
+	}
+
+	private _claudeCodeCapabilityNoticeKey(sessionId = this.session?.sessionId): string | null {
+		return sessionId ? `bobbit-claude-code-capability-notice-dismissed-${sessionId}` : null;
+	}
+
+	private _isClaudeCodeCapabilityNoticeDismissed(): boolean {
+		const key = this._claudeCodeCapabilityNoticeKey();
+		if (!key || typeof localStorage === "undefined") return false;
+		try { return localStorage.getItem(key) === "true"; } catch { return false; }
+	}
+
+	private _dismissClaudeCodeCapabilityNotice(): void {
+		const key = this._claudeCodeCapabilityNoticeKey();
+		try { if (key && typeof localStorage !== "undefined") localStorage.setItem(key, "true"); } catch { /* ignore storage failures */ }
+		this._claudeCodeNoticeExpanded = false;
+		this.requestUpdate();
+	}
+
+	private _openClaudeCodeRuntimeDocs(): void {
+		const opened = window.open("/docs/claude-code-runtime.md", "_blank", "noopener");
+		try { if (opened) opened.opener = null; } catch { /* ignore */ }
+		if (!opened) window.open("https://github.com/SuuBro/bobbit/blob/master/docs/claude-code-runtime.md", "_blank", "noopener");
+	}
+
+	private _renderClaudeCodeCapabilityNotice() {
+		const sessionId = this.session?.sessionId;
+		if (!sessionId || this._currentRuntime() !== "claude-code" || this._isClaudeCodeCapabilityNoticeDismissed()) return nothing;
+		const detailsId = `claude-code-capability-details-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+		const detailsGroup = (title: string, items: string[]) => html`
+			<div class="rounded-md border border-border bg-background/40 p-2" data-testid="claude-code-capability-detail-group">
+				<div class="font-medium text-foreground mb-1">${title}</div>
+				<ul class="m-0 pl-4 text-muted-foreground">
+					${items.map((item) => html`<li>${item}</li>`)}
+				</ul>
+			</div>
+		`;
+		return html`
+			<section
+				role="note"
+				data-testid="claude-code-capability-notice"
+				class="mx-4 my-3 p-3 rounded-lg border border-border bg-card text-card-foreground text-sm"
+			>
+				<div class="flex items-start gap-3">
+					<span class="text-primary shrink-0 mt-0.5" aria-hidden="true">${icon(Info, "sm")}</span>
+					<div class="min-w-0 flex-1">
+						<div class="flex items-center gap-2 flex-wrap">
+							<div class="font-semibold text-foreground">Claude Code local runtime</div>
+							<span class="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">Claude Code (local)</span>
+						</div>
+						<p class="m-0 mt-1 text-muted-foreground">
+							This session runs through your local Claude Code CLI. Bobbit provides the chat shell, transcript, session metadata, alias switching, best-effort stop/abort, and mapped tool rendering.
+						</p>
+						${this._claudeCodeNoticeExpanded ? html`
+							<div id=${detailsId} class="grid gap-2 mt-3 sm:grid-cols-3 text-xs" data-testid="claude-code-capability-details">
+								${detailsGroup("Claude Code handles", [
+									"Login and account state",
+									"Available models and exact context behavior",
+									"Tool execution and permission prompts",
+									"Claude Code's own resume/context semantics",
+								])}
+								${detailsGroup("Bobbit handles", [
+									"Chat UI, transcript hydration, and session metadata",
+									"claude-code/* alias selection and same-runtime alias switching",
+									"Best-effort stop/abort",
+									"Rendering mapped tool use/results when Claude Code emits them structurally",
+								])}
+								${detailsGroup("Still standard Bobbit runtime", [
+									"Workflow gates, reviewers, and verification agents",
+									"Team/staff agents unless explicitly moved to Claude Code later",
+									"Bobbit-native tools that are not part of Claude Code's local tool run",
+								])}
+							</div>
+						` : html`<div id=${detailsId} hidden></div>`}
+						<div class="flex items-center gap-2 mt-3 flex-wrap">
+							<button
+								type="button"
+								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
+								aria-expanded=${String(this._claudeCodeNoticeExpanded)}
+								aria-controls=${detailsId}
+								data-testid="claude-code-capability-details-toggle"
+								@click=${() => { this._claudeCodeNoticeExpanded = !this._claudeCodeNoticeExpanded; }}
+							>${this._claudeCodeNoticeExpanded ? "Hide details" : "View details"}</button>
+							<button
+								type="button"
+								class="text-xs rounded-md border border-border px-2 py-1 hover:bg-secondary text-foreground"
+								aria-label="Dismiss Claude Code runtime note for this session"
+								data-testid="claude-code-capability-dismiss"
+								@click=${() => this._dismissClaudeCodeCapabilityNotice()}
+							>Got it for this session</button>
+							<button
+								type="button"
+								class="text-xs rounded-md px-2 py-1 text-primary hover:bg-secondary"
+								data-testid="claude-code-capability-learn-more"
+								@click=${() => this._openClaudeCodeRuntimeDocs()}
+							>Learn more</button>
+						</div>
+					</div>
+				</div>
+			</section>
+		`;
 	}
 
 	/**
@@ -1710,6 +1823,7 @@ export class AgentInterface extends LitElement {
 		});
 		return html`
 			<div class="flex flex-col gap-3">
+				${this._renderClaudeCodeCapabilityNotice()}
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
@@ -1803,21 +1917,37 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
+	private _usageNumber(value: unknown): number {
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	}
+
+	private _usageTotalTokens(usage: any): number {
+		return this._usageNumber(usage?.totalTokens)
+			|| (this._usageNumber(usage?.input) + this._usageNumber(usage?.output) + this._usageNumber(usage?.cacheRead) + this._usageNumber(usage?.cacheWrite));
+	}
+
+	private _usageCostTotal(usage: any): number {
+		return typeof usage?.cost === "number"
+			? this._usageNumber(usage.cost)
+			: this._usageNumber(usage?.cost?.total);
+	}
+
 	private renderStats() {
 		if (!this.session) return html`<div class="text-xs h-5"></div>`;
 
 		const state = this.session.state;
-		const totals = state.messages
+		const messages = Array.isArray(state.messages) ? state.messages : [];
+		const totals = messages
 			.filter((m) => m.role === "assistant")
 			.reduce(
 				(acc, msg: any) => {
 					const usage = msg.usage;
 					if (usage) {
-						acc.input += usage.input;
-						acc.output += usage.output;
-						acc.cacheRead += usage.cacheRead;
-						acc.cacheWrite += usage.cacheWrite;
-						acc.cost.total += usage.cost.total;
+						acc.input += this._usageNumber(usage.input);
+						acc.output += this._usageNumber(usage.output);
+						acc.cacheRead += this._usageNumber(usage.cacheRead);
+						acc.cacheWrite += this._usageNumber(usage.cacheWrite);
+						acc.cost.total += this._usageCostTotal(usage);
 					}
 					return acc;
 				},
@@ -1871,8 +2001,8 @@ export class AgentInterface extends LitElement {
 			} else {
 				// Find last assistant message with usage (skip aborted/error)
 				let lastUsage: Usage | undefined;
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const msg = messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
@@ -1880,7 +2010,7 @@ export class AgentInterface extends LitElement {
 				}
 
 				if (lastUsage) {
-					const contextTokens = lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite);
+					const contextTokens = this._usageTotalTokens(lastUsage);
 					const contextWindow = model.contextWindow;
 					const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
 					const barColor = pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)";
@@ -1998,19 +2128,19 @@ export class AgentInterface extends LitElement {
 			// Find last assistant usage (same logic as above)
 			let lastUsage: Usage | undefined;
 			if (!usageStale) {
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const msg = messages[i] as any;
 					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
 						lastUsage = msg.usage;
 						break;
 					}
 				}
 			}
-			const contextTokens = lastUsage ? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite)) : 0;
+			const contextTokens = lastUsage ? this._usageTotalTokens(lastUsage) : 0;
 			const contextWindow = m?.contextWindow || 0;
 			const pct = contextWindow ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
-			const msgCount = state.messages.length;
-			const turnCount = state.messages.filter((msg: any) => msg.role === "assistant").length;
+			const msgCount = messages.length;
+			const turnCount = messages.filter((msg: any) => msg.role === "assistant").length;
 
 			const row = (label: string, value: any) => html`
 				<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
@@ -2054,10 +2184,10 @@ export class AgentInterface extends LitElement {
 					${lastUsage ? html`
 						<div style="border-top:1px solid var(--border);padding-top:8px;">
 							<div style="font-weight:600;margin-bottom:6px;">Last Turn</div>
-							${row("Input tokens", formatTokenCount(lastUsage.input))}
-							${row("Output tokens", formatTokenCount(lastUsage.output))}
-							${lastUsage.cacheRead ? row("Cache read", formatTokenCount(lastUsage.cacheRead)) : nothing}
-							${lastUsage.cacheWrite ? row("Cache write", formatTokenCount(lastUsage.cacheWrite)) : nothing}
+							${row("Input tokens", formatTokenCount(this._usageNumber(lastUsage.input)))}
+							${row("Output tokens", formatTokenCount(this._usageNumber(lastUsage.output)))}
+							${this._usageNumber(lastUsage.cacheRead) ? row("Cache read", formatTokenCount(this._usageNumber(lastUsage.cacheRead))) : nothing}
+							${this._usageNumber(lastUsage.cacheWrite) ? row("Cache write", formatTokenCount(this._usageNumber(lastUsage.cacheWrite))) : nothing}
 						</div>
 					` : nothing}
 
