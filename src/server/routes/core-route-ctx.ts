@@ -30,6 +30,7 @@ import type { SkillMarketContext } from "../skills/slash-skills.js";
 import type { ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "../agent/session-setup.js";
 import type { StaffManager } from "../agent/staff-manager.js";
 import type { InboxManager } from "../agent/inbox-manager.js";
+import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -155,4 +156,18 @@ export interface CoreRouteCtx {
 	staffManager: StaffManager;
 	/** Optional exactly as handleApiRoute's own `inboxManager` param is (a pre-existing gateway-wiring detail, not request-shaped). */
 	inboxManager?: InboxManager;
+
+	// ── Cohort 4 (pack-runtimes) additions — append-only from here down. ──
+	// Never reorder the fields above; a parallel cohort-5 branch may also be
+	// appending to this interface.
+	/** Per-gateway-instance singleton (handleApiRoute's own scope var) — needed
+	 *  by the pack-runtimes capabilities/start routes to read a provider's RAW
+	 *  (activation-unfiltered) contributions via `getRawPack`. */
+	packContributionRegistry: PackContributionRegistry;
+	/** server.ts's module-level `readBodyText` — reads the raw request body as
+	 *  text (no JSON parse), distinguishing an EMPTY body (valid) from a
+	 *  MALFORMED one (400). ALSO used by the not-yet-migrated sessionless
+	 *  `/api/ext/pack-route/:packId/:routeName` route, so it stays defined once
+	 *  in server.ts and is threaded through here rather than duplicated. */
+	readBodyText(req: http.IncomingMessage, maxBytes?: number): Promise<string | null>;
 }
