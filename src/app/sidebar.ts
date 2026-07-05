@@ -89,8 +89,19 @@ function completeProjectOrderIds(projectIds: string[]): string[] {
 		seen.add(id);
 		complete.push(id);
 	}
+	// Headquarters never participates in the reorderable set (mirrors
+	// currentProjectIds() above and server-side participatesInVisibleOrder()
+	// in project-registry.ts) — it must never leak into this "leftover
+	// projects" backfill. state.projects is the only other source consulted
+	// here, and it's the one place that still carries Headquarters (unlike
+	// `projectIds`, which is always seeded from currentProjectIds()).
+	// Before this fix, a visible Headquarters project leaked into the
+	// finalIds array sent to PUT /api/projects/order, which the server
+	// rejects wholesale (invalid_project_order), so drag-reorder silently
+	// rolled back to the original order for every project whenever
+	// Headquarters was visible in the sidebar.
 	for (const project of state.projects) {
-		if (seen.has(project.id)) continue;
+		if (seen.has(project.id) || isHeadquartersProject(project)) continue;
 		seen.add(project.id);
 		complete.push(project.id);
 	}
