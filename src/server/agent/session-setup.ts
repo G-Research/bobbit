@@ -21,6 +21,7 @@ import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } fro
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { SessionStore, WorktreePushPolicy } from "./session-store.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
@@ -1120,7 +1121,12 @@ export async function executeWorktreeAsync(
 	// "preparing" by SessionManager.createSession before this fn is invoked, so
 	// sleeping here keeps the session visibly preparing without changing
 	// production behaviour (gated on the env var being set).
-	const preparingDelayMs = ctx.testPreparingDelayMs;
+	//
+	// Prefer the injected ctx value (DI seam), but fall back to a live read of
+	// process.env so tests that set BOBBIT_TEST_PREPARING_DELAY_MS *after* the
+	// in-process gateway has already booted (its boot-time snapshot is undefined)
+	// still get the delay applied. Env unset ⇒ undefined ⇒ no delay in production.
+	const preparingDelayMs = ctx.testPreparingDelayMs ?? getLegacyTestRuntimeFlags().testPreparingDelayMs;
 	if (preparingDelayMs) {
 		const delayMs = Number(preparingDelayMs);
 		if (Number.isFinite(delayMs) && delayMs > 0) {
