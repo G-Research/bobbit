@@ -1892,16 +1892,119 @@ test("goalCompleted retains one async replace outcome digest and duplicate calls
 		await provider.goalCompleted(c as never);
 		assert.equal(calls.retain.length, 1);
 		const r = calls.retain[0];
-		assert.match(r.content, /Goal completed: goal-1/);
+		assert.match(r.content, /# Goal completed: goal-1/);
 		assert.equal(r.opts.documentId, "outcome:goal-1");
 		assert.equal(r.opts.updateMode, "replace");
 		assert.deepEqual(r.opts.observationScopes, [["project:proj-1"]]);
 		assert.deepEqual(r.opts.entities, [{ text: "market-packs/hindsight/src/provider.ts", type: "file" }]);
-		assert.match(r.content, /Pull request: #42 OPEN https:\/\/github\.com\/SuuBro\/bobbit\/pull\/42/);
-		assert.match(r.content, /Tasks:\n- \[complete\] Implement provider mechanics \(implementation\) — Changed market-packs\/hindsight\/src\/provider\.ts/);
-		assert.match(r.content, /Gates:\n- Implementation: passed, signals=2, commit=abc123/);
+		assert.match(r.content, /## Outcome\n[\s\S]*Pull request: #42 OPEN https:\/\/github\.com\/SuuBro\/bobbit\/pull\/42/);
+		assert.match(r.content, /## Outcome\n[\s\S]*Decision: Use stable outcome document id/);
+		// F26: passing task/gate ⇒ grouped under "What worked", not a flat "Tasks:"/"Gates:" dump.
+		assert.match(r.content, /## What worked\n- \[complete\] Implement provider mechanics \(implementation\) — Changed market-packs\/hindsight\/src\/provider\.ts\n- Implementation: passed, signals=2, commit=abc123/);
+		assert.doesNotMatch(r.content, /## What failed/);
+		assert.match(r.content, /## Reusable takeaway\nAll tracked tasks\/gates passed cleanly/);
+		assert.match(r.content, /## Artifacts\n- file: market-packs\/hindsight\/src\/provider\.ts/);
 		assert.equal(r.opts.tags?.kind, "outcome");
 		assert.equal(r.opts.tags?.pr, "42");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// F26: goalCompleted lesson extraction — the retained content must be lesson-shaped
+// (what was tried, what worked/failed, a reusable takeaway), not a flat outcome dump.
+test("F26: goalCompleted lesson digest splits failing gates/tasks into a 'What failed' section with a rework takeaway", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await provider.goalCompleted({
+			config: { ...ACTIVE },
+			host: { store },
+			projectId: "p",
+			goalId: "goal-2",
+			headSha: "def456",
+			tasks: [
+				{ title: "Fix flaky test", type: "implementation", state: "complete", resultSummary: "Stabilized retry" },
+				{ title: "Wire up dashboard", type: "implementation", state: "failed", resultSummary: "Blocked on API shape" },
+			],
+			gates: [
+				{ gateId: "unit", name: "Unit tests", status: "passed", signalCount: 1 },
+				{ gateId: "e2e", name: "E2E tests", status: "failed", signalCount: 3, content: "3 browser specs timed out waiting for selector" },
+			],
+		} as never);
+		assert.equal(calls.retain.length, 1);
+		const r = calls.retain[0];
+		assert.match(r.content, /## What worked\n[\s\S]*\[complete\] Fix flaky test[\s\S]*Unit tests: passed, signals=1/);
+		assert.match(r.content, /## What failed\n[\s\S]*\[failed\] Wire up dashboard \(implementation\) — Blocked on API shape/);
+		assert.match(r.content, /## What failed\n[\s\S]*E2E tests: failed, signals=3 — 3 browser specs timed out waiting for selector/);
+		assert.match(r.content, /## Reusable takeaway\n2 item\(s\) needed rework/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// F26: a bug in the new lesson-extraction path (here: a hostile/throwing
+// `gate.content` getter — a field ONLY the digest reads, never the flat dump) must
+// degrade to the pre-F26 flat outcome dump, not throw or block the retain.
+test("F26: goalCompleted degrades to the flat outcome dump when lesson extraction throws", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const hostileGate: Record<string, unknown> = { gateId: "e2e", name: "E2E tests", status: "failed", signalCount: 1 };
+		Object.defineProperty(hostileGate, "content", {
+			enumerable: true,
+			get() {
+				throw new Error("boom: hostile gate.content getter");
+			},
+		});
+		await provider.goalCompleted({
+			config: { ...ACTIVE },
+			host: { store },
+			projectId: "p",
+			goalId: "goal-3",
+			headSha: "ghi789",
+			gates: [hostileGate],
+		} as never);
+		assert.equal(calls.retain.length, 1, "extraction failure must not block the retain");
+		const r = calls.retain[0];
+		// Fell back to the flat outcomeLines shape (no sectioned lesson headings).
+		assert.doesNotMatch(r.content, /## What worked|## What failed|## Outcome|## Reusable takeaway/);
+		assert.match(r.content, /Goal completed: goal-3/);
+		assert.match(r.content, /Gates:\n- E2E tests: failed, signals=1/);
+		// Marker still reaches the terminal "retained" state — a local extraction bug
+		// does not corrupt idempotency bookkeeping.
+		const marker = await store.get<{ state?: string }>("goal-completed:goal-3:ghi789");
+		assert.equal(marker?.state, "retained");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// F26: idempotency semantics (documentId/updateMode/marker dedup) must be
+// unaffected by the lesson-digest content shape — duplicate goalCompleted calls
+// with a lesson-shaped payload still retain exactly once, replace-mode, same doc id.
+test("F26: idempotency is preserved for the lesson-shaped payload (duplicate calls retain once, replace mode)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const c = {
+			config: { ...ACTIVE },
+			host: { store },
+			projectId: "p",
+			goalId: "goal-4",
+			headSha: "jkl012",
+			tasks: [{ title: "Ship it", state: "complete" }],
+		};
+		await provider.goalCompleted(c as never);
+		await provider.goalCompleted(c as never);
+		await provider.goalCompleted(c as never);
+		assert.equal(calls.retain.length, 1);
+		assert.equal(calls.retain[0].opts.documentId, "outcome:goal-4");
+		assert.equal(calls.retain[0].opts.updateMode, "replace");
+		assert.match(calls.retain[0].content, /## What worked/);
 	} finally {
 		__setClientFactory(null);
 	}

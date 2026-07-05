@@ -53,8 +53,10 @@ project's own primary AGENTS.md prose untouched.
 
 ## Design
 
-`BOBBIT_AGENTSMD_BUDGET=<tokens>` env var (or `PromptParts.agentsMdBudgetTokens`
-override). **Default unset = OFF = today's uncapped behavior, byte-identical**
+`agents_md_budget: "<tokens>"` in `project.yaml`, with
+`BOBBIT_AGENTSMD_BUDGET=<tokens>` as the highest-precedence process override
+(or `PromptParts.agentsMdBudgetTokens` override). **Default unset/empty = OFF
+= today's uncapped behavior, byte-identical**
 (pinned by the "flag off" tests in `tests/agents-md-cascade-budget.test.ts`
 and by the full pre-existing `tests/system-prompt*.test.ts` suite passing
 unchanged).
@@ -90,7 +92,7 @@ default-on rollout.
 ## A/B plan
 
 1. Ship default OFF. Operators who suspect a bloated cascade opt in with
-   `BOBBIT_AGENTSMD_BUDGET` (start around 6000–8000 tokens — keeps the
+   `agents_md_budget` or `BOBBIT_AGENTSMD_BUDGET` (start around 6000–8000 tokens — keeps the
    primary file whole and typically still allows one or two @-refs through
    before capping).
 2. Compare `<sessionId>-prompt.json` `totalTokens` and the `Project

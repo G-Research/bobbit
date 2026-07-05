@@ -334,6 +334,66 @@ describe("GateStore", () => {
 		});
 	});
 
+	// --- findings (F3 — structured findings on verdict) ---
+
+	describe("GateSignalStep.findings roundtrip", () => {
+		it("persists and reloads a signal with findings (new shape)", () => {
+			store.initGatesForGoal("goal-1", ["a"]);
+			store.recordSignal({
+				id: "sig-findings",
+				gateId: "a",
+				goalId: "goal-1",
+				sessionId: "s1",
+				timestamp: Date.now(),
+				commitSha: "abc123",
+				verification: {
+					status: "failed",
+					steps: [{
+						name: "review", type: "llm-review", passed: false, output: "failed",
+						duration_ms: 5,
+						findings: [
+							{ severity: "blocker", summary: "SQL injection", file: "src/db.ts", line: 10 },
+							{ severity: "minor", summary: "nit" },
+						],
+					}],
+				},
+			});
+
+			// Reload from disk into a fresh GateStore instance to prove the
+			// findings array survives a real save/load cycle, not just the in-memory Map.
+			const reloaded = new GateStore(path.join(TEST_DIR, "state"));
+			const step = reloaded.getGate("goal-1", "a")!.signals[0].verification.steps[0];
+			assert.deepEqual(step.findings, [
+				{ severity: "blocker", summary: "SQL injection", file: "src/db.ts", line: 10 },
+				{ severity: "minor", summary: "nit" },
+			]);
+		});
+
+		it("loads an old-shape signal (no findings field) unchanged", () => {
+			store.initGatesForGoal("goal-1", ["a"]);
+			store.recordSignal({
+				id: "sig-old-shape",
+				gateId: "a",
+				goalId: "goal-1",
+				sessionId: "s1",
+				timestamp: Date.now(),
+				commitSha: "abc123",
+				verification: {
+					status: "passed",
+					// Deliberately old-shape: no `findings` key anywhere, mirrors a
+					// record persisted before F3 shipped.
+					steps: [{ name: "review", type: "llm-review", passed: true, output: "ok", duration_ms: 5 }],
+				},
+			});
+
+			const reloaded = new GateStore(path.join(TEST_DIR, "state"));
+			const step = reloaded.getGate("goal-1", "a")!.signals[0].verification.steps[0];
+			assert.equal(step.findings, undefined);
+			assert.equal(step.passed, true);
+			assert.equal(step.output, "ok");
+		});
+	});
+
 	// --- Gate dependency checking helper ---
 
 	describe("upstream gate dependency checking", () => {

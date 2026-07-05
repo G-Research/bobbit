@@ -12,11 +12,16 @@
  * The replace is atomic (see scripts/lib/atomic-copy-dir.mjs) — dist/server/defaults
  * is bind-mounted read-only into sandbox containers as /tools-builtin, and a naive
  * rm -rf + copy leaves it missing/partial for any container created mid-rebuild.
+ *
+ * Uses the gapless symlink-swap variant (scripts/lib/gapless-symlink-swap.mjs)
+ * where the platform supports it, closing even the small residual window
+ * atomic-copy-dir's two-rename swap leaves; it fails open to atomicReplaceDir
+ * everywhere else (see that module's header for the Windows/npm-publish story).
  */
-import { atomicReplaceDir } from "./lib/atomic-copy-dir.mjs";
+import { atomicReplaceDirGapless } from "./lib/gapless-symlink-swap.mjs";
 
 const SRC = "defaults";
 const DEST = "dist/server/defaults";
 
-atomicReplaceDir(SRC, DEST);
+atomicReplaceDirGapless(SRC, DEST);
 console.log(`Built ${DEST}/ from ${SRC}/`);

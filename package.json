@@ -51,7 +51,7 @@
     "test": "npm run build && npm run test:unit && npm run test:e2e:run --",
     "graph:refresh": "scripts/graphify-refresh.sh --force",
     "clean": "shx rm -rf dist",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "node scripts/prepublish-build.mjs",
     "build:binaries": "node scripts/build-binaries.mjs"
   },
   "optionalDependencies": {
