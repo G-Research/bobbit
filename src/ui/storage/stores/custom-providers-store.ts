@@ -18,7 +18,14 @@ export interface CustomProvider {
 	name: string; // Display name, also used as Model.provider
 	type: CustomProviderType;
 	baseUrl: string;
-	apiKey?: string; // Optional, applies to all models
+	// WRITE-ONLY. Sent to the server when the user types a new key; the
+	// server NEVER returns stored keys on any read path (GET /api/custom-providers
+	// redacts them — security fix, see redactCustomProviderConfig in
+	// src/server/agent/model-registry.ts). On write: omit to keep the stored
+	// key, send null to clear it, send a non-empty string to replace it.
+	apiKey?: string | null;
+	// READ-ONLY. Set by the server on GET responses: whether a key is stored.
+	hasApiKey?: boolean;
 
 	// For manual types ONLY - models stored directly on provider
 	// Auto-discovery types: models fetched on-demand, never stored

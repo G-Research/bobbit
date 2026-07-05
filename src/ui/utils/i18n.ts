@@ -193,6 +193,11 @@ declare module "@mariozechner/mini-lit" {
 		"e.g., http://localhost:11434": string;
 		"API Key (Optional)": string;
 		"Leave empty if not required": string;
+		"Key set — leave blank to keep": string;
+		"An API key is stored for this provider.": string;
+		"Stored key will be removed on save.": string;
+		"Clear stored key": string;
+		"Keep stored key": string;
 		"Test Connection": string;
 		Discovered: string;
 		models: string;
@@ -434,6 +439,11 @@ export const translations = {
 		"e.g., http://localhost:11434": "e.g., http://localhost:11434",
 		"API Key (Optional)": "API Key (Optional)",
 		"Leave empty if not required": "Leave empty if not required",
+		"Key set — leave blank to keep": "Key set — leave blank to keep",
+		"An API key is stored for this provider.": "An API key is stored for this provider.",
+		"Stored key will be removed on save.": "Stored key will be removed on save.",
+		"Clear stored key": "Clear stored key",
+		"Keep stored key": "Keep stored key",
 		"Test Connection": "Test Connection",
 		Discovered: "Discovered",
 		Models: "Models",
