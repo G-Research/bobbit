@@ -908,20 +908,47 @@ export interface ReviewDiffArtifact {
 	baselineSha: string | null;
 	/** `git diff --stat` output. */
 	stat: string;
-	/** `git diff -M` output (possibly truncated — see `truncated`). */
+	/** Full `git diff -M` output (bounded only by `REVIEW_DIFF_ARTIFACT_CAP_BYTES`) —
+	 * this is what gets persisted to `diff.patch`. Prompt embedding applies the
+	 * separate, much smaller `REVIEW_DIFF_INLINE_CAP_BYTES` at embed time in
+	 * `buildReviewPrompt`. */
 	diff: string;
-	/** True if `diff` was truncated to fit `REVIEW_DIFF_ARTIFACT_CAP_BYTES`. */
+	/** True if even the full `diff` was truncated to fit `REVIEW_DIFF_ARTIFACT_CAP_BYTES`. */
 	truncated: boolean;
 	/** Absolute path to the persisted full-diff artifact file, when written. */
 	path?: string;
 }
 
-/** Safety-net cap on the inline diff we embed in reviewer prompts — matches the
- * existing 10 MB convention used elsewhere in this file for review artifacts
- * (MAX_ARTIFACT_SIZE, QA_MAX_ARTIFACT). Real branch diffs are far smaller; this
- * only guards against a pathological diff blowing up every reviewer's prompt.
+/**
+ * TWO caps, two purposes:
+ *
+ * 1. `REVIEW_DIFF_ARTIFACT_CAP_BYTES` (10 MB) — buffer-scale. Bounds execFile's
+ *    maxBuffer and the persisted `diff.patch` file. Matches the existing 10 MB
+ *    convention used elsewhere in this file for retained review artifacts
+ *    (MAX_ARTIFACT_SIZE, QA_MAX_ARTIFACT).
+ *
+ * 2. `REVIEW_DIFF_INLINE_CAP_BYTES` (128 KB) — prompt-scale. Bounds what gets
+ *    EMBEDDED into each reviewer's prompt. The embedded diff bypasses the
+ *    tool-result truncation layer (`truncateLargeToolContent`, threshold
+ *    `LARGE_CONTENT_THRESHOLD` = 32 KB in truncate-large-content.ts) that
+ *    bounded an oversized diff when reviewers shelled out to `git diff`
+ *    themselves — so the embed needs its own bound, or a multi-MB branch diff
+ *    would be pasted verbatim into 3-4 concurrent reviewer prompts: a token
+ *    blow-up on exactly the runs where reviews are most expensive. 128 KB =
+ *    4x the tool-content threshold: the diff is the reviewer's primary work
+ *    object (worth more budget than a generic tool result) while staying
+ *    prompt-scale (~32k tokens). No other canonical prompt-embedding cap
+ *    exists in this file — the nearby 512 KB / 1 MB values are retained-log
+ *    tails, not prompt embeds.
+ *
+ * When the inline cap truncates, the prompt still embeds the full `--stat`
+ * (always small) plus the diff head, and points the reviewer at the persisted
+ * `diff.patch` and targeted `git diff <base>...HEAD -- <paths>` commands for
+ * anything beyond the excerpt (pinned by
+ * tests/verification-harness-shared-diff.test.ts T5).
  */
 const REVIEW_DIFF_ARTIFACT_CAP_BYTES = 10 * 1024 * 1024;
+export const REVIEW_DIFF_INLINE_CAP_BYTES = 128 * 1024;
 
 /**
  * Compute the branch diff (`git diff --stat` + `git diff -M`, both against
@@ -1184,6 +1211,12 @@ export async function buildReviewPrompt(
 	sections.push(contextLines.join("\n"));
 
 	if (!isDesignGate && diffArtifact) {
+		// Prompt-scale inline cap — the full diff (buffer-scale cap) lives in the
+		// persisted diff.patch; only up to REVIEW_DIFF_INLINE_CAP_BYTES of it is
+		// embedded in each reviewer's prompt. See the two-caps comment above
+		// REVIEW_DIFF_INLINE_CAP_BYTES.
+		const inlineTruncated = diffArtifact.truncated || diffArtifact.diff.length > REVIEW_DIFF_INLINE_CAP_BYTES;
+		const inlineDiff = inlineTruncated ? diffArtifact.diff.slice(0, REVIEW_DIFF_INLINE_CAP_BYTES) : diffArtifact.diff;
 		const diffSection: string[] = [
 			"\n## Branch Diff",
 			"",
@@ -1195,15 +1228,19 @@ export async function buildReviewPrompt(
 			diffArtifact.stat.trim() || "(no changes)",
 			"```",
 			"",
-			"### Diff",
+			"### Diff" + (inlineTruncated ? " (truncated — head only)" : ""),
 			"```diff",
-			diffArtifact.diff,
+			inlineDiff,
 			"```",
 		];
-		if (diffArtifact.truncated) {
+		if (inlineTruncated) {
 			diffSection.push(
 				"",
-				`_Diff truncated at ${REVIEW_DIFF_ARTIFACT_CAP_BYTES} bytes.${diffArtifact.path ? ` Full diff persisted at \`${diffArtifact.path}\` — read it directly for anything beyond this excerpt.` : " Read changed files directly with `read` for anything beyond this excerpt."}_`,
+				`_Inline diff truncated at ${REVIEW_DIFF_INLINE_CAP_BYTES} bytes (full diff is ${diffArtifact.diff.length}${diffArtifact.truncated ? "+" : ""} bytes). The diffstat above is complete._`,
+				diffArtifact.path
+					? `_The full diff is persisted at \`${diffArtifact.path}\` — read it (or sections of it) directly._`
+					: "_Read changed files directly with `read` for anything beyond this excerpt._",
+				`_For specific files you may also run targeted diffs: \`git diff origin/${reviewBaselineBranch}...HEAD -- <paths>\` (read-only, safe for concurrent use)._`,
 			);
 		}
 		sections.push(diffSection.join("\n"));

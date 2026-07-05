@@ -28,6 +28,11 @@
  *   T4 — verifyGateSignal fan-out: two concurrent llm-review steps in the
  *        same phase both receive the IDENTICAL diffArtifact object — proving
  *        it was computed once and shared, not re-derived per reviewer.
+ *   T5 — inline cap (REVIEW_DIFF_INLINE_CAP_BYTES, prompt-scale — distinct
+ *        from the 10 MB buffer/persisted-file cap): an over-cap diff embeds
+ *        the full stat + a capped head + pointer text to the persisted
+ *        diff.patch and targeted `git diff -- <paths>` commands, and the
+ *        prompt length stays bounded.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -39,6 +44,7 @@ import path from "node:path";
 const {
 	buildReviewPrompt,
 	computeReviewDiffArtifact,
+	REVIEW_DIFF_INLINE_CAP_BYTES,
 	VerificationHarness,
 } = await import("../src/server/agent/verification-harness.js");
 
@@ -173,6 +179,53 @@ test("T3: buildReviewPrompt without a diffArtifact preserves the legacy self-der
 	assert.match(prompt, /git diff --stat origin\/main\.\.\.HEAD/);
 	assert.match(prompt, /git diff origin\/main\.\.\.HEAD -M/);
 	assert.doesNotMatch(prompt, /## Branch Diff\n/);
+});
+
+test("T5: an artifact over the inline cap embeds the full stat + a capped diff head + a pointer to the persisted file, keeping prompt length bounded", async () => {
+	const gate = { id: "implementation", depends_on: ["design-doc"] };
+	// A "diff" 4x the inline cap. Line-structured so the head slice looks diff-like.
+	const bigLine = "+" + "x".repeat(127) + "\n";
+	const bigDiff = "diff --git a/big.txt b/big.txt\nHEAD_MARKER_LINE\n" + bigLine.repeat((REVIEW_DIFF_INLINE_CAP_BYTES * 4) / bigLine.length);
+	const diffArtifact = {
+		baselineSha: "abc123def456",
+		stat: " big.txt | 4096 +++\n 1 file changed\n",
+		diff: bigDiff,
+		truncated: false, // under the 10MB buffer cap — only the INLINE cap fires
+		path: "/state/verifications/sig-1/diff.patch",
+	};
+
+	const prompt = await buildReviewPrompt(
+		{ promptTemplate: "role\n{{REVIEW_CONTEXT}}", name: "reviewer" },
+		{ name: "Code quality", prompt: "Review code." },
+		"/nonexistent/cwd/for/this/test",
+		{ branch: "goal/x", master: "main", cwd: "/nonexistent/cwd/for/this/test", commit: "abc", goal_spec: "" },
+		undefined, undefined, "spec", new Map(),
+		gate,
+		diffArtifact as any,
+	);
+
+	// The full --stat (always small) is embedded intact.
+	assert.match(prompt, /big\.txt \| 4096/, "VER-04_W3_2_INLINE_CAP: the complete diffstat must always be embedded");
+	// The diff head is present…
+	assert.match(prompt, /HEAD_MARKER_LINE/, "VER-04_W3_2_INLINE_CAP: the head of the diff must be embedded");
+	assert.match(prompt, /### Diff \(truncated — head only\)/);
+	// …but the embed is capped: the prompt must NOT contain the full diff.
+	assert.ok(
+		!prompt.includes(bigDiff),
+		"VER-04_W3_2_INLINE_CAP: the full over-cap diff must never be pasted verbatim into the prompt",
+	);
+	// Pointer text: persisted-file path + targeted git diff escape hatch.
+	assert.match(prompt, /\/state\/verifications\/sig-1\/diff\.patch/, "VER-04_W3_2_INLINE_CAP: truncation notice must point at the persisted full-diff file");
+	assert.match(prompt, /git diff origin\/main\.\.\.HEAD -- <paths>/, "VER-04_W3_2_INLINE_CAP: truncation notice must allow targeted per-file diffs");
+	assert.match(prompt, new RegExp(`Inline diff truncated at ${REVIEW_DIFF_INLINE_CAP_BYTES} bytes`));
+
+	// Prompt length stays bounded: inline cap + generous fixed overhead for the
+	// role/instructions scaffolding — NOT proportional to the 4x-cap diff.
+	const maxExpected = REVIEW_DIFF_INLINE_CAP_BYTES + 16 * 1024;
+	assert.ok(
+		prompt.length <= maxExpected,
+		`VER-04_W3_2_INLINE_CAP: prompt length ${prompt.length} must stay within inline cap + scaffolding (${maxExpected}), independent of the ${bigDiff.length}-byte diff`,
+	);
 });
 
 test("T4: verifyGateSignal computes the branch diff ONCE and shares it across every concurrent llm-review reviewer in a phase", async () => {
