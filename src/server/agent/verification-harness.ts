@@ -119,7 +119,8 @@ import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch, parseBaseRef, getHeadCommitSha } from "../skills/git.js";
-import type { SwarmArtifact, SwarmTerminalStatus } from "./swarm-group-store.js";
+import type { SwarmArtifact, SwarmGroupRecord, SwarmTerminalStatus } from "./swarm-group-store.js";
+import type { ProjectContext } from "./project-context.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
@@ -175,6 +176,7 @@ import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { SwarmGovernor } from "./swarm-governor.js";
+import { verifyBestOfNGroup } from "./swarm-verifier.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
@@ -192,6 +194,7 @@ import {
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
 } from "../gate-diagnostics.js";
+import { GATE_RISK_POINT, GATE_RISK_KIND, gatherGateRiskChangedFiles } from "./gate-risk-classifier.js";
 
 /**
  * Clamp a thinking-level value against the resolved reviewer/QA model. When
@@ -1446,8 +1449,16 @@ export class VerificationHarness {
 	 * non-swarm children use, stamped "killed", so the barrier/artifact
 	 * capture + scheduler-permit release run off the existing seam exactly
 	 * like an operator-initiated kill. Best-effort: logs, never throws.
+	 *
+	 * SWARM-W4.1: `opts.killReason` is purely informational — it is stamped
+	 * onto the captured artifact (`SwarmArtifact.killReason`) so the UI can
+	 * tell a deliberate early-kill (`"superseded"`) apart from a budget/
+	 * wall-clock governor kill, but nothing in the kill/capture/barrier
+	 * mechanism itself branches on it. A third trigger source
+	 * (early-kill, `_captureSwarmArtifactIfTagged` below) reuses this EXACT
+	 * call, unchanged, per design/swarm-orchestration-w4.md §1.3.
 	 */
-	async hardKillSwarmNode(goalId: string, reason: string): Promise<void> {
+	async hardKillSwarmNode(goalId: string, reason: string, opts?: { killReason?: "governor-budget" | "governor-wallclock" | "superseded" }): Promise<void> {
 		console.warn(`[swarm-governor] hard-killing ${goalId}: ${reason}`);
 		try {
 			const ctx = this.projectContextManager?.getContextForGoal(goalId);
@@ -1460,7 +1471,7 @@ export class VerificationHarness {
 			console.warn(`[swarm-governor] terminateSession failed for ${goalId} (non-fatal):`, err);
 		}
 		try {
-			await this.notifyChildTerminal(goalId, "killed");
+			await this.notifyChildTerminal(goalId, "killed", opts?.killReason);
 		} catch (err) {
 			console.warn(`[swarm-governor] notifyChildTerminal(killed) failed for ${goalId} (non-fatal):`, err);
 		}
@@ -3408,6 +3419,36 @@ export class VerificationHarness {
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
 			};
+
+			// CLF-W5 — gate-risk classifier, OBSERVE-ONLY (see
+			// gate-risk-classifier.ts's header for the full design). Consulted
+			// here, right after `baseBranch` is resolved, so the changed-file
+			// diff it gathers uses the SAME `origin/<baseBranch>...HEAD` refs this
+			// verification run itself just resolved — never a second, possibly
+			// inconsistent, notion of "the diff". Pure telemetry: the result is
+			// NEVER read back to skip/select a workflow, gate, or step — VER-05's
+			// solo-fast auto-selection stays a human/agent choice until a future
+			// apply-mode wave consumes this classifier's accumulated
+			// would-have-chosen labels. Non-fatal by construction:
+			// `this.sessionManager` can be undefined in standalone/test
+			// construction of `VerificationHarness`, the (point,kind) pair may be
+			// unregistered (most unit-test `LifecycleHub` fixtures never wire
+			// this pair), and a git failure inside `gatherGateRiskChangedFiles`
+			// already resolves to `undefined` (abstain) rather than throwing —
+			// none of that may ever slow or block gate verification.
+			try {
+				const lifecycleHub = this.sessionManager?.lifecycleHub;
+				if (lifecycleHub) {
+					const changedFiles = await gatherGateRiskChangedFiles(cwd, baseBranch);
+					await lifecycleHub.dispatchDecision(GATE_RISK_POINT, GATE_RISK_KIND, {
+						sessionId: signal.sessionId,
+						goalId: signal.goalId,
+						cwd,
+					}, { changedFiles });
+				}
+			} catch (err) {
+				console.warn(`[verification] gate-risk dispatchDecision failed for signal ${signal.id} (non-fatal, observe-only): ${err instanceof Error ? err.message : String(err)}`);
+			}
 
 			// Project config — resolved via {{project.key}}
 			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
@@ -6030,15 +6071,19 @@ export class VerificationHarness {
 	 * route) pass "killed" explicitly. Zero overhead for a non-swarm child:
 	 * the capture is a single `swarmGroup` field check that returns
 	 * immediately when unset.
+	 *
+	 * SWARM-W4.1: `killReason` is forwarded verbatim onto the captured
+	 * artifact (informational only, see `hardKillSwarmNode`'s doc) — omitted
+	 * for every non-`hardKillSwarmNode` caller, exactly as before this wave.
 	 */
-	async notifyChildTerminal(childGoalId: string, status: SwarmTerminalStatus = "done"): Promise<void> {
+	async notifyChildTerminal(childGoalId: string, status: SwarmTerminalStatus = "done", killReason?: "governor-budget" | "governor-wallclock" | "superseded"): Promise<void> {
 		this.childScheduler.notifyTerminal(childGoalId);
 		// SWARM-W1: stop governing this node — a terminal goal can no longer
 		// straggle or breach a turn-boundary budget. Idempotent / no-op for a
 		// non-swarm or never-registered goal (cheap Map lookup).
 		this.swarmGovernor.unregisterNode(childGoalId);
 		try {
-			await this._captureSwarmArtifactIfTagged(childGoalId, status);
+			await this._captureSwarmArtifactIfTagged(childGoalId, status, killReason);
 		} catch (err) {
 			console.warn(`[verification-harness] notifyChildTerminal: swarm artifact capture failed for ${childGoalId} (non-fatal):`, err);
 		}
@@ -6051,7 +6096,7 @@ export class VerificationHarness {
 	 * `SessionManager.getSessionOutput` collected-output mechanism verbatim —
 	 * no new transcript reader.
 	 */
-	private async _captureSwarmArtifactIfTagged(childGoalId: string, status: SwarmTerminalStatus): Promise<void> {
+	private async _captureSwarmArtifactIfTagged(childGoalId: string, status: SwarmTerminalStatus, killReason?: "governor-budget" | "governor-wallclock" | "superseded"): Promise<void> {
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
 		if (!ctx) return;
 		const child = ctx.goalStore.get(childGoalId);
@@ -6077,6 +6122,7 @@ export class VerificationHarness {
 			branch: child.branch,
 			commitSha,
 			status,
+			...(killReason ? { killReason } : {}),
 			verifierScore: null,
 			capturedAt: Date.now(),
 		};
@@ -6097,7 +6143,55 @@ export class VerificationHarness {
 			.filter(g => g.swarmGroup === swarmGroup)
 			.map(g => g.id);
 
-		ctx.swarmGroupStore.recordArtifact(swarmGroup, artifact, siblingIds, child.rootGoalId);
+		const record = ctx.swarmGroupStore.recordArtifact(swarmGroup, artifact, siblingIds, child.rootGoalId);
+
+		if (status === "done") this._maybeEarlyKillSiblings(ctx, record).catch((err) => {
+			console.warn(`[verification-harness] early-kill check failed for group ${swarmGroup} (non-fatal):`, err);
+		});
+	}
+
+	/**
+	 * SWARM-W4.1 (design/swarm-orchestration-w4.md §1.3) — "best-of-N +
+	 * early-kill": the instant a sibling lands `"done"`, verify it ALONE
+	 * (never the whole group — `verifyBestOfNGroup`'s `onlyGoalId` opt), and
+	 * if it passes, hard-kill every sibling still in flight (not yet in
+	 * `record.artifacts`) via the EXACT SAME `hardKillSwarmNode` path used
+	 * for budget/wall-clock kills — no new terminal-state plumbing, the
+	 * early-killed sibling converges the barrier exactly like any other
+	 * `"killed"` artifact (SWARM-W0/W2 restart-durability applies unchanged).
+	 *
+	 * No-op unless the group was created with `earlyKill: true` (opt-in this
+	 * wave — see `swarm-best-of-n.ts`'s `BestOfNSwarmOptions.earlyKill` doc).
+	 * This is a pure optimization side-channel: it NEVER calls
+	 * `SwarmGroupStore.recordVerifyResult` and NEVER mints an
+	 * operator-confirmation token, so it cannot influence (or substitute for)
+	 * the human-gated `/verify` → `/confirm` pick — that flow is completely
+	 * unmodified by this wave. Best-effort: logs, never throws.
+	 */
+	private async _maybeEarlyKillSiblings(ctx: ProjectContext, record: SwarmGroupRecord): Promise<void> {
+		const config = record.config as { earlyKill?: boolean; verifyCommand?: string } | undefined;
+		if (!config?.earlyKill || !config.verifyCommand) return;
+		if (record.barrierFired) return; // nothing left running to early-kill
+
+		// The sibling that just went "done" and triggered this check — the
+		// LAST artifact recorded is always the one that just landed, since
+		// `recordArtifact` appends/replaces synchronously before this runs.
+		const justDone = record.artifacts[record.artifacts.length - 1];
+		if (!justDone || justDone.status !== "done") return;
+
+		const resolveCwd = (goalId: string): string | undefined => {
+			const g = ctx.goalStore.get(goalId);
+			return g?.repoWorktrees?.["."] ?? g?.worktreePath;
+		};
+		const result = await verifyBestOfNGroup(record, resolveCwd, config.verifyCommand, { onlyGoalId: justDone.goalId });
+		if (result.outcome !== "picked") return;
+
+		const captured = new Set(record.artifacts.map(a => a.goalId));
+		const stillRunning = (record.expectedSiblingIds ?? []).filter(id => !captured.has(id));
+		for (const goalId of stillRunning) {
+			this.hardKillSwarmNode(goalId, `superseded — sibling ${justDone.goalId} already verified passed:true (early-kill)`, { killReason: "superseded" })
+				.catch((err) => console.warn(`[swarm-governor] early-kill hardKillSwarmNode failed for ${goalId} (non-fatal):`, err));
+		}
 	}
 
 	/**

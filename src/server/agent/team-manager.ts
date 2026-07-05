@@ -256,6 +256,21 @@ interface TeamEntry {
 	unsubscribeTeamLeadEvents?: () => void;
 }
 
+interface PendingTeamLeadNotification {
+	goalId: string;
+	workerSessionId: string;
+	role: string;
+	agentId: string;
+	message: string;
+}
+
+interface PendingTeamLeadNotificationBatch {
+	goalId: string;
+	teamLeadSessionId: string;
+	items: PendingTeamLeadNotification[];
+	timer: ReturnType<typeof setTimeout>;
+}
+
 
 
 /**
@@ -363,6 +378,9 @@ export class TeamManager {
 	/** Per-worker-session pending idle-notify timer (5s debounce); cancelled if the worker resumes. */
 	private pendingIdleNotify = new Map<string, ReturnType<typeof setTimeout>>();
 
+	/** Per-team-lead pending worker notifications batched during a short quiet window. */
+	private pendingLeadNotify = new Map<string, PendingTeamLeadNotificationBatch>();
+
 	/**
 	 * Effective worker-idle nudge debounce (ms). Defaults to the static
 	 * constant; exposed as an instance field so in-process tests can shrink it
@@ -370,6 +388,14 @@ export class TeamManager {
 	 * the real 5s window. Production never reassigns this.
 	 */
 	private workerIdleNudgeDebounceMs = TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS;
+
+	/**
+	 * Short per-lead quiet window for cross-worker completion coalescing. Worker
+	 * idle notifications already waited out the per-worker debounce; this extra
+	 * delay lets near-simultaneous workers land as one prompt to the lead.
+	 */
+	private static readonly TEAM_LEAD_NOTIFY_COALESCE_MS = 2_000;
+	private teamLeadNotifyCoalesceMs = TeamManager.TEAM_LEAD_NOTIFY_COALESCE_MS;
 
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
@@ -396,6 +422,9 @@ export class TeamManager {
 
 	/** Stop watchdog timers (idempotent). */
 	dispose(): void {
+		this.flushAllPendingLeadNotifications().catch((err) => {
+			console.error("[team-manager] Failed to flush pending team-lead notifications during dispose:", err);
+		});
 		this.stopStuckSweep();
 	}
 
@@ -2350,10 +2379,20 @@ export class TeamManager {
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
 
+		const message = this.buildTeamLeadWorkerNotification(goalId, workerSessionId, role, agentId);
+		this.queueTeamLeadWorkerNotification(entry.teamLeadSessionId, {
+			goalId,
+			workerSessionId,
+			role,
+			agentId,
+			message,
+		});
+	}
+
+	private buildTeamLeadWorkerNotification(goalId: string, workerSessionId: string, role: string, agentId: string): string {
 		// Look up tasks assigned to the worker
 		const tasks = this.resolveTasksForSession(goalId, workerSessionId);
 
-		let message: string;
 		if (tasks.length > 0) {
 			const heading = tasks.every(t => t.state === "complete") ? "Task complete" : "Agent finished";
 			const taskSummaries = tasks.map(t => `**${t.title}** (\`${t.state}\`)`).join("; ");
@@ -2369,25 +2408,96 @@ export class TeamManager {
 			if (result?.branch) lines.push(`- **Branch:** \`${result.branch}\`${result.commit ? ` @ \`${result.commit.slice(0, 8)}\`` : ""}`);
 			if (result?.checks) lines.push(`- **Checks:** ${result.checks}`);
 			lines.push("- **Next:** `task_list`, then review task and decide next step.");
-			message = lines.join("\n");
-		} else {
-			message = `**Agent finished**\n\n- **Agent:** \`${agentId}\` (\`${role}\`)\n- **Task:** no assigned tasks\n- **Next:** \`task_list\`, then review tasks and decide next step.`;
+			return lines.join("\n");
 		}
 
+		return `**Agent finished**\n\n- **Agent:** \`${agentId}\` (\`${role}\`)\n- **Task:** no assigned tasks\n- **Next:** \`task_list\`, then review tasks and decide next step.`;
+	}
+
+	private queueTeamLeadWorkerNotification(teamLeadSessionId: string, item: PendingTeamLeadNotification): void {
+		const existing = this.pendingLeadNotify.get(teamLeadSessionId);
+		if (existing) {
+			existing.items.push(item);
+			return;
+		}
+
+		const timer = setTimeout(() => {
+			this.flushPendingLeadNotification(teamLeadSessionId).catch((err) => {
+				console.error(`[team-manager] Failed to flush team-lead notification batch for ${teamLeadSessionId}:`, err);
+			});
+		}, this.teamLeadNotifyCoalesceMs);
+		timer.unref?.();
+
+		this.pendingLeadNotify.set(teamLeadSessionId, {
+			goalId: item.goalId,
+			teamLeadSessionId,
+			items: [item],
+			timer,
+		});
+	}
+
+	private async flushAllPendingLeadNotifications(): Promise<void> {
+		const leadIds = Array.from(this.pendingLeadNotify.keys());
+		for (const leadId of leadIds) {
+			await this.flushPendingLeadNotification(leadId);
+		}
+	}
+
+	private async flushPendingLeadNotificationForGoal(goalId: string): Promise<void> {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return;
+		await this.flushPendingLeadNotification(entry.teamLeadSessionId);
+	}
+
+	private async flushPendingLeadNotification(teamLeadSessionId: string): Promise<void> {
+		const batch = this.pendingLeadNotify.get(teamLeadSessionId);
+		if (!batch) return;
+		clearTimeout(batch.timer);
+		this.pendingLeadNotify.delete(teamLeadSessionId);
+		if (batch.items.length === 0) return;
+
+		const entry = this.teams.get(batch.goalId);
+		if (!entry || entry.teamLeadSessionId !== teamLeadSessionId) return;
+
+		const teamLeadSession = this.sessionManager.getSession(teamLeadSessionId);
+		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+		if (this.recoverErroredIdleSessionBeforeNudge(batch.goalId, teamLeadSessionId, "Worker-idle notification")) return;
+
+		const message = this.formatTeamLeadWorkerNotificationBatch(batch.items);
 		try {
 			if (teamLeadSession.status === "streaming") {
 				// Mid-turn: inject directly as a real-time steer interrupt
-				await this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "auto-nudge" });
+				await this.sessionManager.deliverLiveSteer(teamLeadSessionId, message, { source: "auto-nudge" });
 			} else {
 				// Idle: enqueue as a steered prompt so it drains immediately
-				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
+				this.sessionManager.enqueuePrompt(teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
 			}
 			// The full message body (agent completion summary) is already visible in
 			// the UI transcript — log only a concise reference here.
-			console.log(`[team-manager] Notified team lead for goal ${goalId} (status=${teamLeadSession.status}, ${message.length} chars)`);
+			console.log(`[team-manager] Notified team lead for goal ${batch.goalId} (status=${teamLeadSession.status}, workers=${batch.items.length}, ${message.length} chars)`);
 		} catch (err) {
-			console.error(`[team-manager] Failed to notify team lead for goal ${goalId}:`, err);
+			console.error(`[team-manager] Failed to notify team lead for goal ${batch.goalId}:`, err);
 		}
+	}
+
+	private formatTeamLeadWorkerNotificationBatch(items: PendingTeamLeadNotification[]): string {
+		if (items.length === 1) return items[0].message;
+
+		const sections = items.map((item, index) => {
+			return [
+				`### ${index + 1}. \`${item.agentId}\` (\`${item.role}\`)`,
+				"",
+				item.message,
+			].join("\n");
+		});
+
+		return [
+			"**Team agents finished**",
+			"",
+			`The following ${items.length} worker-idle notifications arrived together. Review them in order, then run \`task_list\` and decide next steps.`,
+			"",
+			sections.join("\n\n"),
+		].join("\n");
 	}
 
 	/**
@@ -2883,6 +2993,9 @@ export class TeamManager {
 			}
 		}
 
+		// Flush any worker-finished batch while the team lead is still live.
+		await this.flushPendingLeadNotificationForGoal(goalId);
+
 		// Cancel idle-nudge timer and unsubscribe from team lead events
 		this.clearIdleNudgeTimer(goalId);
 		entry.unsubscribeTeamLeadEvents?.();
@@ -2928,6 +3041,9 @@ export class TeamManager {
 		if (this.verificationHarness) {
 			await this.verificationHarness.cancelAllVerifications(goalId);
 		}
+
+		// Flush any worker-finished batch while the team lead is still live.
+		await this.flushPendingLeadNotificationForGoal(goalId);
 
 		// Cancel idle-nudge timer and unsubscribe from team lead events
 		this.clearIdleNudgeTimer(goalId);

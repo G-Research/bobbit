@@ -556,14 +556,20 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 	//
 	// Automatic risk-based selection of this path (classifying a diff as
 	// low-risk and routing it here without the user asking) is explicitly out
-	// of scope — that is CLF-W3's classifier territory. This workflow only
+	// of scope. The observe-only evidence-gatherer for that eventual decision
+	// landed as CLF-W5 (gate-risk-classifier.ts, `(gate-verify, risk)`) — it
+	// proposes a low/medium/high label from changed-file shape, but nothing
+	// reads that label back to select a workflow yet. This workflow only
 	// makes the fast path *available*; nothing auto-selects it.
 	//
 	// The "unit" step below still runs the full suite. TEST-01 landed
 	// explicit-path filtering (`npm run test:unit -- <paths>`) but there is no
-	// automatic diff→affected-files computation yet (that's diff-risk-model
-	// territory, same CLF-W3 seam) — wiring the unit step to auto-derive
-	// "affected" files from the branch diff belongs there, not here.
+	// automatic diff→affected-files computation yet — CLF-W5 computes path
+	// CLASSES (server/ui/tests/docs) for its own risk label, not an
+	// affected-file list, so wiring the unit step to auto-derive "affected"
+	// files from the branch diff remains a separate, unbuilt piece of that
+	// same future diff-risk-model territory, not something this wave's
+	// classifier already does.
 	const soloFast: SeededWorkflow = {
 		id: "solo-fast",
 		name: "Solo Fast",

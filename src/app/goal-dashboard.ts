@@ -350,10 +350,10 @@ interface SwarmGroupStatus {
 	barrierFired: boolean;
 	allFailed: boolean;
 	/** Per-sibling TERMINAL status, one entry per captured artifact (SWARM-W3: rendered per-sibling in the strip, not just as an aggregate count — transparency into which candidate did what). Absent siblings are still non-terminal (running or capacity-blocked); their live state comes from `dashboardDescendants`, not this array. */
-	artifacts?: Array<{ goalId: string; status: "done" | "failed" | "killed"; branch?: string; commitSha?: string; capturedAt: number }>;
+	artifacts?: Array<{ goalId: string; status: "done" | "failed" | "killed"; branch?: string; commitSha?: string; capturedAt: number; killReason?: "governor-budget" | "governor-wallclock" | "superseded" }>;
 	lastVerify?: { outcome: string; winnerGoalId?: string; scores: Array<{ goalId: string; passed: boolean; score: number }> };
 	integratedGoalId?: string;
-	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string };
+	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string; earlyKill?: boolean };
 }
 const swarmGroupStatusCache = new Map<string, SwarmGroupStatus>();
 const swarmGroupStatusInFlight = new Set<string>();
@@ -515,10 +515,17 @@ function renderSwarmSiblingRows(swarmGroup: string, status: SwarmGroupStatus | u
 					: sib.state === "blocked"
 						? "queued (capacity)"
 						: sib.state; // "todo" | "in-progress" | "complete" | "shelved"
+				// SWARM-W4.1 (design/swarm-orchestration-w4.md §5): a bare "killed"
+				// reads as a budget/timeout failure — misleading for a deliberate
+				// early-kill. One-word suffix, no new row shape, reuses this exact
+				// existing state span.
+				const killReasonSuffix = artifact?.status === "killed" && artifact.killReason
+					? (artifact.killReason === "superseded" ? " (superseded)" : artifact.killReason === "governor-budget" ? " (budget)" : " (wall-clock)")
+					: "";
 				return html`
 					<div class="swarm-governor-sibling" data-sibling-goal-id="${sib.id}" data-sibling-state="${stateLabel}">
 						<span class="swarm-governor-sibling-title">${sib.title}</span>
-						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}</span>
+						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}${killReasonSuffix}</span>
 						${score
 							? html`<span class="swarm-governor-sibling-score">verify: ${score.passed ? "pass" : "fail"}${typeof score.score === "number" ? ` (${score.score})` : ""}</span>`
 							: nothing}

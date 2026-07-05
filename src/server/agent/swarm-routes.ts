@@ -102,6 +102,9 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 		const hardKillMarginMultiplier = typeof body.hardKillMarginMultiplier === "number" && body.hardKillMarginMultiplier > 1 ? body.hardKillMarginMultiplier : undefined;
 		const verifyCommand = typeof body.verifyCommand === "string" ? body.verifyCommand : "";
 		if (!verifyCommand) { json({ error: "verifyCommand is required — best-of-N MUST have a deterministic verifier, never an LLM grading its own output", code: "VERIFY_COMMAND_REQUIRED" }, 400); return true; }
+		// SWARM-W4.1: opt-in early-kill (design/swarm-orchestration-w4.md §1.3)
+		// — defaults false, byte-identical to pre-W4.1 behavior when omitted.
+		const earlyKill = body.earlyKill === true;
 		try {
 			const result = await createBestOfNSwarm(
 				{
@@ -109,7 +112,7 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 					getGoalManagerForGoal,
 					harness: verificationHarness,
 				},
-				{ parentGoalId: parentId, title, spec, siblings, tokenBudgetPerNode, wallClockMsPerNode, hardKillMarginMultiplier, verifyCommand },
+				{ parentGoalId: parentId, title, spec, siblings, tokenBudgetPerNode, wallClockMsPerNode, hardKillMarginMultiplier, verifyCommand, earlyKill },
 			);
 			broadcastToAll({ type: "goal_created", goalId: parentId, swarmGroup: result.swarmGroup });
 			json({ ...result }, 201);

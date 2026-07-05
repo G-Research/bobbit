@@ -403,7 +403,7 @@ graphify (installed as a CLI + optional MCP server) extracts an AST/import graph
 
 **It is not installed on PATH by default.** Install the CLI yourself (`pipx install graphify` or `uv tool install graphify`, see graphify's own docs) — this repo only wires the *result* of having it installed.
 
-The `LSP` tool itself is interactive-session-only; subagents run the same queries via `scripts/lsp-cli.mjs` (`workspace`/`symbols`/`refs`/`def`/`hover`) — see [`.claude/skills/orient/SKILL.md`](../.claude/skills/orient/SKILL.md). The `workspace <file> <query>` command warms the anchor file before polling workspace symbols and emits repo-relative file suffixes, which avoids treating primary/worktree absolute path prefixes as different symbols.
+The `LSP` tool itself is interactive-session-only; subagents run the same queries via `scripts/lsp-cli.mjs` (`workspace`/`symbols`/`refs`/`def`/`hover`) — see [`.claude/skills/orient/SKILL.md`](../.claude/skills/orient/SKILL.md). The `workspace <file> <query>` command warms the anchor file before polling workspace symbols and emits repo-relative file suffixes, which avoids treating primary/worktree absolute path prefixes as different symbols. Productizing this as an agent-facing tool group is designed in [docs/design/lsp-product-tools.md](design/lsp-product-tools.md) (F6) — not implemented yet.
 
 ### The graph is a snapshot, not live
 

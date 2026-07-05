@@ -329,6 +329,49 @@ describe("SessionManager.enqueuePrompt — F14 thinking router apply mode (CLF-W
 		assert.equal(session.spawnPinnedThinkingLevel, undefined, "apply mode must not mutate spawnPinnedThinkingLevel");
 	});
 
+	it("restores the pre-apply thinking level exactly once on the next abstain", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager, { spawnPinnedThinkingLevel: "medium" });
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1);
+		assert.equal(session.rpcClient.setThinkingLevel.mock.calls[0].arguments[0], "xhigh");
+		assert.equal(session.thinkingRouterAppliedBaseline, "medium");
+
+		await manager.enqueuePrompt(session.id, "now do the simple follow-up");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 2);
+		assert.equal(session.rpcClient.setThinkingLevel.mock.calls[1].arguments[0], "medium");
+		assert.equal(session.thinkingRouterAppliedBaseline, undefined, "restore must clear the transient marker");
+
+		await manager.enqueuePrompt(session.id, "one more ordinary prompt");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 2, "cleared marker must not restore again");
+	});
+
+	it("clears the classifier marker without restoring after an explicit user thinking-level change", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager, { spawnPinnedThinkingLevel: "medium" });
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1);
+		assert.equal(session.thinkingRouterAppliedBaseline, "medium");
+
+		session.spawnPinnedThinkingLevel = "high";
+		session.thinkingLevelUserPinned = true;
+
+		await manager.enqueuePrompt(session.id, "ultrathink again, but the user already picked high");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1, "user-pinned thinking level must win; no baseline restore");
+		assert.equal(session.thinkingRouterAppliedBaseline, undefined, "user change clears the classifier-applied marker");
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.equal(ring[1].decision.kind, "select");
+		assert.equal(ring[1].applied, false);
+	});
+
 	it("does not apply when BOBBIT_CLF_THINKING_ROUTER is unset (default remains observe)", async () => {
 		delete process.env.BOBBIT_CLF_THINKING_ROUTER;
 		const manager = makeManager({ withRegisteredHub: true });

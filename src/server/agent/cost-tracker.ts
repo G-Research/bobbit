@@ -63,6 +63,26 @@ export interface RawSessionCost {
 }
 
 /**
+ * Append-only per-turn usage row. This is stored alongside, not instead of,
+ * the cumulative {@link RawSessionCost}; existing cumulative consumers should
+ * continue to read the same data shape from `session-costs.json`.
+ */
+export interface RawTurnCost {
+	ts: number;
+	sessionId: string;
+	/** Monotonic per-session sequence, preserved across reloads. */
+	seq: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cacheWrite1hTokens: number;
+	totalCost: number;
+	goalId?: string;
+	trigger?: string;
+}
+
+/**
  * Public-facing session cost snapshot. Adds the derived `cacheHitRate`
  * to {@link RawSessionCost}. `cacheHitRate` is `null` when the denominator
  * (`cacheReadTokens + inputTokens`) is 0 — i.e. cold sessions, or providers
@@ -191,7 +211,9 @@ export function withDerivedFields(raw: RawSessionCost): SessionCost {
  */
 export class CostTracker {
 	private costs: Map<string, RawSessionCost> = new Map();
+	private turnCosts: Map<string, RawTurnCost[]> = new Map();
 	private readonly storeFile: string;
+	private readonly turnStoreFile: string;
 	/** Monotonically increasing tick — bumped on every cost mutation.
 	 *  Used by `computeTreeCost` for cache invalidation (tree-cost rollup). */
 	private generation = 0;
@@ -216,13 +238,21 @@ export class CostTracker {
 	 */
 	private saveTimer: ReturnType<typeof setTimeout> | null = null;
 	private static readonly SAVE_DEBOUNCE_MS = 1000;
+	// Bound telemetry growth: retain the most recent rows per session.
+	private static readonly MAX_TURN_COST_ROWS_PER_SESSION = 500;
 
 	constructor(stateDir: string) {
 		this.storeFile = path.join(stateDir, "session-costs.json");
+		this.turnStoreFile = path.join(stateDir, "session-cost-turns.json");
 		this.load();
 	}
 
 	private load(): void {
+		this.loadCosts();
+		this.loadTurnCosts();
+	}
+
+	private loadCosts(): void {
 		try {
 			if (fs.existsSync(this.storeFile)) {
 				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
@@ -251,6 +281,45 @@ export class CostTracker {
 			}
 		} catch (err) {
 			console.error("[cost-tracker] Failed to load persisted costs:", err);
+		}
+	}
+
+	private loadTurnCosts(): void {
+		try {
+			if (!fs.existsSync(this.turnStoreFile)) return;
+			const data = JSON.parse(fs.readFileSync(this.turnStoreFile, "utf-8"));
+			if (!data || typeof data !== "object" || Array.isArray(data)) return;
+			for (const [id, rows] of Object.entries(data)) {
+				if (!id || !Array.isArray(rows)) continue;
+				const parsedRows: RawTurnCost[] = [];
+				for (const row of rows) {
+					if (!row || typeof row !== "object") continue;
+					const r = row as Record<string, unknown>;
+					if (r.sessionId !== id) continue;
+					const ts = typeof r.ts === "number" && Number.isFinite(r.ts) ? r.ts : undefined;
+					const seq = typeof r.seq === "number" && Number.isFinite(r.seq) ? r.seq : undefined;
+					if (ts === undefined || seq === undefined) continue;
+					const entry: RawTurnCost = {
+						ts,
+						sessionId: id,
+						seq,
+						inputTokens: typeof r.inputTokens === "number" ? r.inputTokens : 0,
+						outputTokens: typeof r.outputTokens === "number" ? r.outputTokens : 0,
+						cacheReadTokens: typeof r.cacheReadTokens === "number" ? r.cacheReadTokens : 0,
+						cacheWriteTokens: typeof r.cacheWriteTokens === "number" ? r.cacheWriteTokens : 0,
+						cacheWrite1hTokens: typeof r.cacheWrite1hTokens === "number" ? r.cacheWrite1hTokens : 0,
+						totalCost: typeof r.totalCost === "number" ? r.totalCost : 0,
+					};
+					if (typeof r.goalId === "string" && r.goalId.length > 0) entry.goalId = r.goalId;
+					if (typeof r.trigger === "string" && r.trigger.length > 0) entry.trigger = r.trigger;
+					parsedRows.push(entry);
+				}
+				if (parsedRows.length > 0) {
+					this.turnCosts.set(id, parsedRows.slice(-CostTracker.MAX_TURN_COST_ROWS_PER_SESSION));
+				}
+			}
+		} catch (err) {
+			console.error("[cost-tracker] Failed to load persisted turn costs:", err);
 		}
 	}
 
@@ -284,6 +353,12 @@ export class CostTracker {
 				data[id] = entry;
 			}
 			atomicWriteJsonSync(this.storeFile, data);
+
+			const turnData: Record<string, RawTurnCost[]> = {};
+			for (const [id, rows] of this.turnCosts) {
+				turnData[id] = rows.map((row) => ({ ...row }));
+			}
+			atomicWriteJsonSync(this.turnStoreFile, turnData);
 		} catch (err) {
 			console.error("[cost-tracker] Failed to save costs:", err);
 		}
@@ -326,8 +401,10 @@ export class CostTracker {
 	 *
 	 * Returns a snapshot with the derived `cacheHitRate` populated.
 	 */
-	recordUsage(sessionId: string, usage: UsageData, goalId?: string): SessionCost {
+	recordUsage(sessionId: string, usage: UsageData, goalId?: string, trigger?: string): SessionCost {
 		const existing = this.costs.get(sessionId) ?? emptyRaw();
+		const beforeTotalCost = existing.totalCost;
+		const ts = Date.now();
 		existing.inputTokens += usage.inputTokens ?? 0;
 		existing.outputTokens += usage.outputTokens ?? 0;
 		existing.cacheReadTokens += usage.cacheReadTokens ?? 0;
@@ -339,12 +416,43 @@ export class CostTracker {
 			existing.goalId = goalId;
 		}
 		if (!existing.firstSeenAt) {
-			existing.firstSeenAt = Date.now();
+			existing.firstSeenAt = ts;
 		}
 		this.costs.set(sessionId, existing);
+		this.appendTurnCostRow(sessionId, usage, existing.totalCost - beforeTotalCost, goalId, trigger, ts);
 		this.generation++;
 		this.save();
 		return withDerivedFields(existing);
+	}
+
+	private appendTurnCostRow(
+		sessionId: string,
+		usage: UsageData,
+		totalCostDelta: number,
+		goalId: string | undefined,
+		trigger: string | undefined,
+		ts: number,
+	): void {
+		const rows = this.turnCosts.get(sessionId) ?? [];
+		const lastSeq = rows.length > 0 ? rows[rows.length - 1]!.seq : 0;
+		const row: RawTurnCost = {
+			ts,
+			sessionId,
+			seq: lastSeq + 1,
+			inputTokens: usage.inputTokens ?? 0,
+			outputTokens: usage.outputTokens ?? 0,
+			cacheReadTokens: usage.cacheReadTokens ?? 0,
+			cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? 0,
+			totalCost: Math.round(totalCostDelta * 1_000_000) / 1_000_000,
+		};
+		if (goalId) row.goalId = goalId;
+		if (trigger) row.trigger = trigger;
+		rows.push(row);
+		if (rows.length > CostTracker.MAX_TURN_COST_ROWS_PER_SESSION) {
+			rows.splice(0, rows.length - CostTracker.MAX_TURN_COST_ROWS_PER_SESSION);
+		}
+		this.turnCosts.set(sessionId, rows);
 	}
 
 	/** Current generation tick. Bumped on every cost mutation. */
@@ -406,6 +514,18 @@ export class CostTracker {
 		const out = new Map<string, SessionCost>();
 		for (const [id, cost] of this.costs) {
 			out.set(id, withDerivedFields(cost));
+		}
+		return out;
+	}
+
+	getTurnCosts(sessionId: string): RawTurnCost[] {
+		return (this.turnCosts.get(sessionId) ?? []).map((row) => ({ ...row }));
+	}
+
+	getAllTurnCosts(): Map<string, RawTurnCost[]> {
+		const out = new Map<string, RawTurnCost[]>();
+		for (const [id, rows] of this.turnCosts) {
+			out.set(id, rows.map((row) => ({ ...row })));
 		}
 		return out;
 	}
@@ -475,7 +595,9 @@ export class CostTracker {
 	 *  than going through the recordUsage debounce. Also cancels any pending
 	 *  debounced save so a stale in-memory snapshot can't win a save race. */
 	removeSession(sessionId: string): void {
-		if (this.costs.delete(sessionId)) {
+		const removedCost = this.costs.delete(sessionId);
+		const removedTurns = this.turnCosts.delete(sessionId);
+		if (removedCost || removedTurns) {
 			this.generation++;
 			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
 			this.saveNow();

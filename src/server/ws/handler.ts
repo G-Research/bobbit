@@ -953,6 +953,8 @@ export function handleWebSocketConnection(
 						// the F14 thinking-router's apply mode (BOBBIT_CLF_THINKING_ROUTER=
 						// enforce) never overrides it. See SessionManager.canApplyThinkingRouterDecision.
 						session.thinkingLevelUserPinned = true;
+						session.thinkingRouterAppliedBaseline = undefined;
+						sessionManager.persistSessionThinkingUserPinned(session.id, true);
 						broadcast(session.clients, { type: "state", data: { thinkingLevel: level } });
 					} catch (err: any) {
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${level}):`, err?.message || err);
