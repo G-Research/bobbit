@@ -17,11 +17,12 @@
 // CLF-W3 — APPLY MODE (`BOBBIT_CLF_THINKING_ROUTER=enforce`, see
 // `isThinkingRouterApplyMode` below): `enqueuePrompt` calls
 // `session.rpcClient.setThinkingLevel(choice)` with the classifier's exact
-// `select`ed level, transiently for that turn only (never persisted as
-// `spawnPinnedThinkingLevel` — the next turn re-consults from scratch, same as
-// this wave's Decision itself is per-prompt). Three states mirror the
-// tool-approve-heuristic pattern exactly (`isToolApproveEnforceMode`): absent
-// or any value other than the literal string `"enforce"` (including
+// `select`ed level, transiently for that turn only. The pre-apply effective
+// level is remembered in live `SessionInfo` and restored on the next apply-mode
+// prompt where the router does not select; neither the escalation nor the
+// restore marker is persisted as `spawnPinnedThinkingLevel`. Three states mirror
+// the tool-approve-heuristic pattern exactly (`isToolApproveEnforceMode`):
+// absent or any value other than the literal string `"enforce"` (including
 // `"observe"`) stays observe-only, byte-identical to W1b.
 //
 // PRECEDENCE (pinned invariant — the classifier must lose to any config a

@@ -155,6 +155,8 @@ export interface PersistedSession {
 	imageModelProvider?: string;
 	/** Image generation model ID for this session, if overridden from the default. */
 	imageModelId?: string;
+	/** True when the user explicitly changed this session's thinking level. */
+	thinkingLevelUserPinned?: boolean;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
@@ -216,6 +218,7 @@ export type UpdatableSessionFields = Pick<
 	| "claudeCodeModelAlias"
 	| "imageModelProvider"
 	| "imageModelId"
+	| "thinkingLevelUserPinned"
 	| "sandboxed"
 	| "projectId"
 	| "repoWorktrees"
@@ -715,6 +718,7 @@ export class SessionStore {
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "runtime", "claudeCodeSessionId",
 		"claudeCodeExecutable", "claudeCodePermissionMode", "claudeCodeModelAlias",
+		"thinkingLevelUserPinned",
 		"inFlightSteerTexts",
 		"sidePanelWorkspace",
 		"wasStreaming", "streamingStartedAt", "messageQueue",

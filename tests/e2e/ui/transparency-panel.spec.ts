@@ -206,6 +206,7 @@ test.describe("Transparency Panel — real F14 thinking router (CLF-W1b)", () =>
 		await expect(rows).toContainText("user-prompt-submit");
 		await expect(rows).toContainText("thinking");
 		await expect(rows).toContainText("selected: xhigh");
+		await expect(rows).not.toContainText("selected: xhigh (applied)");
 		await expect(rows).toContainText("consulted 1");
 
 		await page.locator('[data-testid="transparency-panel-row-toggle"]').first().click();
