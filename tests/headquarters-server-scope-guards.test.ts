@@ -49,6 +49,51 @@ function writeInstalledPack(root: string, packName: string, skillName = "demo"):
 	].join("\n"), "utf-8");
 }
 
+function writeInstalledUiPack(root: string, packName: string, toolName: string, panelId: string): void {
+	const packRoot = path.join(root, packName);
+	const toolDir = path.join(packRoot, "tools", toolName);
+	const panelDir = path.join(packRoot, "panels");
+	fs.mkdirSync(toolDir, { recursive: true });
+	fs.mkdirSync(panelDir, { recursive: true });
+	fs.writeFileSync(path.join(packRoot, "pack.yaml"), [
+		`name: ${packName}`,
+		"description: scope guard UI pack",
+		"version: 1.0.0",
+		"contents:",
+		"  roles: []",
+		`  tools: [${toolName}]`,
+		"  skills: []",
+		"  entrypoints: []",
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(toolDir, `${toolName}.yaml`), [
+		`name: ${toolName}`,
+		"description: scope guard renderer",
+		"group: Scope Guard",
+		"renderer: Renderer.js",
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(toolDir, "Renderer.js"), "export default function createRenderer() { return { render() { return null; } }; }\n", "utf-8");
+	fs.writeFileSync(path.join(panelDir, "scope-guard-panel.yaml"), [
+		`id: ${panelId}`,
+		"title: Scope Guard Panel",
+		"entry: Panel.js",
+		"",
+	].join("\n"), "utf-8");
+	fs.writeFileSync(path.join(panelDir, "Panel.js"), "export default function createPanel() { return { render() { return null; } }; }\n", "utf-8");
+	fs.writeFileSync(path.join(packRoot, ".pack-meta.yaml"), [
+		`packName: ${packName}`,
+		"version: 1.0.0",
+		"scope: server",
+		"sourceUrl: test",
+		"sourceRef: main",
+		"commit: test",
+		"installedAt: test",
+		"updatedAt: test",
+		"",
+	].join("\n"), "utf-8");
+}
+
 function samePath(a: string, b: string): boolean {
 	const normalize = (value: string) => {
 		let resolved = path.resolve(value);
@@ -275,6 +320,10 @@ test("server-scope assistant accepts an explicit cwd inside the Headquarters dir
 
 test("config discovery APIs require explicit projectId", async (t) => {
 	const serverRoot = tmpDir("bobbit-config-api-project-required-");
+	const packName = "scope-guard-pack";
+	const toolName = "scope_guard_demo";
+	const panelId = "scope.guard.panel";
+	writeInstalledUiPack(path.join(serverRoot, ".bobbit", "headquarters", "config", "market-packs"), packName, toolName, panelId);
 	const { baseUrl } = await startGateway(t, serverRoot);
 
 	// Project-runtime routes require an explicit projectId (400 on missing).
@@ -284,14 +333,17 @@ test("config discovery APIs require explicit projectId", async (t) => {
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
-	// Tool/role discovery/detail/config mutations require an explicit projectId.
+	// Tool/role/pack discovery/detail/config mutations require an explicit projectId.
 	// First-party UI passes `headquarters` for server scope; missing scope must fail closed.
 	for (const pathname of [
 		"/api/tools",
 		"/api/tools/read",
+		`/api/tools/${toolName}/renderer`,
 		"/api/roles",
 		"/api/roles/team-lead",
 		"/api/tool-group-policies",
+		"/api/ext/contributions",
+		`/api/ext/packs/${packName}/panels/${panelId}`,
 	]) {
 		const missing = await api(baseUrl, pathname);
 		assert.equal(missing.status, 400, `${pathname} should require projectId`);
@@ -323,9 +375,45 @@ test("config discovery APIs require explicit projectId", async (t) => {
 	assert.equal(mcp.status, 200, JSON.stringify(mcp.body));
 	assert.deepEqual(mcp.body, []);
 
+	for (const pathname of [
+		`/api/tools/${toolName}/renderer?projectId=missing-project`,
+		"/api/ext/contributions?projectId=missing-project",
+		`/api/ext/packs/${packName}/panels/${panelId}?projectId=missing-project`,
+	]) {
+		const unknown = await api(baseUrl, pathname);
+		assert.equal(unknown.status, 404, `${pathname} should reject unknown projectId`);
+		assert.equal(unknown.body.code, "PROJECT_NOT_FOUND");
+	}
+
 	const tools = await api(baseUrl, "/api/tools?projectId=headquarters");
 	assert.equal(tools.status, 200, JSON.stringify(tools.body));
 	assert.ok(Array.isArray(tools.body.tools));
+
+	const hqContributions = await api(baseUrl, "/api/ext/contributions?projectId=headquarters");
+	assert.equal(hqContributions.status, 200, JSON.stringify(hqContributions.body));
+	assert.ok((hqContributions.body.packs as Array<{ packId: string }>).some((pack) => pack.packId === packName));
+
+	const hqPanel = await fetch(`${baseUrl}/api/ext/packs/${packName}/panels/${panelId}?projectId=headquarters`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+	const hqPanelText = await hqPanel.text();
+	assert.equal(hqPanel.status, 200, hqPanelText);
+	assert.match(hqPanelText, /createPanel|default/);
+
+	const hqRenderer = await fetch(`${baseUrl}/api/tools/${toolName}/renderer?projectId=headquarters`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+	const hqRendererText = await hqRenderer.text();
+	assert.equal(hqRenderer.status, 200, hqRendererText);
+	assert.match(hqRendererText, /createRenderer|default/);
+
+	const normalRoot = tmpDir("bobbit-pack-scope-normal-");
+	const normalProject = await api(baseUrl, "/api/projects", { name: "Pack Scope Normal", rootPath: normalRoot, upsert: true });
+	assert.ok(normalProject.status === 200 || normalProject.status === 201, JSON.stringify(normalProject.body));
+	const normalProjectId = normalProject.body.id as string;
+	const projectContributions = await api(baseUrl, `/api/ext/contributions?projectId=${encodeURIComponent(normalProjectId)}`);
+	assert.equal(projectContributions.status, 200, JSON.stringify(projectContributions.body));
+	assert.ok(Array.isArray(projectContributions.body.packs));
+	const projectPanel = await fetch(`${baseUrl}/api/ext/packs/${packName}/panels/${panelId}?projectId=${encodeURIComponent(normalProjectId)}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+	assert.equal(projectPanel.status, 200, await projectPanel.text());
+	const projectRenderer = await fetch(`${baseUrl}/api/tools/${toolName}/renderer?projectId=${encodeURIComponent(normalProjectId)}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+	assert.equal(projectRenderer.status, 200, await projectRenderer.text());
 
 	const toolDetail = await api(baseUrl, "/api/tools/read?projectId=headquarters");
 	assert.equal(toolDetail.status, 200, JSON.stringify(toolDetail.body));
