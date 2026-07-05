@@ -25,8 +25,18 @@
  * were tried and rejected/no-opped. Override with env var BOBBIT_GLM_EFFORT=off (or
  * low/false) to disable thinking mode, e.g. for cheap smoke calls.
  *
+ * DORMANT BY DEFAULT (AJ decision, ADDENDUM #30 in
+ * ~/Documents/dev/bobbit-fable-refactor/FABLE-PROMPT.md, 2026-07-05): GLM 5.2 is dropped as a
+ * worker LLM — maintenance cost (proxy, key rotation, 40rpm babysitting, garbled-edit retries)
+ * exceeded benefit. The micro-tier pipeline's default generation path is now codex/GPT-5.5
+ * directly (see the glm-task skill) with NO probe of this endpoint. This script and its NIM
+ * wiring stay in place, unmaintained but not deleted, and only run when the caller explicitly
+ * opts in via `BOBBIT_GLM_WORKER=1` — the same re-arm shape as `GLM_AUTO_ENABLED` in
+ * bobbit-fable-refactor/scripts/codex-lane.sh. Without that opt-in, `main()` refuses to run and
+ * points the caller at the codex path instead of touching the NIM endpoint.
+ *
  * Usage:
- *   node scripts/glm-worker.mjs --spec <spec.json> [--workdir <dir>]
+ *   BOBBIT_GLM_WORKER=1 node scripts/glm-worker.mjs --spec <spec.json> [--workdir <dir>]
  *     [--env-file <path>] [--max-rounds N] [--max-tokens N]
  *   BOBBIT_GLM_EFFORT=off node scripts/glm-worker.mjs ...   # disable thinking mode
  *
@@ -77,6 +87,29 @@ const OUTPUT_TAIL_CHARS = 4000;
 // "off"/"low"/"false" to disable thinking mode (e.g. for cheap/fast smoke calls).
 const GLM_EFFORT = (process.env.BOBBIT_GLM_EFFORT || "high").toLowerCase();
 const GLM_THINKING_ENABLED = !["off", "low", "false", "0", "disable", "disabled"].includes(GLM_EFFORT);
+
+/**
+ * Routing decision for the micro-tier pipeline: GLM 5.2 is dropped as a worker LLM by default
+ * (ADDENDUM #30) and the pipeline's default generation path is codex/GPT-5.5 directly, with no
+ * probe of the NIM endpoint. This script's GLM branch only re-arms behind an explicit env
+ * opt-in — nothing sets it today. Pure/side-effect-free so it's dry-runnable in tests without
+ * touching the network or the key-loading path.
+ */
+export function selectGenerationPath(env = process.env) {
+  const flag = (env.BOBBIT_GLM_WORKER || "").trim().toLowerCase();
+  const enabled = ["1", "true", "yes"].includes(flag);
+  if (!enabled) {
+    return {
+      path: "codex",
+      reason:
+        "BOBBIT_GLM_WORKER not set — GLM 5.2 dropped as a worker LLM (ADDENDUM #30); default path is codex/GPT-5.5 directly, see the glm-task skill",
+    };
+  }
+  return {
+    path: "glm",
+    reason: "BOBBIT_GLM_WORKER=1 — explicit opt-in re-arms the GLM 5.2 (NVIDIA NIM) branch",
+  };
+}
 
 function printUsage() {
   console.error(
@@ -266,6 +299,19 @@ async function main() {
     printUsage();
     process.exit(2);
   }
+
+  const routing = selectGenerationPath(process.env);
+  if (routing.path !== "glm") {
+    console.log(JSON.stringify({ event: "routing", ...routing }));
+    console.error(
+      `glm-worker.mjs: ${routing.reason}\n` +
+        `This script is dormant by default — the micro-tier pipeline's default generation path is\n` +
+        `codex/GPT-5.5 directly (see .claude/skills/glm-task/SKILL.md, step 0). Set BOBBIT_GLM_WORKER=1\n` +
+        `to explicitly re-arm the GLM 5.2 (NVIDIA NIM) branch instead of running this script.`
+    );
+    process.exit(3);
+  }
+
   const spec = JSON.parse(readFileSync(path.resolve(args.spec), "utf8"));
   const workdir = path.resolve(args.workdir || spec.workdir || ".");
   const maxRounds = args.maxRounds || spec.maxRounds || DEFAULT_MAX_ROUNDS;
