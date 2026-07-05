@@ -226,17 +226,18 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 
 		const {
 			setProjectRoot,
+			resetAgentDirStateForTests,
 			scaffoldBobbitDir,
 			loadOrCreateToken,
 			createGateway,
 			registerRpcBridgeFactory,
 		} = await withDistServerImportLock(async () => {
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { setProjectRoot, resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
 			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
+			return { setProjectRoot, resetAgentDirStateForTests, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
 		});
 		// Register the in-process mock bridge factory before any sessions are
 		// created. The factory intercepts RpcBridge constructions whose cliPath
@@ -248,6 +249,27 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			return null;
 		});
 
+		// `agent-dir-config.ts`'s runtime state is a lazily-initialized,
+		// per-*process* singleton (production has exactly one gateway per
+		// process, initialized once from cli.ts). `gateway` here is a
+		// worker-scoped fixture — it boots exactly once per worker — but other
+		// specs in this same "api" project (e.g.
+		// tests/e2e/custom-provider-models-json-sync.spec.ts) boot their OWN
+		// short-lived in-process gateways directly, sharing this same Node
+		// process/module registry when Playwright reuses a worker across spec
+		// files. If one of those runs (and tears its bobbitDir down) before
+		// this fixture's one-and-only boot, `globalAgentDir()` — and everything
+		// downstream of it, e.g. `writeContextWindowOverrides()` — silently
+		// resolves to that other spec's now-deleted directory instead of ours,
+		// so models.json overrides never land where this worker's tests read
+		// them from (`gateway.bobbitDir`). Solo/isolated runs never surface
+		// this (there's no earlier gateway boot in the process to collide
+		// with); it only shows up as a poll timeout in full-suite runs
+		// depending on which spec happens to grab this worker first. Reset
+		// immediately before this boot so `setProjectRoot`/`process.env.BOBBIT_DIR`
+		// below are re-read fresh — same fix as `tests/helpers/agent-dir.ts`'s
+		// `pinAgentDirForTest` and `tests/e2e/custom-provider-models-json-sync.spec.ts`.
+		resetAgentDirStateForTests();
 		setProjectRoot(bobbitDir);
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();

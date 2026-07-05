@@ -49,7 +49,12 @@ protocol future cohorts should follow, and what's left after cohort 1.
   `GET /api/sessions/:id/prompt-sections`
   (`src/server/routes/session-utility-routes.ts`) — see
   [Cohort 7: session utilities](#cohort-7-session-utilities) below.
-- Everything else in `handleApiRoute` (~347 remaining routes) is unchanged,
+- **Cohort 8: maintenance + search admin** — worktree/session/archive
+  maintenance routes, search admin routes, and index-row cleanup routes
+  (`src/server/routes/maintenance-routes.ts`) — see
+  [Cohort 8: maintenance + search admin](#cohort-8-maintenance--search-admin)
+  below.
+- Everything else in `handleApiRoute` (~333 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -589,6 +594,51 @@ Parity evidence to run: `tests/e2e/bg-process-sandbox-guard.spec.ts`,
 `tests/e2e/ui/queue-ui.spec.ts`, and
 `tests/e2e/ui/pill-overflow-promotion.spec.ts`.
 
+## Cohort 8: maintenance + search admin
+
+One new module, registered after cohort 7's in `server.ts`:
+`src/server/routes/maintenance-routes.ts`.
+
+This cohort picked the low-risk tail cluster for operator maintenance and
+search-index administration. The routes are exact path matches, lexically
+contiguous at the end of `handleApiRoute`, and have direct API coverage in
+`tests/e2e/maintenance-api.spec.ts` and `tests/e2e/search-admin-api.spec.ts`.
+
+| Method | Path |
+|---|---|
+| GET | `/api/maintenance/worktrees` |
+| GET | `/api/maintenance/archived-session-worktrees` |
+| POST | `/api/maintenance/cleanup-archived-session-worktrees` |
+| GET | `/api/maintenance/orphaned-worktrees` |
+| POST | `/api/maintenance/cleanup-worktrees` |
+| GET | `/api/maintenance/orphaned-sessions` |
+| POST | `/api/maintenance/cleanup-sessions` |
+| GET | `/api/maintenance/expired-archives` |
+| POST | `/api/maintenance/purge-archives` |
+| POST | `/api/search/rebuild` |
+| GET | `/api/search/stats` |
+| POST | `/api/search/compact` |
+| GET | `/api/maintenance/orphaned-index-rows` |
+| POST | `/api/maintenance/cleanup-index-rows` |
+
+`CoreRouteCtx` did not grow in this cohort. The existing fields already
+covered every request-local dependency: `json`, `readBody`, `req`, `url`,
+`sessionManager`, and `projectContextManager`. `WorktreeInventoryService`
+is imported directly by the route module, and the two search-admin helper
+functions used only by this migrated family moved into the route module.
+
+**Fall-through parity: no shim needed.** Every legacy block in this cohort
+gated on exact path and method in the same `if` condition. A method mismatch
+skipped the block and fell through to the same generic terminal 404 as an
+unmatched path. The registry entries are method-scoped, so leaving unhandled
+methods unregistered preserves that behavior without a 405 shim.
+
+Parity evidence to run: `tests/e2e/maintenance-api.spec.ts` and
+`tests/e2e/search-admin-api.spec.ts`. UI fixture coverage that exercises the
+client calls includes `tests/ui-fixtures/search-preview-maintenance.spec.ts`,
+`tests/ui-fixtures/search-index-ui.spec.ts`, and
+`tests/ui-fixtures/settings-admin-fixture.spec.ts`.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -669,12 +719,13 @@ Parity evidence to run: `tests/e2e/bg-process-sandbox-guard.spec.ts`,
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~347 routes, including the largest/highest-traffic families
+- The other ~333 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
   the workflows + review-annotation families in cohort 6, and the session
-  utility cluster in cohort 7 (all above).
+  utility cluster in cohort 7, and the maintenance + search-admin cluster in
+  cohort 8 (all above).
   Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see

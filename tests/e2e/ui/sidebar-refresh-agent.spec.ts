@@ -70,7 +70,46 @@ test.describe("Sidebar Refresh agent action", () => {
 		await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
 	}
 
+	const sessionOverridesByPage = new WeakMap<Page, Map<string, Record<string, unknown>>>();
+
+	// __bobbitRenderApp() only SCHEDULES a render via requestAnimationFrame
+	// (src/app/state.ts renderApp()); it does not paint synchronously. Resolving
+	// this evaluate() before that rAF fires leaves the caller racing the render
+	// against whatever it does next (hover / isVisible snapshot). Wait for two
+	// nested rAFs inside the SAME evaluate call so the promise cannot resolve
+	// until the patched DOM has actually painted — same by-construction fix as
+	// forceRender() in tests/e2e/ui/notification-policy.spec.ts.
+	//
+	// That still isn't enough: this only fakes CLIENT memory. The app's own 5s
+	// session-list poll and WS-push-triggered refresh (src/app/api.ts
+	// refreshSessions()) fully REPLACE state.gatewaySessions with the real
+	// (unpatched) server data — `state.gatewaySessions = newSessions;` — on any
+	// `changed: true` response, silently reverting the patch. Whether that poll
+	// lands before or after the test's next assertion depends on wall-clock
+	// timing (5s interval phase, WS event debounce), which is exactly the kind
+	// of margin this project forbids racing. Fix by construction: keep the
+	// override STICKY in the /api/sessions response body itself (same pattern
+	// as injectChildFields() in tests/e2e/ui/plan-tab-gate-status.spec.ts), so
+	// every poll — no matter when it fires — keeps reporting the patched value.
 	async function patchClientSession(page: Page, sessionId: string, patch: Record<string, unknown>): Promise<void> {
+		let overrides = sessionOverridesByPage.get(page);
+		if (!overrides) {
+			overrides = new Map();
+			sessionOverridesByPage.set(page, overrides);
+			await page.route("**/api/sessions*", async (route) => {
+				if (route.request().method() !== "GET") return route.fallback();
+				const response = await route.fetch();
+				const body = await response.json().catch(() => null);
+				if (!body || !Array.isArray(body.sessions)) return route.fulfill({ response });
+				for (const s of body.sessions) {
+					const o = overrides!.get(s?.id);
+					if (o) Object.assign(s, o);
+				}
+				await route.fulfill({ response, json: body });
+			});
+		}
+		overrides.set(sessionId, { ...(overrides.get(sessionId) ?? {}), ...patch });
+
 		await page.evaluate(({ id, patch }) => {
 			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 			if (!state?.gatewaySessions) throw new Error("missing bobbit gatewaySessions state");
@@ -78,6 +117,9 @@ test.describe("Sidebar Refresh agent action", () => {
 			if (idx < 0) throw new Error(`missing session ${id}`);
 			state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], ...patch };
 			(window as any).__bobbitRenderApp?.();
+			return new Promise<void>((resolve) =>
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+			);
 		}, { id: sessionId, patch });
 	}
 
