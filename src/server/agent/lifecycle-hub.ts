@@ -597,12 +597,25 @@ export class LifecycleHub {
 	 * so every real invocation of this method today would throw, and none
 	 * occurs — production behaviour is provably byte-identical. See
 	 * tests/lifecycle-hub-dispatch-decision.test.ts.
+	 *
+	 * `opts.applyIfSelected` (CLF-W3) — the CALLER'S pre-decided answer to "if
+	 * this consult comes back `select`, will I actually apply it?", computed
+	 * from mode-flag + precedence checks BEFORE the classifier ever runs (it
+	 * cannot depend on the resulting `choice`, since that doesn't exist yet).
+	 * Recorded verbatim onto the outcome's `applied` field when the result is
+	 * `select` (omitted for `abstain` — never meaningful there); omitted
+	 * entirely (`applied` stays `undefined`) when the caller doesn't pass it —
+	 * every pre-CLF-W3 call site, byte-identical. This method itself never
+	 * applies anything — see thinking-router-classifier.ts / session-manager.ts
+	 * for the actual `setThinkingLevel` call the caller makes with the returned
+	 * `Decision`.
 	 */
 	async dispatchDecision<TChoice = unknown>(
 		point: DecisionPoint,
 		kind: string,
 		ctx: DecisionDispatchCtx,
 		arg?: unknown,
+		opts?: { applyIfSelected?: boolean },
 	): Promise<Decision<TChoice>> {
 		const key = decisionKey(point, kind);
 		if (!this.decisionAllowList.has(key)) {
@@ -633,7 +646,9 @@ export class LifecycleHub {
 			// abstain → keep polling remaining classifiers
 		}
 		const ms = Math.round(performance.now() - t0);
-		this.recordDecisionOutcome(ctx.sessionId, { ts: Date.now(), point, decisionKind: kind, consulted, decision, ms });
+		const outcome: DecisionOutcome = { ts: Date.now(), point, decisionKind: kind, consulted, decision, ms };
+		if (decision.kind === "select" && opts?.applyIfSelected !== undefined) outcome.applied = opts.applyIfSelected;
+		this.recordDecisionOutcome(ctx.sessionId, outcome);
 		return decision;
 	}
 

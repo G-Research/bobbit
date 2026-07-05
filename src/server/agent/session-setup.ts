@@ -36,6 +36,7 @@ import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
+import { MODEL_TIER_POINT, MODEL_TIER_KIND } from "./model-tier-classifier.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -752,6 +753,27 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 		plan.dynamicContextBlocks = blocks;
 	} catch (err) {
 		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
+	}
+	// CLF-W4 — model-tier classifier, OBSERVE-ONLY (see model-tier-classifier.ts's
+	// header for the full design). Consulted AFTER the `sessionSetup` dispatch
+	// above so an active TraceEntry already exists to attach into
+	// (ContextTraceStore.appendDecision's "attaches to the latest entry"
+	// contract, same ordering constraint the thinking router's own tests rely
+	// on). Pure telemetry: the result is NEVER read back to change
+	// `plan.bridgeOptions.initialModel`, which is already resolved by this
+	// point (`resolveBridgeOptions` runs earlier in every pipeline ordering).
+	// Non-fatal: an unregistered (point,kind) pair (e.g. most unit-test
+	// LifecycleHub fixtures, which don't wire this new pair) or any classifier
+	// error must never block session spawn.
+	try {
+		await ctx.lifecycleHub.dispatchDecision(MODEL_TIER_POINT, MODEL_TIER_KIND, {
+			sessionId: plan.id,
+			projectId: plan.projectId,
+			goalId: effectiveGoalId(plan),
+			cwd: plan.cwd,
+		}, { roleName: plan.roleName ?? plan.role });
+	} catch (err) {
+		console.warn(`[session-setup] model-tier dispatchDecision failed for ${plan.id} (non-fatal, observe-only): ${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 

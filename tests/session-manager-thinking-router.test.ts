@@ -122,6 +122,7 @@ function putSession(manager: any, overrides: Record<string, any> = {}): any {
 
 afterEach(() => {
 	while (managers.length > 0) cleanupManager(managers.pop());
+	delete process.env.BOBBIT_CLF_THINKING_ROUTER;
 });
 
 describe("SessionManager.enqueuePrompt — F14 thinking router (CLF-W1b, observe mode)", () => {
@@ -225,5 +226,137 @@ describe("SessionManager.enqueuePrompt — F14 thinking router (CLF-W1b, observe
 
 		assert.equal(session.promptQueue.length, 1);
 		assert.equal(session.promptQueue.peek()?.thinkingDecision, undefined);
+	});
+});
+
+// CLF-W3: `BOBBIT_CLF_THINKING_ROUTER=enforce` apply mode. The three-state
+// flag mirrors `BOBBIT_CLF_TOOL_APPROVE` (isToolApproveEnforceMode): absent or
+// any value other than the exact string "enforce" (including "observe") must
+// stay byte-identical to the CLF-W1b describe block above — pinned again here
+// explicitly rather than assumed, since this is the block most likely to
+// regress if a future change widens the enforce check.
+describe("SessionManager.enqueuePrompt — F14 thinking router apply mode (CLF-W3)", () => {
+	it("applies the classifier's exact selection via setThinkingLevel and marks the recorded outcome applied:true", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1);
+		assert.equal(session.rpcClient.setThinkingLevel.mock.calls[0].arguments[0], "xhigh");
+
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.equal(ring.length, 1);
+		assert.equal(ring[0].decision.kind, "select");
+		assert.equal(ring[0].applied, true, "the transparency row must show applied:true when apply mode actually applies a select");
+	});
+
+	it("never calls setThinkingLevel on an abstain, even in enforce mode", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "fix this typo in the README");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 0);
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.deepEqual(ring[0].decision, { kind: "abstain" });
+		assert.equal(ring[0].applied, undefined, "applied is not meaningful for an abstain and must not be set");
+	});
+
+	it("loses to an explicit user-pinned thinking level — never overridden downward", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager, { thinkingLevelUserPinned: true });
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 0, "an explicit user pin must never be overridden by the classifier");
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.equal(ring[0].decision.kind, "select", "the decision is still recorded for telemetry even though it's not applied");
+		assert.equal(ring[0].applied, false, "recorded outcome must reflect that apply was skipped");
+	});
+
+	it("loses to a role-level thinkingLevel override — never overridden downward", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		manager.configCascade = {
+			resolveRoleThinkingLevel: (roleName: string, projectId?: string) => (roleName === "docs-writer" && projectId === "proj-a" ? "low" : undefined),
+		};
+		const { session } = putSession(manager, { role: "docs-writer", projectId: "proj-a" });
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 0, "a role-level thinkingLevel override must never be overridden by the classifier");
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.equal(ring[0].decision.kind, "select");
+		assert.equal(ring[0].applied, false);
+	});
+
+	it("is byte-identical to observe mode when BOBBIT_CLF_THINKING_ROUTER is explicitly 'observe'", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "observe";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 0);
+		const ring = manager.lifecycleHub.getDecisionTrace();
+		assert.equal(ring[0].applied, false);
+	});
+
+	it("applies immediately even when the prompt itself is only queued (busy session) — the apply is about live session state, not this turn's dispatch", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager, { status: "streaming" });
+
+		await manager.enqueuePrompt(session.id, "ultrathink about the queueing bug");
+
+		assert.equal(session.rpcClient.prompt.mock.callCount(), 0, "busy session must still queue the prompt itself");
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1, "but the apply is not gated on direct dispatch");
+		assert.equal(session.rpcClient.setThinkingLevel.mock.calls[0].arguments[0], "xhigh");
+	});
+
+	it("does not persist the applied level as spawnPinnedThinkingLevel — the apply is turn-scoped, not sticky", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1);
+		assert.equal(session.spawnPinnedThinkingLevel, undefined, "apply mode must not mutate spawnPinnedThinkingLevel");
+	});
+
+	it("does not apply when BOBBIT_CLF_THINKING_ROUTER is unset (default remains observe)", async () => {
+		delete process.env.BOBBIT_CLF_THINKING_ROUTER;
+		const manager = makeManager({ withRegisteredHub: true });
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 0);
+	});
+
+	it("clamps the applied level against the session's current bound model before calling setThinkingLevel", async () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		const manager = makeManager({ withRegisteredHub: true });
+		// An unrecognized model id falls to aigw-manager's DEFAULT_META
+		// (`reasoning: false`), which clamps every requested level down to "off"
+		// (thinking-levels.ts: `reasoning === false` ⇒ only "off" is supported).
+		// A made-up id (rather than a real non-reasoning model) so this test
+		// doesn't depend on pi-ai's live catalog data for any specific model.
+		manager._testStore.get = mock.fn(() => ({ modelProvider: "some-custom-provider", modelId: "totally-fake-model-xyz" }));
+		const { session } = putSession(manager);
+
+		await manager.enqueuePrompt(session.id, "ultrathink: redesign the auth flow end to end");
+
+		assert.equal(session.rpcClient.setThinkingLevel.mock.callCount(), 1);
+		assert.notEqual(
+			session.rpcClient.setThinkingLevel.mock.calls[0].arguments[0],
+			"xhigh",
+			"a model resolved as non-reasoning must never receive an unsupported 'xhigh' literal — same defense-in-depth as ws/handler.ts's set_thinking_level and tryApplyDefaultThinkingLevel",
+		);
 	});
 });

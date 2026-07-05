@@ -113,6 +113,7 @@ import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecyc
 import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
 import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
+import { registerModelTierClassifier } from "./agent/model-tier-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1890,6 +1891,11 @@ export function createGateway(config: GatewayConfig) {
 	if (isToolApproveHeuristicEnabled()) {
 		registerToolApproveHeuristicClassifier(sessionManager.lifecycleHub);
 	}
+	// CLF-W4 — model-tier classifier: registered unconditionally, same as the
+	// F14 thinking router above — this classifier has no apply/enforce mode at
+	// all this wave (see model-tier-classifier.ts's header for why), so there
+	// is nothing to gate behind a flag. Pure telemetry, zero behavior change.
+	registerModelTierClassifier(sessionManager.lifecycleHub);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;

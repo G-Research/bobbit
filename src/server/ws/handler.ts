@@ -949,6 +949,10 @@ export function handleWebSocketConnection(
 						const result = await session.rpcClient.setThinkingLevel(level);
 						if (result && result.success === false) throw new Error(result.error || "thinking level change rejected by runtime");
 						session.spawnPinnedThinkingLevel = level;
+						// CLF-W3: this is a deliberate, explicit user action — mark it so
+						// the F14 thinking-router's apply mode (BOBBIT_CLF_THINKING_ROUTER=
+						// enforce) never overrides it. See SessionManager.canApplyThinkingRouterDecision.
+						session.thinkingLevelUserPinned = true;
 						broadcast(session.clients, { type: "state", data: { thinkingLevel: level } });
 					} catch (err: any) {
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${level}):`, err?.message || err);
