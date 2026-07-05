@@ -158,12 +158,14 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	let gw = await startGW(dir, port1, "BOOT");
 	console.log(`  [boot] gateway :${port1} cwd=${dir}`);
 
-	// Register the project
+	// Register the project. `dir` is the gateway's own cwd — since Headquarters
+	// (#925) the server workspace only registers via upsert, which returns the
+	// existing Headquarters project with 200 (a plain POST is 409).
 	const regRes = await api(gw, "/api/projects", {
 		method: "POST",
-		body: JSON.stringify({ name: "Restart Min", rootPath: dir }),
+		body: JSON.stringify({ name: "Restart Min", rootPath: dir, upsert: true }),
 	});
-	expect(regRes.status).toBe(201);
+	expect([200, 201]).toContain(regRes.status);
 	const reg = await regRes.json() as any;
 	gw.defaultProjectId = reg.id;
 	console.log(`  [boot] project ${reg.id}`);

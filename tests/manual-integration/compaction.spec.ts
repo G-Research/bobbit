@@ -206,12 +206,14 @@ test("compaction — real LLM @real", async ({ page }) => {
 
 	let gw = await startGW(dir, agentDir, port);
 	try {
-		// Register project.
+		// Register project. `dir` is the gateway's own cwd — since Headquarters
+		// (#925) the server workspace only registers via upsert, which returns
+		// the existing Headquarters project with 200 (a plain POST is 409).
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "compaction-manual", rootPath: dir }),
+			body: JSON.stringify({ name: "compaction-manual", rootPath: dir, upsert: true }),
 		});
-		expect(regRes.status).toBe(201);
+		expect([200, 201]).toContain(regRes.status);
 		gw.defaultProjectId = (await regRes.json() as any).id;
 
 		// Create a session to learn the default model.

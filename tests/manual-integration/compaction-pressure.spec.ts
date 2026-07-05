@@ -219,12 +219,14 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 
 	let gw = await startGW(dir, agentDir, port, "BOOT");
 	try {
-		// Register project
+		// Register project. `dir` is the gateway's own cwd — since Headquarters
+		// (#925) the server workspace only registers via upsert, which returns
+		// the existing Headquarters project with 200 (a plain POST is 409).
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "compact", rootPath: dir }),
+			body: JSON.stringify({ name: "compact", rootPath: dir, upsert: true }),
 		});
-		expect(regRes.status).toBe(201);
+		expect([200, 201]).toContain(regRes.status);
 		gw.defaultProjectId = (await regRes.json() as any).id;
 
 		// Create session to learn the default model
