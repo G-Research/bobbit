@@ -269,6 +269,17 @@ interface PendingTeamLeadNotificationBatch {
 	teamLeadSessionId: string;
 	items: PendingTeamLeadNotification[];
 	timer: ReturnType<typeof setTimeout>;
+	/**
+	 * Resolvers for every `notifyTeamLead()` call that fed an item into this
+	 * batch. Fire-and-forget production callers (`.catch()`-only) never await
+	 * these, but direct-invocation callers (tests, and any future caller that
+	 * wants delivery confirmation) get a promise that settles once the batch
+	 * has actually been flushed — whether delivered, skipped (errored-idle
+	 * recovery, terminated session), or dropped (goal gone). This preserves
+	 * the pre-coalescing "notifyTeamLead resolves after the notification is
+	 * sent" contract without reintroducing synchronous delivery.
+	 */
+	resolvers: Array<() => void>;
 }
 
 
@@ -2380,7 +2391,7 @@ export class TeamManager {
 		this.lastNotifyTime.set(workerSessionId, now);
 
 		const message = this.buildTeamLeadWorkerNotification(goalId, workerSessionId, role, agentId);
-		this.queueTeamLeadWorkerNotification(entry.teamLeadSessionId, {
+		await this.queueTeamLeadWorkerNotification(entry.teamLeadSessionId, {
 			goalId,
 			workerSessionId,
 			role,
@@ -2414,11 +2425,11 @@ export class TeamManager {
 		return `**Agent finished**\n\n- **Agent:** \`${agentId}\` (\`${role}\`)\n- **Task:** no assigned tasks\n- **Next:** \`task_list\`, then review tasks and decide next step.`;
 	}
 
-	private queueTeamLeadWorkerNotification(teamLeadSessionId: string, item: PendingTeamLeadNotification): void {
+	private queueTeamLeadWorkerNotification(teamLeadSessionId: string, item: PendingTeamLeadNotification): Promise<void> {
 		const existing = this.pendingLeadNotify.get(teamLeadSessionId);
 		if (existing) {
 			existing.items.push(item);
-			return;
+			return new Promise((resolve) => existing.resolvers.push(resolve));
 		}
 
 		const timer = setTimeout(() => {
@@ -2428,11 +2439,14 @@ export class TeamManager {
 		}, this.teamLeadNotifyCoalesceMs);
 		timer.unref?.();
 
-		this.pendingLeadNotify.set(teamLeadSessionId, {
-			goalId: item.goalId,
-			teamLeadSessionId,
-			items: [item],
-			timer,
+		return new Promise((resolve) => {
+			this.pendingLeadNotify.set(teamLeadSessionId, {
+				goalId: item.goalId,
+				teamLeadSessionId,
+				items: [item],
+				timer,
+				resolvers: [resolve],
+			});
 		});
 	}
 
@@ -2454,29 +2468,36 @@ export class TeamManager {
 		if (!batch) return;
 		clearTimeout(batch.timer);
 		this.pendingLeadNotify.delete(teamLeadSessionId);
-		if (batch.items.length === 0) return;
-
-		const entry = this.teams.get(batch.goalId);
-		if (!entry || entry.teamLeadSessionId !== teamLeadSessionId) return;
-
-		const teamLeadSession = this.sessionManager.getSession(teamLeadSessionId);
-		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
-		if (this.recoverErroredIdleSessionBeforeNudge(batch.goalId, teamLeadSessionId, "Worker-idle notification")) return;
-
-		const message = this.formatTeamLeadWorkerNotificationBatch(batch.items);
+		// Every exit path below (early-return or completed delivery) must settle
+		// the resolvers so direct-invocation callers of notifyTeamLead() — which
+		// now await this flush — never hang.
 		try {
-			if (teamLeadSession.status === "streaming") {
-				// Mid-turn: inject directly as a real-time steer interrupt
-				await this.sessionManager.deliverLiveSteer(teamLeadSessionId, message, { source: "auto-nudge" });
-			} else {
-				// Idle: enqueue as a steered prompt so it drains immediately
-				this.sessionManager.enqueuePrompt(teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
+			if (batch.items.length === 0) return;
+
+			const entry = this.teams.get(batch.goalId);
+			if (!entry || entry.teamLeadSessionId !== teamLeadSessionId) return;
+
+			const teamLeadSession = this.sessionManager.getSession(teamLeadSessionId);
+			if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+			if (this.recoverErroredIdleSessionBeforeNudge(batch.goalId, teamLeadSessionId, "Worker-idle notification")) return;
+
+			const message = this.formatTeamLeadWorkerNotificationBatch(batch.items);
+			try {
+				if (teamLeadSession.status === "streaming") {
+					// Mid-turn: inject directly as a real-time steer interrupt
+					await this.sessionManager.deliverLiveSteer(teamLeadSessionId, message, { source: "auto-nudge" });
+				} else {
+					// Idle: enqueue as a steered prompt so it drains immediately
+					this.sessionManager.enqueuePrompt(teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
+				}
+				// The full message body (agent completion summary) is already visible in
+				// the UI transcript — log only a concise reference here.
+				console.log(`[team-manager] Notified team lead for goal ${batch.goalId} (status=${teamLeadSession.status}, workers=${batch.items.length}, ${message.length} chars)`);
+			} catch (err) {
+				console.error(`[team-manager] Failed to notify team lead for goal ${batch.goalId}:`, err);
 			}
-			// The full message body (agent completion summary) is already visible in
-			// the UI transcript — log only a concise reference here.
-			console.log(`[team-manager] Notified team lead for goal ${batch.goalId} (status=${teamLeadSession.status}, workers=${batch.items.length}, ${message.length} chars)`);
-		} catch (err) {
-			console.error(`[team-manager] Failed to notify team lead for goal ${batch.goalId}:`, err);
+		} finally {
+			for (const resolve of batch.resolvers) resolve();
 		}
 	}
 
