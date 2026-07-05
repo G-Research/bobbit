@@ -27,12 +27,13 @@ import {
 	Trash2,
 } from "lucide";
 import type { IconNode } from "lucide";
-import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectDisplayName } from "./headquarters.js";
 import { renderApp, state } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
 	browseMarketplace,
+	getHindsightBanks,
 	getHindsightConfig,
 	getHindsightStatus,
 	getPackActivation,
@@ -288,10 +289,39 @@ interface HindsightFormState {
 	result: { ok: boolean; text: string } | null;
 	overrideBaseline: string;
 	overrideDraft: string;
+	/** Per-project memory-BANK override (multi-project follow-up): baseline/draft of
+	 *  the overlay's `bank` key for the SELECTED project ("" ⇒ inherit global). */
+	overrideBankBaseline: string;
+	overrideBankDraft: string;
 	overrideSaving: boolean;
 	overrideResult: { ok: boolean; text: string } | null;
 }
 const hindsightForms = new Map<string, HindsightFormState>();
+
+/** Lazily-probed available-banks snapshot feeding the override's bank picker,
+ *  keyed by projectId. Probed ONLY while the inline Configure form is open
+ *  (mirrors {@link renderRuntimeRow}'s probe-only-`if (checked)` gate — never on
+ *  the passive row render) and at most ONCE per open/project-switch. The `banks`
+ *  route is dormant-safe (`{ configured: false, banks: [] }`, errors in-band, no
+ *  404), so a project with no reachable Hindsight runtime costs one graceful
+ *  read — never a request storm. */
+interface HindsightBanksSnapshot {
+	loading: boolean;
+	configured: boolean;
+	banks: string[];
+}
+const hindsightBanksCache = new Map<string, HindsightBanksSnapshot>();
+
+function ensureHindsightBanks(projectId: string | undefined, force = false): void {
+	const cacheKey = projectId ?? "";
+	if (!force && hindsightBanksCache.has(cacheKey)) return;
+	hindsightBanksCache.set(cacheKey, { loading: true, configured: false, banks: [] });
+	void getHindsightBanks(projectId).then((res) => {
+		const banks = res.ok && Array.isArray(res.data.banks) ? res.data.banks.filter((b): b is string => typeof b === "string") : [];
+		hindsightBanksCache.set(cacheKey, { loading: false, configured: res.ok ? !!res.data.configured : false, banks });
+		renderApp();
+	});
+}
 
 /** Row-level busy flags (`test:${key}`, `start:${key}`, `stop:${key}`) + the last
  *  action-result lozenge shown on the row (Test connection / Start confirm). */
@@ -323,6 +353,7 @@ function clearHindsightState(): void {
 	hindsightSnapshot.clear();
 	hindsightConfigureOpen.clear();
 	hindsightForms.clear();
+	hindsightBanksCache.clear();
 	hindsightRowBusy.clear();
 	hindsightRowResult.clear();
 	hindsightStartConsent.clear();
@@ -371,6 +402,36 @@ function currentProjectId(): string | undefined {
 	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
 }
 
+/** localStorage key for the EXPLICITLY-selected per-project override target.
+ *  Explicit + persisted is what makes the selection durable across a reload —
+ *  the same durability requirement that previously forced the `projects[0]` pin
+ *  (see {@link hindsightProjectId}). */
+const HINDSIGHT_OVERRIDE_PROJECT_LS_KEY = "bobbit:market:hindsight-override-project";
+
+function readPersistedHindsightProject(): string | undefined {
+	try {
+		return localStorage.getItem(HINDSIGHT_OVERRIDE_PROJECT_LS_KEY) || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function persistHindsightProject(projectId: string): void {
+	try {
+		localStorage.setItem(HINDSIGHT_OVERRIDE_PROJECT_LS_KEY, projectId);
+	} catch {
+		/* best-effort — selection just won't survive the reload */
+	}
+}
+
+/** Projects selectable as per-project override targets: every registered project
+ *  EXCEPT Headquarters (mirrors the sidebar's HQ filtering — Headquarters is the
+ *  server workspace whose sessions read the GLOBAL config the main form edits;
+ *  a per-project overlay for it would just shadow that same global surface). */
+function hindsightSelectableProjects(): Array<{ id: string; name: string }> {
+	return state.projects.filter((p) => !isHeadquartersProject(p)).map((p) => ({ id: p.id, name: projectDisplayName(p) }));
+}
+
 /** Stable project id for the Hindsight per-project config override — deliberately
  *  NOT `currentProjectId()`/`state.activeProjectId`: the active project tracks
  *  whichever chat session is selected and is NOT durable across a reload
@@ -379,11 +440,18 @@ function currentProjectId(): string | undefined {
  *  session is reselected). Using the session-driven active project here would
  *  save the override under one project and, after a reload, read it back under a
  *  DIFFERENT one (whatever project happens to be first) — the override would
- *  silently look cleared. `state.projects[0]?.id` is exactly that same "first
- *  project" fallback, so it resolves IDENTICALLY before and after a reload
- *  regardless of session churn in between. */
+ *  silently look cleared.
+ *
+ *  Multi-project follow-up: the user now picks the target project EXPLICITLY via
+ *  the override section's project select; the choice is persisted in localStorage
+ *  so it resolves IDENTICALLY before and after a reload. When nothing valid is
+ *  persisted this falls back to the first selectable (non-Headquarters) project —
+ *  and, for an HQ-only install, to `state.projects[0]` exactly as before. */
 function hindsightProjectId(): string | undefined {
-	return state.projects[0]?.id || undefined;
+	const selectable = hindsightSelectableProjects();
+	const persisted = readPersistedHindsightProject();
+	if (persisted && selectable.some((p) => p.id === persisted)) return persisted;
+	return selectable[0]?.id || state.projects[0]?.id || undefined;
 }
 
 /** The ACTIVE CHAT SESSION's project — the project the GLOBAL tool-renderer
@@ -2013,15 +2081,45 @@ function renderHindsightConfigForm(form: HindsightFormState, key: string): Templ
 	`;
 }
 
-/** Per-project memory override sub-section (recallScope only — the safe
- *  memory-quality overlay `validateProjectOverride` accepts). Reads/writes via
- *  `POST config { projectOverride }`, a full-replace overlay layered OVER the
- *  global config the form above edits. */
+/** Per-project memory override sub-section (`recallScope` + `bank` — safe
+ *  memory-quality keys the overlay `validateProjectOverride` accepts). Reads/
+ *  writes via `POST config { projectOverride }`, a full-replace overlay layered
+ *  OVER the global config the form above edits. Multi-project: the target project
+ *  is chosen EXPLICITLY via a picker (persisted, reload-stable) and the bank
+ *  picker is fed by the runtime's `banks` route — with a free-text fallback when
+ *  the runtime is dormant/unreachable (it serves no bank list to pick from). */
 function renderHindsightOverride(form: HindsightFormState, key: string, projectId: string): TemplateResult {
-	const dirty = form.overrideDraft !== form.overrideBaseline;
+	const dirty = form.overrideDraft !== form.overrideBaseline || form.overrideBankDraft !== form.overrideBankBaseline;
+	const projects = hindsightSelectableProjects();
+	const banksSnap = hindsightBanksCache.get(projectId);
+	const bankOptions = banksSnap && !banksSnap.loading ? [...banksSnap.banks] : [];
+	// A stored override bank must never silently disappear from its own picker,
+	// even when the runtime no longer lists it.
+	if (form.overrideBankBaseline && !bankOptions.includes(form.overrideBankBaseline)) bankOptions.unshift(form.overrideBankBaseline);
+	const onBankChange = (e: Event) => {
+		const f = hindsightForms.get(key);
+		if (!f) return;
+		f.overrideBankDraft = (e.target as HTMLInputElement | HTMLSelectElement).value;
+		renderApp();
+	};
 	return html`
 		<div class="market-hindsight-override" data-testid="market-hindsight-override">
 			<div class="text-[11px] font-medium text-foreground">Per-project override</div>
+			${projects.length > 0
+				? html`
+					<label class="market-field mt-1">
+						<span class="market-field-label">Project</span>
+						<select
+							class="market-input"
+							data-testid="market-hindsight-override-project"
+							.value=${projectId}
+							@change=${(e: Event) => { void hindsightSelectOverrideProject(key, (e.target as HTMLSelectElement).value); }}
+						>
+							${projects.map((p) => html`<option value=${p.id} ?selected=${p.id === projectId}>${p.name}</option>`)}
+						</select>
+					</label>
+				`
+				: ""}
 			<label class="market-field mt-1">
 				<span class="market-field-label">Recall scope override</span>
 				<select
@@ -2039,6 +2137,17 @@ function renderHindsightOverride(form: HindsightFormState, key: string, projectI
 					<option value="project" ?selected=${form.overrideDraft === "project"}>project</option>
 					<option value="all" ?selected=${form.overrideDraft === "all"}>all</option>
 				</select>
+			</label>
+			<label class="market-field mt-1">
+				<span class="market-field-label">Memory bank override</span>
+				${bankOptions.length > 0
+					? html`
+						<select class="market-input" data-testid="market-hindsight-override-bank" .value=${form.overrideBankDraft} @change=${onBankChange}>
+							<option value="" ?selected=${form.overrideBankDraft === ""}>Inherit global</option>
+							${bankOptions.map((b) => html`<option value=${b} ?selected=${form.overrideBankDraft === b}>${b}</option>`)}
+						</select>
+					`
+					: html`<input type="text" class="market-input" data-testid="market-hindsight-override-bank" placeholder="Inherit global" .value=${form.overrideBankDraft} @input=${onBankChange} />`}
 			</label>
 			<div class="flex items-center gap-2 mt-2">
 				<button
@@ -2079,12 +2188,16 @@ async function hindsightToggleConfigure(pack: InstalledPackWire): Promise<void> 
 
 async function hindsightSeedForm(key: string): Promise<void> {
 	const projectId = hindsightProjectId();
+	// Bank picker data — probed here (form open), NEVER on the passive row render;
+	// force a fresh probe so the picker never seeds from a stale earlier open.
+	ensureHindsightBanks(projectId, true);
 	const res = await getHindsightConfig(projectId);
 	if (!res.ok) return;
 	const cfg = (res.data.globalConfig ?? res.data.config ?? {}) as Record<string, unknown>;
 	const baseline = hindsightExtractFormFields(cfg);
 	const override = (res.data.projectOverride ?? null) as Record<string, unknown> | null;
 	const overrideScope = override && typeof override.recallScope === "string" ? override.recallScope : "";
+	const overrideBank = override && typeof override.bank === "string" ? override.bank : "";
 	hindsightForms.set(key, {
 		mode: typeof cfg.mode === "string" ? cfg.mode : "external",
 		baseline,
@@ -2093,6 +2206,8 @@ async function hindsightSeedForm(key: string): Promise<void> {
 		result: null,
 		overrideBaseline: overrideScope,
 		overrideDraft: overrideScope,
+		overrideBankBaseline: overrideBank,
+		overrideBankDraft: overrideBank,
 		overrideSaving: false,
 		overrideResult: null,
 	});
@@ -2132,18 +2247,46 @@ async function saveHindsightConfigForm(key: string): Promise<void> {
 	await refreshHindsightSnapshot();
 }
 
+/** Switch the per-project override target. Persists the choice (reload-stable),
+ *  then re-seeds ONLY the override baseline/draft for the newly-selected project —
+ *  the global form fields above are project-independent and any unsaved global
+ *  edits must survive the switch. A stale-response guard drops the re-seed if the
+ *  selection changed again while the fetch was in flight. */
+async function hindsightSelectOverrideProject(key: string, projectId: string): Promise<void> {
+	persistHindsightProject(projectId);
+	const form = hindsightForms.get(key);
+	if (form) form.overrideResult = null;
+	renderApp();
+	ensureHindsightBanks(projectId);
+	// The row's `projectOverrideActive` badge must follow the SELECTED project.
+	void refreshHindsightSnapshot();
+	const res = await getHindsightConfig(projectId);
+	const fresh = hindsightForms.get(key);
+	if (!fresh || hindsightProjectId() !== projectId || !res.ok) return;
+	const override = (res.data.projectOverride ?? null) as Record<string, unknown> | null;
+	fresh.overrideBaseline = override && typeof override.recallScope === "string" ? override.recallScope : "";
+	fresh.overrideDraft = fresh.overrideBaseline;
+	fresh.overrideBankBaseline = override && typeof override.bank === "string" ? override.bank : "";
+	fresh.overrideBankDraft = fresh.overrideBankBaseline;
+	renderApp();
+}
+
 async function saveHindsightOverrideForm(key: string, projectId: string): Promise<void> {
 	const form = hindsightForms.get(key);
 	if (!form || form.overrideSaving) return;
 	form.overrideSaving = true;
 	form.overrideResult = null;
 	renderApp();
-	const res = await saveHindsightProjectOverride({ recallScope: form.overrideDraft }, projectId);
+	// The overlay write is FULL-REPLACE (`validateProjectOverride`), so every
+	// override key must ride along on every save — sending only `recallScope`
+	// would silently wipe a stored `bank` override ("" ⇒ key cleared).
+	const res = await saveHindsightProjectOverride({ recallScope: form.overrideDraft, bank: form.overrideBankDraft }, projectId);
 	const fresh = hindsightForms.get(key);
 	if (!fresh) return;
 	fresh.overrideSaving = false;
 	if (res.ok) {
 		fresh.overrideBaseline = fresh.overrideDraft;
+		fresh.overrideBankBaseline = fresh.overrideBankDraft;
 		fresh.overrideResult = { ok: true, text: "Saved" };
 	} else {
 		fresh.overrideResult = { ok: false, text: res.error };

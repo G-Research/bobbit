@@ -3730,6 +3730,22 @@ export function getHindsightConfig(projectId?: string): Promise<MarketResult<Hin
 	return getExtPackRoute<HindsightConfigWire>("hindsight", "config", projectId);
 }
 
+/** Hindsight `banks` diagnostic route response (`market-packs/hindsight/src/routes.ts::banks`).
+ *  Dormant/unconfigured ⇒ `{ configured: false, banks: [] }`; a reach failure is
+ *  reported IN-BAND via `error` — the route itself never 404s, so probing it for a
+ *  project with no reachable Hindsight runtime is a single graceful read. */
+export interface HindsightBanksWire {
+	configured: boolean;
+	banks: string[];
+	error?: string;
+}
+
+/** GET the Hindsight `banks` route (sessionless, pure read — dormant-safe, never
+ *  starts Docker). Feeds the per-project override's bank picker. */
+export function getHindsightBanks(projectId?: string): Promise<MarketResult<HindsightBanksWire>> {
+	return getExtPackRoute<HindsightBanksWire>("hindsight", "banks", projectId);
+}
+
 /** POST a GLOBAL Hindsight config write (sessionless). `body` carries only the
  *  changed top-level config keys — never `projectOverride` (see
  *  {@link saveHindsightProjectOverride} for the per-project overlay write). */
