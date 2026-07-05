@@ -1412,8 +1412,8 @@ describe("TeamManager", () => {
 			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
 			assert.match(
 				source,
-				/const worktreeOptions = \{ startPoint: memberStartPoint, pushPolicy: "local-only" as const \};\s*worktreeResult = await createWorktree\(goal\.repoPath!, branchName, worktreeOptions\);/,
-				"team member worktree creation must request local-only push policy",
+				/const worktreeOptions = \{ startPoint: memberStartPoint, pushPolicy: "local-only" as const, commandRunner: this\.commandRunner \};\s*worktreeResult = await createWorktree\(goal\.repoPath!, branchName, worktreeOptions\);/,
+				"team member worktree creation must request local-only push policy through the injected command runner",
 			);
 
 			await team.startTeam(goalId);

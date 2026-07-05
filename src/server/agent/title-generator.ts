@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import { discoverAigwModels } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
@@ -82,6 +83,8 @@ export interface TitleGenOptions {
 	availableModels?: ApiModel[] | (() => Promise<ApiModel[]>);
 	/** Test hook: performs the direct-model completion. */
 	directModelCompleter?: (model: ApiModel, args: { systemPrompt: string; userPrompt: string; maxTokens: number; thinkingLevel: "off" }) => Promise<string | null>;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
+	skipTitleGeneration?: boolean;
 	fetchImpl?: typeof fetch;
 }
 
@@ -441,7 +444,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	const fetchImpl = options?.fetchImpl ?? defaultFetch;
 	// Skip title generation entirely when tests/CI opt out - avoids real
 	// outbound calls to api.anthropic.com for every prompted test.
-	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
+	if (options?.skipTitleGeneration ?? getLegacyTestRuntimeFlags().skipTitleGeneration) return null;
 	const preview = extractConversationPreview(messages);
 	if (!preview.trim()) {
 		console.error("[title-gen] No conversation content to summarise");
@@ -646,7 +649,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
  */
 export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
 	const fetchImpl = options?.fetchImpl ?? defaultFetch;
-	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
+	if (options?.skipTitleGeneration ?? getLegacyTestRuntimeFlags().skipTitleGeneration) return null;
 	if (!goalTitle.trim()) {
 		console.error("[title-gen] No goal title to summarise");
 		return null;

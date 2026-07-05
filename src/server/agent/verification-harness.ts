@@ -2383,10 +2383,10 @@ export class VerificationHarness {
 	 */
 	private async _sleepCancellable(totalMs: number, isCancelled: () => boolean): Promise<void> {
 		const CHUNK_MS = 2000;
-		const deadline = Date.now() + totalMs;
-		while (Date.now() < deadline) {
+		const deadline = this.clock.now() + totalMs;
+		while (this.clock.now() < deadline) {
 			if (isCancelled()) return;
-			const remaining = deadline - Date.now();
+			const remaining = deadline - this.clock.now();
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), Math.min(CHUNK_MS, remaining)));
 		}
 	}
@@ -2440,8 +2440,8 @@ export class VerificationHarness {
 	private async _waitForCommandIdentityFile(step: ActiveVerification["steps"][number], isStillActive: () => boolean): Promise<{ pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number }> {
 		let identity = this._readCommandIdentityFile(step);
 		if (identity.ok || !identity.retryable) return identity;
-		const deadline = Date.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
-		while (Date.now() < deadline && isStillActive()) {
+		const deadline = this.clock.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
+		while (this.clock.now() < deadline && isStillActive()) {
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS));
 			identity = this._readCommandIdentityFile(step);
 			if (identity.ok || !identity.retryable) return identity;
@@ -2533,8 +2533,8 @@ export class VerificationHarness {
 	}
 
 	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
+		const deadline = this.clock.now() + timeoutMs;
+		while (this.clock.now() < deadline) {
 			if (!isPidAlive(pid)) return true;
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), 50));
 		}
@@ -5336,11 +5336,11 @@ export class VerificationHarness {
 			return restartInterrupted(cleanup.reason ?? unsafeReason);
 		};
 
-		if (Date.now() >= deadline) {
+		if (this.clock.now() >= deadline) {
 			return await finalizeTimeoutAfterVerifiedCleanup("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
 		}
 
-		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - this.clock.now()) / 1000))}s)`);
 
 		let stopTail: (() => void) | undefined;
 		if (step.outFile && step.errFile) {
@@ -5356,7 +5356,7 @@ export class VerificationHarness {
 		}
 
 		try {
-			while (Date.now() < deadline) {
+			while (this.clock.now() < deadline) {
 				if (!this._isResumeStillActive(v)) return null;
 				await new Promise<void>(r => this.clock.setTimeout(() => r(), 500));
 				if (step.exitFile && fs.existsSync(step.exitFile)) {
@@ -5370,7 +5370,7 @@ export class VerificationHarness {
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
 				return finalize(readExitFile());
 			}
-			if (Date.now() >= deadline) {
+			if (this.clock.now() >= deadline) {
 				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
 			}
 
@@ -6216,7 +6216,7 @@ export class VerificationHarness {
 		if (!ctx) return "archived-other";
 		const POLL_MS = 100;
 		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
-		const startedAt = Date.now();
+		const startedAt = this.clock.now();
 		while (true) {
 			if (active.cancelled) return "cancelled";
 			const child = ctx.goalStore.get(childGoalId);
@@ -6226,7 +6226,7 @@ export class VerificationHarness {
 				return child.state === "complete" ? "archived-complete" : "archived-other";
 			}
 			if (child.state !== "blocked") return "unblocked";
-			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
+			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
 		}
 	}
@@ -6268,7 +6268,7 @@ export class VerificationHarness {
 		// `"timeout"` like `"archived-other"` (release semaphore + retry on
 		// the next harness pass).
 		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
-		const startedAt = Date.now();
+		const startedAt = this.clock.now();
 		while (true) {
 			if (active.cancelled) return "cancelled";
 			const child = ctx.goalStore.get(childGoalId);
@@ -6282,7 +6282,7 @@ export class VerificationHarness {
 			}
 			const rtm = ctx.gateStore.getGate(childGoalId, "ready-to-merge");
 			if (rtm?.status === "passed") return "passed";
-			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
+			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
 			// paused / pending / failed all continue the wait — only an external
 			// archive or a passed ready-to-merge is terminal.
 			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
