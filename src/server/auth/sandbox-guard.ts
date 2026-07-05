@@ -60,6 +60,11 @@ export function isSandboxAllowed(
 		if (m === "PATCH" && subpath === "") return true;     // preview_open metadata
 		if (m === "DELETE" && subpath === "") return true;    // delegate cleanup
 		if (m === "POST" && subpath === "/wait") return true; // delegate wait
+		// Direct project agents run outside Docker but still receive this same
+		// scoped token type. Permit the guard extension's long-poll callback for
+		// the token's own session so denied tool calls can surface the human grant
+		// card without exposing the admin token to the agent environment.
+		if (m === "POST" && subpath === "/tool-grant-request") return true;
 
 		return false;
 	}

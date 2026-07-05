@@ -5116,7 +5116,10 @@ export class SessionManager {
 
 		// ── Restore Docker sandbox wiring ──
 		let restoredSandboxed = ps.sandboxed === true && !(ps.projectId && isSandboxExemptProject(ps.projectId));
-		if (restoredSandboxed) {
+		if (ps.sandboxed === true) {
+			// Keep applySandboxWiring as the single restore decision point. It uses
+			// the selected project's config internally, returns false for non-docker
+			// projects, and preserves Headquarters/system no-sandbox exemptions.
 			// On restore, the worktree already exists inside the container —
 			// pass the container-internal cwd directly (no branch = no worktree creation).
 			if (ps.cwd?.startsWith("/workspace")) {
@@ -5124,19 +5127,19 @@ export class SessionManager {
 			}
 			restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
 				projectId: ps.projectId,
-				goalId: ps.goalId,
+				goalId: ps.goalId ?? ps.teamGoalId,
 			});
 			if (!restoredSandboxed) {
 				ps.sandboxed = false;
 				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
-				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId);
+				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
 			}
 		} else {
 			if (ps.sandboxed) {
 				ps.sandboxed = false;
 				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
 			}
-			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId);
+			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		}
 		if (restoredSandboxed) {
 			// Verify the sandbox worktree still exists inside the container. Headquarters
