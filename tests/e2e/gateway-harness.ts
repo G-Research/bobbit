@@ -452,6 +452,15 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 
 		// Teardown — use existing shutdown() for proper cleanup
 		await gw.shutdown();
+		// W2.R: remove this worker's memoized nonGitCwd()/gitCwd() dirs — these
+		// live directly under os.tmpdir() (not under bobbitDir/defaultProjectRoot
+		// below) and nothing removed them before, so every worker in every run
+		// left one or two directories behind permanently. See
+		// cleanupWorkerTempCwds()'s doc comment in e2e-setup.ts.
+		try {
+			const { cleanupWorkerTempCwds } = await import("./e2e-setup.js");
+			await cleanupWorkerTempCwds();
+		} catch { /* best-effort */ }
 		// Bounded-retry cleanup. Replaces the previous fire-and-forget
 		// `void rmAsync(...)` strategy: that hid Windows Defender / FS-handle
 		// races behind the global teardown sweep and produced spurious leak
