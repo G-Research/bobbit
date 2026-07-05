@@ -1033,6 +1033,7 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/openai-orphan-tool-result", hostPath: path.join(stateDir, "openai-orphan-tool-result") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
+		{ containerPrefix: "/bobbit-state/provider-bridge", hostPath: path.join(stateDir, "provider-bridge") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 

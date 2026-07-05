@@ -59,8 +59,39 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 					? "C:\\Users\\test\\project\\.bobbit\\state\\openai-orphan-tool-result\\def456abc123\\extension.ts"
 					: "/home/test/project/.bobbit/state/openai-orphan-tool-result/def456abc123/extension.ts",
 			},
+			{
+				containerPath: "/bobbit-state/provider-bridge/abc123def456/bridge.ts",
+				expectedHost: process.platform === "win32"
+					? "C:\\Users\\test\\project\\.bobbit\\state\\provider-bridge\\abc123def456\\bridge.ts"
+					: "/home/test/project/.bobbit/state/provider-bridge/abc123def456/bridge.ts",
+			},
 		]) {
 			assert.equal(containerPathToHost(containerPath), expectedHost);
+		}
+	});
+
+	it("every sandbox state mount has a working host→container remap (provider-bridge regression)", async () => {
+		// Regression net for the class of bug where a generated extension dir is
+		// staged under the state dir and passed to pi via --extension, but is
+		// missing from either SANDBOX_STATE_MOUNTS (docker-args.ts) or the mount
+		// table (rpc-bridge.ts). When the remap is missing, hostPathToContainer
+		// returns the HOST path unchanged, pi inside the container exits 1 with
+		// "Extension path does not exist", and the session terminates at spawn.
+		// That exact rot shipped for provider-bridge (per-turn provider hooks,
+		// #788) and broke every sandboxed session with hindsight enabled.
+		const { SANDBOX_STATE_MOUNTS } = await import("../src/server/agent/docker-args.ts");
+		const statePrefix = process.platform === "win32"
+			? "C:\\Users\\test\\project\\.bobbit\\state\\"
+			: "/home/test/project/.bobbit/state/";
+		for (const { sub } of SANDBOX_STATE_MOUNTS) {
+			const hostPath = process.platform === "win32"
+				? `${statePrefix}${sub}\\deadbeef1234\\file.ts`
+				: `${statePrefix}${sub}/deadbeef1234/file.ts`;
+			assert.equal(
+				hostPathToContainer(hostPath),
+				`/bobbit-state/${sub}/deadbeef1234/file.ts`,
+				`state subdir "${sub}" is bind-mounted by docker-args.ts but has no host→container remap in rpc-bridge.ts buildMountTable() — sandboxed --extension paths under it would leak host paths into the container`,
+			);
 		}
 	});
 

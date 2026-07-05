@@ -515,7 +515,7 @@ function initRepo(dir: string) {
 /**
  * Remove Docker containers and volumes created by test runs.
  * Matches containers whose bind-mounts reference temp dirs used by manual tests
- * (`.bobbit-manual-*`, `.bobbit-manual-integration-*`, `.e2e-resilience-*`).
+ * (`.bobbit-manint-*`, legacy `.bobbit-manual-*`, `.e2e-resilience-*`).
  * Skips the live project sandbox (bound to the real project root).
  */
 function cleanTestDockerContainers() {
@@ -532,7 +532,7 @@ function cleanTestDockerContainers() {
 					"inspect", "--format", "{{json .HostConfig.Binds}}", id,
 				], { encoding: "utf-8", timeout: 5_000 }).trim();
 				// Only remove containers bound to test temp dirs
-				if (/\.bobbit-manual|\.e2e-resilience/.test(binds)) {
+				if (/\.bobbit-manual|\.bobbit-manint|\.e2e-resilience/.test(binds)) {
 					// Get project ID for volume cleanup
 					const projectId = execFileSync("docker", [
 						"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
@@ -664,7 +664,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		ti.setTimeout(180_000);
 		port = await freePort();
 		const tmp = manualTmpRoot();
-		dir = join(tmp, `.bobbit-manual-${port}`);
+		dir = join(tmp, `.bobbit-manint-${port}`);  // see agent-tool-use.spec.ts: must not match stale e2e-teardown reapers
 		rmSync(dir, { recursive: true, force: true });
 		initRepo(dir);
 
@@ -692,6 +692,21 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			throw new Error(`Failed to register default project: ${regRes.status}`);
 		}
 		gw.defaultProjectId = (await regRes.json()).id;
+
+		// Since Headquarters (#925) the gateway-cwd registration takes the
+		// upsert path, which returns the existing HQ project and IGNORES the
+		// components/workflows in the POST body. Install them explicitly so
+		// workflowId:"feature" is resolvable — without this the goal assistant
+		// answers "This project has no workflows yet" and propose_goal never
+		// renders the proposal form (broke test B).
+		const regBody = projectRegistrationBody("default", dir);
+		const cfgRes = await api(gw, `/api/projects/${gw.defaultProjectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ components: regBody.components, workflows: regBody.workflows }),
+		});
+		if (cfgRes.status !== 200) {
+			throw new Error(`Failed to install workflows on default project: ${cfgRes.status} ${await cfgRes.text()}`);
+		}
 
 		if (HAS_DOCKER) {
 			const ss = await (await api(gw, "/api/sandbox-status")).json();
@@ -819,7 +834,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 	test("A2. multi-project sessions and goal", async ({ page }) => {
 		// 1. Create a separate git repo for the second project
 		const tmp = manualTmpRoot();
-		proj2Dir = join(tmp, `.bobbit-manual-proj2-${port}`);
+		proj2Dir = join(tmp, `.bobbit-manint-proj2-${port}`);
 		rmSync(proj2Dir, { recursive: true, force: true });
 		mkdirSync(proj2Dir, { recursive: true });
 		execFileSync("git", ["init"], { cwd: proj2Dir, stdio: "ignore" });

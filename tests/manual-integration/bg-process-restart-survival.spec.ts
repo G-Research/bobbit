@@ -180,9 +180,11 @@ test("bg-process-restart-survival: running re-attaches & keeps streaming; finish
 	let gw = await startGW(dir, port1);
 	console.log(`  [boot] gateway :${port1} cwd=${dir}`);
 
-	// Register the project.
-	const regRes = await api(gw, "/api/projects", { method: "POST", body: JSON.stringify({ name: "BG Restart", rootPath: dir }) });
-	expect(regRes.status).toBe(201);
+	// Register the project. `dir` is the gateway's own cwd — since Headquarters
+	// (#925) the server workspace only registers via upsert, which returns the
+	// existing Headquarters project with 200 (a plain POST is 409).
+	const regRes = await api(gw, "/api/projects", { method: "POST", body: JSON.stringify({ name: "BG Restart", rootPath: dir, upsert: true }) });
+	expect([200, 201]).toContain(regRes.status);
 	const reg = await regRes.json() as any;
 	gw.defaultProjectId = reg.id;
 

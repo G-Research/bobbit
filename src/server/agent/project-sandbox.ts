@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS } from "./docker-args.js";
+import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS, isMissingDockerNetworkError, sandboxNetworkCreateArgs } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -927,12 +927,32 @@ export class ProjectSandbox {
 			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		}
 
-		const { stdout } = await execDocker(dockerArgs, {
-			timeout: 60_000,
-			env: DOCKER_ENV,
-		});
+		let runResult: { stdout: string };
+		try {
+			runResult = await execDocker(dockerArgs, {
+				timeout: 60_000,
+				env: DOCKER_ENV,
+			});
+		} catch (err) {
+			// The sandbox network is machine-global and every gateway's shutdown
+			// runs `docker network rm` on it — a concurrently draining gateway can
+			// delete it between our `network create` and this `docker run`. Detect
+			// that exact failure, re-ensure the network, and retry once.
+			if (!sandboxNetwork || !isMissingDockerNetworkError(err, sandboxNetwork)) throw err;
+			console.warn(`[project-sandbox] Network "${sandboxNetwork}" vanished before docker run (concurrent gateway shutdown?) — recreating and retrying once`);
+			try {
+				await execDocker(sandboxNetworkCreateArgs(sandboxNetwork), { timeout: 15_000, env: DOCKER_ENV });
+			} catch (createErr: any) {
+				const msg = createErr?.stderr || createErr?.message || "";
+				if (!msg.includes("already exists")) throw createErr;
+			}
+			runResult = await execDocker(dockerArgs, {
+				timeout: 60_000,
+				env: DOCKER_ENV,
+			});
+		}
 
-		const containerId = stdout.trim();
+		const containerId = runResult.stdout.trim();
 		if (!containerId) {
 			throw new Error(`[project-sandbox] docker run returned empty container ID for project ${projectId}`);
 		}

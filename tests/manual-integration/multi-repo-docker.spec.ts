@@ -413,7 +413,15 @@ test.describe("Multi-repo & components — integration", () => {
 		await archiveBtn.waitFor({ timeout: 15_000 });
 		await archiveBtn.click();
 		await page.locator('text=Archive Goal').first().waitFor({ timeout: 5_000 });
-		await page.keyboard.press("Enter");
+		// UX-03 removed the document-level Enter confirm — Enter only activates
+		// the FOCUSED button now, and focus lands async on open. Click the
+		// confirm button explicitly (same adaptation as the browser E2Es, see
+		// tests/e2e/ui/goal-archive-always-on.spec.ts).
+		// The dialog has two variants depending on whether the goal team is
+		// still active at archive time: "Archive Goal" (confirm: "Archive") or
+		// "Stop team and archive goal?" (confirm: "Stop & Archive"). Both end
+		// with the goal archived — accept either confirm label.
+		await page.locator('[role="dialog"]').last().getByRole("button", { name: /^(Archive|Stop & Archive)$/ }).click();
 
 		const archDeadline = Date.now() + 30_000;
 		let archivedFlag = false;

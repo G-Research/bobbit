@@ -172,6 +172,59 @@ async function sendPrompt(page: Page, text: string) {
 	await textarea.press("Enter");
 }
 
+/**
+ * The spec copies the REAL agent auth.json into the isolated agent dir; on
+ * machines where an account OAuth login (Anthropic/Google) has expired, the
+ * app shows a modal on load ("<provider> login expired" / "OAuth logins
+ * expired") whose backdrop intercepts composer clicks. Dismiss it if present
+ * — expired third-party logins are an environment condition, not the
+ * behavior under test.
+ */
+async function dismissOAuthExpiryModal(page: Page) {
+	try {
+		const dialog = page.locator('[role="dialog"]', { hasText: /login expired|OAuth logins expired/i }).first();
+		await dialog.waitFor({ state: "visible", timeout: 4_000 });
+		await dialog.getByRole("button", { name: "Dismiss" }).click();
+		await dialog.waitFor({ state: "hidden", timeout: 5_000 });
+	} catch {
+		// Modal never appeared — nothing to dismiss.
+	}
+}
+
+/**
+ * Resolve a model that can actually complete a call on THIS machine.
+ * COMPACTION_TEST_MODEL wins unconditionally (no probe — explicit operator
+ * choice). Otherwise probe cheap candidates via POST /api/models/test and
+ * return the first that answers, so expired OAuth for one provider doesn't
+ * rot the spec while another provider works fine.
+ */
+async function pickWorkingModel(gw: GW): Promise<string | undefined> {
+	const explicit = process.env.COMPACTION_TEST_MODEL?.trim();
+	if (explicit) return explicit;
+	const candidates = [
+		"anthropic/claude-haiku-4-5",
+		"google/gemini-3.1-flash-preview",
+		"google/gemini-3.1-pro-preview",
+	];
+	// Extend with whatever the gateway reports as available, cheap-ish first.
+	try {
+		const models = await (await api(gw, "/api/models")).json() as Array<{ provider: string; id: string }>;
+		if (Array.isArray(models)) {
+			for (const m of models) {
+				const pref = `${m.provider}/${m.id}`;
+				if (!candidates.includes(pref)) candidates.push(pref);
+			}
+		}
+	} catch { /* probe the static list only */ }
+	for (const pref of candidates.slice(0, 8)) {
+		try {
+			const res = await api(gw, "/api/models/test", { method: "POST", body: JSON.stringify({ pref }) });
+			if (res.ok && ((await res.json()) as any).ok) return pref;
+		} catch { /* try next */ }
+	}
+	return undefined;
+}
+
 test.describe.configure({ mode: "serial" });
 
 test("compaction — real LLM @real", async ({ page }) => {
@@ -199,19 +252,30 @@ test("compaction — real LLM @real", async ({ page }) => {
 	if (!existsSync(join(agentDir, "auth.json"))) {
 		test.skip(true, `No agent auth found at ${realAgentDir}/auth.json — set BOBBIT_AGENT_DIR_REAL or sign in first`);
 	}
-	const defaultSessionModel = process.env.COMPACTION_TEST_MODEL || "anthropic/claude-haiku-4-5";
-	writeFileSync(join(dir, ".bobbit", "state", "preferences.json"), JSON.stringify({
-		"default.sessionModel": defaultSessionModel,
-	}, null, 2));
-
 	let gw = await startGW(dir, agentDir, port);
 	try {
-		// Register project.
+		// Pin a WORKING model. The old hardcoded "anthropic/claude-haiku-4-5"
+		// fallback rotted on machines where the copied auth.json's Anthropic
+		// OAuth login has expired — every turn errored and the compaction
+		// animation never started. COMPACTION_TEST_MODEL still wins outright;
+		// otherwise probe cheap candidates with POST /api/models/test (a real
+		// minimal LLM call) and pin the first one that answers.
+		const pinnedModel = await pickWorkingModel(gw);
+		if (!pinnedModel) test.skip(true, "No candidate model passed /api/models/test — sign in or set COMPACTION_TEST_MODEL");
+		const prefRes = await api(gw, "/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "default.sessionModel": pinnedModel }),
+		});
+		expect(prefRes.status).toBe(200);
+		console.log(`  Pinned session model: ${pinnedModel}`);
+		// Register project. `dir` is the gateway's own cwd — since Headquarters
+		// (#925) the server workspace only registers via upsert, which returns
+		// the existing Headquarters project with 200 (a plain POST is 409).
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "compaction-manual", rootPath: dir }),
+			body: JSON.stringify({ name: "compaction-manual", rootPath: dir, upsert: true }),
 		});
-		expect(regRes.status).toBe(201);
+		expect([200, 201]).toContain(regRes.status);
 		gw.defaultProjectId = (await regRes.json() as any).id;
 
 		// Create a session to learn the default model.
@@ -261,6 +325,7 @@ test("compaction — real LLM @real", async ({ page }) => {
 
 		await page.goto(`${gw.base}/?token=${gw.token}#/session/${sessionId}`);
 		await page.waitForSelector("textarea", { timeout: 30_000 });
+		await dismissOAuthExpiryModal(page);
 
 		// Two large prompts to push context up. Real model — keep payload bounded.
 		const FILLER = "Please remember the following inert filler block exactly: "
