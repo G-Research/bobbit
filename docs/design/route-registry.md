@@ -63,10 +63,14 @@ protocol future cohorts should follow, and what's left after cohort 1.
   outside inbox plus `GET`/`POST` MCP runtime/meta-tool routes
   (`src/server/routes/staff-mcp-operator-routes.ts`) — see
   [Cohort 10](#cohort-10-staff-crud--mcp-operator-routes) below.
-- Everything else in `handleApiRoute` (~298 remaining routes) is unchanged,
 - **Cohort 11: OAuth account routes** — the five `/api/oauth/*` account
   endpoints (`src/server/routes/oauth-account-routes.ts`) — see
   [Cohort 11: OAuth account routes](#cohort-11-oauth-account-routes) below.
+- **Cohort 12: preferences routes** — `GET`/`PUT /api/preferences` and
+  `POST /api/preferences/claude-code/confirmation`
+  (`src/server/routes/preferences-routes.ts`) — see
+  [Cohort 12: preferences routes](#cohort-12-preferences-routes) below.
+- Everything else in `handleApiRoute` (~295 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -773,6 +777,43 @@ Pinning coverage: OAuth helper behavior is covered by `tests/oauth-google.test.t
 `tests/oauth-complete-empty-code.test.ts`, and `tests/oauth-external-callbacks.test.ts`.
 Route-level E2E coverage is `tests/e2e/oauth-flow-status.spec.ts` and
 `tests/e2e/oauth-google-logout.spec.ts`.
+
+## Cohort 12: preferences routes
+
+`src/server/routes/preferences-routes.ts`.
+
+This cohort moved the cohesive preferences surface used by Settings and the
+Claude Code sensitive-preference confirmation flow. It deliberately avoids the
+recently modified `/api/custom-providers*` security-redaction surface and the
+recently modified `POST /api/sessions` create block.
+
+| Method | Path |
+|---|---|
+| POST | `/api/preferences/claude-code/confirmation` |
+| GET | `/api/preferences` |
+| PUT | `/api/preferences` |
+
+`CoreRouteCtx` grew append-only by five small helper closures already defined
+inside `handleApiRoute`: `broadcastPreferencesChanged`,
+`claudeCodeConfirmationBinding`, `firstHeader`, `getSafePreferences`, and
+`isHumanOperatorRequest`. Existing ctx fields already supplied
+`preferencesStore`, `broadcastToAll`, and `listProjectsForApi`.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+Registry count reconciliation: the current status summary says ~298 remaining
+legacy routes after cohort 11. Moving these 3 routes leaves ~295 routes in the
+legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`
+and `tests/helpers/server-route-surface*`. Preference behavior is covered by
+`tests/e2e/claude-code-status-api.spec.ts`,
+`tests/e2e/claude-code-confirmation-auth.spec.ts`,
+`tests/e2e/claude-code-confirmation-localhost.spec.ts`, and related UI
+settings specs.
 
 ## Pins
 

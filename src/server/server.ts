@@ -89,6 +89,8 @@ import { registerServerSystemRoutes } from "./routes/server-system-routes.js";
 import { registerStaffMcpOperatorRoutes } from "./routes/staff-mcp-operator-routes.js";
 // STR-01 cohort 11: OAuth account routes.
 import { registerOauthAccountRoutes } from "./routes/oauth-account-routes.js";
+// STR-01 cohort 12: preferences routes.
+import { registerPreferencesRoutes } from "./routes/preferences-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -592,10 +594,9 @@ import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieT
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
-import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
-import { consumeOperatorConfirmation, mintOperatorConfirmation, stableConfirmationBinding } from "./auth/operator-confirmation.js";
+import { stableConfirmationBinding } from "./auth/operator-confirmation.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
@@ -604,7 +605,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey } from "./agent/model-registry.js";
-import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
+import { sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -3354,6 +3355,7 @@ registerMaintenanceRoutes(coreRouteTable);
 registerServerSystemRoutes(coreRouteTable);
 registerStaffMcpOperatorRoutes(coreRouteTable);
 registerOauthAccountRoutes(coreRouteTable);
+registerPreferencesRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3605,7 +3607,8 @@ async function handleApiRoute(
 	// cohort 10, staff CRUD plus MCP operator/internal-MCP routes
 	// (src/server/routes/staff-mcp-operator-routes.ts).
 	// server/system routes (src/server/routes/server-system-routes.ts); cohort
-	// 11, OAuth account routes (src/server/routes/oauth-account-routes.ts).
+	// 11, OAuth account routes (src/server/routes/oauth-account-routes.ts);
+	// cohort 12, preferences routes (src/server/routes/preferences-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3639,6 +3642,8 @@ async function handleApiRoute(
 				config, preferencesStore, sandboxManager: sandboxManager ?? undefined, getAigwUrl, writeProjectResolutionError,
 				// Cohort 10 (staff CRUD + MCP operator routes) additions — append-only.
 				groupPolicyStore, refreshMcpExternalTools, resolveRoleForProject,
+				// Cohort 12 (preferences routes) additions — append-only.
+				broadcastPreferencesChanged, claudeCodeConfirmationBinding, firstHeader, getSafePreferences, isHumanOperatorRequest,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -7243,104 +7248,9 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
-	// for host-local Claude Code preferences that affect process execution or permission bypass.
-	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {
-		if (!isHumanOperatorRequest()) {
-			json({ error: "Claude Code preference confirmation requires an operator browser session" }, 403);
-			return;
-		}
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-		try {
-			confirmation = claudeCodeConfirmationBinding(body as Record<string, unknown>);
-		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 400);
-			return;
-		}
-		if (!confirmation.requiresConfirmation) {
-			json({ confirmationRequired: false, sensitiveKeys: [] });
-			return;
-		}
-		const minted = mintOperatorConfirmation({ purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-		json({ confirmationRequired: true, confirmationToken: minted.token, expiresAt: minted.expiresAt, sensitiveKeys: confirmation.keys });
-		return;
-	}
-
-	// GET /api/preferences — return all preferences (filter sensitive keys)
-	if (url.pathname === "/api/preferences" && req.method === "GET") {
-		json(getSafePreferences());
-		return;
-	}
-
-	// PUT /api/preferences — merge preferences
-	if (url.pathname === "/api/preferences" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
-		const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
-		if (blockedKey) {
-			json({
-				error: `${blockedKey} is managed by the agent directory settings workflow. Use PUT /api/agent-dir/pending instead.`,
-				code: "AGENT_DIR_PREFERENCE_FORBIDDEN",
-				key: blockedKey,
-				use: "/api/agent-dir/pending",
-			}, 400);
-			return;
-		}
-		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
-		let preferencePatch = body as Record<string, unknown>;
-		if (claudeCodePrefsChanged) {
-			let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-			try {
-				confirmation = claudeCodeConfirmationBinding(preferencePatch);
-			} catch (err: any) {
-				json({ error: err?.message || String(err) }, 400);
-				return;
-			}
-			if (confirmation.requiresConfirmation) {
-				const token = firstHeader("x-bobbit-operator-confirmation");
-				const confirmed = isHumanOperatorRequest()
-					&& consumeOperatorConfirmation(token, { purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-				if (!confirmed) {
-					json({
-						error: "Claude Code host-runtime preference changes require operator confirmation",
-						confirmationRequired: true,
-						sensitiveKeys: confirmation.keys,
-					}, 403);
-					return;
-				}
-			}
-			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
-			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
-			preferencePatch = { ...preferencePatch, ...normalized.values };
-		}
-		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
-		for (const [key, value] of Object.entries(preferencePatch)) {
-			if (key === "githubTrustedHosts") {
-				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
-				// authoritative. An empty/invalid list removes the key entirely.
-				const normalized = normalizeTrustedHosts(value);
-				if (normalized.length === 0) preferencesStore.remove(key);
-				else preferencesStore.set(key, normalized);
-			} else if (value === null || value === undefined) {
-				preferencesStore.remove(key);
-			} else {
-				preferencesStore.set(key, value);
-			}
-		}
-		if (claudeCodePrefsChanged) {
-			invalidateClaudeCodeStatusCache();
-			invalidateModelCache();
-		}
-		json(getSafePreferences());
-		broadcastPreferencesChanged();
-		if (headquartersVisibilityChanged) {
-			broadcastToAll({ type: "projects_changed", projects: listProjectsForApi() });
-		}
-		return;
-	}
+	// /api/preferences and /api/preferences/claude-code/confirmation moved to
+	// the core route registry (STR-01 cohort 12) — see
+	// src/server/routes/preferences-routes.ts and docs/design/route-registry.md.
 
 	// GET /api/project-config, GET /api/project-config/defaults, and (below)
 	// PUT /api/project-config moved to the core route registry (STR-01

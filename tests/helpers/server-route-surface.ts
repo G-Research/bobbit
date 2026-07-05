@@ -85,6 +85,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/staff-mcp-operator-routes.ts",
 	// STR-01 cohort 11 (OAuth account routes).
 	"src/server/routes/oauth-account-routes.ts",
+	// STR-01 cohort 12 (preferences routes).
+	"src/server/routes/preferences-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
