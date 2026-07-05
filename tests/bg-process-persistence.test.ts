@@ -880,6 +880,104 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 	});
 });
 
+describe("PollTailer — PERF-07 adaptive backoff (idle-CPU decay)", () => {
+	it("decays the poll interval geometrically on a silent stream, capped, instead of polling forever at 5Hz", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-backoff-"));
+		const file = path.join(dir, "x.spool");
+		fs.writeFileSync(file, ""); // never grows in this test — fully silent stream
+		let statCalls = 0;
+		const origStatSync = fs.statSync;
+		(fs as unknown as { statSync: typeof fs.statSync }).statSync = ((...args: Parameters<typeof fs.statSync>) => {
+			statCalls++;
+			return (origStatSync as any)(...args);
+		}) as typeof fs.statSync;
+		try {
+			const tailer = new PollTailer(file, "stdout", () => {});
+			tailer.start(0);
+
+			// Fire #1 at t=200ms (initial 5Hz cadence) — no bytes seen → interval backs off to 400ms.
+			t.mock.timers.tick(200);
+			assert.equal(statCalls, 1, "first tick still fires at the fast 200ms cadence");
+
+			// Only 200ms has elapsed since fire #1; the interval already backed off to
+			// 400ms, so this must NOT fire yet — proves the cadence actually decayed.
+			t.mock.timers.tick(200);
+			assert.equal(statCalls, 1, "no fire at the old fast cadence once backed off");
+
+			// Completing the 400ms window fires #2 → backs off to 800ms.
+			t.mock.timers.tick(200);
+			assert.equal(statCalls, 2, "fire #2 after the full 400ms backoff window");
+
+			// 700ms < 800ms — must not fire yet.
+			t.mock.timers.tick(700);
+			assert.equal(statCalls, 2, "no fire before the 800ms window elapses");
+			// Completing it fires #3 → backs off to 1600ms.
+			t.mock.timers.tick(100);
+			assert.equal(statCalls, 3, "fire #3 after the full 800ms backoff window");
+
+			// 1500ms < 1600ms — must not fire yet.
+			t.mock.timers.tick(1500);
+			assert.equal(statCalls, 3, "no fire before the 1600ms window elapses");
+			// Completing it fires #4 → backs off to the 2000ms cap (2*1600 would be
+			// 3200ms, but the cap holds it at 2000ms).
+			t.mock.timers.tick(100);
+			assert.equal(statCalls, 4, "fire #4 after the full 1600ms backoff window");
+
+			// Once at the cap, two consecutive quiet windows must each take exactly
+			// 2000ms — proving it holds at the cap rather than continuing to grow
+			// (which would silently blow past any bounded-latency guarantee).
+			t.mock.timers.tick(1900);
+			assert.equal(statCalls, 4, "no fire before the capped 2000ms window elapses");
+			t.mock.timers.tick(100);
+			assert.equal(statCalls, 5, "fire #5 after exactly one capped 2000ms window");
+			t.mock.timers.tick(1999);
+			assert.equal(statCalls, 5, "still capped at 2000ms, not growing further");
+			t.mock.timers.tick(1);
+			assert.equal(statCalls, 6, "fire #6 after a second capped 2000ms window");
+
+			tailer.stop();
+		} finally {
+			fs.statSync = origStatSync;
+		}
+	});
+
+	it("resets to fast cadence instantly on activity, and delivers output within the capped backoff bound after silence", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-backoff-"));
+		const file = path.join(dir, "x.spool");
+		fs.writeFileSync(file, "");
+		const chunks: string[] = [];
+		const tailer = new PollTailer(file, "stdout", (_s, text) => chunks.push(text));
+		tailer.start(0);
+
+		// Let the stream go fully quiet and decay all the way to the 2000ms cap
+		// (mirrors the schedule pinned in the test above: 200 → 400 → 800 → 1600 → 2000).
+		t.mock.timers.tick(200);
+		t.mock.timers.tick(400);
+		t.mock.timers.tick(800);
+		t.mock.timers.tick(1600);
+
+		// Output arrives while the tailer is parked at the capped (slow) cadence.
+		fs.appendFileSync(file, "hello\n");
+		// No output must be lost — the very next scheduled tick (at most POLL_MAX_MS
+		// after the write) must observe the growth via statSync, so worst-case
+		// delivery latency after silence ends is bounded, never unbounded.
+		t.mock.timers.tick(2000);
+		assert.ok(chunks.join("").includes("hello"), "growth is observed on the next tick within the capped bound");
+
+		// Cadence must have reset to fast (200ms) the instant activity was seen —
+		// a further write is picked up on the very next fast tick, not after
+		// another multi-second backoff climb.
+		chunks.length = 0;
+		fs.appendFileSync(file, "world\n");
+		t.mock.timers.tick(200);
+		assert.ok(chunks.join("").includes("world"), "cadence reset to the fast 200ms poll after activity resumed");
+
+		tailer.stop();
+	});
+});
+
 describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 	function fakeChild(): any {
 		const c = new EventEmitter() as any;
