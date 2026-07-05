@@ -28,6 +28,8 @@ import type { PackRuntimeStatus, PackRuntimeCapabilitySummary } from "../runtime
 import type { PackEntry } from "../agent/pack-types.js";
 import type { SkillMarketContext } from "../skills/slash-skills.js";
 import type { ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "../agent/session-setup.js";
+import type { StaffManager } from "../agent/staff-manager.js";
+import type { InboxManager } from "../agent/inbox-manager.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -145,4 +147,12 @@ export interface CoreRouteCtx {
 		provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
 		effectiveConfig?: Record<string, unknown>,
 	): boolean;
+
+	// ── Cohort 5 (staff inbox) additions — append-only from here down.
+	// Both already exist as handleApiRoute params/locals shared with the
+	// not-yet-migrated rest of the /api/staff* family; threaded through
+	// rather than duplicated or imported back from server.ts.
+	staffManager: StaffManager;
+	/** Optional exactly as handleApiRoute's own `inboxManager` param is (a pre-existing gateway-wiring detail, not request-shaped). */
+	inboxManager?: InboxManager;
 }

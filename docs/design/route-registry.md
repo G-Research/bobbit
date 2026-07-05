@@ -25,7 +25,11 @@ protocol future cohorts should follow, and what's left after cohort 1.
   [Cohort list](#cohort-1-projects) below.
 - **Cohort 2: `/api/marketplace/*` + `GET /api/packs/conflicts`** — see
   [Cohort 2: marketplace](#cohort-2-marketplace) below.
-- Everything else in `handleApiRoute` (~390 remaining routes) is unchanged,
+- **Cohort 5: staff inbox** — `GET`/`POST` `/api/staff/:id/inbox`,
+  `POST /api/staff/:id/inbox/:entryId/{complete,dismiss}`,
+  `DELETE /api/staff/:id/inbox/:entryId` — see
+  [Cohort 5: staff inbox](#cohort-5-staff-inbox) below.
+- Everything else in `handleApiRoute` (~385 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -304,6 +308,53 @@ specs (`market-activation`, `marketplace-conflicts`, `marketplace-mcp`,
 `artifacts-pack`) except one pre-existing flake
 (`marketplace.spec.ts`'s "Sources menu filters..." package-count assertion,
 confirmed to fail identically on the unmigrated baseline).
+
+## Cohort 5: staff inbox
+
+`src/server/routes/staff-inbox-routes.ts`. The five staff-inbox routes,
+moved verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/staff/:id/inbox` |
+| POST | `/api/staff/:id/inbox` |
+| POST | `/api/staff/:id/inbox/:entryId/complete` |
+| POST | `/api/staff/:id/inbox/:entryId/dismiss` |
+| DELETE | `/api/staff/:id/inbox/:entryId` |
+
+Chosen for this cohort because it's small (5 handlers, ~150 lines),
+lexically self-contained (its own comment-delimited block, distinct from the
+surrounding `/api/staff` CRUD family), and has the strongest test coverage
+of any candidate in the remaining chain: unit coverage
+(`tests/inbox-manager.test.ts`, `tests/inbox-nudger.test.ts`,
+`tests/inbox-store.test.ts`), a dedicated API E2E spec
+(`tests/e2e/inbox-api.spec.ts`, 11 cases covering every route's happy path,
+404/403/409 branches, and the deleted `/wake` shim), and a browser E2E spec
+(`tests/e2e/ui/staff-inbox.spec.ts`). It's also explicitly NOT a
+session/steer/WS hot path — it's an async task-queue CRUD surface staff
+agents poll, not part of live session streaming.
+
+**No unhandled-method parity shim needed** (unlike cohort 2's
+project-config family): every legacy block here gated on the path regex AND
+the method in the SAME `if` condition (e.g.
+`if (staffInboxListMatch && req.method === "GET")`), so a method mismatch
+never even entered the "path matched" branch — it fell straight through to
+the same generic terminal 404 as a wholly-unmatched path. `RouteTable`'s
+`:param` entries are method-scoped the same way (`match()` filters by method
+before testing the regex), so simply not registering other methods on these
+path shapes reproduces that fall-through exactly.
+
+**Scope note**: only the inbox sub-family was migrated, not the rest of
+`/api/staff*` (list, create, get/patch/put/delete by `:id` — its own larger
+review unit involving project reassignment, worktree/sandbox provisioning,
+and role-cascade validation) or the lexically-adjacent deprecated
+`GET /api/staff/:id/sessions` 410 stub (unrelated one-liner that merely
+sits next to the inbox block in `server.ts`).
+
+`staffManager` and `inboxManager` were appended to `CoreRouteCtx` — both
+already existed as `handleApiRoute` params shared with the not-yet-migrated
+rest of the `/api/staff*` family, so they're threaded through by reference
+rather than duplicated.
 
 ## Pins
 
