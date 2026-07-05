@@ -1,0 +1,152 @@
+{
+  "generatedBy": "scripts/testing-v2/codemod.mjs",
+  "generatedAt": "2026-07-05T12:26:24.966Z",
+  "argv": [
+    "tests/token-dir.test.ts",
+    "tests/is-setup-complete.test.ts",
+    "tests/system-prompt-resolver.test.ts",
+    "tests/scaffold-agent-gitignore.test.ts",
+    "tests/propose-project-validation.test.ts",
+    "tests/output-path-containment.test.ts",
+    "tests/system-prompt-skills-budget.test.ts",
+    "tests/goal-metadata-second-review-fixes.test.ts"
+  ],
+  "dryRun": false,
+  "methods": [
+    "codemod"
+  ],
+  "counts": {
+    "total": 8,
+    "clean": 0,
+    "needsWithEnv": 8,
+    "needsManual": 0,
+    "written": 8
+  },
+  "files": [
+    {
+      "file": "tests/goal-metadata-second-review-fixes.test.ts",
+      "target": "tests2/core/goal-metadata-second-review-fixes.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/is-setup-complete.test.ts",
+      "target": "tests2/core/is-setup-complete.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/output-path-containment.test.ts",
+      "target": "tests2/core/output-path-containment.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/propose-project-validation.test.ts",
+      "target": "tests2/core/propose-project-validation.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/scaffold-agent-gitignore.test.ts",
+      "target": "tests2/core/scaffold-agent-gitignore.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/system-prompt-resolver.test.ts",
+      "target": "tests2/core/system-prompt-resolver.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/system-prompt-skills-budget.test.ts",
+      "target": "tests2/core/system-prompt-skills-budget.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/token-dir.test.ts",
+      "target": "tests2/core/token-dir.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    }
+  ]
+}
