@@ -83,23 +83,40 @@ export class SwarmGovernor {
 	 * `onStraggler` fires exactly once, at `wallClockMs` after registration,
 	 * UNLESS `unregisterNode` is called first (the caller's job: call it from
 	 * the same terminal path that already calls `notifyChildTerminal`).
+	 *
+	 * SWARM-W2 (restart-resume, design/swarm-orchestration.md §11 Wave 2):
+	 * `opts.elapsedMs` lets a caller re-arm a node that was already governed
+	 * BEFORE this process started — e.g. a gateway restart mid-swarm — without
+	 * granting it a fresh full `wallClockMs` budget from the restart moment.
+	 * The straggler timer fires after `max(0, wallClockMs - elapsedMs)`; a
+	 * node that was already past its deadline during the downtime fires
+	 * (almost) immediately rather than being silently un-governed forever.
+	 * Omitted/zero for a genuinely fresh registration (unchanged behavior).
 	 */
-	registerNode(goalId: string, budget: SwarmNodeBudget, onStraggler: (reason: string) => void): void {
+	registerNode(
+		goalId: string,
+		budget: SwarmNodeBudget,
+		onStraggler: (reason: string) => void,
+		opts?: { elapsedMs?: number },
+	): void {
 		this.unregisterNode(goalId); // clear any prior timer before re-arming
 		const resolved: Required<SwarmNodeBudget> = {
 			tokenBudget: budget.tokenBudget,
 			hardKillMarginMultiplier: budget.hardKillMarginMultiplier ?? DEFAULT_HARD_KILL_MARGIN,
 			wallClockMs: budget.wallClockMs,
 		};
-		const state: NodeState = { budget: resolved, registeredAt: this.now(), abortIssued: false };
+		const elapsedMs = Math.max(0, opts?.elapsedMs ?? 0);
+		const state: NodeState = { budget: resolved, registeredAt: this.now() - elapsedMs, abortIssued: false };
 		if (Number.isFinite(resolved.wallClockMs) && resolved.wallClockMs > 0) {
+			const remainingMs = Math.max(0, resolved.wallClockMs - elapsedMs);
 			state.stragglerTimer = this.schedule(() => {
 				// The node may have gone terminal in the same tick the timer
 				// fires (race) — re-check it's still registered before firing.
 				if (this.nodes.get(goalId) === state) {
-					onStraggler(`straggler wall-clock deadline (${resolved.wallClockMs}ms) exceeded`);
+					const suffix = elapsedMs > 0 ? ` (re-armed after restart; ${elapsedMs}ms already elapsed pre-restart)` : "";
+					onStraggler(`straggler wall-clock deadline (${resolved.wallClockMs}ms) exceeded${suffix}`);
 				}
-			}, resolved.wallClockMs);
+			}, remainingMs);
 		}
 		this.nodes.set(goalId, state);
 	}
