@@ -39,6 +39,7 @@ import type { Role, RoleStore } from "../agent/role-store.js";
 import type { RoleManager } from "../agent/role-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
+import type { SandboxScope } from "../auth/sandbox-token.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
@@ -248,4 +249,7 @@ export interface CoreRouteCtx {
 
 	// ── Cohort 14 (directory browser routes) additions — append-only.
 	defaultCwd: string;
+
+	// ── Cohort 15 (model/provider routes) additions — append-only.
+	sandboxScope?: SandboxScope;
 }
