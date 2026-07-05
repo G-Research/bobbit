@@ -131,6 +131,8 @@ export function isSandboxAllowed(
 	}
 
 	// ── Task endpoints (tool extensions use /api/tasks/:id directly) ──
+	// The route handler resolves task → goal and enforces scope.goalIds; the
+	// guard only allows scoped tokens to reach that ownership-aware check.
 	const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(\/.*)?$/);
 	if (taskMatch) {
 		const subpath = taskMatch[2] || "";

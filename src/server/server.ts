@@ -107,7 +107,7 @@ import {
 } from "./agent/compaction-sidecar.js";
 import { readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
-import type { TaskState } from "./agent/task-store.js";
+import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
@@ -3982,14 +3982,27 @@ async function handleApiRoute(
 		return tm;
 	}
 
-	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
-	function getTaskManagerForTask(taskId: string): TaskManager {
-		// Search all project contexts for the task
+	/** Get a task and its manager by looking up which project store owns it. */
+	function getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined {
 		for (const ctx of projectContextManager.all()) {
 			const task = ctx.taskStore.get(taskId);
-			if (task) return getTaskManagerForGoal(task.goalId);
+			if (task) return { task, taskManager: getTaskManagerForGoal(task.goalId), projectId: ctx.project.id };
 		}
+		return undefined;
+	}
+
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
+	function getTaskManagerForTask(taskId: string): TaskManager {
+		const record = getTaskRecordForTask(taskId);
+		if (record) return record.taskManager;
 		throw new Error(`Task "${taskId}" not found in any project`);
+	}
+
+	function sandboxCanAccessTask(task: PersistedTask): boolean {
+		if (!sandboxScope) return true;
+		if (sandboxScope.goalIds.has(task.goalId)) return true;
+		json({ error: "Forbidden: task is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+		return false;
 	}
 
 	// GET /api/harness-status — report whether the dev restart harness is active
@@ -6103,12 +6116,6 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-transition the goal to in-progress when its first session starts.
-		// Deferred to here so the sandbox ownership check above runs first.
-		if (goalId && goalForSession && goalForSession.state === "todo") {
-			await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
-		}
-
 		let resolvedProjectId = explicitProjectId;
 		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
@@ -6300,6 +6307,12 @@ async function handleApiRoute(
 		if (sandboxed && !goalId && !assistantType) {
 			const shortId = randomUUID().slice(0, 8);
 			autoSandboxBranch = `session/s-${shortId}`;
+		}
+
+		// Auto-transition the goal to in-progress only after all request
+		// validation has passed and immediately before creating the session.
+		if (goalId && goalForSession && goalForSession.state === "todo") {
+			await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
 		}
 
 		try {
@@ -10891,9 +10904,10 @@ async function handleApiRoute(
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
 			try {
-				const task = getTaskManagerForTask(id).getTask(id);
-				if (!task) { json({ error: "Task not found" }, 404); return; }
-				json(task);
+				const record = getTaskRecordForTask(id);
+				if (!record) { json({ error: "Task not found" }, 404); return; }
+				if (!sandboxCanAccessTask(record.task)) return;
+				json(record.task);
 			} catch {
 				json({ error: "Task not found" }, 404);
 			}
@@ -10905,9 +10919,12 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			try {
-				const tm = getTaskManagerForTask(id);
-				const task = tm.getTask(id);
-				const prevState = task?.state;
+				const record = getTaskRecordForTask(id);
+				if (!record) { json({ error: "Task not found" }, 404); return; }
+				if (!sandboxCanAccessTask(record.task)) return;
+				const tm = record.taskManager;
+				const task = record.task;
+				const prevState = task.state;
 				const ok = tm.updateTask(id, {
 					title: body.title,
 					spec: body.spec,
@@ -10959,7 +10976,10 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskAssignMatch[1];
-			const tm = getTaskManagerForTask(taskId);
+			const record = getTaskRecordForTask(taskId);
+			if (!record) { json({ error: "Task not found" }, 400); return; }
+			if (!sandboxCanAccessTask(record.task)) return;
+			const tm = record.taskManager;
 			const ok = tm.assignTask(taskId, sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 
@@ -10999,8 +11019,11 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskTransitionMatch[1];
-			const tm = getTaskManagerForTask(taskId);
-			const task = tm.getTask(taskId);
+			const record = getTaskRecordForTask(taskId);
+			if (!record) { json({ error: "Task not found" }, 400); return; }
+			if (!sandboxCanAccessTask(record.task)) return;
+			const tm = record.taskManager;
+			const task = record.task;
 			const ok = tm.transitionTask(taskId, state as TaskState);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 

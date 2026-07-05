@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { bobbitDir } from "../bobbit-dir.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { PersistedSession } from "./session-store.js";
@@ -193,7 +194,17 @@ export function validateExecutionCwd(
 		};
 	}
 
-	if (project.id === HEADQUARTERS_PROJECT_ID || project.id === SYSTEM_PROJECT_ID) {
+	if (project.id === SYSTEM_PROJECT_ID) {
+		if (isSameOrDescendant(bobbitDir(), cwd) || isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		return {
+			ok: false,
+			status: 422,
+			code: "CWD_OUTSIDE_PROJECT",
+			error: "cwd must be inside the Headquarters directory for system-scope sessions",
+		};
+	}
+
+	if (project.id === HEADQUARTERS_PROJECT_ID) {
 		if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
 		return {
 			ok: false,

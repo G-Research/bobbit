@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { rawApiFetch, readE2EToken } from "./e2e-setup.js";
+import { bobbitDir, rawApiFetch, readE2EToken } from "./e2e-setup.js";
 
 let bogusCwd: string;
 const createdSessionIds: string[] = [];
@@ -68,6 +68,30 @@ test.describe("POST /api/sessions — server-scope vs project-scoped assistants"
 			expect(text).toMatch(/projectId required/);
 		});
 	}
+
+	test("delegate from server-scope assistant inherits Headquarters cwd", async () => {
+		const parentResp = await rawApiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "role", cwd: bogusCwd }),
+		});
+		const parentText = await parentResp.text();
+		expect(parentResp.status, parentText).toBe(201);
+		const parent = JSON.parse(parentText);
+		createdSessionIds.push(parent.id);
+		expect(parent.projectId).toBe("system");
+		expect(parent.cwd.replace(/\\/g, "/")).toContain(bobbitDir().replace(/\\/g, "/"));
+
+		const delegateResp = await rawApiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ delegateOf: parent.id, instructions: "check system-scope delegate cwd" }),
+		});
+		const delegateText = await delegateResp.text();
+		expect(delegateResp.status, delegateText).toBe(201);
+		const delegate = JSON.parse(delegateText);
+		createdSessionIds.push(delegate.id);
+		expect(delegate.projectId).toBe("system");
+		expect(delegate.cwd).toBe(parent.cwd);
+	});
 
 	test("staff assistant WITH projectId+cwd — 201", async () => {
 		const projResp = await rawApiFetch("/api/projects");

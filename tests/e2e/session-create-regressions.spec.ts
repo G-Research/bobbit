@@ -119,3 +119,45 @@ test("POST /api/sessions does not let Headquarters sandbox config authorize a no
 	expect(resp.status, body.text).toBe(400);
 	expect(body.json.error).toContain("Docker sandbox is not configured");
 });
+
+test("POST /api/sessions leaves a goal todo when projectId validation fails", async () => {
+	const projectA = await createTempProject(`session-goal-a-${Date.now()}`);
+	const projectB = await createTempProject(`session-goal-b-${Date.now()}`);
+	let goalId = "";
+	try {
+		const createGoalResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId: projectA.id,
+				cwd: projectA.rootPath,
+				title: `Validation ordering ${Date.now()}`,
+				spec: "Pin that failed session creation does not mutate the source goal state.",
+				worktree: false,
+			}),
+		});
+		const created = await readJson(createGoalResp);
+		expect(createGoalResp.status, created.text).toBe(201);
+		goalId = created.json.id;
+
+		const before = await apiFetch(`/api/goals/${goalId}`);
+		expect((await before.json()).state).toBe("todo");
+
+		const resp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId: projectB.id,
+				goalId,
+				worktree: false,
+			}),
+		});
+		const body = await readJson(resp);
+
+		expect(resp.status, body.text).toBe(422);
+		expect(body.json.code).toBe("PROJECT_ID_MISMATCH");
+
+		const after = await apiFetch(`/api/goals/${goalId}`);
+		expect((await after.json()).state).toBe("todo");
+	} finally {
+		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
+	}
+});
