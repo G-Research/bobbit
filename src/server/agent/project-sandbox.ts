@@ -862,10 +862,15 @@ export class ProjectSandbox {
 	private async _createContainer(): Promise<void> {
 		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
 
-		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
+		// Ensure the state directory and sandbox-visible subdirectories exist for bind
+		// mounts. Sourced from SANDBOX_STATE_MOUNTS (docker-args.ts) — the single
+		// source of truth for which state subdirs are bind-mounted — so this list can
+		// never drift from what buildDockerRunArgs() actually mounts (see the
+		// openai-orphan-tool-result regression fixed alongside this comment: a hand-
+		// maintained duplicate list here had silently fallen out of sync).
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
-		for (const sub of ["sessions", "tool-guard", "html-snapshots", "google-code-assist", "openai-orphan-tool-result"]) {
+		for (const { sub } of SANDBOX_STATE_MOUNTS) {
 			fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 		}
 

@@ -41,6 +41,7 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },
+	{ sub: "openai-orphan-tool-result", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
 ];
 
@@ -237,8 +238,8 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// Generated extension state dirs (`google-code-assist` and
-	// `tool-result-error-bridge`) hold content-addressed pi-coding-agent
+	// Generated extension state dirs (`google-code-assist`, `openai-orphan-tool-result`,
+	// and `tool-result-error-bridge`) hold content-addressed pi-coding-agent
 	// extensions loaded via `--extension`. remapArgsForContainer rewrites their
 	// host paths to `/bobbit-state/<subdir>/...`; those container paths only
 	// resolve if the subdirs are bind-mounted here. They contain only generated

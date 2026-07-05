@@ -450,7 +450,9 @@ hash.
 The generated extension subscribes to three pi events:
 
 - **`before_agent_start`** (per turn) → POST `…/provider-hooks/before-prompt` with
-  `{ prompt: event.prompt }`, with an `AbortController` timeout of **2500 ms**. On success, if the
+  `{ prompt: event.prompt }`, with an `AbortController` timeout of **`BEFORE_PROMPT_TIMEOUT_MS`
+  (5000 ms)** — raised from 2500 ms to stay above the shipped Hindsight memory provider's
+  4500 ms budget (see "Fix Hindsight memory hook timeouts"). On success, if the
   response contains non-empty `content`, it returns a hidden custom message:
   `{ message: { customType: "bobbit:dynamic-context", content, display: false } }`. On empty
   content or **any** failure (transport, timeout/abort, non-2xx, parse error), it returns

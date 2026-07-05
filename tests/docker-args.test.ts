@@ -100,7 +100,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			});
 			const mounts = args.filter((a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge"]) {
+			for (const sub of ["google-code-assist", "openai-orphan-tool-result", "tool-result-error-bridge"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
