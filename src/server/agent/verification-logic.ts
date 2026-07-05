@@ -690,6 +690,216 @@ export function canSkipAllSteps(
 }
 
 // ---------------------------------------------------------------------------
+// Content-keyed step cache (VER-01) — opt-in widening of buildStepCache
+// ---------------------------------------------------------------------------
+//
+// buildStepCache above requires an EXACT commit-SHA match: every Ralph-loop
+// fix commit changes HEAD, so it re-invalidates the whole gate suite even
+// when a step's real inputs are untouched (see docs/design/gate-step-cache.md,
+// finding VER-01). This section adds a second, opt-in cache mode selected via
+// `BOBBIT_GATE_CACHE=content` (default remains "sha" — buildStepCache is
+// UNCHANGED above, so the default behavior and its pinning tests are
+// unaffected byte-for-byte).
+//
+// Content mode reuses a step from a *different* commit SHA only when the step
+// declares `cacheInputGlobs` (VerifyStep) AND the declared globs are
+// byte-identical between the two commits. Steps without declared globs always
+// fall back to requiring an exact SHA match — the conservative default for
+// step types whose real inputs can't be soundly expressed as static path
+// globs (llm-review, agent-qa, subgoal, human-signoff).
+
+/** Selects the gate step-cache keying strategy. See docs/design/gate-step-cache.md. */
+export type GateCacheMode = "sha" | "content";
+
+/**
+ * Resolve `BOBBIT_GATE_CACHE` to a cache mode. Any value other than the
+ * literal string `"content"` (including undefined, empty, or a typo) falls
+ * back to `"sha"` — today's behavior — so a misconfigured env var can only
+ * ever be *more* conservative, never silently widen reuse.
+ */
+export function resolveGateCacheMode(raw: string | undefined): GateCacheMode {
+	return raw === "content" ? "content" : "sha";
+}
+
+/**
+ * Convert a simple glob (`*` matches within a path segment, `**` matches
+ * across segments, everything else is literal) into an anchored RegExp.
+ * Deliberately minimal — no brace expansion, no character classes, no
+ * negation. Over-matching is safe here (it only widens what counts as
+ * "changed", never what counts as "unchanged"); under-matching a glob that
+ * was meant to cover a path is the actual risk, so keep the glob vocabulary
+ * small and the mapping obvious.
+ */
+export function globToRegExp(glob: string): RegExp {
+	// Walk the glob one token at a time rather than split/join on a sentinel
+	// (a sentinel string risks colliding with pathological input). `**`
+	// crosses path separators, a lone `*`/`?` stays within a path segment,
+	// everything else is escaped and matched literally.
+	let pattern = "";
+	for (let i = 0; i < glob.length; i++) {
+		if (glob[i] === "*" && glob[i + 1] === "*") {
+			pattern += ".*";
+			i += 1;
+		} else if (glob[i] === "*") {
+			pattern += "[^/]*";
+		} else if (glob[i] === "?") {
+			pattern += "[^/]";
+		} else if (/[.+^${}()|[\]\\]/.test(glob[i])) {
+			pattern += `\\${glob[i]}`;
+		} else {
+			pattern += glob[i];
+		}
+	}
+	return new RegExp(`^${pattern}$`);
+}
+
+/** True when `path` matches at least one of `globs` (see `globToRegExp`). */
+export function pathMatchesAnyGlob(path: string, globs: string[]): boolean {
+	return globs.some(g => globToRegExp(g).test(path));
+}
+
+/**
+ * True when at least one entry of `trackedPaths` matches at least one of
+ * `globs`. Used as a defense-in-depth existence guard: a glob that matches
+ * NOTHING in the tree is indistinguishable, to a pathspec-scoped `git diff`,
+ * from a glob whose files are merely unchanged — both report "no
+ * differences". Without this guard a typo'd or stale glob (e.g. a renamed
+ * `src/` directory) would silently look content-stable forever. Callers
+ * should treat a `false` result as "cannot verify" and refuse to reuse,
+ * NOT as "confirmed changed" or "confirmed unchanged".
+ */
+export function anyPathMatchesGlobs(trackedPaths: string[], globs: string[]): boolean {
+	return trackedPaths.some(p => pathMatchesAnyGlob(p, globs));
+}
+
+export interface ContentCacheDecision {
+	stepName: string;
+	/** Which key actually produced (or would have produced) the verdict. */
+	keyKind: "sha" | "content";
+	result: "hit" | "miss";
+	reason?: string;
+}
+
+/**
+ * Git-backed lookups needed to evaluate content-keyed reuse. Injected so the
+ * decision logic here stays pure/testable; the real implementation
+ * (verification-harness.ts) shells out to `git`.
+ */
+export interface ContentCacheGitDeps {
+	/** Flat list of tracked file paths at `sha`, relative to `cwd`'s repo root... callers pass paths relative to `cwd`. */
+	listTrackedPaths(cwd: string, sha: string): Promise<string[]>;
+	/** True when `git diff --quiet <priorSha> <currentSha> -- <globs>` (run at `cwd`) reports no differences. */
+	diffIsClean(cwd: string, priorSha: string, currentSha: string, globs: string[]): Promise<boolean>;
+}
+
+/**
+ * Content-keyed counterpart to `buildStepCache`. Reuses `buildStepCache`
+ * verbatim for the exact-SHA case (identical semantics, zero duplicated
+ * invalidation rules), then layers additional per-step content-matched reuse
+ * on top for steps that:
+ *   1. are still uncached after the exact-SHA pass,
+ *   2. are not `human-signoff` (never reusable, any mode),
+ *   3. declare `cacheInputGlobs` on the workflow step, and
+ *   4. have a prior passed result whose declared globs are byte-identical
+ *      (per `deps`) between that prior commit and the current one.
+ *
+ * `stepCwds` maps step name -> resolved cwd (the caller already computes this
+ * via `resolveStep` to run the command; content mode reuses it rather than
+ * re-resolving).
+ */
+export async function buildContentStepCache(
+	signals: GateSignal[],
+	currentSignalId: string,
+	commitSha: string | undefined,
+	verificationCacheInvalidatedAt: number | undefined,
+	activeSteps: VerifyStep[],
+	stepCwds: Map<string, string>,
+	deps: ContentCacheGitDeps,
+): Promise<{ cache: Map<string, GateSignalStep>; decisions: ContentCacheDecision[] }> {
+	const decisions: ContentCacheDecision[] = [];
+	const exact = buildStepCache(signals, currentSignalId, commitSha, verificationCacheInvalidatedAt);
+	const cache = new Map(exact);
+	const activeStepNames = new Set(activeSteps.map(s => s.name));
+	for (const name of exact.keys()) {
+		if (activeStepNames.has(name)) decisions.push({ stepName: name, keyKind: "sha", result: "hit" });
+	}
+
+	if (!commitSha) return { cache, decisions };
+
+	const trackedPathsCache = new Map<string, string[]>(); // cwd -> tracked paths at commitSha
+
+	for (const step of activeSteps) {
+		if (cache.has(step.name)) continue; // already satisfied by exact match
+		if (step.type === "human-signoff") continue; // never reusable, any mode
+
+		const globs = step.cacheInputGlobs;
+		if (!globs || globs.length === 0) {
+			decisions.push({ stepName: step.name, keyKind: "sha", result: "miss", reason: "no cacheInputGlobs declared on step — sha-exact only" });
+			continue;
+		}
+
+		// Find the (chronologically-first, matching buildStepCache's own
+		// iteration convention) prior passed result for this step, at any SHA.
+		let matchedStep: GateSignalStep | undefined;
+		let matchedFromSha: string | undefined;
+		for (const prev of signals) {
+			if (prev.id === currentSignalId) continue;
+			if (verificationCacheInvalidatedAt !== undefined && prev.timestamp <= verificationCacheInvalidatedAt) continue;
+			if (!prev.verification?.status || prev.verification.status === "running") continue;
+			const s = prev.verification.steps.find(x => x.name === step.name);
+			if (!s || !s.passed) continue;
+			matchedStep = s;
+			matchedFromSha = prev.commitSha;
+			break;
+		}
+		if (!matchedStep || !matchedFromSha) {
+			decisions.push({ stepName: step.name, keyKind: "content", result: "miss", reason: "no prior passed result found" });
+			continue;
+		}
+		if (matchedFromSha === commitSha) {
+			// Should already be covered by the exact-SHA pass above, but keep this
+			// branch for robustness (e.g. a step added to cacheInputGlobs after the
+			// exact pass already ran with a name it didn't recognize).
+			cache.set(step.name, matchedStep);
+			decisions.push({ stepName: step.name, keyKind: "sha", result: "hit" });
+			continue;
+		}
+
+		const cwd = stepCwds.get(step.name);
+		if (!cwd) {
+			decisions.push({ stepName: step.name, keyKind: "content", result: "miss", reason: "step cwd could not be resolved" });
+			continue;
+		}
+
+		try {
+			let trackedPaths = trackedPathsCache.get(cwd);
+			if (!trackedPaths) {
+				trackedPaths = await deps.listTrackedPaths(cwd, commitSha);
+				trackedPathsCache.set(cwd, trackedPaths);
+			}
+			if (!anyPathMatchesGlobs(trackedPaths, globs)) {
+				decisions.push({ stepName: step.name, keyKind: "content", result: "miss", reason: "cacheInputGlobs matched no tracked paths — cannot verify" });
+				continue;
+			}
+			const unchanged = await deps.diffIsClean(cwd, matchedFromSha, commitSha, globs);
+			if (unchanged) {
+				cache.set(step.name, matchedStep);
+				decisions.push({ stepName: step.name, keyKind: "content", result: "hit" });
+			} else {
+				decisions.push({ stepName: step.name, keyKind: "content", result: "miss" });
+			}
+		} catch (err) {
+			// Any git failure (unreachable SHA after a force-push, timeout, etc.)
+			// is conservative-miss, never a hit.
+			const msg = err instanceof Error ? err.message : String(err);
+			decisions.push({ stepName: step.name, keyKind: "content", result: "miss", reason: `git lookup failed: ${msg}` });
+		}
+	}
+
+	return { cache, decisions };
+}
+
+// ---------------------------------------------------------------------------
 // Overall pass/fail computation
 // ---------------------------------------------------------------------------
 

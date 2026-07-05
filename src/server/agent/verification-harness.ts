@@ -149,6 +149,10 @@ import {
 	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
 	buildStepCache,
+	buildContentStepCache,
+	resolveGateCacheMode,
+	type ContentCacheDecision,
+	type ContentCacheGitDeps,
 	computeAllPassed,
 	canSkipAllSteps,
 	detectJsonValidationError,
@@ -347,6 +351,54 @@ export function resolveStep(
 	// Free-form pure { run } at the per-branch container root.
 	return { cwd: branchContainer, runString: step.run };
 }
+
+// ---------------------------------------------------------------------------
+// Content-keyed gate cache (VER-01) — git-backed ContentCacheGitDeps
+// ---------------------------------------------------------------------------
+//
+// Real git implementation of the deps `buildContentStepCache` needs
+// (verification-logic.ts). Split out so the decision logic there stays
+// pure/testable; only these two functions touch the filesystem/subprocess.
+
+/**
+ * Flat, glob-free list of every tracked path at `sha` (recursive,
+ * `git ls-tree` — no pathspec magic, so it's always a literal, authoritative
+ * listing). Used as the existence guard in `buildContentStepCache`: a glob
+ * that matches nothing here is treated as "cannot verify", never as
+ * "unchanged".
+ */
+export async function gitListTrackedPaths(cwd: string, sha: string): Promise<string[]> {
+	const { execFile: execFileCb } = await import("node:child_process");
+	const { promisify } = await import("node:util");
+	const execFileAsync = promisify(execFileCb);
+	const { stdout } = await execFileAsync("git", ["ls-tree", "-r", "--name-only", sha], { cwd, timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
+	return execOutputToString(stdout).split(/\r?\n/).filter(Boolean);
+}
+
+/**
+ * True when `git diff --quiet <priorSha> <currentSha> -- <globs>` reports no
+ * differences — i.e. every path matching `globs` is byte-identical between
+ * the two commits. Any git failure (unreachable SHA after a force-push,
+ * timeout, not-a-git-repo) propagates as a thrown error; the caller
+ * (`buildContentStepCache`) treats that as a conservative miss.
+ */
+export async function gitDiffIsClean(cwd: string, priorSha: string, currentSha: string, globs: string[]): Promise<boolean> {
+	const { execFile: execFileCb } = await import("node:child_process");
+	const { promisify } = await import("node:util");
+	const execFileAsync = promisify(execFileCb);
+	try {
+		await execFileAsync("git", ["diff", "--quiet", priorSha, currentSha, "--", ...globs], { cwd, timeout: 30_000 });
+		return true; // exit 0 — no differences within the declared globs
+	} catch (err) {
+		if (execErrorCode(err) === 1) return false; // exit 1 — a real diff was found
+		throw err; // anything else (bad SHA, timeout, git error) is not a verdict
+	}
+}
+
+export const GIT_CONTENT_CACHE_DEPS: ContentCacheGitDeps = {
+	listTrackedPaths: gitListTrackedPaths,
+	diffIsClean: gitDiffIsClean,
+};
 
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
@@ -3016,15 +3068,53 @@ export class VerificationHarness {
 			// Results array indexed by step position (declared early for optional step skipping)
 			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
 
-			// Build cache of previously-passed step results for the same commit SHA.
-			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
+			// Build cache of previously-passed step results for the same commit SHA
+			// (mode "sha", default) — or, opted in via BOBBIT_GATE_CACHE=content, for
+			// steps whose declared cacheInputGlobs are unchanged since a prior *different*
+			// SHA (VER-01: the exact-SHA-only cache invalidates the whole gate suite on
+			// every Ralph-loop fix commit). See docs/design/gate-step-cache.md.
 			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-			const cachedSteps = buildStepCache(
-				gateState?.signals ?? [],
-				signal.id,
-				signal.commitSha,
-				gateState?.verificationCacheInvalidatedAt,
-			);
+			const gateCacheMode = resolveGateCacheMode(process.env.BOBBIT_GATE_CACHE);
+			let cachedSteps: Map<string, GateSignalStep>;
+			let cacheDecisions: ContentCacheDecision[];
+			if (gateCacheMode === "content") {
+				const components = projectConfigStore?.getComponents() ?? [];
+				const stepCwds = new Map<string, string>();
+				for (const step of steps) {
+					try {
+						stepCwds.set(step.name, resolveStep(step, components, cwd, { workflow: effectiveGate.id, gate: signal.gateId }).cwd);
+					} catch {
+						// Leave unresolved for this step — buildContentStepCache treats a
+						// missing cwd as "cannot verify" and falls back to sha-exact.
+					}
+				}
+				const built = await buildContentStepCache(
+					gateState?.signals ?? [],
+					signal.id,
+					signal.commitSha,
+					gateState?.verificationCacheInvalidatedAt,
+					steps,
+					stepCwds,
+					GIT_CONTENT_CACHE_DEPS,
+				);
+				cachedSteps = built.cache;
+				cacheDecisions = built.decisions;
+			} else {
+				cachedSteps = buildStepCache(
+					gateState?.signals ?? [],
+					signal.id,
+					signal.commitSha,
+					gateState?.verificationCacheInvalidatedAt,
+				);
+				cacheDecisions = steps
+					.filter(s => s.type !== "human-signoff")
+					.map(s => ({ stepName: s.name, keyKind: "sha" as const, result: cachedSteps.has(s.name) ? "hit" as const : "miss" as const }));
+			}
+			// Telemetry (VER-01 A/B): one structured line per verification with a
+			// per-step hit/miss + key-kind breakdown, so BOBBIT_GATE_CACHE=content vs
+			// the sha-exact default can be compared on real cache-hit rate. Wall-clock
+			// and cost deltas are already observable via existing gate logs / cost-tracker.
+			console.log(`[verification][gate-cache] mode=${gateCacheMode} gate=${signal.gateId} commit=${(signal.commitSha || "unknown").slice(0, 8)} decisions=${JSON.stringify(cacheDecisions)}`);
 			if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}

@@ -192,6 +192,58 @@ describe("InlineWorkflowStore — round-trip", () => {
 		assert.doesNotMatch(raw, /^\s+label: Enable QA\s*$/m);
 	});
 
+	it("saved cacheInputGlobs round-trips through put/getAll (VER-01 content-keyed gate cache)", () => {
+		writeProjectYaml(projectFor([]));
+		const store = makeStore();
+
+		store.put({
+			id: "wf",
+			name: "Test workflow",
+			description: "",
+			gates: [{
+				id: "g",
+				name: "Gate",
+				dependsOn: [],
+				verify: [
+					{ name: "Build", type: "command", component: "app", command: "build", cacheInputGlobs: ["src/**", "package.json"] },
+					{ name: "Bug hunt", type: "llm-review", prompt: "hunt" }, // no globs — must stay undefined
+				],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const reloaded = makeStore().getAll();
+		const [build, bugHunt] = reloaded[0].gates[0].verify!;
+		assert.deepEqual(build.cacheInputGlobs, ["src/**", "package.json"]);
+		assert.equal(bugHunt.cacheInputGlobs, undefined);
+
+		const raw = fs.readFileSync(path.join(configDir, "project.yaml"), "utf-8");
+		assert.match(raw, /cacheInputGlobs:/);
+	});
+
+	it("drops an empty cacheInputGlobs array rather than round-tripping a meaningless empty list", () => {
+		writeProjectYaml(projectFor([]));
+		const store = makeStore();
+
+		store.put({
+			id: "wf",
+			name: "Test workflow",
+			description: "",
+			gates: [{
+				id: "g",
+				name: "Gate",
+				dependsOn: [],
+				verify: [{ name: "Build", type: "command", cacheInputGlobs: [] }],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const reloaded = makeStore().getAll();
+		assert.equal(reloaded[0].gates[0].verify![0].cacheInputGlobs, undefined);
+	});
+
 	it("saved human-signoff label round-trips through put/getAll", () => {
 		writeProjectYaml(projectFor([]));
 		const store = makeStore();
