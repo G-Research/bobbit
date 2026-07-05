@@ -51,6 +51,7 @@ tests/fixtures/*-bundle.css
 .e2e-ui-bobbit
 tests/code-review-results.json
 coverage/
+.profiles/
 concept/
 ARCHIVE/
 prompt_tmp.json

@@ -12,13 +12,18 @@ function createMemoryFs(): FsLike & { files: Map<string, string> } {
 	const dirs = new Set<string>();
 	const norm = (p: fs.PathLike) => path.resolve(String(p));
 	const ensureParent = (p: string) => dirs.add(path.dirname(p));
+	// Buffer.from's overloads do not accept the full NodeJS.ArrayBufferView union
+	// (e.g. BigUint64Array, Uint8ClampedArray). Normalise any view via its
+	// underlying ArrayBuffer window so every typed-array kind decodes cleanly.
+	const toText = (data: string | NodeJS.ArrayBufferView) =>
+		typeof data === "string" ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf-8");
 	const api = {
 		files,
 		existsSync(p: fs.PathLike) { const n = norm(p); return files.has(n) || dirs.has(n); },
 		mkdirSync(p: fs.PathLike) { dirs.add(norm(p)); return undefined as any; },
 		readFileSync(p: fs.PathLike) { const n = norm(p); if (!files.has(n)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return files.get(n)!; },
-		writeFileSync(p: fs.PathLike, data: string | NodeJS.ArrayBufferView) { const n = norm(p); ensureParent(n); files.set(n, typeof data === "string" ? data : Buffer.from(data).toString("utf-8")); },
-		appendFileSync(p: fs.PathLike, data: string | NodeJS.ArrayBufferView) { const n = norm(p); ensureParent(n); files.set(n, (files.get(n) ?? "") + (typeof data === "string" ? data : Buffer.from(data).toString("utf-8"))); },
+		writeFileSync(p: fs.PathLike, data: string | NodeJS.ArrayBufferView) { const n = norm(p); ensureParent(n); files.set(n, toText(data)); },
+		appendFileSync(p: fs.PathLike, data: string | NodeJS.ArrayBufferView) { const n = norm(p); ensureParent(n); files.set(n, (files.get(n) ?? "") + toText(data)); },
 		readdirSync(p: fs.PathLike) { const n = norm(p); const prefix = n.endsWith(path.sep) ? n : n + path.sep; return [...files.keys()].filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length).split(path.sep)[0]); },
 		statSync(p: fs.PathLike) { const n = norm(p); if (!files.has(n) && !dirs.has(n)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return { isDirectory: () => dirs.has(n), isFile: () => files.has(n), mtimeMs: Date.now(), size: files.get(n)?.length ?? 0 } as fs.Stats; },
 		lstatSync(p: fs.PathLike) { return this.statSync(p); },
@@ -30,8 +35,8 @@ function createMemoryFs(): FsLike & { files: Map<string, string> } {
 			access: async (p: fs.PathLike) => { if (!api.existsSync(p)) throw new Error("ENOENT"); },
 			mkdir: async (p: fs.PathLike) => { api.mkdirSync(p); undefined as any; },
 			readFile: async (p: fs.PathLike) => api.readFileSync(p),
-			writeFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { api.writeFileSync(p, data); },
-			appendFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { api.appendFileSync(p, data); },
+			writeFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { const n = norm(String(p)); ensureParent(n); files.set(n, toText(data)); },
+			appendFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { const n = norm(String(p)); ensureParent(n); files.set(n, (files.get(n) ?? "") + toText(data)); },
 			readdir: async (p: fs.PathLike) => api.readdirSync(p) as any,
 			stat: async (p: fs.PathLike) => api.statSync(p),
 			lstat: async (p: fs.PathLike) => api.lstatSync(p),
