@@ -1,5 +1,9 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { resolveGatewayDeps, type GatewayDeps } from "./gateway-deps.js";
+export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
+export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -1739,7 +1743,24 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
-export function createGateway(config: GatewayConfig) {
+export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
+	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
+	if (deps?.agentBridgeFactory) {
+		registerRpcBridgeFactory(deps.agentBridgeFactory);
+	}
+	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
+	const gatewayDeps = resolveGatewayDeps({
+		...deps,
+		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
+	});
+	let rpcBridgeFactoryRestored = false;
+	const restoreExplicitRpcBridgeFactory = () => {
+		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
+		rpcBridgeFactoryRestored = true;
+		registerRpcBridgeFactory(previousRpcBridgeFactory);
+	};
+
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
@@ -2945,6 +2966,7 @@ export function createGateway(config: GatewayConfig) {
 
 	return {
 		server,
+		deps: gatewayDeps,
 		sessionManager,
 		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
 		teamManager,
@@ -3400,35 +3422,39 @@ export function createGateway(config: GatewayConfig) {
 			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
-			// Stop accepting NEW connections AND forcibly terminate existing
-			// keep-alive connections BEFORE we tear down the state stores.
-			// Without this, an HTTP/1.1 keep-alive connection from the client
-			// can still deliver a request to handleApiRoute mid-shutdown (e.g.
-			// during the awaits below), after projectContextManager.closeAll()
-			// has emptied the contexts map — producing spurious `Goal "X" not
-			// found in any project` errors. It also matters for the test
-			// crash/restart path: a stale keep-alive connection on the OLD
-			// server's accept() fd survives port reuse and routes new requests
-			// to the OLD (already torn down) handler closure. Forcibly closing
-			// connections forces clients to reconnect to the NEW server.
-			try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
-			server.close();
-			clearInterval(cleanupInterval);
-			triggerEngine.stop();
-			inboxNudger.stop();
-			wss.close();
-			await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
-			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
-			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-			for (const pool of sessionManager.getAllWorktreePools().values()) {
-				await pool.drain();
+			try {
+				// Stop accepting NEW connections AND forcibly terminate existing
+				// keep-alive connections BEFORE we tear down the state stores.
+				// Without this, an HTTP/1.1 keep-alive connection from the client
+				// can still deliver a request to handleApiRoute mid-shutdown (e.g.
+				// during the awaits below), after projectContextManager.closeAll()
+				// has emptied the contexts map — producing spurious `Goal "X" not
+				// found in any project` errors. It also matters for the test
+				// crash/restart path: a stale keep-alive connection on the OLD
+				// server's accept() fd survives port reuse and routes new requests
+				// to the OLD (already torn down) handler closure. Forcibly closing
+				// connections forces clients to reconnect to the NEW server.
+				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
+				server.close();
+				clearInterval(cleanupInterval);
+				triggerEngine.stop();
+				inboxNudger.stop();
+				wss.close();
+				await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
+				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
+				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
+				for (const pool of sessionManager.getAllWorktreePools().values()) {
+					await pool.drain();
+				}
+				await sessionManager.shutdown();
+				await projectContextManager.closeAll();
+				if (sandboxManager) {
+					await sandboxManager.shutdownAll();
+				}
+				await sessionManager.cleanupSandboxNetwork();
+			} finally {
+				restoreExplicitRpcBridgeFactory();
 			}
-			await sessionManager.shutdown();
-			await projectContextManager.closeAll();
-			if (sandboxManager) {
-				await sandboxManager.shutdownAll();
-			}
-			await sessionManager.cleanupSandboxNetwork();
 		},
 	};
 }
