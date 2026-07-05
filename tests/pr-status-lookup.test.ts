@@ -11,7 +11,7 @@ import {
 	buildGhPrMergePermissionsArgs,
 	buildGhPrViewArgs,
 	buildGhRulesetArgs,
-} from "../src/server/server.ts";
+} from "../src/server/skills/git-gh.ts";
 
 const PR_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
 

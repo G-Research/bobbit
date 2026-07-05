@@ -73,7 +73,7 @@ test.describe.serial("session git-status multi-repo envelope", () => {
 	let webWt: string;
 
 	test.beforeAll(async () => {
-		serverModule = await import("../../dist/server/server.js");
+		serverModule = await import("../../dist/server/skills/git-gh.js");
 		expect(typeof serverModule.__setGitStatusFake).toBe("function");
 
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sess-mr-"));
