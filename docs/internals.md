@@ -53,15 +53,13 @@ When a user registers a project whose `rootPath` is a Linux/macOS symlink (or a 
 
 ### Headquarters project
 
-Headquarters is the visible server workspace with stable id `headquarters`, name `Headquarters`, `kind: "headquarters"`, and root `getProjectRoot()`. It is auto-ensured on startup and repaired if an older record drifts. It exists so a fresh server can create sessions/staff/goals immediately and so server-level config has a user-facing home.
+Headquarters is the visible server workspace with stable id `headquarters`, name `Headquarters`, `kind: "headquarters"`, and root `headquartersDir()` (the physical Headquarters directory, **not** the server run directory). It is auto-ensured on startup and repaired if an older record drifts. It exists so a fresh server can create sessions/staff/goals immediately and so server-level config has a user-facing home.
 
-Headquarters aliases `bobbitDir()`, `bobbitStateDir()`, and `bobbitConfigDir()` instead of deriving paths from `<rootPath>/.bobbit`. This is required because `BOBBIT_DIR` can redirect server state/config outside the server run directory.
+Headquarters is physically separated from normal projects. Server state/config live under the Headquarters directory (`<server-run-dir>/.bobbit/headquarters` by default, `$BOBBIT_DIR`/`$BOBBIT_PI_DIR` when set), resolved by `headquartersDir()`/`bobbitStateDir()`/`bobbitConfigDir()`. Its default cwd is the Headquarters directory too, so HQ sessions do not operate on the server run directory's git checkout. Crucially, starting Bobbit in a directory already registered as a normal project yields **two distinct visible projects** — the same-root normal project is never promoted or renamed into Headquarters. Live server secrets (`token`, `tls/`, `sandbox-agent-auth/`) are the exception: they live under `serverSecretsDir()` outside any project root. Headquarters never creates worktrees or uses git/PR lifecycle. See [Headquarters project](headquarters.md) for the full contract.
 
 For non-workflow config, `projectId: "headquarters"` normalizes to server scope: roles, tools, tool policies, skills, marketplace/MCP contributions, and config-directory lookups use the same stores as `/api/project-config` and report server origins. Workflows remain project-scoped; `resolveWorkflows("headquarters")` reads the Headquarters project config store, while `resolveWorkflows(undefined)` returns `[]`.
 
-`GET /api/projects` returns Headquarters first by default. The `showHeadquartersInProjectLists` preference hides it only from normal project lists/sidebar/pickers; explicit lookup and internal routing by id still work and all sessions/goals/staff/config remain intact. Destructive project lifecycle routes reject Headquarters through `HEADQUARTERS_IMMUTABLE` or `HEADQUARTERS_ALREADY_EXISTS` responses.
-
-See [Headquarters project](headquarters.md) for the full behavior contract.
+`GET /api/projects` returns Headquarters first by default. The `showHeadquartersInProjectLists` preference hides it only from normal project lists/sidebar/pickers; explicit lookup and internal routing by id still work and all sessions/goals/staff/config remain intact. Destructive project lifecycle routes reject Headquarters through `HEADQUARTERS_IMMUTABLE` or `HEADQUARTERS_ALREADY_EXISTS` responses. Because Headquarters' root is `headquartersDir` (not the server run directory), a normal project can still be registered at the server run directory without colliding with it.
 
 ### Synthetic system project
 
@@ -94,11 +92,12 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
     search.flex/       # Lexical search index for THIS project (FlexSearch JSON)
     session-costs.json # Cost tracking (see session-cost.md)
 
-<bobbitStateDir>/
+<bobbitStateDir>/          # <headquarters-dir>/state (server/HQ scope; see headquarters.md)
   projects.json     # Global project registry
   preferences.json  # Global UI preferences
-  token             # Auth token
   gateway-url       # Gateway address
+  # NOTE: live secrets (token, tls/, sandbox-agent-auth/) live under
+  # serverSecretsDir() OUTSIDE any project root, not here.
   colors.json       # Session colors
   goals.json        # Headquarters goals
   sessions.json     # Headquarters sessions
@@ -143,21 +142,29 @@ Store resolution **never falls back to a default project**. Every operation reso
 
 1. **Entity-based resolution** - `getContextForGoal(goalId)`, `getContextForSession(sessionId)`: scans all project contexts to find the owning project. Returns `null` if not found; callers throw or return 404.
 2. **Explicit projectId** - `getOrCreate(projectId)`: used when the caller already knows the target project (e.g. from a session's `projectId` field).
-3. **Explicit-required on creation** - `POST /api/sessions`, `POST /api/goals`, and `POST /api/staff` resolve the target project at the top of the handler via the `resolveProjectForRequest` helper in `src/server/agent/resolve-project.ts`. Resolution order: explicit `body.projectId` → `body.cwd` inside a registered project's `rootPath` → **400 Bad Request**. There is no creation-time default. Once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
+3. **Explicit-required on creation** - `POST /api/sessions`, `POST /api/goals`, and `POST /api/staff` resolve the target project at the top of the handler via the `resolveProjectForRequest` helper in `src/server/agent/resolve-project.ts`. Resolution is by **explicit `body.projectId` only** — `cwd` is deliberately ignored for scope selection (it is an execution directory validated *after* the project is chosen). Missing projectId → **400 `PROJECT_ID_REQUIRED`**; unknown → 404 `PROJECT_NOT_FOUND`; hidden/system where a visible project is required → 400 `PROJECT_NOT_VISIBLE`. There is no creation-time default. Once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2. See [projectId-required API contract](#projectid-required-api-contract).
 
 `ProjectContextManager` no longer exposes `getDefault()`, `getDefaultOrNull()`, `getDefaultProjectId()`, or `getDefaultProjectIdOrNull()`; `ProjectRegistry` no longer exposes `ensureDefaultProject()`. Any code path that needs a project must either resolve it explicitly (via `resolveProjectForRequest`, an entity lookup, or a threaded `projectId` parameter) or return 400. The only remaining reference to a "first registered project" is in `state-migration.ts`, and it is migration-only - see the block comment on `migrateToPerProjectState()` and the State migration section below.
 
-##### Project selection contract
+##### projectId-required API contract
 
-`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` share the following 400 contract:
+**`projectId` is the authoritative project scope for all user/work actions.** `cwd` is only an execution directory, used *after* the project has been selected by `projectId` (or by an already-persisted record that carries `projectId`). Project scope is never inferred from `cwd` — `ProjectRegistry.findByCwd()` is not used for sessions, goals, staff, proposals, verification/review, or tool/config discovery. This prevents the class of bugs where a shared cwd (e.g. the server run directory) silently routes work to the wrong project.
 
-| Condition | Body |
-|---|---|
-| Neither `projectId` nor `cwd` provided | `{"error":"projectId required: no projectId was provided and cwd (\"\") does not match any registered project"}` |
-| `cwd` provided but no registered project contains it | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
-| `projectId` provided but unknown | `{"error":"Invalid project"}` (pre-existing) |
+`resolveProjectForRequest()` (`src/server/agent/resolve-project.ts`) resolves from explicit `projectId` only and returns structured errors:
 
-Callers should always pass an explicit `projectId` when one is available. `cwd`-only resolution exists to support agent tools and external scripts that only know a filesystem path.
+| Condition | Status | Code |
+|---|---|---|
+| `projectId` missing/blank | 400 | `PROJECT_ID_REQUIRED` |
+| `projectId` unknown | 404 | `PROJECT_NOT_FOUND` |
+| `projectId` hidden/system where a visible project is required | 400 | `PROJECT_NOT_VISIBLE` |
+
+The same `PROJECT_ID_REQUIRED` contract is enforced across project-scoped surfaces: `POST /api/sessions|goals|staff`, proposal acceptance and proposal draft creation for project-scoped types, verification/review sub-sessions (scope from `goal.projectId`), WebSocket slash-skill activation and file-mention/tool execution (scope from the persisted `session.projectId`), and the config/discovery/mutation routes for **tools, roles, workflows, tool group policies, config directories, and MCP servers**. A request to those routes without a resolvable project scope returns 400 rather than falling back to a default or to cwd.
+
+**Headquarters aliases server scope.** For non-workflow config, `projectId=headquarters` normalizes to server/HQ scope (`<headquarters-dir>/config`) — tools, roles, tool group policies, skills, config directories, and marketplace/MCP contributions all read/write the server stores and report origin `server` (labelled **Headquarters** in the UI). Workflows are the exception and remain project-scoped. First-party UI and proposal tools always send an explicit `projectId` (using `headquarters` for server-scope settings); they do not rely on a cwd or missing-param fallback.
+
+**Server-scope assistant carve-out.** Role/tool authoring assistants may operate in server scope without a user-visible project: `POST /api/sessions` with `assistantType ∈ {role, tool}` and no `projectId` resolves to the hidden `system` anchor for compatibility. Staff assistants are *not* in this carve-out — they are project-scoped. Project-assistant setup may use a directory path to propose/register a new project, but once a project record exists, subsequent actions must carry its `projectId`.
+
+**Cwd validation** happens separately via `validateExecutionCwd(projectId, cwd, source)` after project resolution. Fresh user-supplied cwd must be the project root or a descendant; server-generated/persisted worktree cwd values outside the project root are accepted only when ownership is proven by the selected `projectId` (goal/session/team/verification owns that worktree path). Otherwise → 422 `CWD_OUTSIDE_PROJECT`. Headquarters allows only `headquartersDir` or a descendant and never a worktree path.
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern - they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
