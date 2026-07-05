@@ -80,6 +80,11 @@ unknown file set, say so and stop instead of forcing it through this pipeline.
 
 - Never hardcode, print, or commit the `NVIDIA_BUILD_KEY` value. If the driver's own log ever contains
   the literal key, treat that as a bug in the script, not something to paper over — stop and report it.
+- Both models in this pipeline run at high reasoning effort by default — GLM 5.2 via
+  `chat_template_kwargs: { thinking: true }` in `glm-worker.mjs`, GPT-5.5 via
+  `model_reasoning_effort = "high"` (global `~/.codex/config.toml` plus an explicit
+  `-c model_reasoning_effort="high"` in `gpt55-review.sh`). Don't override either to a lower effort
+  unless the orchestrator explicitly asks for a cheap/fast smoke call (`BOBBIT_GLM_EFFORT=off` for GLM).
 - Never edit the primary checkout directly; always work in the worktree you created.
 - Never `git add -A` or `git stash`.
 - If the task doesn't fit the "GLM-shaped" bar in the skill, say so in your return summary instead of
