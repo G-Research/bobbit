@@ -1,25 +1,31 @@
 #!/bin/sh
-# graphify graph refresh — runs after `git checkout`/`git switch`.
+# graphify graph refresh — runs after `git checkout`/`git switch`, and also
+# after `git worktree add` (git treats that as a checkout with flag=1 too —
+# see the HAZARD note below).
 #
 # Only fires on an actual branch switch (git passes flag=1 for that; flag=0 is
 # a plain file checkout, which we ignore). Keeps src/graphify-out/graph.json
 # (gitignored) roughly in sync when hopping branches/worktrees.
 # Opt in via `scripts/setup-githooks.sh` (sets core.hooksPath=.githooks).
 #
-# Defensive by design:
-#   - no-ops silently if `graphify` isn't on PATH (other machines/CI stay unaffected)
-#   - runs detached in the background so the checkout never blocks
-#   - logs to .git/graphify-update.log instead of the terminal
+# HAZARD this hook must guard against: `git worktree add` fires this hook in
+# the *new* worktree, which has no src/graphify-out/ yet. We routinely run
+# 10+ concurrent lane worktrees — if this triggered a full graph build in
+# each one, that's 10+ concurrent `graphify update` processes on one machine.
+# scripts/graphify-refresh.sh's --hook mode guards against exactly this: it
+# no-ops unless src/graphify-out/graph.json already exists in *this* checkout.
+#
+# Delegates to scripts/graphify-refresh.sh, which:
+#   - no-ops silently if `graphify` isn't on PATH (other machines/CI unaffected)
+#   - no-ops unless this checkout already has src/graphify-out/graph.json
+#     (see HAZARD above)
+#   - coalesces via a lock (with stale-lock reclaim) so back-to-back checkouts
+#     don't stack concurrent rebuilds
+#   - runs detached at low priority so the checkout never blocks
+#   - logs to src/graphify-out/graphify-update.log
 
 BRANCH_SWITCH="$3"
 [ "$BRANCH_SWITCH" = "1" ] || exit 0
 
-command -v graphify >/dev/null 2>&1 || exit 0
-
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
-LOG="$GIT_DIR/graphify-update.log"
-
-nohup graphify update src --force >>"$LOG" 2>&1 &
-disown >/dev/null 2>&1 || true
-
-exit 0
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+"$repo_root/scripts/graphify-refresh.sh" --hook

@@ -403,13 +403,19 @@ graphify (installed as a CLI + optional MCP server) extracts an AST/import graph
 
 ### The graph is a snapshot, not live
 
-`src/graphify-out/` is gitignored (an 11MB+ generated artifact) and does **not** auto-update as code changes. Three ways it gets refreshed, in increasing order of automation:
+`src/graphify-out/` is gitignored (an 11MB+ generated artifact) and does **not** auto-update as code changes. Two ways it gets refreshed:
 
-1. **Manual**: `npm run graph:refresh` (= `graphify update src --force`) from the repo root. No LLM call — pure AST re-extraction. `--force` is required whenever files were deleted (otherwise graphify refuses to shrink the graph).
-2. **Committed git hooks** (`.githooks/post-merge`, `.githooks/post-checkout`): refresh the graph in the background after a merge/pull or a branch switch. **Not active by default** — opt in once per clone/worktree with `./scripts/setup-githooks.sh` (sets `core.hooksPath=.githooks` for that checkout only; nothing is enabled automatically on `npm install`). The hooks no-op silently if `graphify` isn't on PATH, so machines/CI without it are unaffected, and they run detached (logging to `.git/graphify-update.log`) so `git merge`/`git pull`/`git checkout` never block on a rebuild.
-3. **`graphify` also ships its own native hook installer** (`graphify hook install`), which writes post-commit/post-checkout hooks straight into `.git/hooks/` (uncommitted, machine-local, not shared via this repo). We deliberately did **not** use that path here — `.git/hooks/` isn't checked in, so it wouldn't propagate to other clones/worktrees the way `.githooks/` + `core.hooksPath` does. If you prefer per-commit (not just per-merge) refreshes on your own machine, `graphify hook install` is a reasonable personal addition on top of (or instead of) the committed hooks.
+1. **Manual**: `npm run graph:refresh` from the repo root. This runs `scripts/graphify-refresh.sh --force`, which always refreshes (building the graph from scratch if it doesn't exist yet) via `graphify update src --force`. No LLM call — pure AST re-extraction. `--force` is required whenever files were deleted (otherwise graphify refuses to shrink the graph).
+2. **Committed git hooks** (`.githooks/post-merge`, `.githooks/post-checkout` on branch switches, `.githooks/post-commit`): refresh the graph in the background after a merge/pull, a branch switch, or a local commit. **Not active by default** — opt in once per clone/worktree with `./scripts/setup-githooks.sh` (sets `core.hooksPath=.githooks` for that checkout only; nothing is enabled automatically on `npm install`). All three delegate to `scripts/graphify-refresh.sh --hook`, which:
+   - no-ops silently if `graphify` isn't on PATH, so machines/CI without it are unaffected;
+   - **no-ops unless this checkout already has `src/graphify-out/graph.json`** — this is the critical guard for worktrees (see below);
+   - coalesces concurrent triggers through a mkdir-based lock under `src/graphify-out/`, with a 30-minute stale-lock reclaim (`STALE_LOCK_SECONDS` env override) so a crashed refresh can't wedge future ones;
+   - runs detached at low `nice` priority so `git merge`/`git pull`/`git checkout`/`git commit` never block on a rebuild;
+   - logs to `src/graphify-out/graphify-update.log` instead of the terminal.
 
-**Worktree caveat**: a fresh worktree/clone has no `src/graphify-out/` until someone runs the refresh once. `/orient` degrades gracefully in that case — LSP + `rg` still work (steps 1/3/4 in that skill), just without the structural graph step.
+   `graphify` also ships its own native hook installer (`graphify hook install`), which writes hooks straight into `.git/hooks/` (uncommitted, machine-local, not shared via this repo). We deliberately did **not** use that path — `.git/hooks/` isn't checked in, so it wouldn't propagate to other clones/worktrees the way `.githooks/` + `core.hooksPath` does.
+
+**Worktree hazard — read before changing these hooks**: `git worktree add` fires `post-checkout` (git treats worktree creation as a checkout with the branch-switch flag set) in the *new* worktree, which has no `src/graphify-out/` yet. We routinely run 10+ concurrent lane worktrees; without the "only refresh if the graph already exists" guard above, every `git worktree add` would kick off its own full `graphify update` — 10+ concurrent rebuilds on one machine. The guard makes this a fast, side-effect-free no-op instead: a fresh worktree/clone simply has no graph until someone runs `npm run graph:refresh` there deliberately. `/orient` degrades gracefully in that case — LSP + `rg` still work (steps 1/3/4 in that skill), just without the structural graph step.
 
 ### MCP wiring
 

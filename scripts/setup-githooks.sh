@@ -2,7 +2,16 @@
 # Opt in to this repo's committed git hooks (.githooks/).
 #
 # Currently just the graphify code-graph auto-refresh (post-merge,
-# post-checkout on branch switch) — see docs/dev-workflow.md#code-graph-graphify.
+# post-checkout on branch switch, post-commit) — see
+# docs/dev-workflow.md#code-graph-graphify.
+#
+# All three are guarded (via scripts/graphify-refresh.sh): they no-op unless
+# this checkout already has src/graphify-out/graph.json — so `git worktree
+# add` (which fires post-checkout) never kicks off a full graph build in a
+# fresh lane worktree — and they coalesce concurrent triggers through a
+# stale-lock-tolerant lock so a burst of git operations doesn't stack
+# rebuilds.
+#
 # Run once per clone/worktree:
 #
 #   ./scripts/setup-githooks.sh
