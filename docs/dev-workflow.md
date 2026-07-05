@@ -413,7 +413,11 @@ graphify (installed as a CLI + optional MCP server) extracts an AST/import graph
 
 ### MCP wiring
 
-`.mcp.json` (committed) wires graphify as an MCP server so its `query_graph`/`get_neighbors`/`shortest_path`/`get_pr_impact` tools are available directly, instead of shelling out to the `graphify` CLI. Its `command` field is a machine-specific absolute path to the `uv`-managed graphify Python interpreter (e.g. `/Users/<you>/.local/share/uv/tools/graphifyy/bin/python`) — adjust it per machine if graphify was installed differently (pipx, system Python, a different `uv` tool name). Without a working `.mcp.json` entry, fall back to the `graphify query "<question>"` / `graphify path` / `graphify explain` CLI subcommands from the repo root.
+`.mcp.json` (committed) wires graphify as an MCP server so its `query_graph`/`get_neighbors`/`shortest_path`/`get_pr_impact` tools are available directly, instead of shelling out to the `graphify` CLI. Its `command` is the committed `scripts/graphify-mcp.sh` wrapper (`${CLAUDE_PROJECT_DIR:-.}/scripts/graphify-mcp.sh`) rather than a hardcoded interpreter path, so the file is portable across machines and worktrees:
+- **Interpreter**: prefers `graphify` on PATH (reads its shebang to find the `uv`-managed venv python that has the package importable — the CLI has no `serve` subcommand, MCP is only exposed via `python -m graphify.serve`), else `$GRAPHIFY_PYTHON` as an explicit override. If neither resolves, the wrapper prints one line to stderr and exits 0 so Claude Code shows a dead/unavailable server instead of a crash loop.
+- **Graph path**: prefers this checkout's own `src/graphify-out/graph.json`, else falls back to the primary checkout's graph (first entry of `git worktree list`) so a fresh worktree still gets the shared graph before its first local refresh.
+
+Without a working `.mcp.json` entry, fall back to the `graphify query "<question>"` / `graphify path` / `graphify explain` CLI subcommands from the repo root.
 
 ### `graph.json` and merge conflicts
 
