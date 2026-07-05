@@ -25,6 +25,8 @@ import "./SkillChip.js";
 import type { SkillChipData } from "./SkillChip.js";
 import "./FileMentionChip.js";
 import type { FileMentionChipData, FileMentionKind } from "./FileMentionChip.js";
+import "./TransparencyPanel.js";
+import type { TransparencyDecision } from "./TransparencyPanel.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 /** Format a message timestamp for display (locale-appropriate time). */
@@ -237,6 +239,10 @@ function buildChipItems(
 @customElement("user-message")
 export class UserMessage extends LitElement {
 	@property({ type: Object }) message!: UserMessageWithAttachments | UserMessageType;
+	/** CLF-W1a: classifier decision outcomes recorded for this turn (see
+	 *  `TransparencyPanel`). Empty/absent ⇒ the panel renders nothing —
+	 *  byte-identical to before this feature existed. */
+	@property({ type: Array }) decisions: TransparencyDecision[] = [];
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -290,6 +296,7 @@ export class UserMessage extends LitElement {
 							`
 							: "";
 					})()}
+					<transparency-panel .decisions=${this.decisions}></transparency-panel>
 				</div>
 				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
