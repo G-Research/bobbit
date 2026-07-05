@@ -103,6 +103,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/cost-routes.ts",
 	// STR-01 cohort 16b (preview mount/artifact/SSE endpoints).
 	"src/server/routes/preview-routes.ts",
+	// STR-01 cohort 17 (editable proposal REST endpoints).
+	"src/server/routes/session-proposal-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
