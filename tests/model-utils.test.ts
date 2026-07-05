@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { getModels } from "@earendil-works/pi-ai";
 import { inferMeta } from "../src/server/agent/aigw-manager.ts";
-import { modelRecencyRank } from "../src/server/agent/model-registry.ts";
+import { modelRecencyRank, selectAigwModelForRoleTier } from "../src/server/agent/model-registry.ts";
 
 // ── inferMeta tests ────────────────────────────────────────────────
 
@@ -285,5 +285,53 @@ describe("modelRecencyRank()", () => {
 	it("case-insensitive matching", () => {
 		assert.equal(modelRecencyRank("Claude-Opus-4-6"), modelRecencyRank("claude-opus-4-6"));
 		assert.equal(modelRecencyRank("GPT-5.4"), modelRecencyRank("gpt-5.4"));
+	});
+});
+
+// ── selectAigwModelForRoleTier tests (Finding F5-model-aigw) ────────
+//
+// The aigw auto-select branch in session-manager.ts::tryAutoSelectModel
+// used to pick the single highest-modelRecencyRank model for every
+// session regardless of role. These tests pin the role-tier-aware fix:
+// "low" thinking-tier roles (currently only docs-writer) get the
+// cheapest discovered model; every other tier is unchanged.
+
+describe("selectAigwModelForRoleTier()", () => {
+	const models = [
+		{ id: "claude-opus-4-8" }, // frontier — highest rank
+		{ id: "claude-3-5-haiku" }, // oldest/cheapest — lowest rank
+		{ id: "claude-sonnet-4-6" }, // mid
+	];
+
+	it("low tier picks the lowest-ranked (cheapest) discovered model", () => {
+		const picked = selectAigwModelForRoleTier(models, "low");
+		assert.equal(picked.id, "claude-3-5-haiku");
+	});
+
+	it("high tier keeps today's behavior: highest-ranked model", () => {
+		const picked = selectAigwModelForRoleTier(models, "high");
+		assert.equal(picked.id, "claude-opus-4-8");
+	});
+
+	it("medium tier keeps today's behavior: highest-ranked model", () => {
+		const picked = selectAigwModelForRoleTier(models, "medium");
+		assert.equal(picked.id, "claude-opus-4-8");
+	});
+
+	it("unset tier keeps today's behavior: highest-ranked model", () => {
+		const picked = selectAigwModelForRoleTier(models, undefined);
+		assert.equal(picked.id, "claude-opus-4-8");
+	});
+
+	it("single discovered model is returned regardless of tier", () => {
+		const single = [{ id: "claude-sonnet-4-6" }];
+		assert.equal(selectAigwModelForRoleTier(single, "low").id, "claude-sonnet-4-6");
+		assert.equal(selectAigwModelForRoleTier(single, "high").id, "claude-sonnet-4-6");
+	});
+
+	it("does not mutate the input array", () => {
+		const original = [...models];
+		selectAigwModelForRoleTier(models, "low");
+		assert.deepEqual(models, original);
 	});
 });

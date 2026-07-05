@@ -92,6 +92,16 @@ type ResolverCtx = {
 const RUNNABLE_RESOLVER_BLOCK = `
 const fallbackProviderAllowlistFromPrefs = () => undefined;
 const mergeHostAgentProviderEnv = (env) => env;
+// Faithful stand-ins for session-runtime.ts. None of this file's fixtures
+// use a "claude-code/..." model string or an explicit plan.runtime, so
+// these always resolve to the "pi" runtime — matching real
+// resolveSessionRuntime()/runtimeFromModelString() behavior for that input
+// space without pulling in the real RpcBridge-backed module.
+const resolveSessionRuntime = (opts) => (
+	opts.runtime ?? (typeof opts.initialModel === "string" && opts.initialModel.indexOf("/") > 0 && opts.initialModel.slice(0, opts.initialModel.indexOf("/")) === "claude-code" ? "claude-code" : "pi")
+);
+const assertRuntimeAllowedForSession = () => {};
+const hydrateRuntimeOptions = (options) => options;
 ${RESOLVER_BLOCK}
 `;
 

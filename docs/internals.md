@@ -1519,13 +1519,27 @@ The built-in roles (`defaults/roles/*.yaml`, the lowest cascade layer) ship with
 
 Any project- or server-level role override replaces the whole record (see Cascade above), so overriding a built-in role locally also takes over its tier. The assignments are pinned by `tests/builtin-role-thinking-tiers.test.ts` - edit that test alongside any deliberate tier change.
 
+### Recommended model tiers (VER-02) - guidance, not a shipped default
+
+Finding VER-02 asked for the model-side companion to the thinkingLevel tiers above: cheap-tier roles running the same frontier model as a team-lead is the single biggest addressable cost lever in verification. The table below is the recommended tiering - apply it per-install via the role manager's **Model** tab (or a project/server role-YAML override) - but **no built-in role ships a literal `model:` default**, and that omission is deliberate and pinned by `tests/builtin-role-model-tiers.test.ts`.
+
+| Recommended tier | Roles | Rationale |
+|---|---|---|
+| Frontier (keep session/review default) | team-lead, architect, security-reviewer, spec-auditor, bug-hunter | Same set as the `high` thinkingLevel tier - orchestration and high-stakes review where a missed finding is expensive. |
+| Mid | coder, reviewer, code-reviewer, test-engineer, qa-tester | Mechanical-but-technical work; a mid-tier model handles it fine at a fraction of the cost/latency. |
+| Cheap | docs-writer | Purely mechanical prose/doc edits - the same role F5 already tiers to `thinkingLevel: low`. |
+
+**Why this is guidance and not a shipped `defaults/roles/*.yaml` value:** `role.model` binding is a hard contract (see Precedence and Failure handling below) - a `setModel` failure or read-back mismatch throws, and only falls back to `default.sessionModel` when the operator has separately opted into `allowSessionModelFallback` (off by default; see [Controlled session model fallback](session-model-fallback.md)). A literal `<provider>/<modelId>` string is provider-specific: shipping e.g. an Anthropic-direct model as docs-writer's default would hard-fail every docs-writer spawn on any install that only has an AI Gateway, Bedrock, or a different provider configured - the opposite of graceful degradation, and a much worse outcome than "runs at the frontier price." `tests/controlled-model-fallback.test.ts` ("off/absent setting: failing explicit role.model rejects...") pins exactly this risk. Until Bobbit has a symbolic, install-portable tier (a value that resolves against whatever the operator actually has configured, the way `selectAigwModelForRoleTier` already does for the AI-Gateway auto-select path below), a hardcoded literal model default is not safe to ship broadly.
+
+**F5-model-aigw (fixed):** the AI-Gateway auto-select fallback in `tryAutoSelectModel` (fires only when neither a role model nor `default.sessionModel` is set) used to pick the single highest-`modelRecencyRank` discovered model for *every* session regardless of role - a docs-only task burned the same newest/priciest gateway model as an architect. `selectAigwModelForRoleTier()` (`model-registry.ts`) now factors in the role's thinkingLevel tier: `"low"`-tier roles (docs-writer today) get the lowest-ranked (oldest/cheapest) model the gateway reports; every other tier is unchanged. This is availability-safe by construction - it only ever picks among models the gateway already discovered, so it can never turn a working install into a hard spawn failure. Pinned by `tests/model-utils.test.ts` (`selectAigwModelForRoleTier()`) and `tests/controlled-model-fallback.test.ts` (`F5-model-aigw: aigw auto-select is role-tier aware`).
+
 ### Precedence at session start
 
 When a session starts, the model and thinking level are resolved in this order (highest wins):
 
 1. **Explicit per-session override** - the user picking a model in the composer mid-run, or callers passing `skipAutoModel: true` after pre-binding (e.g. delegate sessions with an explicit model arg).
 2. **Role override** - `role.model` / `role.thinkingLevel` from the resolved cascade.
-3. **Global defaults** - `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway best-ranked fallback when no pref is set).
+3. **Global defaults** - `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway auto-select fallback when no pref is set - role-tier aware per F5-model-aigw above: `"low"`-tier roles get the cheapest discovered model, every other tier gets the highest-ranked one as before).
 
 Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` - the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
 
