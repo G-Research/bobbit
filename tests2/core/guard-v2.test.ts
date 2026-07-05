@@ -33,11 +33,11 @@ const MAP_PATH = join(ROOT, "tests2", "tests-map.json");
 // Support directories that hold fixtures/harness code, not managed test files.
 const SUPPORT_DIRS = new Set(["_quarantine", "_setup", "_e2e", "helpers"]);
 // Buckets that materialize into tests2/{core,dom,integration}.
-const MANAGED_ROOTS = [
+const MANAGED_ROOTS: [string, string][] = [
 	["v2-core", "tests2/core"],
 	["v2-dom", "tests2/dom"],
 	["v2-integration", "tests2/integration"],
-] as const;
+];
 
 function toPosix(p: string): string {
 	return p.replace(/\\/g, "/");
@@ -48,9 +48,9 @@ function listActual(rootRel: string): string[] {
 	const abs = join(ROOT, rootRel);
 	const out: string[] = [];
 	const walk = (dir: string): void => {
-		let ents: ReturnType<typeof readdirSync>;
+		let ents: import("node:fs").Dirent<string>[];
 		try {
-			ents = readdirSync(dir, { withFileTypes: true });
+			ents = readdirSync(dir, { withFileTypes: true, encoding: "utf8" });
 		} catch {
 			return; // subtree may not exist yet during early migration
 		}
