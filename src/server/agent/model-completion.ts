@@ -1,4 +1,14 @@
-import { complete, completeSimple, getModel, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+// getModel is a pure static-catalog read — migrated to the durable pi-ai 0.80
+// replacement. complete/completeSimple are the api-dispatch stream functions
+// (env API key injection, api-registry lookup by model.api); porting those to
+// createModels()/createProvider() would mean constructing a Provider per
+// per-request resolved apiKey (see resolveProviderApiKey below), which balloons
+// this diff for no behavior change, so they stay on /compat for now.
+// TODO(pi-0.8x): migrate off /compat once the coding-agent ModelManager
+// migration lands upstream (compat.d.ts says this module dies with it).
+import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -201,7 +211,7 @@ export async function testProviderApiKey(
 	if (!provider || !modelId || !apiKey.trim()) {
 		return { ok: false, status: 400, error: "Missing provider, modelId, or key" };
 	}
-	const model = getModel(provider as any, modelId) as Model<Api> | undefined;
+	const model = getBuiltinModel(provider as any, modelId as any) as Model<Api> | undefined;
 	if (!model) {
 		return { ok: false, status: 404, error: `Model "${provider}/${modelId}" is not in the built-in pi-ai catalog.` };
 	}

@@ -16,7 +16,7 @@ process.env.BOBBIT_AGENT_DIR = agentDir;
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../src/server/agent/model-registry.ts");
-const { getModel } = await import("@earendil-works/pi-ai");
+const { getBuiltinModel: getModel } = await import("@earendil-works/pi-ai/providers/all");
 const { clampThinkingLevelForModel, resolveThinkingClampModel } = await import("../src/server/agent/thinking-level-clamp.ts");
 
 const managers: any[] = [];
@@ -91,7 +91,12 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 		assert.equal(resolved.metadataSource, "pi-ai-catalog");
 		assert.equal(resolved.reasoning, true);
 		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-5.2"), "high");
-		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "high");
+		// pi-ai 0.80 added `thinkingLevelMap: { xhigh: "xhigh" }` for this catalog
+		// entry (0.79.6 had none, so "xhigh" clamped down to "high"). The model
+		// now genuinely advertises xhigh support, so it must pass through
+		// unclamped — same code path pinned below by the synthetic
+		// "vendor/future-reasoner" xhigh-support test.
+		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "xhigh");
 	});
 
 	it("runtime persisted AIGW GLM 5.2 clamp keeps inferMeta fallback", () => {

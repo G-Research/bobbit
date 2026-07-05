@@ -95,17 +95,50 @@ function packageRootFromMain(specifier: string): string | undefined {
 	}
 }
 
-function piAiBedrockCandidates(): string[] {
-	const candidates: string[] = [];
+/**
+ * One installed copy of @earendil-works/pi-ai to patch (top-level, or the
+ * copy nested under pi-coding-agent's own node_modules). `candidates` is
+ * ordered by preference: pi-ai 0.80 moved the Bedrock stream implementation
+ * from `dist/providers/amazon-bedrock.js` to `dist/api/bedrock-converse-stream.js`
+ * — the old path is now a ~40-line provider-factory wrapper that no longer
+ * contains either patch anchor. The old path is kept as a trailing fallback
+ * candidate so an older installed pi-ai (pre-0.80) still gets patched, NOT
+ * as an independent target to warn about when its anchors don't match — a
+ * target only warns if EVERY one of its candidates fails to patch (see
+ * ensurePiAiBedrockHeadersPatch below).
+ */
+interface BedrockPatchTarget {
+	copyLabel: string;
+	candidates: string[];
+}
+
+function piAiBedrockCandidates(): BedrockPatchTarget[] {
+	const targets: BedrockPatchTarget[] = [];
+
 	const piAiRoot = packageRootFromMain("@earendil-works/pi-ai");
-	if (piAiRoot) candidates.push(path.join(piAiRoot, "dist", "providers", "amazon-bedrock.js"));
+	if (piAiRoot) {
+		targets.push({
+			copyLabel: "top-level @earendil-works/pi-ai",
+			candidates: uniqueExisting([
+				path.join(piAiRoot, "dist", "api", "bedrock-converse-stream.js"),
+				path.join(piAiRoot, "dist", "providers", "amazon-bedrock.js"),
+			]),
+		});
+	}
 
 	const piCodingAgentRoot = packageRootFromMain("@earendil-works/pi-coding-agent");
 	if (piCodingAgentRoot) {
-		candidates.push(path.join(piCodingAgentRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"));
+		const nestedPiAiRoot = path.join(piCodingAgentRoot, "node_modules", "@earendil-works", "pi-ai");
+		targets.push({
+			copyLabel: "pi-coding-agent's nested @earendil-works/pi-ai",
+			candidates: uniqueExisting([
+				path.join(nestedPiAiRoot, "dist", "api", "bedrock-converse-stream.js"),
+				path.join(nestedPiAiRoot, "dist", "providers", "amazon-bedrock.js"),
+			]),
+		});
 	}
 
-	return uniqueExisting(candidates);
+	return targets.filter((target) => target.candidates.length > 0);
 }
 
 function patchPiAiBedrockFile(filePath: string): "patched" | "already" | "skipped" {
@@ -129,14 +162,27 @@ export function ensurePiAiBedrockHeadersPatch(): void {
 	if (didEnsure) return;
 	didEnsure = true;
 
-	for (const candidate of piAiBedrockCandidates()) {
-		try {
-			const result = patchPiAiBedrockFile(candidate);
-			if (result === "skipped") {
-				console.warn(`[aigw] Could not patch pi-ai Bedrock headers hook; unsupported file shape: ${candidate}`);
+	for (const target of piAiBedrockCandidates()) {
+		let succeeded = false;
+		let lastError: unknown;
+		for (const candidate of target.candidates) {
+			try {
+				const result = patchPiAiBedrockFile(candidate);
+				if (result === "patched" || result === "already") {
+					succeeded = true;
+					break;
+				}
+			} catch (err) {
+				lastError = err;
 			}
-		} catch (err: any) {
-			console.warn(`[aigw] Failed to patch pi-ai Bedrock headers hook at ${candidate}: ${err?.message || err}`);
+		}
+		if (!succeeded) {
+			if (lastError !== undefined) {
+				const err = lastError as any;
+				console.warn(`[aigw] Failed to patch pi-ai Bedrock headers hook for ${target.copyLabel}: ${err?.message || err}`);
+			} else {
+				console.warn(`[aigw] Could not patch pi-ai Bedrock headers hook for ${target.copyLabel}; unsupported file shape in all candidates: ${target.candidates.join(", ")}`);
+			}
 		}
 	}
 }
