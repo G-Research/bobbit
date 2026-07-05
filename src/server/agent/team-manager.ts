@@ -26,6 +26,7 @@ import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
 import {
 	findOrphanTeamEntries,
+	findUntrackedTeamLeadSessions,
 	pickCanonicalTeamLeadJsonl,
 	reconstructTeamLeadSessionRecord,
 	reconstructAgentSessionRecord,
@@ -701,6 +702,64 @@ export class TeamManager {
 			}
 			if (droppedDanglingLead > 0) {
 				console.log(`[team-manager] Cleaned ${droppedDanglingLead} unrecoverable team entries on boot.`);
+			}
+
+			// [CON-06] Pass 2.5 — adopt untracked team-lead sessions.
+			//
+			// startTeam persists the team-lead's session record (role="team-lead",
+			// teamGoalId=goalId) via createSession/updateSessionMeta BEFORE the
+			// team-store entry — persistEntry() below only runs after the session
+			// is already durable on disk. A crash in that window (e.g. during the
+			// sandboxed worktree/Docker spawn) leaves sessions.json holding a live,
+			// correctly-stamped team-lead session for a goal with NO team-store
+			// entry. The second pass above can't see this — it only walks entries
+			// the team-store still knows about. The third pass below explicitly
+			// skips goals that already have a matching team-lead session (see its
+			// `existingLead` check) because for FULLY-orphaned (session AND entry
+			// both lost, then reconstructed from a surviving .jsonl) goals,
+			// recovery genuinely isn't needed once a session exists again — but
+			// that assumption is wrong for this case: the session here was never
+			// lost, only the team-store write was, so it needs to be re-linked,
+			// not skipped.
+			//
+			// Without this pass, the next startTeam(goalId) call only checks
+			// `this.teams.has(goalId)` (false — nothing was ever restored) and
+			// spawns a SECOND team-lead on the SAME goal worktree/branch, leaving
+			// two team-leads concurrently mutating one branch.
+			//
+			// Idempotent: once adopted, `ctx.teamStore.get(goalId)` is truthy, so
+			// re-running this pass (or the third pass's own guard at its top) is a
+			// no-op on subsequent boots.
+			let adoptedUntrackedLeads = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				const untracked = findUntrackedTeamLeadSessions(
+					ctx.goalStore.getAll(),
+					(goalId) => ctx.teamStore.get(goalId) !== undefined,
+					(goalId) => ctx.sessionStore.getAll()
+						.find(s => s.teamGoalId === goalId && s.role === "team-lead"),
+				);
+				for (const { goalId, teamLeadSessionId } of untracked) {
+					try {
+						ctx.teamStore.put({
+							goalId,
+							teamLeadSessionId,
+							agents: [],
+							maxConcurrent: 12,
+						});
+						adoptedUntrackedLeads++;
+						console.warn(
+							`[team-manager] Boot recovery: adopted untracked team-lead session ` +
+							`${teamLeadSessionId.slice(0, 8)} for goal ${goalId.slice(0, 8)} back into ` +
+							`the team-store (CON-06 crash-window recovery — session was persisted ` +
+							`before its team-store entry).`,
+						);
+					} catch (err) {
+						console.error(`[team-manager] Failed to adopt untracked team-lead for goalId=${goalId}:`, err);
+					}
+				}
+			}
+			if (adoptedUntrackedLeads > 0) {
+				console.log(`[team-manager] Boot recovery: adopted ${adoptedUntrackedLeads} untracked team-lead session(s) into the team-store.`);
 			}
 
 			// Third pass — fully-orphaned team-mode goals.

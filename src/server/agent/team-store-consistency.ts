@@ -49,6 +49,68 @@ export function findOrphanTeamEntries(
 	return orphans;
 }
 
+// ── CON-06: untracked team-lead adoption ───────────────────────────────────
+//
+// Mirror of the sweep above, in the opposite direction. `startTeam` persists
+// the team-lead's session record (role="team-lead", teamGoalId=goalId) BEFORE
+// the team-store entry (see team-manager.ts `_startTeamImpl`: the
+// `sessionManager.createSession(...)` / `updateSessionMeta(...)` writes land
+// synchronously well before the later `this.persistEntry(goalId)` call). A
+// crash in that window leaves `sessions.json` holding a live, correctly
+// role-stamped team-lead session for a goal that has NO team-store entry.
+//
+// `findOrphanTeamEntries` above can't see this — it only walks entries the
+// team-store still has. Without a matching sweep in this direction, the next
+// `startTeam(goalId)` call only checks `this.teams.has(goalId)` (false, since
+// nothing was ever restored) and spawns a SECOND team-lead on the same goal
+// worktree/branch, leaving two team-leads mutating one branch concurrently.
+
+export interface GoalTeamRef {
+	id: string;
+	team?: boolean;
+	archived?: boolean;
+}
+
+export interface UntrackedTeamLeadSession {
+	id: string;
+	role?: string;
+	teamGoalId?: string;
+}
+
+/**
+ * Identify team-mode, non-archived goals that have no team-store entry but DO
+ * have a session record already claiming to be their team-lead
+ * (`role === "team-lead"`, `teamGoalId === goal.id`). These are CON-06
+ * crash-window orphans: the session write landed, the team-store write never
+ * did.
+ *
+ * @param goals Every goal known to the owning project.
+ * @param hasTeamEntry Predicate — true when the team-store already has an
+ *   entry for this goal id (caller is responsible for the live read).
+ * @param findTeamLeadSession Given a goal id, return the session record
+ *   claiming to be its team-lead, if any (caller is responsible for the live
+ *   lookup — mirrors the `.find(s => s.teamGoalId === goal.id && s.role ===
+ *   "team-lead")` scans already used elsewhere in `restoreTeams`).
+ * @returns `{ goalId, teamLeadSessionId }` pairs to re-adopt into the
+ *   team-store. Caller performs the actual write (we stay pure for
+ *   testability, matching `findOrphanTeamEntries`).
+ */
+export function findUntrackedTeamLeadSessions(
+	goals: ReadonlyArray<GoalTeamRef>,
+	hasTeamEntry: (goalId: string) => boolean,
+	findTeamLeadSession: (goalId: string) => UntrackedTeamLeadSession | undefined,
+): Array<{ goalId: string; teamLeadSessionId: string }> {
+	const out: Array<{ goalId: string; teamLeadSessionId: string }> = [];
+	for (const goal of goals) {
+		if (!goal.team || goal.archived) continue;
+		if (hasTeamEntry(goal.id)) continue;
+		const lead = findTeamLeadSession(goal.id);
+		if (!lead) continue;
+		out.push({ goalId: goal.id, teamLeadSessionId: lead.id });
+	}
+	return out;
+}
+
 /**
  * Decide whether `purgeOneSession` is allowed to destroy a team-lead session.
  *
