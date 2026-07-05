@@ -1,8 +1,39 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// W2.P: McpManager's manual-config cascade reads real user-level files
+// (~/.claude.json, ~/.claude/.mcp.json, ~/.bobbit/.mcp.json, and
+// <BOBBIT_DIR>/config/mcp.json) via os.homedir() / bobbitConfigDir(). On a
+// machine with any of those configured (e.g. a real "hindsight" MCP server
+// in ~/.claude.json), those servers leak into every discoverServers() /
+// discoverConnectionGroups() / reloadDiscoveredServers() call in this file
+// and the assertions below — which expect an exact, hermetic server list —
+// fail. Point HOME/USERPROFILE and BOBBIT_DIR at an isolated tmp dir for the
+// whole file, mirroring the pattern in tests/transcript-sanitizer-agent-dir.test.ts
+// and tests/session-recovery-agent-dir.test.ts, so this test never reads the
+// real .bobbit / ~/.claude* config regardless of what's on the host machine.
+const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-market-isolated-home-"));
+const isolatedHome = path.join(isolatedRoot, "home");
+fs.mkdirSync(isolatedHome, { recursive: true });
+const previousEnv = {
+  HOME: process.env.HOME,
+  USERPROFILE: process.env.USERPROFILE,
+  BOBBIT_DIR: process.env.BOBBIT_DIR,
+};
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
+process.env.BOBBIT_DIR = path.join(isolatedRoot, ".bobbit");
+
+after(() => {
+  for (const [key, value] of Object.entries(previousEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  fs.rmSync(isolatedRoot, { recursive: true, force: true });
+});
 
 const {
   McpManager,

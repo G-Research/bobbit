@@ -46,6 +46,11 @@ binaries/binaries-*/bin/rg.exe
 # Specs rebuild these on demand via tests/fixtures/build-bundle.ts or local beforeAll hooks.
 tests/fixtures/*-bundle.js
 tests/fixtures/*-bundle.css
+# W2.Q: build-bundle.ts writes an esbuild --metafile sidecar next to every
+# bundle it builds (its full transitive-input list, used to invalidate the
+# cache correctly — see build-bundle.ts). Same lifecycle as the bundle itself;
+# bundles under .bobbit/tmp/ are already covered by the .bobbit/tmp/ rule below.
+tests/fixtures/*-bundle.js.meta.json
 
 .e2e-ui-pi
 .e2e-ui-bobbit
