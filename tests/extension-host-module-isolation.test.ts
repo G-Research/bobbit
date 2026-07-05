@@ -69,9 +69,9 @@ function writeInDir(dir: string, name: string, body: string): string {
 
 /** Create a symlink, returning false (so the test can skip) when the platform
  *  forbids it (e.g. Windows without the create-symlink privilege). */
-function trySymlink(target: string, linkPath: string): boolean {
+function trySymlink(target: string, linkPath: string, type?: "file" | "dir" | "junction"): boolean {
 	try {
-		fs.symlinkSync(target, linkPath);
+		fs.symlinkSync(target, linkPath, type);
 		return true;
 	} catch (err: any) {
 		if (err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "ENOSYS")) return false;
@@ -298,6 +298,61 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 		try {
 			// packRoot = the actual pack root (not the group dir).
 			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, root)), 7);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a symlinked gapless-swap pack root allows imports inside the canonical pack root", async (t) => {
+		const root = path.join(tmp, `gapless-ok-${caseSeq++}`);
+		const builtinRoot = path.join(root, "dist", "server", "builtin-packs");
+		const versionRoot = path.join(builtinRoot, "market-packs.versions", "v-1");
+		const visibleMarketPacks = path.join(builtinRoot, "market-packs");
+		const canonicalPackRoot = path.join(versionRoot, "terminal");
+		writeInDir(path.join(canonicalPackRoot, "lib"), "helper.mjs", `export const v = 42;`);
+		writeInDir(canonicalPackRoot, "actions.mjs", `import { v } from "./lib/helper.mjs";\nexport const actions = { run: async () => v };`);
+		fs.mkdirSync(path.dirname(visibleMarketPacks), { recursive: true });
+		if (!trySymlink(versionRoot, visibleMarketPacks, "dir")) {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+		const symlinkedPackRoot = path.join(visibleMarketPacks, "terminal");
+		const url = pathToFileURL(path.join(symlinkedPackRoot, "actions.mjs")).href;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, symlinkedPackRoot)), 42);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a symlinked gapless-swap pack root still rejects imports resolving outside the canonical pack root", async (t) => {
+		const root = path.join(tmp, `gapless-escape-${caseSeq++}`);
+		const builtinRoot = path.join(root, "dist", "server", "builtin-packs");
+		const versionRoot = path.join(builtinRoot, "market-packs.versions", "v-1");
+		const visibleMarketPacks = path.join(builtinRoot, "market-packs");
+		const canonicalPackRoot = path.join(versionRoot, "terminal");
+		const secret = path.join(versionRoot, "outside.mjs");
+		fs.mkdirSync(canonicalPackRoot, { recursive: true });
+		fs.writeFileSync(secret, `export const s = "escaped";`);
+		if (!trySymlink(secret, path.join(canonicalPackRoot, "link.mjs"))) {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+		writeInDir(canonicalPackRoot, "actions.mjs", `import { s } from "./link.mjs";\nexport const actions = { run: async () => s };`);
+		fs.mkdirSync(path.dirname(visibleMarketPacks), { recursive: true });
+		if (!trySymlink(versionRoot, visibleMarketPacks, "dir")) {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+		const symlinkedPackRoot = path.join(visibleMarketPacks, "terminal");
+		const url = pathToFileURL(path.join(symlinkedPackRoot, "actions.mjs")).href;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, symlinkedPackRoot)),
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+			);
 		} finally {
 			mh.dispose();
 		}
