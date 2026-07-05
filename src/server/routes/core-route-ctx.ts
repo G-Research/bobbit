@@ -216,4 +216,11 @@ export interface CoreRouteCtx {
 	groupPolicyStore: ToolGroupPolicyStore;
 	refreshMcpExternalTools(): void;
 	resolveRoleForProject(roleId: string, projectId?: string): Role | undefined;
+
+	// ── Cohort 12 (preferences routes) additions — append-only.
+	broadcastPreferencesChanged(): void;
+	claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string };
+	firstHeader(name: string): string | undefined;
+	getSafePreferences(): Record<string, unknown>;
+	isHumanOperatorRequest(): boolean;
 }
