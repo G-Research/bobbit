@@ -850,6 +850,104 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 	});
 });
 
+// ── Design-doc pin #3 (docs/design/pack-loader-unification.md §4 item 3):
+// per-kind activation-filter-timing — a DisabledRefs-disabled contribution is
+// dropped from getPack()'s output but the field IS present (unfiltered) via
+// getRawPack(), for each of entrypoints/providers/runtimes. Locks down the
+// raw-vs-filtered distinction that getRawPack's own doc comment
+// (pack-contribution-registry.ts:117-134) previously only asserted in prose.
+describe("PackContributionRegistry raw-vs-filtered activation-timing pin (design doc §4 item 3)", () => {
+	it("entrypoints: a DisabledRefs-disabled entrypoint is dropped from getPack but present via getRawPack", () => {
+		const root = packRoot("pin3-ep", "artifacts");
+		w(path.join(root, "pack.yaml"), "name: artifacts\n");
+		w(path.join(root, "entrypoints", "artifacts-deeplink.yaml"), "id: artifacts.deeplink\nkind: route\nrouteId: artifacts\ntarget:\n  panelId: artifacts.viewer\nparamKeys: []\n");
+		const m = manifest("artifacts", { entrypoints: ["artifacts-deeplink"] });
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			(_scope, _pid, packName) => (packName === "artifacts" ? ["artifacts-deeplink"] : []),
+		);
+		assert.deepEqual(filtered.getPack(undefined, "artifacts")!.entrypoints.map((e) => e.listName), [], "getPack must drop the disabled entrypoint");
+		assert.deepEqual(
+			filtered.getRawPack(undefined, "artifacts")!.entrypoints.map((e) => e.listName),
+			["artifacts-deeplink"],
+			"getRawPack must still show it — the raw/filtered distinction is load-bearing for the managed-runtime REST surface",
+		);
+	});
+
+	it("providers: a DisabledRefs-disabled provider is dropped from getPack but present via getRawPack", () => {
+		const root = packRoot("pin3-prov", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), "id: memory\nmodule: ../lib/provider.js\nhooks: [beforePrompt]\n");
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			(_scope, _pid, packName) => (packName === "memory-pack" ? ["memory"] : []),
+		);
+		assert.deepEqual(filtered.getPack(undefined, "memory-pack")!.providers.map((p) => p.id), [], "getPack must drop the disabled provider");
+		assert.deepEqual(filtered.listProviders(undefined).map((p) => p.id), [], "listProviders must also drop it");
+		assert.deepEqual(
+			filtered.getRawPack(undefined, "memory-pack")!.providers.map((p) => p.id),
+			["memory"],
+			"getRawPack must still show it, unfiltered",
+		);
+	});
+
+	it("runtimes: a DisabledRefs-disabled runtime is dropped from getPack but present via getRawPack", () => {
+		const root = packRoot("pin3-rt", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		const m = { ...manifest("runtime-pack", { runtimes: ["hindsight"] }), schema: 2 };
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined, undefined, undefined,
+			(_scope, _pid, packName) => (packName === "runtime-pack" ? ["hindsight"] : []),
+		);
+		assert.deepEqual(filtered.getPack(undefined, "runtime-pack")!.runtimes.map((r) => r.id), [], "getPack must drop the disabled runtime");
+		assert.deepEqual(
+			filtered.getRawPack(undefined, "runtime-pack")!.runtimes.map((r) => r.id),
+			["hindsight"],
+			"getRawPack must still show it, unfiltered",
+		);
+	});
+});
+
+// ── Design-doc pin #4 (docs/design/pack-loader-unification.md §4 item 4): a
+// direct loadPackContributions() call (the §1.1 ad-hoc call-site pattern) vs.
+// registry.getRawPack() must agree byte-for-byte in the common case (no
+// disabled contributions) — the property any future §1.1 call-site migration
+// to the registry would depend on. Kept general (not tied to one specific
+// call site) since none of the six existing ad-hoc call sites are being
+// switched in this change (see PR body for why each stays ad-hoc).
+describe("ad-hoc loadPackContributions() vs. registry.getRawPack() parity pin (design doc §4 item 4)", () => {
+	it("identical output for a pack with no disabled contributions", () => {
+		const root = packRoot("pin4-parity", "kitchen-sink");
+		w(path.join(root, "pack.yaml"), "name: kitchen-sink\n");
+		w(path.join(root, "panels", "v.yaml"), "id: kitchen-sink.viewer\nentry: lib/v.js\n");
+		w(path.join(root, "entrypoints", "deeplink.yaml"), "id: kitchen-sink.deeplink\nkind: route\nrouteId: kitchen-sink\ntarget:\n  panelId: kitchen-sink.viewer\nparamKeys: []\n");
+		w(path.join(root, "providers", "memory.yaml"), "id: memory\nmodule: ../lib/provider.js\nhooks: [beforePrompt]\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		w(path.join(root, "lib", "v.js"), "export default {};\n");
+		const m = { ...manifest("kitchen-sink", { entrypoints: ["deeplink"], providers: ["memory"], runtimes: ["hindsight"] }), schema: 2 };
+
+		// The ad-hoc call-site pattern (§1.1's six direct callers): resolve the
+		// entry yourself, then call loadPackContributions directly.
+		const adHoc = loadPackContributions(root, m);
+
+		// The registry's raw (activation-unfiltered) equivalent read.
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		const viaRegistry = reg.getRawPack(undefined, "kitchen-sink");
+
+		assert.deepEqual(
+			viaRegistry,
+			adHoc,
+			"getRawPack() must be byte-identical to a direct loadPackContributions() call for a pack with no disabled contributions",
+		);
+	});
+});
+
 // ── Settings-section contribution kind (docs/design/pack-settings-contribution.md §4.1) ──
 
 describe("loadSettingsSections (§4.1 pack-settings-contribution)", () => {
