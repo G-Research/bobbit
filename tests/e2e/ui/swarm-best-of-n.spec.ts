@@ -153,6 +153,92 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			await deleteGoal(parentId).catch(() => {});
 		}
 	});
+
+	test("killed sibling rows explain the kill class and persist after reload", async ({ page, gateway }) => {
+		const parent = await createGoal({ title: `Swarm kill labels ${Date.now()}`, autoStartTeam: false, worktree: false });
+		const parentId = parent.id as string;
+		const createdChildIds: string[] = [];
+		const swarmGroup = `swarm-e2e-kill-labels-${Date.now()}`;
+
+		try {
+			const pcm = gateway.projectContextManager ?? gateway.sessionManager?.getProjectContextManager?.();
+			const ctx = pcm?.getContextForGoal(parentId);
+			expect(ctx, "browser harness must expose the project context for direct swarm fixture seeding").toBeTruthy();
+			const parentGoal = ctx.goalManager.getGoal(parentId);
+			expect(parentGoal, "parent goal must be visible in its project context").toBeTruthy();
+
+			const children = [];
+			for (const [suffix, reason] of [
+				["Superseded", "superseded"],
+				["Budget", "governor-budget"],
+				["Wall Clock", "governor-wallclock"],
+			] as const) {
+				const child = await ctx.goalManager.createGoal(`Kill label ${suffix}`, parentGoal.cwd, {
+					spec: `Fixture child for ${reason}`,
+					workflowId: parentGoal.workflow?.id ?? "general",
+					resolvedWorkflow: parentGoal.workflow,
+					projectId: parentGoal.projectId,
+					parentGoalId: parentId,
+					swarmGroup,
+					worktree: false,
+				});
+				children.push({ child, reason });
+				createdChildIds.push(child.id);
+			}
+
+			const childIds = children.map(({ child }) => child.id);
+			ctx.swarmGroupStore.createGroup(swarmGroup, childIds, parentGoal.rootGoalId ?? parentId, {
+				parentGoalId: parentId,
+				tokenBudgetPerNode: 1000,
+				wallClockMsPerNode: 1000,
+				verifyCommand: "true",
+				earlyKill: true,
+			});
+			for (const { child, reason } of children) {
+				ctx.swarmGroupStore.recordArtifact(swarmGroup, {
+					goalId: child.id,
+					output: "",
+					status: "killed",
+					killReason: reason,
+					verifierScore: null,
+					capturedAt: Date.now(),
+				}, childIds, parentGoal.rootGoalId ?? parentId);
+			}
+
+			await openApp(page);
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+
+			const strip = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(strip).toBeVisible({ timeout: 15_000 });
+			await expect(strip.locator(".swarm-governor-count")).toHaveText("3/3 candidates terminal", { timeout: 10_000 });
+
+			const expectedLabels: Array<[string, string]> = [
+				[children[0].child.id, "killed (superseded)"],
+				[children[1].child.id, "killed (budget)"],
+				[children[2].child.id, "killed (wall-clock)"],
+			];
+			for (const [childId, label] of expectedLabels) {
+				await expect(
+					strip.locator(`.swarm-governor-sibling[data-sibling-goal-id="${childId}"] .swarm-governor-sibling-state`),
+				).toHaveText(label, { timeout: 10_000 });
+			}
+
+			await page.reload();
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+			const stripAfterReload = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(stripAfterReload).toBeVisible({ timeout: 15_000 });
+			for (const [childId, label] of expectedLabels) {
+				await expect(
+					stripAfterReload.locator(`.swarm-governor-sibling[data-sibling-goal-id="${childId}"] .swarm-governor-sibling-state`),
+				).toHaveText(label, { timeout: 10_000 });
+			}
+		} finally {
+			for (const childId of createdChildIds) await deleteGoal(childId).catch(() => {});
+			await deleteGoal(parentId).catch(() => {});
+		}
+	});
 });
 
 /**

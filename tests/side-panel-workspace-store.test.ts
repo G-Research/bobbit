@@ -68,6 +68,16 @@ describe("side-panel workspace canonicalization", () => {
 		assert.equal(canonicalizeTab({ ...previewTab("index.html"), id: "preview:entry:index.html:v:0", source: { type: "preview", sessionId, entry: "index.html", historical: true, version: 0 } }, sessionId), null);
 	});
 
+	it("accepts all proposal kinds used by the browser workspace", () => {
+		for (const type of ["goal", "project", "role", "tool", "staff", "workflow", "skill"]) {
+			const tab = canonicalizeTab(proposalTab(type, `${type} Proposal`), sessionId);
+			assert.ok(tab, `${type} proposal tab should canonicalize`);
+			assert.equal(tab.source.type, "proposal");
+			assert.equal(tab.source.proposalType, type);
+		}
+		assert.equal(canonicalizeTab(proposalTab("bad"), sessionId), null);
+	});
+
 	it("migrates legacy review-title tabs to deterministic document ids", () => {
 		const tab = canonicalizeTab({
 			id: "review:My%20Review",

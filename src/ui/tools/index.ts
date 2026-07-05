@@ -157,7 +157,8 @@ registerLazyToolRenderer("read_session", async () => {
 // lazy `ProposalRenderer` chunk via deduped `import()`.
 const PROPOSAL_TOOL_NAMES = [
 	"propose_goal", "propose_role", "propose_tool",
-	"propose_staff", "propose_project",
+	"propose_staff", "propose_project", "propose_workflow",
+	"propose_skill",
 ] as const;
 for (const name of PROPOSAL_TOOL_NAMES) {
 	registerLazyToolRenderer(name, async () => {

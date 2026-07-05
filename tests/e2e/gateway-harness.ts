@@ -60,6 +60,7 @@ export interface GatewayInfo {
 	serverRoot: string;
 	sessionManager?: any;
 	teamManager?: any;
+	projectContextManager?: any;
 	preferencesStore?: any;
 	/** Server-side log ring buffer (last 200 lines), populated by the harness's
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
@@ -502,6 +503,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			serverRoot,
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
+			projectContextManager: (gw as any).projectContextManager,
 			preferencesStore: (gw as any).preferencesStore,
 			logs: _serverLogs,
 			async crash() {
@@ -547,6 +549,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				);
 				info.sessionManager = gw.sessionManager;
 				info.teamManager = gw.teamManager;
+				info.projectContextManager = (gw as any).projectContextManager;
 				info.preferencesStore = (gw as any).preferencesStore;
 			},
 		};
