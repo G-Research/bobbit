@@ -395,6 +395,9 @@ function needsHeadquartersConfigProjectId(path: string, method: string): boolean
 	if (method === "GET" && /^\/api\/(tools|roles|sandbox-status)(\?|$)/.test(path)) return true;
 	if (method === "POST" && /^\/api\/sandbox-image\/build(\?|$)/.test(path)) return true;
 	if ((method === "GET" || method === "PUT") && /^\/api\/tools\/[^/]+$/.test(bare)) return true;
+	if (method === "GET" && /^\/api\/tools\/[^/]+\/renderer$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/ext/contributions") return true;
+	if (method === "GET" && /^\/api\/ext\/packs\/[^/]+\/panels\/[^/]+$/.test(bare)) return true;
 	if ((method === "POST" || method === "DELETE") && /^\/api\/tools\/[^/]+\/(customize|override)$/.test(bare)) return true;
 	if (method === "POST" && bare === "/api/roles") return true;
 	if ((method === "GET" || method === "PUT" || method === "DELETE") && /^\/api\/roles\/(?!assistant\/prompts(?:\/|$))[^/]+$/.test(bare)) return true;

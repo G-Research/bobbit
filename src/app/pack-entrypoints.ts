@@ -35,6 +35,7 @@
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { setExtRoute } from "./routing.js";
 import { openPackPanel, getLauncherHost } from "./pack-panels.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { isSupportedEntrypointIconId, type EntrypointIconId } from "../shared/entrypoint-icons.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
 
@@ -502,15 +503,16 @@ let reconcileGeneration = 0;
  * (never blocks a session switch; built-in surfaces are unaffected on failure).
  */
 export async function reconcilePackEntrypointsForProject(projectId: string | undefined): Promise<void> {
-	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
+	const apiProjectId = projectId || HEADQUARTERS_PROJECT_ID;
+	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === apiProjectId) return;
 	const gen = ++reconcileGeneration;
 	try {
-		const packs = await fetchContributions(projectId);
+		const packs = await fetchContributions(apiProjectId);
 		// A newer reconcile started while our fetch was in flight — it owns the
 		// registry + dedupe now. Drop this stale response.
 		if (gen !== reconcileGeneration) return;
-		registerPackEntrypoints(entrypointInfosFromContributions(packs), projectId);
-		lastReconciledProject = projectId;
+		registerPackEntrypoints(entrypointInfosFromContributions(packs), apiProjectId);
+		lastReconciledProject = apiProjectId;
 	} catch {
 		// Non-fatal — leave lastReconciledProject untouched so a later call retries.
 	}

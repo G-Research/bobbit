@@ -37,6 +37,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { closeSidePanelTab, openSidePanelTab } from "./side-panel-workspace.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import type { HostApi, PanelTarget } from "../shared/extension-host/host-api.js";
 
 /** Host toolkit handed to a pack panel's factory — keeps the pack on the app's
@@ -260,15 +261,16 @@ let reconcileGeneration = 0;
  * session switch; built-in panels are unaffected on failure).
  */
 export async function reconcilePackPanelsForProject(projectId: string | undefined): Promise<void> {
-	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
+	const apiProjectId = projectId || HEADQUARTERS_PROJECT_ID;
+	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === apiProjectId) return;
 	const gen = ++reconcileGeneration;
 	try {
-		const packs = await fetchContributions(projectId);
+		const packs = await fetchContributions(apiProjectId);
 		// A newer reconcile started while our fetch was in flight — it owns the
 		// registry + dedupe now. Drop this stale response.
 		if (gen !== reconcileGeneration) return;
-		registerPackPanels(panelInfosFromContributions(packs), projectId);
-		lastReconciledProject = projectId;
+		registerPackPanels(panelInfosFromContributions(packs), apiProjectId);
+		lastReconciledProject = apiProjectId;
 	} catch {
 		// Non-fatal — leave lastReconciledProject untouched so a later call retries.
 	}

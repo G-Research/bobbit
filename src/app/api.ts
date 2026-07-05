@@ -2680,7 +2680,8 @@ export interface PackContributionsWire {
  *  (reconcile-on-uninstall keys off a row disappearing, not becoming empty). */
 export async function fetchContributions(projectId?: string): Promise<PackContributionsWire[]> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/ext/contributions${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch contributions: ${res.status}`);
 		const data = await res.json();

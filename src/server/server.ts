@@ -7445,14 +7445,14 @@ async function handleApiRoute(
 	const rendererMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/renderer$/);
 	if (rendererMatch && req.method === "GET") {
 		const tool = decodeURIComponent(rendererMatch[1]);
-		// Resolve through the PROJECT-scoped tool manager when a projectId is given
-		// (design §4b — same `?? toolManager` fallback as GET /api/tools): a pack
-		// installed at PROJECT scope, or one that shadows a same-named global tool,
-		// must serve the PROJECT winner — never the split-brain server-level one.
-		const rendererProjectId = url.searchParams.get("projectId") || undefined;
+		// Require the same explicit config project scope as GET /api/tools. Headquarters
+		// aliases the server/global layer; unknown normal projects fail before any
+		// server-scope fallback can leak a different pack renderer.
+		const rendererScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!rendererScope.ok) { writeConfigProjectScopeError(rendererScope); return; }
 		const rendererTm = resolveActionToolManager(
 			toolManager,
-			rendererProjectId ? projectContextManager.getOrCreate(rendererProjectId)?.toolManager : undefined,
+			rendererScope.context?.toolManager,
 		);
 		// Resolve the WINNING tool's on-disk location independent of `provider:`
 		// (design §4b — a pack renderer needs no provider). resolveToolLocation
@@ -7495,8 +7495,9 @@ async function handleApiRoute(
 	if (extPanelMatch && req.method === "GET") {
 		const packId = decodeURIComponent(extPanelMatch[1]);
 		const panelId = decodeURIComponent(extPanelMatch[2]);
-		const panelProjectId = url.searchParams.get("projectId") || undefined;
-		const panel = packContributionRegistry.getPanel(panelProjectId, packId, panelId);
+		const panelScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!panelScope.ok) { writeConfigProjectScopeError(panelScope); return; }
+		const panel = packContributionRegistry.getPanel(panelScope.effectiveProjectId, packId, panelId);
 		if (!panel) {
 			json({ error: "no such panel in this pack" }, 404);
 			return;
@@ -7524,8 +7525,9 @@ async function handleApiRoute(
 	// installed + active pack emits a row (empty arrays allowed) — the frozen
 	// always-emit contract so the client reconcile is deterministic.
 	if (url.pathname === "/api/ext/contributions" && req.method === "GET") {
-		const contribProjectId = url.searchParams.get("projectId") || undefined;
-		const packs = packContributionRegistry.list(contribProjectId).map((p) => ({
+		const contribScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!contribScope.ok) { writeConfigProjectScopeError(contribScope); return; }
+		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
 			panels: p.panels.map((panel) => {
