@@ -1,0 +1,1098 @@
+{
+  "experimentId": "EXP-001-gate-cache-keying",
+  "corpus": [
+    {
+      "id": "dependency-change",
+      "description": "Dependency metadata commit invalidates Build, Type check, and Unit tests.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    },
+    {
+      "id": "docs-only-change",
+      "description": "Docs-only commit outside the declared command-step input globs.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    },
+    {
+      "id": "earliest-prior-passed-result",
+      "description": "The earliest prior passed result is selected even when a later passed result would be reusable.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        }
+      ]
+    },
+    {
+      "id": "exact-sha-resignal",
+      "description": "Same commit SHA re-signalled; both arms should reuse every prior passed step.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    },
+    {
+      "id": "glob-matches-no-tracked-path",
+      "description": "Declared glob matches no tracked files; content mode must fail closed.",
+      "steps": [
+        {
+          "name": "Custom stale glob step",
+          "type": "command",
+          "cacheInputGlobs": [
+            "missing/**"
+          ],
+          "runtimeMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "no-cache-input-globs",
+      "description": "Review-like step without cacheInputGlobs remains SHA-exact under content mode.",
+      "steps": [
+        {
+          "name": "Risk review",
+          "type": "llm-review",
+          "cacheInputGlobs": null,
+          "runtimeMs": 180000
+        }
+      ]
+    },
+    {
+      "id": "public-asset-change",
+      "description": "Public asset commit invalidates Build only among the content-keyed command steps.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    },
+    {
+      "id": "source-change",
+      "description": "Source commit invalidates Build, Type check, and Unit tests.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    },
+    {
+      "id": "test-only-change",
+      "description": "Test-only commit invalidates Unit tests but not Build or Type check.",
+      "steps": [
+        {
+          "name": "Build",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "public/**",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "vite.config.ts"
+          ],
+          "runtimeMs": 60000
+        },
+        {
+          "name": "Type check passes",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tsconfig.json",
+            "tsconfig.server.json",
+            "tsconfig.web.json",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 45000
+        },
+        {
+          "name": "Unit tests",
+          "type": "command",
+          "cacheInputGlobs": [
+            "src/**",
+            "tests/**",
+            "defaults/**",
+            "market-packs/**",
+            "scripts/**",
+            "index.html",
+            "vite.config.ts",
+            "package.json",
+            "package-lock.json"
+          ],
+          "runtimeMs": 90000
+        },
+        {
+          "name": "E2E tests",
+          "type": "command",
+          "cacheInputGlobs": null,
+          "runtimeMs": 120000
+        }
+      ]
+    }
+  ],
+  "records": [
+    {
+      "scenarioId": "dependency-change",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 69.18558300000001,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "dependency-change",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 0.019249999999999545,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "docs-only-change",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 3,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 3
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 120000,
+      "decisionWallClockMs": 56.648459,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "docs-only-change",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 0.009916999999973086,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "earliest-prior-passed-result",
+      "arm": "content",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 60000,
+      "decisionWallClockMs": 37.90220899999997,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "earliest-prior-passed-result",
+      "arm": "sha",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 60000,
+      "decisionWallClockMs": 0.00687500000003638,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "exact-sha-resignal",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 4,
+      "cacheMisses": 0,
+      "hitKeyKinds": {
+        "sha": 4,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 0,
+      "decisionWallClockMs": 0.020166000000017448,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "hit"
+        }
+      ]
+    },
+    {
+      "scenarioId": "exact-sha-resignal",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 4,
+      "cacheMisses": 0,
+      "hitKeyKinds": {
+        "sha": 4,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 0,
+      "decisionWallClockMs": 0.011333999999919797,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "hit"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "hit"
+        }
+      ]
+    },
+    {
+      "scenarioId": "glob-matches-no-tracked-path",
+      "arm": "content",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 30000,
+      "decisionWallClockMs": 13.692499999999882,
+      "decisions": [
+        {
+          "stepName": "Custom stale glob step",
+          "keyKind": "content",
+          "result": "miss",
+          "reason": "cacheInputGlobs matched no tracked paths - cannot verify"
+        }
+      ]
+    },
+    {
+      "scenarioId": "glob-matches-no-tracked-path",
+      "arm": "sha",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 30000,
+      "decisionWallClockMs": 0.004666999999926702,
+      "decisions": [
+        {
+          "stepName": "Custom stale glob step",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "no-cache-input-globs",
+      "arm": "content",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 180000,
+      "decisionWallClockMs": 0.00966599999992468,
+      "decisions": [
+        {
+          "stepName": "Risk review",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "no-cache-input-globs",
+      "arm": "sha",
+      "cacheableSteps": 1,
+      "cacheHits": 0,
+      "cacheMisses": 1,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 180000,
+      "decisionWallClockMs": 0.002208000000109678,
+      "decisions": [
+        {
+          "stepName": "Risk review",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "public-asset-change",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 2,
+      "cacheMisses": 2,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 2
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 180000,
+      "decisionWallClockMs": 55.046084000000064,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "public-asset-change",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 0.006291999999803011,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "source-change",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 59.763124999999945,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "source-change",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 0.005666999999903055,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    },
+    {
+      "scenarioId": "test-only-change",
+      "arm": "content",
+      "cacheableSteps": 4,
+      "cacheHits": 2,
+      "cacheMisses": 2,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 2
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 210000,
+      "decisionWallClockMs": 54.51662499999975,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "content",
+          "result": "hit"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "content",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss",
+          "reason": "no cacheInputGlobs declared on step - sha-exact only"
+        }
+      ]
+    },
+    {
+      "scenarioId": "test-only-change",
+      "arm": "sha",
+      "cacheableSteps": 4,
+      "cacheHits": 0,
+      "cacheMisses": 4,
+      "hitKeyKinds": {
+        "sha": 0,
+        "content": 0
+      },
+      "falseHitRiskProxy": 0,
+      "estimatedWallClockMs": 315000,
+      "decisionWallClockMs": 0.009250000000065484,
+      "decisions": [
+        {
+          "stepName": "Build",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Type check passes",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "Unit tests",
+          "keyKind": "sha",
+          "result": "miss"
+        },
+        {
+          "stepName": "E2E tests",
+          "keyKind": "sha",
+          "result": "miss"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "generatedAt": "2026-07-05T23:12:10.878Z",
+    "sampleSize": {
+      "pairedScenarios": 9,
+      "cacheableStepsPerArm": {
+        "sha": 27,
+        "content": 27
+      }
+    },
+    "arms": {
+      "sha": {
+        "scenarios": 9,
+        "cacheableSteps": 27,
+        "cacheHits": 4,
+        "cacheMisses": 23,
+        "cacheHitRate": 0.14814814814814814,
+        "hitKeyKinds": {
+          "sha": 4,
+          "content": 0
+        },
+        "falseHitRiskProxy": 0,
+        "estimatedWallClockMs": 1845000,
+        "medianEstimatedWallClockMs": 315000,
+        "decisionWallClockMs": 0.07545999999973674
+      },
+      "content": {
+        "scenarios": 9,
+        "cacheableSteps": 27,
+        "cacheHits": 11,
+        "cacheMisses": 16,
+        "cacheHitRate": 0.4074074074074074,
+        "hitKeyKinds": {
+          "sha": 4,
+          "content": 7
+        },
+        "falseHitRiskProxy": 0,
+        "estimatedWallClockMs": 1410000,
+        "medianEstimatedWallClockMs": 180000,
+        "decisionWallClockMs": 346.78441699999956
+      }
+    },
+    "paired": [
+      {
+        "scenarioId": "dependency-change",
+        "shaEstimatedWallClockMs": 315000,
+        "contentEstimatedWallClockMs": 315000,
+        "savingsMs": 0,
+        "reductionPct": 0
+      },
+      {
+        "scenarioId": "docs-only-change",
+        "shaEstimatedWallClockMs": 315000,
+        "contentEstimatedWallClockMs": 120000,
+        "savingsMs": 195000,
+        "reductionPct": 0.6190476190476191
+      },
+      {
+        "scenarioId": "earliest-prior-passed-result",
+        "shaEstimatedWallClockMs": 60000,
+        "contentEstimatedWallClockMs": 60000,
+        "savingsMs": 0,
+        "reductionPct": 0
+      },
+      {
+        "scenarioId": "exact-sha-resignal",
+        "shaEstimatedWallClockMs": 0,
+        "contentEstimatedWallClockMs": 0,
+        "savingsMs": 0,
+        "reductionPct": null
+      },
+      {
+        "scenarioId": "glob-matches-no-tracked-path",
+        "shaEstimatedWallClockMs": 30000,
+        "contentEstimatedWallClockMs": 30000,
+        "savingsMs": 0,
+        "reductionPct": 0
+      },
+      {
+        "scenarioId": "no-cache-input-globs",
+        "shaEstimatedWallClockMs": 180000,
+        "contentEstimatedWallClockMs": 180000,
+        "savingsMs": 0,
+        "reductionPct": 0
+      },
+      {
+        "scenarioId": "public-asset-change",
+        "shaEstimatedWallClockMs": 315000,
+        "contentEstimatedWallClockMs": 180000,
+        "savingsMs": 135000,
+        "reductionPct": 0.42857142857142855
+      },
+      {
+        "scenarioId": "source-change",
+        "shaEstimatedWallClockMs": 315000,
+        "contentEstimatedWallClockMs": 315000,
+        "savingsMs": 0,
+        "reductionPct": 0
+      },
+      {
+        "scenarioId": "test-only-change",
+        "shaEstimatedWallClockMs": 315000,
+        "contentEstimatedWallClockMs": 210000,
+        "savingsMs": 105000,
+        "reductionPct": 0.3333333333333333
+      }
+    ],
+    "effects": {
+      "cacheHitRateDeltaPctPoints": 25.925925925925924,
+      "totalEstimatedWallClockSavingsMs": 435000,
+      "medianEstimatedWallClockReductionPct": 0.42857142857142855,
+      "medianPairedReductionPct": 0,
+      "contentOverheadShareOfSavings": 0.000797205556321838
+    },
+    "recommendation": "recommend-content-for-next-lane"
+  }
+}
