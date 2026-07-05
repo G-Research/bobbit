@@ -691,12 +691,18 @@ export function getSortedPhases(groups: Map<number, unknown[]>): number[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve `BOBBIT_PARALLEL_REVIEWS` to on/off. Only the literal string `"1"`
- * enables it — everything else (unset, empty, a typo) is off, matching the
- * default-OFF / opt-in-per-program-policy posture for this A/B.
+ * Resolve `BOBBIT_PARALLEL_REVIEWS` to on/off. Default is now ON (opt-OUT):
+ * only the literal string `"0"` disables it. Flipped from opt-in after the
+ * dark-flags A/B measured -42.8% pass-path wall-clock with the ordering
+ * contract preserved by construction (see
+ * docs/design/gate-step-cache.md-adjacent VER-07 notes and
+ * RECONCILIATION-2026-07-05.md's "Dark flags: VER-05/VER-07 measurement").
+ * The one measured downside (discarded reviewer spawns on a command-track
+ * failure) is mitigated by the retry-aware early-start guard — see
+ * `isRetryAfterCommandFailure` below.
  */
 export function isParallelReviewsEnabled(raw: string | undefined): boolean {
-	return raw === "1";
+	return raw !== "0";
 }
 
 /**
@@ -745,6 +751,41 @@ export function computeEarlyReviewPhases(
 		}
 	}
 	return early;
+}
+
+/**
+ * Retry-aware early-start guard (VER-07 default-on companion). Early-starting
+ * review phases pays off on the pass path (-42.8% wall-clock, measured) but
+ * wastes reviewer spawns whenever the command track fails — the review
+ * verdicts get discarded and any still-running reviewer session is
+ * terminated (~4.4K prompt tokens burned per failed gate run for a 3-reviewer
+ * phase, per the dark-flags measurement). That waste concentrates on
+ * re-verification attempts: a signal that immediately follows a fix commit
+ * for a gate whose most recent completed attempt failed in the command
+ * track is disproportionately likely to fail the command track again (the
+ * whole reason a Ralph-loop fix commit was pushed).
+ *
+ * This checks only the SAME gate's most recent completed (non-`"running"`)
+ * prior signal (the current in-flight signal is excluded by id, matching
+ * `buildStepCache`'s own convention). If that prior signal has any
+ * non-review step that failed and wasn't skipped, this is treated as a
+ * retry-after-command-failure and early-start should be suppressed for the
+ * current attempt — stay fully serial. A first-ever signal, or one whose
+ * most recent prior attempt's command track passed cleanly, is unaffected
+ * and still gets the early-start speedup.
+ */
+export function isRetryAfterCommandFailure(
+	signals: readonly GateSignal[],
+	currentSignalId: string,
+): boolean {
+	let mostRecent: GateSignal | undefined;
+	for (const prev of signals) {
+		if (prev.id === currentSignalId) continue;
+		if (!prev.verification?.status || prev.verification.status === "running") continue;
+		if (!mostRecent || prev.timestamp > mostRecent.timestamp) mostRecent = prev;
+	}
+	if (!mostRecent) return false;
+	return mostRecent.verification.steps.some(s => s.type !== "llm-review" && !s.skipped && !s.passed);
 }
 
 // ---------------------------------------------------------------------------

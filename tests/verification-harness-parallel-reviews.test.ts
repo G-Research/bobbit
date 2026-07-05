@@ -1,19 +1,28 @@
 /**
  * VER-07 — parallelize LLM reviews off the command-suite critical path.
  *
- * Behind `BOBBIT_PARALLEL_REVIEWS=1` (default OFF), `llm-review` steps in the
- * leading contiguous review-only phase (e.g. phase 2 in the built-in
+ * Default ON (opt-out via `BOBBIT_PARALLEL_REVIEWS=0`), `llm-review` steps in
+ * the leading contiguous review-only phase (e.g. phase 2 in the built-in
  * general/feature/bug-fix workflows) are started concurrently with the
  * command phases (Build/typecheck/unit/e2e) that precede them, instead of
  * waiting for those phases to finish. Reviews only ever read the branch diff
  * — never a same-gate command step's output — so this changes wall-clock,
- * not the review's inputs.
+ * not the review's inputs. Measured -42.8% pass-path wall-clock (see
+ * RECONCILIATION-2026-07-05.md's "Dark flags: VER-05/VER-07 measurement").
  *
  * Safety net: verdicts are only committed when the command track passes.
  * On command failure, the concurrently-computed review verdicts are
  * discarded and the review's session (if still running) is terminated; the
  * persisted result is the exact same "Skipped — earlier phase failed" the
  * fully-serial path would have written.
+ *
+ * Retry-aware early-start guard: early-start is additionally suppressed
+ * (fully serial, regardless of the flag) when the gate's most recent
+ * completed signal failed a non-review ("command-track") step — a
+ * re-verification immediately following a fix commit is disproportionately
+ * likely to fail the command track again, and early-starting reviewers in
+ * that case just recreates the wasted-spawn case this file's discard tests
+ * cover. See `isRetryAfterCommandFailure` in verification-logic.ts.
  *
  * These tests exercise `verifyGateSignal` end-to-end with:
  *   - real `command`-type steps (actual `runCommandStep` shell spawns) where
@@ -52,7 +61,7 @@ import type { WorkflowGate } from "../src/server/agent/workflow-store.js";
 
 type BroadcastEvent = { type: string; stepIndex?: number; stepName?: string; phase?: number; status?: string; sessionId?: string };
 
-function makeHarness(events: BroadcastEvent[]) {
+function makeHarness(events: BroadcastEvent[], gateState?: unknown) {
 	const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"));
 	const persisted: { signalId: string; status: string; steps: any[] }[] = [];
 	const gateStatuses: { goalId: string; gateId: string; status: string }[] = [];
@@ -63,7 +72,7 @@ function makeHarness(events: BroadcastEvent[]) {
 		updateGateStatus: (goalId: string, gateId: string, status: string) => {
 			gateStatuses.push({ goalId, gateId, status });
 		},
-		getGate: () => undefined,
+		getGate: () => gateState,
 	} as any;
 	const roleStore = { get: () => undefined, getAll: () => [] } as any;
 
@@ -115,9 +124,9 @@ function stepCompleteEvents(events: BroadcastEvent[]): BroadcastEvent[] {
 	return events.filter(e => e.type === "gate_verification_step_complete");
 }
 
-test("BOBBIT_PARALLEL_REVIEWS unset (default OFF): review step starts strictly after the command phase completes — serial ordering pinned", async () => {
+test("BOBBIT_PARALLEL_REVIEWS=0 (explicit opt-out; default flipped to on): review step starts strictly after the command phase completes — serial ordering pinned", async () => {
 	const prevFlag = process.env.BOBBIT_PARALLEL_REVIEWS;
-	delete process.env.BOBBIT_PARALLEL_REVIEWS;
+	process.env.BOBBIT_PARALLEL_REVIEWS = "0";
 	try {
 		const events: BroadcastEvent[] = [];
 		const { harness, persisted, gateStatuses } = makeHarness(events);
@@ -145,7 +154,7 @@ test("BOBBIT_PARALLEL_REVIEWS unset (default OFF): review step starts strictly a
 			"gate_verification_step_complete:Unit tests",
 			"gate_verification_step_started:Code quality review",
 			"gate_verification_step_complete:Code quality review",
-		], `default (flag off) must preserve strict serial ordering; got: ${JSON.stringify(order)}`);
+		], `explicit opt-out (BOBBIT_PARALLEL_REVIEWS=0) must preserve strict serial ordering; got: ${JSON.stringify(order)}`);
 
 		assert.equal(reviewCalls.length, 1, "review should run exactly once");
 		assert.equal(gateStatuses.at(-1)?.status, "passed");
@@ -340,6 +349,133 @@ test("BOBBIT_PARALLEL_REVIEWS=1 + command phase passes: real review verdict (a f
 		const reviewResult = persisted.at(-1)?.steps.find((s: any) => s.name === "Code quality review");
 		assert.equal(reviewResult.status, "failed");
 		assert.equal(reviewResult.output, "Found a bug at foo.ts:12", "the real verdict is committed verbatim when the command track passed");
+	} finally {
+		if (prevFlag === undefined) delete process.env.BOBBIT_PARALLEL_REVIEWS;
+		else process.env.BOBBIT_PARALLEL_REVIEWS = prevFlag;
+	}
+});
+
+// ===================================================================
+// Retry-aware early-start guard (isRetryAfterCommandFailure) — even with
+// BOBBIT_PARALLEL_REVIEWS=1, a re-verification following a command-track
+// failure of the SAME gate must stay fully serial; a fresh verify (or one
+// following a passing prior signal) is unaffected.
+// ===================================================================
+
+test("BOBBIT_PARALLEL_REVIEWS=1 + retry-aware guard: a re-verification following a command-track failure of the SAME gate stays fully serial", async () => {
+	const prevFlag = process.env.BOBBIT_PARALLEL_REVIEWS;
+	process.env.BOBBIT_PARALLEL_REVIEWS = "1";
+	try {
+		const events: BroadcastEvent[] = [];
+		const priorFailedSignal: GateSignal = {
+			id: "sig-prior-fail",
+			gateId: "implementation",
+			goalId: "goal-1",
+			sessionId: "s0",
+			timestamp: Date.now() - 10_000,
+			commitSha: "sha-prev",
+			verification: {
+				status: "failed",
+				steps: [
+					{ name: "Build", type: "command", passed: true, output: "", duration_ms: 10 },
+					{ name: "Unit tests", type: "command", passed: false, output: "boom", duration_ms: 10 },
+				],
+			},
+		};
+		const gateState = { gateId: "implementation", goalId: "goal-1", status: "failed" as const, signals: [priorFailedSignal], updatedAt: Date.now() };
+		const { harness, persisted, gateStatuses } = makeHarness(events, gateState);
+		const reviewCalls: number[] = [];
+		(harness as any).runLlmReviewStep = async (...args: any[]) => {
+			reviewCalls.push(Date.now());
+			return { passed: true, output: "LGTM", sessionId: args[8] };
+		};
+
+		// A distinct signal id/commit from the prior failed one — this is the
+		// re-verification attempt after the fix commit.
+		const signal = makeSignal("sha-retry-1");
+		const gate = makeGate("sleep 0.15 && true");
+		await (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
+
+		const order = events
+			.filter(e => e.type === "gate_verification_step_started" || e.type === "gate_verification_step_complete")
+			.map(e => `${e.type}:${e.stepName}`);
+		assert.deepEqual(order, [
+			"gate_verification_step_started:Build",
+			"gate_verification_step_complete:Build",
+			"gate_verification_step_started:Unit tests",
+			"gate_verification_step_complete:Unit tests",
+			"gate_verification_step_started:Code quality review",
+			"gate_verification_step_complete:Code quality review",
+		], `re-verification after a same-gate command-track failure must stay serial even with the flag on; got: ${JSON.stringify(order)}`);
+
+		assert.equal(reviewCalls.length, 1, "review should run exactly once");
+		assert.equal(gateStatuses.at(-1)?.status, "passed");
+		assert.equal(persisted.at(-1)?.status, "passed");
+	} finally {
+		if (prevFlag === undefined) delete process.env.BOBBIT_PARALLEL_REVIEWS;
+		else process.env.BOBBIT_PARALLEL_REVIEWS = prevFlag;
+	}
+});
+
+test("BOBBIT_PARALLEL_REVIEWS=1 + retry-aware guard: a fresh verify (prior signal's command track passed) still gets the early-start speedup", async () => {
+	const prevFlag = process.env.BOBBIT_PARALLEL_REVIEWS;
+	process.env.BOBBIT_PARALLEL_REVIEWS = "1";
+	try {
+		const events: BroadcastEvent[] = [];
+		const priorPassedSignal: GateSignal = {
+			id: "sig-prior-pass",
+			gateId: "implementation",
+			goalId: "goal-1",
+			sessionId: "s0",
+			timestamp: Date.now() - 10_000,
+			commitSha: "sha-prev-pass",
+			verification: {
+				status: "passed",
+				steps: [
+					{ name: "Build", type: "command", passed: true, output: "", duration_ms: 10 },
+					{ name: "Unit tests", type: "command", passed: true, output: "", duration_ms: 10 },
+					{ name: "Code quality review", type: "llm-review", passed: true, output: "LGTM", duration_ms: 10 },
+				],
+			},
+		};
+		const gateState = { gateId: "implementation", goalId: "goal-1", status: "passed" as const, signals: [priorPassedSignal], updatedAt: Date.now() };
+		const { harness, persisted, gateStatuses } = makeHarness(events, gateState);
+
+		const unitTests = deferred<{ passed: boolean; output: string }>();
+		(harness as any).runCommandStep = async (cmd: string) => {
+			if (cmd === "true") return { passed: true, output: "" };
+			return unitTests.promise;
+		};
+
+		let reviewInvoked = false;
+		const reviewStarted = deferred<void>();
+		(harness as any).runLlmReviewStep = async (...args: any[]) => {
+			reviewInvoked = true;
+			reviewStarted.resolve();
+			return { passed: true, output: "LGTM", sessionId: args[8] };
+		};
+
+		const signal = makeSignal("sha-fresh-1");
+		const gate = makeGate("__controlled-by-stub__");
+		const verifyPromise = (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
+
+		// Prove the review was kicked off without waiting for the still
+		// in-flight Unit tests command — the guard must NOT suppress
+		// early-start here, since the prior signal's command track passed.
+		await reviewStarted.promise;
+		assert.equal(reviewInvoked, true);
+
+		const unitCompleteEarly = stepCompleteEvents(events).find(e => e.stepName === "Unit tests");
+		assert.equal(
+			unitCompleteEarly, undefined,
+			"a fresh verify after a passing prior signal must still early-start the review — the guard should not fire here",
+		);
+
+		unitTests.resolve({ passed: true, output: "" });
+		await verifyPromise;
+
+		assert.equal(gateStatuses.at(-1)?.status, "passed");
+		assert.equal(persisted.at(-1)?.status, "passed");
 	} finally {
 		if (prevFlag === undefined) delete process.env.BOBBIT_PARALLEL_REVIEWS;
 		else process.env.BOBBIT_PARALLEL_REVIEWS = prevFlag;

@@ -120,8 +120,10 @@ default, project-overridable, comment-documented, pinned by a dedicated
 test):
 
 - `defaults/verification-policy.yaml` — ships the byte-identical-to-today
-  defaults (`gateCacheDefault: sha`, `parallelReviewsDefault: false`,
-  `gateRoles: { ready-to-merge: { childRewrite: adapt-ready-to-merge,
+  defaults (`gateCacheDefault: sha`, `parallelReviewsDefault: true` — flipped
+  from `false` when `BOBBIT_PARALLEL_REVIEWS` went default-on with the
+  retry-aware early-start guard, see `docs/goals-workflows-tasks.md`'s
+  "Parallel reviews" section — `gateRoles: { ready-to-merge: { childRewrite: adapt-ready-to-merge,
   requiredBuiltins: [branch, baseBranch, master, cwd, goal_spec, commit] } }`,
   `reviewVerdictRubric` = today's literal string).
 - `.bobbit/config/verification-policy.yaml` — project override, loaded
