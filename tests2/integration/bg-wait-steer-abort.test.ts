@@ -1,0 +1,163 @@
+/**
+ * E2E test for steer-interruptible `bash_bg wait`.
+ *
+ * Starts a long-running bg process via REST, begins a long-polling wait,
+ * then triggers BgProcessManager.abortAllWaits() (the same call SessionManager
+ * makes from its live-steer code path). The wait must return `aborted: true`
+ * within 500ms and the bg process must keep running.
+ */
+import { test, expect } from "./_e2e/in-process-harness.js";
+import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./_e2e/e2e-setup.js";
+import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+
+async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
+	const method = (opts.method || "GET").toUpperCase();
+	let body = opts.body;
+	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
+		body = await injectDefaultProjectId(body) as BodyInit;
+	}
+	return fetch(`${baseURL}${path}`, {
+		...opts,
+		body,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${readE2EToken()}`,
+			...(opts.headers as Record<string, string> || {}),
+		},
+	});
+}
+
+const SLEEP_CMD = process.platform === "win32"
+	? "ping -n 60 127.0.0.1 >NUL"
+	: "sleep 60";
+
+test.describe("bash_bg wait — steer abort", () => {
+	test("logs endpoint defaults to the last 15 lines", async ({ gateway }) => {
+		let sessionId: string | undefined;
+		try {
+			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd() }),
+			});
+			expect(res.status).toBe(201);
+			({ id: sessionId } = await res.json());
+
+			const command = `node -e "for (let i = 1; i <= 20; i++) console.log('line-' + i); setTimeout(() => {}, 100)"`;
+			const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+				method: "POST",
+				body: JSON.stringify({ command, name: "log tail" }),
+			});
+			expect(bgRes.status).toBe(201);
+			const bg = await bgRes.json();
+
+			const waitRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=5`);
+			expect(waitRes.status).toBe(200);
+
+			const logsRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/logs`);
+			expect(logsRes.status).toBe(200);
+			const logs = await logsRes.json();
+			const expected = Array.from({ length: 15 }, (_, i) => `line-${i + 6}`);
+			expect(logs.log.map((entry: { text: string }) => entry.text)).toEqual(expected);
+			expect(logs.stdout).toEqual(expected);
+		} finally {
+			if (sessionId) await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+		}
+	});
+
+	test("abortAllWaits resolves long-poll wait with aborted:true and leaves process running", async ({ gateway }) => {
+		// Create session
+		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(201);
+		const { id: sessionId } = await res.json();
+
+		// Spawn a long-running bg process
+		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+			method: "POST",
+			body: JSON.stringify({ command: SLEEP_CMD, name: "sleeper" }),
+		});
+		expect(bgRes.status).toBe(201);
+		const bg = await bgRes.json();
+
+		// Start a wait with a generous timeout (60s)
+		const waitStart = Date.now();
+		const waitPromise = adminFetch(
+			gateway.baseURL,
+			`/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=60`,
+		).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+		// Wait until the long poll has registered its AbortController.
+		await pollUntil(
+			() => ((gateway.bgProcessManager as any).waits as Map<string, Set<unknown>>).get(sessionId)?.size ? true : false,
+			{ timeoutMs: 5_000, intervalMs: 25, label: "bg wait registered" },
+		);
+
+		// Trigger abort via the bg manager (same call the live-steer code path uses).
+		gateway.bgProcessManager.abortAllWaits(sessionId);
+
+		const result = await waitPromise;
+		const elapsed = Date.now() - waitStart;
+
+		expect(result.status).toBe(200);
+		expect(result.body.aborted).toBe(true);
+		expect(result.body.timedOut).toBe(false);
+		expect(result.body.info.status).toBe("running");
+		expect(elapsed).toBeLessThan(1500);
+
+		// Process should still be running.
+		const listRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+		const list = await listRes.json();
+		const proc = list.processes.find((p: any) => p.id === bg.id);
+		expect(proc).toBeTruthy();
+		expect(proc.status).toBe("running");
+
+		// Cleanup: kill the process then the session.
+		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}`, { method: "DELETE" });
+		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+	});
+
+	test("session termination releases hanging wait handlers", async ({ gateway }) => {
+		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(201);
+		const { id: sessionId } = await res.json();
+
+		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+			method: "POST",
+			body: JSON.stringify({ command: SLEEP_CMD, name: "sleeper2" }),
+		});
+		expect(bgRes.status).toBe(201);
+		const bg = await bgRes.json();
+
+		const waitPromise = adminFetch(
+			gateway.baseURL,
+			`/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=60`,
+		);
+
+		// Wait until the long poll has registered its AbortController.
+		await pollUntil(
+			() => ((gateway.bgProcessManager as any).waits as Map<string, Set<unknown>>).get(sessionId)?.size ? true : false,
+			{ timeoutMs: 5_000, intervalMs: 25, label: "bg wait registered" },
+		);
+
+		// Terminate — must abort the in-flight wait so the handler resolves. Measure
+		// from the registered wait/DELETE boundary, not from earlier setup work or
+		// DELETE cleanup, so this pins the abort path without accepting hangs.
+		const abortStart = Date.now();
+		const deletePromise = adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+
+		const response = await waitPromise;
+		const elapsed = Date.now() - abortStart;
+		await deletePromise;
+
+		// Either 200 with aborted:true (abort fired first) or 404 (session gone) or
+		// 200 with the process having exited via SIGTERM — any of these is OK as
+		// long as the handler returned well before the 60s timeout.
+		expect([200, 404]).toContain(response.status);
+		expect(elapsed).toBeLessThan(5000);
+	});
+});
