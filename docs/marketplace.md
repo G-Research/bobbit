@@ -777,7 +777,12 @@ Field rules and defaults:
   error (`PackContributionError`) that aborts that pack's contribution load so the registry
   surfaces it loudly rather than silently registering an ambiguous provider.
 - **`kind`** — `memory`, `selector`, or `generic`. Absent ⇒ `generic`. An unknown kind drops
-  the provider (warn) without failing the pack.
+  the provider (warn) without failing the pack. A `selector` provider is DATA-ONLY config read
+  once at construction (never dispatched through a hook) for a classifier that needs to stay
+  off the moduleHost/worker path — e.g. the F14 thinking-router's pack-declared rule-table
+  override (`id: thinking-router-rules`, `hooks: []`; see
+  `src/server/agent/thinking-router-classifier.ts`'s header). Its `module`/`hooks` fields exist
+  only to satisfy this shared schema and are never invoked when `hooks` is empty.
 - **`module`** (required) — an ESM module path resolved **relative to the provider YAML** and
   re-validated (realpath-aware) to stay **inside the pack root** — the same containment guard
   used for routes/entrypoints. A module that resolves outside the pack root drops the provider.
