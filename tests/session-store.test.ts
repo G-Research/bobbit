@@ -251,6 +251,50 @@ describe("SessionStore", () => {
 			store.put(makeSession());
 			assert.equal(store.get("sess-1")!.lastReadAt, undefined);
 		});
+
+		// -------------------------------------------------------------------
+		// CON-04 — restart-redrive fields must flush synchronously
+		//
+		// wasStreaming / streamingStartedAt / messageQueue decide whether a
+		// mid-turn agent (or a queued-but-undispatched prompt) is re-driven
+		// after a hard kill. If these ride the 1s save() debounce, a SIGKILL
+		// within that window (OOM, harness SIGKILL, docker kill) loses them
+		// even though the in-memory session object already reflects the new
+		// state — the very state the field exists to make durable.
+		//
+		// Without calling flush(), the on-disk file must already contain the
+		// new value the instant update() returns. A debounced write leaves
+		// the on-disk file stale until the 1s timer fires (or flush() is
+		// called), which is exactly the lost window.
+		// -------------------------------------------------------------------
+
+		it("wasStreaming flushes synchronously (recovery-critical)", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.update("sess-1", { wasStreaming: true, streamingStartedAt: 123 });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw.sessions[0].wasStreaming, true, "wasStreaming must be on disk before flush()/debounce timer");
+			assert.equal(raw.sessions[0].streamingStartedAt, 123, "streamingStartedAt must be on disk before flush()/debounce timer");
+		});
+
+		it("streamingStartedAt clears synchronously when streaming ends", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			store.update("sess-1", { wasStreaming: true, streamingStartedAt: 123 });
+			store.update("sess-1", { wasStreaming: false, streamingStartedAt: undefined });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw.sessions[0].wasStreaming, false);
+			assert.equal(raw.sessions[0].streamingStartedAt, undefined);
+		});
+
+		it("messageQueue flushes synchronously (recovery-critical)", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			const queue = [{ id: "m1", text: "queued prompt", createdAt: Date.now() }] as any;
+			store.update("sess-1", { messageQueue: queue });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.deepEqual(raw.sessions[0].messageQueue, queue, "messageQueue must be on disk before flush()/debounce timer");
+		});
 	});
 
 	// -----------------------------------------------------------------------
