@@ -50,7 +50,15 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: {
+			...process.env,
+			BOBBIT_DIR: join(dir, ".bobbit"),
+			NODE_ENV: "test",
+			// Live server secrets (admin bearer token) live under serverSecretsDir(),
+			// which is OS-user-level by default. BOBBIT_SECRETS_DIR is the explicit
+			// override the product provides for test isolation.
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit-secrets"),
+		},
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -59,7 +67,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
 		try {
-			const tp = join(dir, ".bobbit", "state", "token");
+			const tp = join(dir, ".bobbit-secrets", "token");
 			if (existsSync(tp)) {
 				const t = readFileSync(tp, "utf-8").trim();
 				if ((await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } })).ok) break;
@@ -68,7 +76,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		await new Promise(r => setTimeout(r, 200));
 	}
 	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Not healthy:\n${stderr}`); }
-	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
+	const token = readFileSync(join(dir, ".bobbit-secrets", "token"), "utf-8").trim();
 	return { proc, port, dir, token, base: `http://127.0.0.1:${port}` };
 }
 
@@ -188,10 +196,18 @@ test("bg-process-restart-survival: running re-attaches & keeps streaming; finish
 	const reg = await regRes.json() as any;
 	gw.defaultProjectId = reg.id;
 
-	// Plain (non-worktree) session: bash_bg runs in this cwd.
+	// Plain (non-worktree) session: bash_bg runs in this cwd. A session cwd'd
+	// inside a git-repo project always gets auto-worktreed, and post-HQ-split
+	// a session's cwd must be inside its own project's root or an owned
+	// worktree (`CWD_OUTSIDE_PROJECT` otherwise) — so to get a genuine
+	// plain/non-worktree session we register a second, non-git project rooted
+	// directly at the session cwd and create the session against it.
 	const sessCwd = join(tmp, `.bobbit-bgrestart-cwd-${port1}`);
 	mkdirSync(sessCwd, { recursive: true });
-	const sRes = await api(gw, "/api/sessions", { method: "POST", body: JSON.stringify({ projectId: reg.id, cwd: sessCwd }) });
+	const sessRegRes = await api(gw, "/api/projects", { method: "POST", body: JSON.stringify({ name: "BG Restart Plain", rootPath: sessCwd, upsert: true }) });
+	expect([200, 201]).toContain(sessRegRes.status);
+	const sessReg = await sessRegRes.json() as any;
+	const sRes = await api(gw, "/api/sessions", { method: "POST", body: JSON.stringify({ projectId: sessReg.id, cwd: sessCwd }) });
 	expect(sRes.status).toBe(201);
 	const sessionId = (await sRes.json() as any).id;
 	await pollIdle(gw, sessionId);
@@ -226,8 +242,12 @@ test("bg-process-restart-survival: running re-attaches & keeps streaming; finish
 		}
 	}
 	expect(preTick, "ticker must stream at least a few ticks pre-restart").toBeGreaterThanOrEqual(2);
-	// Persistence sanity: the durable store + spool exist on disk.
-	const bgJson = join(dir, ".bobbit", "state", "bg-processes.json");
+	// Persistence sanity: the durable store + spool exist on disk. Post-HQ-split
+	// state is per-project: this session belongs to the plain project rooted at
+	// sessCwd, so its BgProcessStore writes <sessCwd>/.bobbit/state/bg-processes.json
+	// (ProjectContext scopes stateDir to the owning project's .bobbit/), not the
+	// Headquarters state dir under `dir`.
+	const bgJson = join(sessCwd, ".bobbit", "state", "bg-processes.json");
 	expect(existsSync(bgJson), "bg-processes.json must be written").toBe(true);
 	console.log(`  [boot] ticker streamed to tick ${preTick}; store persisted`);
 

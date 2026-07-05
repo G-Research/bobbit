@@ -69,7 +69,15 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: {
+			...process.env,
+			BOBBIT_DIR: join(dir, ".bobbit"),
+			NODE_ENV: "test",
+			// Live server secrets (admin bearer token) live under serverSecretsDir(),
+			// which is OS-user-level by default. BOBBIT_SECRETS_DIR is the explicit
+			// override the product provides for test isolation.
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit-secrets"),
+		},
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -79,7 +87,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
 		try {
-			const tp = join(dir, ".bobbit", "state", "token");
+			const tp = join(dir, ".bobbit-secrets", "token");
 			if (existsSync(tp)) {
 				const t = readFileSync(tp, "utf-8").trim();
 				if ((await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } })).ok) break;
@@ -88,7 +96,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		await new Promise(r => setTimeout(r, 300));
 	}
 	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Not healthy:\n${stderr}`); }
-	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
+	const token = readFileSync(join(dir, ".bobbit-secrets", "token"), "utf-8").trim();
 	return { proc, port, dir, token, base: `http://127.0.0.1:${port}` };
 }
 
@@ -307,6 +315,19 @@ test("sandbox-recovery preserves WS frame continuity (seq + statusVersion carry 
 	const gw = await startGW(dir, port);
 	console.log(`  Gateway :${port} cwd=${dir}`);
 
+	// 1. Register the project BEFORE probing sandbox status: post-HQ-split,
+	// GET /api/sandbox-status is project-scoped and a projectless request fails
+	// closed with 400 PROJECT_ID_REQUIRED (resolveProjectForRequest), so the
+	// probe below needs gw.defaultProjectId set for the api() helper to append
+	// ?projectId=. The project's config store then reads the sandbox: "docker"
+	// project.yaml this spec wrote at <dir>/.bobbit/config/.
+	const regRes = await api(gw, "/api/projects", {
+		method: "POST",
+		body: JSON.stringify({ name: "Recovery Frame", rootPath: dir, upsert: true }),
+	});
+	expect([200, 201]).toContain(regRes.status);
+	gw.defaultProjectId = ((await regRes.json()) as any).id;
+
 	// Auto-skip if the sandbox isn't actually available even with Docker installed
 	let sandboxAvailable = false;
 	{
@@ -329,16 +350,6 @@ test("sandbox-recovery preserves WS frame continuity (seq + statusVersion carry 
 	let sessionId: string | null = null;
 
 	try {
-		// 1. Register the project. `dir` is the gateway's own cwd — since
-		// Headquarters (#925) the server workspace only registers via upsert,
-		// which returns the existing HQ project with 200 (a plain POST is 409).
-		const regRes = await api(gw, "/api/projects", {
-			method: "POST",
-			body: JSON.stringify({ name: "Recovery Frame", rootPath: dir, upsert: true }),
-		});
-		expect([200, 201]).toContain(regRes.status);
-		gw.defaultProjectId = ((await regRes.json()) as any).id;
-
 		// 2. Create a sandboxed session
 		const sessRes = await api(gw, "/api/sessions", {
 			method: "POST",
