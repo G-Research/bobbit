@@ -1163,6 +1163,19 @@ export class MessageEditor extends LitElement {
 						: ""
 				}
 
+				<!-- Queue state announcer (screen-reader only): the pill list below is a
+				     purely visual affordance, so mirror queue-count transitions here for
+				     assistive tech. -->
+				<div class="sr-only" data-testid="composer-queue-live-region" role="status" aria-live="polite" aria-atomic="true">
+					${this.queuedMessages.length === 0
+						? ""
+						: `${this.queuedMessages.length} ${
+								this.queuedMessages.length === 1
+									? i18n("message queued — will send after the agent finishes.")
+									: i18n("messages queued — will send after the agent finishes.")
+							}`}
+				</div>
+
 				<!-- Queued messages -->
 				${this.queuedMessages.length > 0 ? html`
 					<div class="px-3 pt-2 pb-1 flex flex-col gap-1.5">
@@ -1262,7 +1275,7 @@ export class MessageEditor extends LitElement {
 					${attachButton}
 					<textarea
 						class="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none resize-none overflow-y-auto py-1 px-1"
-						placeholder=${i18n("Type a message...")}
+						placeholder=${this.isStreaming ? i18n("Message will queue until the agent finishes…") : i18n("Type a message...")}
 						rows="1"
 						autocomplete="off"
 						style="max-height: 200px; field-sizing: content; min-height: 1lh; height: auto;"
