@@ -191,7 +191,7 @@ async function handleSystemPromptCustomise(ctx: CoreRouteCtx): Promise<void> {
 	}
 }
 
-// POST /api/shutdown — graceful shutdown.
+// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage).
 async function handleShutdown(ctx: CoreRouteCtx): Promise<void> {
 	const { json } = ctx;
 	json({ status: "shutting down" });
@@ -208,6 +208,7 @@ async function handleCaCert(ctx: CoreRouteCtx): Promise<void> {
 	}
 	const certData = fs.readFileSync(caCertPath);
 	res.writeHead(200, {
+		// iOS Safari needs this MIME type to offer the profile-install flow.
 		"Content-Type": "application/x-x509-ca-cert",
 		"Content-Disposition": "attachment; filename=\"bobbit-ca.crt\"",
 		"Content-Length": certData.length,
