@@ -8,11 +8,12 @@ export { ChatPanel } from "./ChatPanel.js";
 // All custom-element re-exports below are type-only — a value re-export
 // would force Rollup to retain the file's side-effectful `customElement`
 // registration in every entry chunk that imports anything from
-// `ui/index.ts` (even unrelated symbols like `AppStorage`). The actual
+// `ui/index.ts` (even unrelated symbols like `AppStorage`). Most actual
 // `customElements.define(...)` calls happen via static side-effect
 // imports inside the components themselves (ChatPanel → AgentInterface
-// → BgProcessPill / MessageEditor / MessageList / …), so the elements
-// are still registered on cold start. Type-only keeps the public
+// → MessageList / Messages / …); cold-path widgets such as MessageEditor
+// are registered by their lazy loaders when first rendered. Type-only keeps
+// the public
 // library API surface (`new AgentInterface()`, `instanceof X`) for
 // external consumers without dragging the value graph into entry.
 export type { AgentInterface } from "./components/AgentInterface.js";
