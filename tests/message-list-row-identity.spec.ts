@@ -2,7 +2,7 @@
  * UX-02 — id-less transcript rows must keep their DOM node identity across a
  * re-snapshot/resync, not just an unchanged reduce().
  *
- * Background (`~/Documents/dev/bobbit-fable-refactor/FINDINGS.md` UX-02,
+ * Background (the Fable program's finding UX-02,
  * `design/raciness-and-testing-rethink.md` §A1): pi persists user/aborted/
  * errored rows WITHOUT an id, and the reducer's snapshot path never invents
  * one. `MessageList`'s `repeat()` render key for those rows therefore falls

@@ -1,10 +1,10 @@
 /**
  * Browser E2E: Transparency Panel — classifier decision rows (CLF-W1a).
  *
- * Design: ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md
+ * Design: the Fable program's classifier-framework design note,
  * Wave 1(a) ("Transparency first: TraceEntry.decisions[] + panel rows +
- * browser E2E ... before any classifier") and
- * ~/Documents/dev/bobbit-fable-refactor/design/transparency-panel.md.
+ * browser E2E ... before any classifier") and its transparency-panel
+ * design note.
  *
  * There is still NO production call site for `LifecycleHub.dispatchDecision`
  * (CLF-W0b shipped it dark; CLF-W1b wires the first real customer, the F14

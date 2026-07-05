@@ -1,8 +1,8 @@
 // src/server/agent/thinking-router-classifier.ts
 //
 // CLF-W1b — the F14 deterministic thinking-level router: the Classifier
-// Framework lane's first production `dispatchDecision` customer. See
-// ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md §7/§9
+// Framework lane's first production `dispatchDecision` customer. See the
+// Fable program's classifier-framework design note §7/§9
 // ("Regex `ultrathink`→xhigh (0 tokens); else `ambiguous`→cheap model") and
 // §10 Wave 1 ("deterministic-only ... no model-backed tiebreak yet").
 //

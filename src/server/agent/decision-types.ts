@@ -1,7 +1,7 @@
 // src/server/agent/decision-types.ts
 //
 // SELECT-ONLY decision seam — Wave 0(b) of the Classifier Framework lane
-// (EXT-05 core). See ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md
+// (EXT-05 core). See the Fable program's classifier-framework design note
 // §4/§8/§10 for the full design; this file + LifecycleHub.dispatchDecision()
 // implement ONLY the Wave 0(b) slice described there: a typed Decision return,
 // a per-(point,kind) allow-list, and outcome tracing. No production code calls
