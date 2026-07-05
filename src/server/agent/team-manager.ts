@@ -11,7 +11,7 @@ import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
-import { GoalPausedError } from "./goal-paused-guard.js";
+import { GoalPausedError, requireAncestorsNotPaused } from "./goal-paused-guard.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -1807,8 +1807,10 @@ export class TeamManager {
 		if (this.teams.has(goalId)) {
 			throw new Error(`Team already active for goal: ${goalId}`);
 		}
-		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal.
-		if (goal.paused) throw new GoalPausedError(goalId);
+		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal
+		// OR any paused ancestor (see docs/design/production-subgoals-port.md's
+		// "Pause/resume cascade" section for the design).
+		requireAncestorsNotPaused(goalId, (id) => this.resolveGoal(id));
 		// Scheduler-block guard — refuse to start a goal that still has
 		// unresolved dependsOn deps. 'blocked' is set at spawn time and
 		// cleared by integrate-child when all deps merge. Manual team/start
@@ -2058,8 +2060,12 @@ export class TeamManager {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
 		// Pause-cascade guard — in-process callers (team-lead extension
-		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
-		if (goal.paused) throw new GoalPausedError(goalId);
+		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth,
+		// and must walk the ancestor chain like the REST route does: a
+		// targeted resume (cascade:false) on this goal only clears its own
+		// `paused` flag, so a still-paused parent/grandparent must still
+		// block this spawn.
+		requireAncestorsNotPaused(goalId, (id) => this.resolveGoal(id));
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.

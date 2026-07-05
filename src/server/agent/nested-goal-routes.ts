@@ -461,7 +461,8 @@ export async function tryHandleNestedGoalRoute(
 		// Pause-cascade: refuse to spawn a child on a paused parent. The
 		// guard runs BEFORE the planId idempotency check below — a re-call
 		// with the same planId on a paused parent still represents a spawn
-		// intent the operator wants blocked (see docs/design/pause-cascade.md).
+		// intent the operator wants blocked (see the "Pause/resume cascade"
+		// bullets in docs/design/production-subgoals-port.md).
 		if (parent.paused) {
 			json({ error: `Parent goal ${parentId} is paused`, code: "GOAL_PAUSED", goalId: parentId }, 409);
 			return true;
