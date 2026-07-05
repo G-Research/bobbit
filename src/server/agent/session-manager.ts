@@ -38,6 +38,7 @@ import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type 
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
+import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -56,7 +57,7 @@ import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from 
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeOpenAiOrphanToolResultExtension } from "./openai-orphan-tool-result-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
@@ -70,9 +71,9 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { selectAigwModelForRoleTier } from "./model-registry.js";
+import { selectAigwModelForRoleTier, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -92,7 +93,7 @@ import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.j
 import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
-import type { SandboxManager } from "./sandbox-manager.js";
+import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
@@ -815,6 +816,28 @@ const _warnedClients = new WeakSet<WebSocket>();
  */
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
 
+/**
+ * Build the `state.model` payload for a live model-state broadcast. Routes
+ * through `resolveModelStateMeta` (registry cache → pi-ai catalog → inferMeta)
+ * so the frame carries the SAME contextWindow / maxTokens / reasoning /
+ * thinkingLevelMap the ModelSelector dropdown shows. The client full-replaces
+ * `state.model`, so every field must be present. `thinkingLevelMap` is omitted
+ * when upstream metadata doesn't provide it.
+ */
+function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
+	const meta = resolveModelStateMeta(provider, id);
+	return {
+		model: {
+			provider,
+			id,
+			contextWindow: meta.contextWindow,
+			maxTokens: meta.maxTokens,
+			reasoning: meta.reasoning,
+			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+		},
+	};
+}
+
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
@@ -1392,8 +1415,9 @@ export class SessionManager {
 
 		for (const session of sessionsToRecover) {
 			try {
-				// Verify/repair/recreate worktree if needed
-				if (session.cwd?.startsWith("/workspace-wt/")) {
+				// Verify/repair/recreate worktree if needed. Headquarters never owns
+				// sandbox worktrees, even for legacy sessions with /workspace-wt cwd.
+				if (projectId !== HEADQUARTERS_PROJECT_ID && session.cwd?.startsWith("/workspace-wt/")) {
 					let worktreeOk = false;
 
 					// Check if worktree still exists (volumes may survive rm -f)
@@ -1958,6 +1982,43 @@ export class SessionManager {
 		return undefined;
 	}
 
+	private readGatewayUrlForAgent(): string | undefined {
+		try {
+			return fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private mintScopedGatewayToken(projectId: string | undefined, sessionId: string, goalId?: string): string | undefined {
+		if (!projectId || !this.sandboxTokenStore) return undefined;
+		const scopedToken = this.sandboxTokenStore.register(projectId);
+		this.sandboxTokenStore.addSession(projectId, sessionId);
+		if (goalId) this.sandboxTokenStore.addGoal(projectId, goalId);
+		return scopedToken;
+	}
+
+	private applyScopedGatewayCredentials(
+		bridgeOptions: RpcBridgeOptions,
+		sessionId: string,
+		projectId: string | undefined,
+		goalId?: string,
+	): void {
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (gwUrl) bridgeOptions.gatewayUrl = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
+		if (scopedToken) bridgeOptions.gatewayToken = scopedToken;
+	}
+
+	private scopedGatewayEnvForDirectAgent(sessionId: string, projectId: string | undefined, goalId?: string): Record<string, string> | undefined {
+		const env: Record<string, string> = {};
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId);
+		if (scopedToken) env.BOBBIT_TOKEN = scopedToken;
+		return Object.keys(env).length > 0 ? env : undefined;
+	}
+
 	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
@@ -1975,15 +2036,24 @@ export class SessionManager {
 		sessionId: string,
 		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
-		if (!this.projectConfigStore) return false;
-		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
-		if (sandboxConfig !== "docker") return false;
-
-		// Resolve project ID
+		// Resolve project ID before reading sandbox config. The selected project's
+		// config is authoritative; the server/HQ store is only a legacy fallback for
+		// genuinely unscoped callers.
 		const projectId = opts?.projectId;
 		if (!projectId) {
 			throw new Error("Sandbox mode requires a projectId");
 		}
+		if (isSandboxExemptProject(projectId)) {
+			bridgeOptions.sandboxed = false;
+			delete bridgeOptions.containerId;
+			return false;
+		}
+
+		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
+		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
+		if (!projectConfigStore) return false;
+		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+		if (sandboxConfig !== "docker") return false;
 
 		// Get the ProjectSandbox for this project
 		if (!this.sandboxManager) {
@@ -2000,32 +2070,25 @@ export class SessionManager {
 
 		const containerId = await sandbox.getContainerId();
 
-		// Read gateway URL and generate scoped token for the container
-		try {
-			const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-			bridgeOptions.gatewayUrl = gwUrl;
-
-			// Generate/reuse a scoped sandbox token for the project (not per-session)
-			if (this.sandboxTokenStore) {
-				const scopedToken = this.sandboxTokenStore.register(projectId);
-				this.sandboxTokenStore.addSession(projectId, sessionId);
-				if (opts?.goalId) {
-					this.sandboxTokenStore.addGoal(projectId, opts.goalId);
-				} else if (bridgeOptions.env?.BOBBIT_GOAL_ID) {
-					this.sandboxTokenStore.addGoal(projectId, bridgeOptions.env.BOBBIT_GOAL_ID);
-				}
-				bridgeOptions.gatewayToken = scopedToken;
-			} else {
-				const adminToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-				bridgeOptions.gatewayToken = adminToken;
+		// Read gateway URL and generate scoped token for the container.
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (!gwUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url not found");
+		bridgeOptions.gatewayUrl = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
+		if (scopedToken) {
+			bridgeOptions.gatewayToken = scopedToken;
+		} else {
+			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
+			// unchanged there. Direct agents never use this admin fallback.
+			const adminToken = readToken();
+			if (adminToken === null) {
+				throw new Error("Cannot read gateway credentials for sandbox");
 			}
-		} catch (err) {
-			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
+			bridgeOptions.gatewayToken = adminToken;
 		}
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
-		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
 		const projectRootPath = projectContext?.project.rootPath;
 		if (projectRootPath) {
 			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
@@ -2033,7 +2096,8 @@ export class SessionManager {
 
 		// Create a worktree inside the container when a branch is specified.
 		// This is the primary code path for goal agents (team lead + members).
-		if (opts?.sandboxBranch) {
+		// Headquarters is always no-worktree, so ignore any legacy sandboxBranch.
+		if (opts?.sandboxBranch && projectId !== HEADQUARTERS_PROJECT_ID) {
 			// Capture the HOST-side working directory BEFORE it is remapped into the
 			// container worktree below. The `goalProvisioned` provider runs HOST-side
 			// (LifecycleHub.dispatchGoalProvisioned executes the provider module on
@@ -2090,7 +2154,6 @@ export class SessionManager {
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
 		// Get project-scoped config/secrets when available.
-		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
@@ -2341,14 +2404,12 @@ export class SessionManager {
 
 	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
 		if (projectId) return this.getMcpManager({ projectId, cwd });
-		if (cwd) return this.getMcpManager({ cwd });
-		return this.mcpManager;
+		return null;
 	}
 
 	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
 		if (projectId) return this.ensureMcpManager({ projectId, cwd });
-		if (cwd) return this.ensureMcpManager({ cwd });
-		return this.mcpManager;
+		return null;
 	}
 
 	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
@@ -2369,11 +2430,9 @@ export class SessionManager {
 
 	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
 		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
+		const { projectId } = this.getMcpSessionScope(sessionId);
 		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
 		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
-		const cwdScopeKey = cwd ? this.mcpScopeKey({ cwd }) : undefined;
-		if (!projectId && cwd && scopeKey === cwdScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ cwd, scopeKey });
 		return null;
 	}
 
@@ -2495,6 +2554,10 @@ export class SessionManager {
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
 	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			this.worktreePools.delete(projectId);
+			return;
+		}
 		if (this.worktreePools.has(projectId)) return;
 		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
 		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
@@ -2525,6 +2588,7 @@ export class SessionManager {
 
 	/** Get the worktree pool for a specific project. */
 	getWorktreePool(projectId?: string): WorktreePool | null {
+		if (projectId === HEADQUARTERS_PROJECT_ID) return null;
 		if (projectId === undefined) {
 			// Legacy: return the first pool (backward compat for callers that don't pass projectId)
 			const first = this.worktreePools.values().next();
@@ -2540,6 +2604,10 @@ export class SessionManager {
 
 	/** Drain and remove a project's worktree pool (for project deletion). */
 	async removeWorktreePool(projectId: string): Promise<void> {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			this.worktreePools.delete(projectId);
+			return;
+		}
 		const pool = this.worktreePools.get(projectId);
 		if (pool) {
 			await pool.drain();
@@ -2874,7 +2942,7 @@ export class SessionManager {
 			// resolve for the active project even when its root != server cwd.
 			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 			const marketContext: SkillMarketContext = {
-				serverBase: getProjectRoot(),
+				serverBase: headquartersDir(),
 				globalUserBase: os.homedir(),
 				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
@@ -5405,18 +5473,36 @@ export class SessionManager {
 		}
 
 		// ── Restore Docker sandbox wiring ──
-		if (ps.sandboxed) {
+		let restoredSandboxed = ps.sandboxed === true && !(ps.projectId && isSandboxExemptProject(ps.projectId));
+		if (ps.sandboxed === true) {
+			// Keep applySandboxWiring as the single restore decision point. It uses
+			// the selected project's config internally, returns false for non-docker
+			// projects, and preserves Headquarters/system no-sandbox exemptions.
 			// On restore, the worktree already exists inside the container —
 			// pass the container-internal cwd directly (no branch = no worktree creation).
 			if (ps.cwd?.startsWith("/workspace")) {
 				bridgeOptions.cwd = ps.cwd;
 			}
-			await this.applySandboxWiring(bridgeOptions, ps.id, {
+			restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
 				projectId: ps.projectId,
-				goalId: ps.goalId,
+				goalId: ps.goalId ?? ps.teamGoalId,
 			});
-			// Verify the sandbox worktree still exists inside the container
-			if (ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			if (!restoredSandboxed) {
+				ps.sandboxed = false;
+				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
+				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
+			}
+		} else {
+			if (ps.sandboxed) {
+				ps.sandboxed = false;
+				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
+			}
+			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
+		}
+		if (restoredSandboxed) {
+			// Verify the sandbox worktree still exists inside the container. Headquarters
+			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
 				try {
 					await execFileAsync("docker", [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
@@ -5851,8 +5937,18 @@ export class SessionManager {
 		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
 			? [...opts.allowedTools]
 			: undefined;
-		// Resolve projectId from opts or from the goal's project
+		// Resolve projectId from opts or from the goal's project.
+		// Headquarters is a server/data workspace: ignore every worktree request at
+		// the lifecycle boundary so downstream setup never claims a pool, creates a
+		// git worktree, or asks sandbox wiring for a branch worktree.
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
+		const sandboxExemptScope = projectId ? isSandboxExemptProject(projectId) : false;
+		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
+		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
+		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
+		const worktreePushPolicy = headquartersScope ? undefined : opts?.worktreePushPolicy;
+		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
+		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
 		await this.ensureMcpManagerForContext(projectId, cwd);
 		const ctx = this.buildPipelineContext(projectId, cwd);
 
@@ -5877,13 +5973,16 @@ export class SessionManager {
 				});
 			}
 		}
-		const sandboxCwdOffset = opts?.sandboxed
+		const sandboxCwdOffset = effectiveSandboxed
 			? await this.resolveSandboxCwdOffset(cwd, projectId, goalId, opts?.sandboxCwdOffset)
+			: undefined;
+		const directGatewayEnv = !effectiveSandboxed
+			? this.scopedGatewayEnvForDirectAgent(id, projectId, goalId ?? opts?.teamGoalId ?? opts?.env?.BOBBIT_GOAL_ID)
 			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
-		if (opts?.worktreeOpts) {
-			const repoPath = opts.worktreeOpts.repoPath;
+		if (worktreeOpts) {
+			const repoPath = worktreeOpts.repoPath;
 			const uuid8 = id.slice(0, 8);
 			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
 
@@ -5895,7 +5994,7 @@ export class SessionManager {
 			// inside the container via ProjectSandbox.createWorktree, and the
 			// host-side worktree pool isn't reachable from the container.
 			const targetBranch = `session/${uuid8}`;
-			const poolForCreate = (!opts?.sandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
+			const poolForCreate = (!effectiveSandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
 			const claimed = poolForCreate ? await poolForCreate.claim(targetBranch).catch((err) => {
 				console.warn(`[session-manager] pool.claim failed for ${id}, falling back to createWorktree: ${err instanceof Error ? err.message : err}`);
 				return null;
@@ -5937,7 +6036,7 @@ export class SessionManager {
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				worktreePath,
-				worktreePushPolicy: opts?.worktreePushPolicy,
+				worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -5978,22 +6077,22 @@ export class SessionManager {
 				runtime: opts?.runtime,
 				sessionScopedAllowedTools,
 				worktreePath,
-				worktreePushPolicy: opts?.worktreePushPolicy,
+				worktreePushPolicy,
 				repoPath,
 				branch,
-				sandboxed: opts?.sandboxed,
+				sandboxed: effectiveSandboxed,
 				role: opts?.role,
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				agentArgs,
-				env: opts?.env,
+				env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 				rolePrompt: resolvedRolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
-				sandboxBranch: opts?.sandboxBranch,
-				sandboxBaseBranch: opts?.sandboxBaseBranch,
+				sandboxBranch,
+				sandboxBaseBranch,
 				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
@@ -6063,25 +6162,25 @@ export class SessionManager {
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
 			runtime: opts?.runtime,
-			worktreePushPolicy: opts?.worktreePushPolicy,
+			worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
-			sandboxed: opts?.sandboxed,
+			sandboxed: effectiveSandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
 			nonInteractive: opts?.nonInteractive,
 			agentArgs,
-			env: opts?.env,
+			env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 			rolePrompt: resolvedRolePrompt,
 			roleName: opts?.roleName,
 			workflowContext: opts?.workflowContext,
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: optsAllowedTagged,
 			projectId,
-			sandboxBranch: opts?.sandboxBranch,
-			sandboxBaseBranch: opts?.sandboxBaseBranch,
+			sandboxBranch,
+			sandboxBaseBranch,
 			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
@@ -6157,15 +6256,14 @@ export class SessionManager {
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
+		const parentStore = this.resolveStoreForId(parentSessionId);
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
-			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
-		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
-		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
+			?? parentStore?.get(parentSessionId)?.projectId;
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
+		const parentMeta = parentStore?.get(parentSessionId);
 		let delegateSandboxed = false;
-		if (parentMeta?.sandboxed) {
+		if (parentMeta?.sandboxed && !(parentProjectId && isSandboxExemptProject(parentProjectId))) {
 			// Always use the parent's validated host-side cwd — never trust the
 			// cwd from the container.  The agent sends process.cwd() which is a
 			// container-internal path (typically /workspace or a subdir).  Using
@@ -6175,6 +6273,9 @@ export class SessionManager {
 			opts.cwd = parentMeta.cwd;
 			delegateSandboxed = true;
 		}
+
+		await this.ensureMcpManagerForContext(parentProjectId, opts.cwd);
+		const ctx = this.buildPipelineContext(parentProjectId, opts.cwd);
 
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
 
@@ -6208,6 +6309,9 @@ export class SessionManager {
 		const sessionScopedAllowedTools = sourceAllowedTools && sourceAllowedTools.length > 0
 			? [...sourceAllowedTools]
 			: undefined;
+		const directGatewayEnv = !delegateSandboxed
+			? this.scopedGatewayEnvForDirectAgent(id, parentProjectId, parentEffectiveGoalId)
+			: undefined;
 
 		const plan: SessionSetupPlan = {
 			id,
@@ -6236,10 +6340,10 @@ export class SessionManager {
 			// level so a delegate no longer silently drops to the system default.
 			initialModel: opts.initialModel,
 			initialThinkingLevel: opts.initialThinkingLevel,
-			// NON-SECRET tool-scoping env (orchestration-core toolEnv). resolveBridgeOptions
-			// spreads plan.env AFTER BOBBIT_SESSION_ID/SECRET, so it is purely additive and
-			// can never widen the inherited sandbox/project scope.
-			env: opts.env,
+			// Caller toolEnv is non-secret metadata. directGatewayEnv is minted by the
+			// gateway and spread last so user-supplied env cannot widen the inherited
+			// project/session scope.
+			env: { ...(opts.env ?? {}), ...(directGatewayEnv ?? {}) },
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
@@ -6786,10 +6890,7 @@ export class SessionManager {
 					const provider = pinnedModel.slice(0, slash);
 					const modelId = pinnedModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					broadcast(session.clients, {
-						type: "state",
-						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-					});
+					broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Verified spawn-pinned model "${pinnedModel}" for session ${session.id}`);
 					return;
 				} catch (err) {
@@ -6821,10 +6922,7 @@ export class SessionManager {
 						const provider = fallbackSessionModel.slice(0, slash);
 						const modelId = fallbackSessionModel.slice(slash + 1);
 						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-						broadcast(session.clients, {
-							type: "state",
-							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-						});
+						broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
 						return;
 					} catch (fallbackErr) {
@@ -6862,10 +6960,7 @@ export class SessionManager {
 					const provider = roleModel.slice(0, slash);
 					const modelId = roleModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					broadcast(session.clients, {
-						type: "state",
-						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-					});
+					broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 					console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
 					return;
 				} catch (err) {
@@ -6898,10 +6993,7 @@ export class SessionManager {
 						const provider = fallbackSessionModel.slice(0, slash);
 						const modelId = fallbackSessionModel.slice(slash + 1);
 						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-						broadcast(session.clients, {
-							type: "state",
-							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-						});
+						broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
 						return;
 					} catch (fallbackErr) {
@@ -6946,10 +7038,7 @@ export class SessionManager {
 				this._writeModelNameFile(session.id, sessionModelPref);
 				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
 				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
-				broadcast(session.clients, {
-					type: "state",
-					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-				});
+				broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 				return;
 			} catch (err) {
 				console.error(`[session-manager] default.sessionModel "${safeSessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model: ${sanitizeModelErrorForLog(err)}`);
@@ -6992,10 +7081,7 @@ export class SessionManager {
 			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}${roleTierForAigw === "low" ? " (low-tier role: cheapest discovered model)" : ""}`);
 
-			broadcast(session.clients, {
-				type: "state",
-				data: { model: { provider: "aigw", id: modelToUse.id, reasoning: inferMeta(modelToUse.id).reasoning } },
-			});
+			broadcast(session.clients, { type: "state", data: buildModelStateData("aigw", modelToUse.id) });
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
 		}
@@ -7657,6 +7743,7 @@ export class SessionManager {
 		// stale pin from a roleless prior spawn was the unclamped "medium").
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		if (!session.sandboxed) this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
 		assertRuntimeAllowedForSession(runtime, session.sandboxed);
@@ -9672,10 +9759,17 @@ export class SessionManager {
 
 			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
 			if (session.sandboxed) {
-				await this.applySandboxWiring(bridgeOptions, id, {
+				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 					projectId: session.projectId,
 					goalId: session.goalId,
 				});
+				if (!sandboxApplied) {
+					session.sandboxed = false;
+					this.resolveStoreForSession(id).update(id, { sandboxed: false });
+					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+				}
+			} else {
+				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 			}
 
 			// Restore goal extension

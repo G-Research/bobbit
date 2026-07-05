@@ -67,27 +67,31 @@ test.describe("CT-18 goal/session routing API stories", () => {
 	});
 
 	// -----------------------------------------------------------
-	// GR-06: POST /api/goals with cwd only resolves to matching project
+	// GR-06: POST /api/goals requires explicit projectId, even for matching cwd
 	// -----------------------------------------------------------
 
-	test("GR-06: API: cwd-only request resolves project", async () => {
+	test("GR-06: API: cwd-only request inside a project is rejected; explicit projectId succeeds", async () => {
 		const projectB = requireProject(projB, "B");
 
-		// cwd is a subpath inside B's rootPath and does not match A.
 		const subCwd = join(projectB.rootPath, "sub");
 		mkdirSync(subCwd, { recursive: true });
 
-		// Use rawApiFetch so the harness default-projectId injection doesn't
-		// short-circuit the cwd-only resolution we're exercising.
-		const resp = await rawApiFetch("/api/goals", {
+		const cwdOnly = await rawApiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "GR-06 cwd-only", cwd: subCwd, worktree: false }),
 		});
+		expect(cwdOnly.status, "cwd-only requests must not infer project scope").toBe(400);
+		const errorBody = await cwdOnly.json().catch(() => ({}));
+		expect(String(errorBody.code ?? errorBody.error ?? "").toLowerCase()).toContain("project");
 
-		expect(resp.status, "cwd-only request should succeed when cwd is inside a registered project").toBe(201);
-		const created = await resp.json();
+		const explicit = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({ title: "GR-06 explicit", cwd: subCwd, projectId: projectB.id, worktree: false }),
+		});
+		expect(explicit.status, await explicit.clone().text()).toBe(201);
+		const created = await explicit.json();
 		goalsToCleanup.push(created.id);
-		expect(created.projectId, "goal routed to project B via cwd match").toBe(projectB.id);
+		expect(created.projectId).toBe(projectB.id);
 	});
 
 	// -----------------------------------------------------------

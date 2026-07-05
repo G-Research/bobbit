@@ -356,13 +356,24 @@ test.describe("Project drag reorder (browser E2E)", () => {
 
 	test("desktop affordances, pointer reorder persistence, live sync, cancel, and collapsed sidebar order", async ({ page }) => {
 		test.setTimeout(120_000);
-		await setHeadquartersVisible(false);
+		await setHeadquartersVisible(true);
 		const alpha = await createProjectFixture("desktop-alpha");
 		const beta = await createProjectFixture("desktop-beta");
 		const gamma = await createProjectFixture("desktop-gamma");
+		const savedOrderPayloads: string[][] = [];
+		await page.route("**/api/projects/order", async (route) => {
+			if (route.request().method() === "PUT") {
+				const payload = JSON.parse(route.request().postData() || "{}") as { projectIds?: unknown };
+				if (Array.isArray(payload.projectIds)) {
+					savedOrderPayloads.push(payload.projectIds.filter((id): id is string => typeof id === "string"));
+				}
+			}
+			await route.continue();
+		});
 
 		await openDesktop(page);
 		await waitForProjects(page, [alpha, beta, gamma]);
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "Headquarters remains visible while normal projects reorder").toBeVisible({ timeout: 20_000 });
 		await expectRenderedOrder(page, [alpha, beta, gamma]);
 		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
 
@@ -418,6 +429,17 @@ test.describe("Project drag reorder (browser E2E)", () => {
 
 			await expectRenderedOrder(page, [gamma, alpha, beta]);
 			await expectPersistedOrder([gamma, alpha, beta]);
+			await expect.poll(() => savedOrderPayloads.length, {
+				message: "normal project reorder should save through /api/projects/order",
+				timeout: 10_000,
+			}).toBeGreaterThan(0);
+			const savedOrderPayload = savedOrderPayloads[savedOrderPayloads.length - 1];
+			expect(savedOrderPayload).not.toContain(HEADQUARTERS_PROJECT_ID);
+			expect(savedOrderPayload.filter(id => [gamma.id, alpha.id, beta.id].includes(id))).toEqual([
+				gamma.id,
+				alpha.id,
+				beta.id,
+			]);
 			await expectNoProjectOrderFailureDialog(page);
 			await expectRenderedOrder(peer, [gamma, alpha, beta]);
 			await expectSessionContentsVisible(page, [alpha, beta, gamma]);

@@ -10,9 +10,10 @@ import type {
   McpToolResult,
   McpToolDocCache,
 } from "./mcp-types.js";
-import { bobbitConfigDir, bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitStateDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
+import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "../agent/project-registry.js";
 
 export interface McpDiscoveryScope {
   cwd: string;
@@ -481,7 +482,14 @@ export class McpManager {
 
     this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
+    // Always load the server-level (Headquarters) Bobbit MCP config — it is the
+    // global base layer visible to all scopes. For normal projects, additionally
+    // load the project-scoped config so project-local servers layer on top.
     this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
+    const projectId = this.discoveryScope.projectId;
+    if (projectId && !isHeadquartersProject(projectId) && projectId !== SYSTEM_PROJECT_ID) {
+      this._mergeConfigFile(merged, path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json"), "mcpServers");
+    }
 
     return merged;
   }

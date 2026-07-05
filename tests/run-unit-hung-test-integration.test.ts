@@ -1,0 +1,71 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
+
+// End-to-end contract test: this pins the ROOT-CAUSE fix — that node's
+// `--test-timeout`, wired exactly as scripts/run-unit.mjs wires it (paired tap +
+// hung-test-reporter, isolated file subprocesses), fails and NAMES a hung test
+// instead of letting it pin the runner until the wrapper's kill timeout. If a
+// future node upgrade changed this behavior, the unit gate could silently hang
+// again; this test would catch it.
+
+const reporterUrl = pathToFileURL(resolve("tests/helpers/hung-test-reporter.mjs")).href;
+
+const tmpDirs: string[] = [];
+after(() => {
+	for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+test("node --test-timeout fails and names a hung test file while the reporter records progress", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "run-unit-hang-int-"));
+	tmpDirs.push(dir);
+	const hangFixture = join(dir, "hangs.test.mjs");
+	const okFixture = join(dir, "passes.test.mjs");
+	const heartbeatFile = join(dir, "heartbeat.json");
+	writeFileSync(hangFixture, 'import { test } from "node:test";\ntest("never settles", async () => { await new Promise(() => {}); });\n');
+	writeFileSync(okFixture, 'import { test } from "node:test";\ntest("settles fast", () => {});\n');
+
+	// This test itself runs under `node --test`, which sets NODE_TEST_CONTEXT for
+	// its file subprocesses. Inheriting it would make the child `node --test`
+	// behave as a nested reporter child and exit early — strip it so the child is a
+	// clean top-level test run (the real run-unit.mjs never spawns from a test
+	// context, so this only affects the test harness).
+	const childEnv = { ...process.env, BOBBIT_UNIT_NODE_HEARTBEAT_FILE: heartbeatFile };
+	delete childEnv.NODE_TEST_CONTEXT;
+
+	const { code, output } = await new Promise<{ code: number | null; output: string }>((res) => {
+		const child = spawn(
+			process.execPath,
+			[
+				"--test",
+				"--test-force-exit",
+				"--test-timeout=700",
+				"--test-reporter=tap",
+				"--test-reporter-destination=stdout",
+				`--test-reporter=${reporterUrl}`,
+				"--test-reporter-destination=stderr",
+				hangFixture,
+				okFixture,
+			],
+			{ env: childEnv, stdio: ["ignore", "pipe", "pipe"] },
+		);
+		let output = "";
+		child.stdout.on("data", (c) => { output += c; });
+		child.stderr.on("data", (c) => { output += c; });
+		child.on("close", (code) => res({ code, output }));
+	});
+
+	assert.notEqual(code, 0, "a hung test must fail the run (non-zero exit)");
+	assert.match(output, /test timed out after 700ms/, "node reports the per-test timeout");
+	assert.match(output, /hangs\.test\.mjs/, "the failure names the hung test file");
+
+	// The paired heartbeat reporter must still have recorded progress (both files
+	// ran to completion once the hung test was force-timed-out).
+	assert.ok(existsSync(heartbeatFile), "the hung-test reporter wrote a heartbeat alongside the run");
+	const hb = JSON.parse(readFileSync(heartbeatFile, "utf8"));
+	assert.equal(hb.completedFiles, 2, "both fixture files completed after the timeout resolved the hang");
+});

@@ -9,7 +9,7 @@ Headquarters is the user-facing name for Bobbit's server-level workspace.
 
 - Display name: **Headquarters**.
 - Stable project id: `headquarters`.
-- Root directory: the server run directory.
+- Root/default cwd: the physical Headquarters directory (`BOBBIT_DIR`, legacy `BOBBIT_PI_DIR`, or `<server-run-dir>/.bobbit/headquarters`).
 - Icon: Lucide `TowerControl` everywhere a normal project would use the folder/project icon.
 - Mental model: **server-level == Headquarters**. Do not show both "System" and "Headquarters" as separate user-facing scopes.
 - Existing hidden `system` persistence may continue internally, but the UI should not expose it as a second global scope.
@@ -22,6 +22,14 @@ Use this language consistently:
 | Normal registered project | Project | Workspace, repo when not exact |
 | Headquarters visibility setting | Show Headquarters in project lists | Delete, archive, disable Headquarters |
 | Inheritance source | Inherited from Headquarters | Inherited from system/server |
+
+### Storage invariant exception: live server secrets
+
+Except for the live secrets below, all server-level state lives under the physical Headquarters directory (`state/` and `config/`): preferences, project registry, proposals, preview/runtime state, hidden `system` compatibility data, and Headquarters sessions/goals/staff. Normal projects, including a same-root project at the server run directory, keep their own `<project-root>/.bobbit/state` and `<project-root>/.bobbit/config`.
+
+Live server secrets are the explicit exception. The admin bearer `token`, TLS material (`tls/`), and sandbox-agent auth (`sandbox-agent-auth/`) live in `serverSecretsDir()`, outside any project root. `BOBBIT_SECRETS_DIR` overrides that directory.
+
+This prevents same-root privilege escalation: if the token lived under `<server-run-dir>/.bobbit/headquarters`, a normal project agent whose cwd is `<server-run-dir>` could read it and gain gateway-wide API access. Migration relocates pre-existing reachable secrets into `serverSecretsDir()` and fails closed if it cannot prove the secret was copied and removed safely.
 
 ## Icon placement
 
@@ -264,7 +272,7 @@ Do not promise full Headquarters goals until the no-git path is verified.
 - Goal dashboard/status should omit branch, worktree, and merge actions when no worktree exists.
 - Use explicit no-git copy where needed:
 
-> This Headquarters goal runs in the server directory without a git worktree. Git branch and merge actions are unavailable.
+> This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch and merge actions are unavailable.
 
 ### If Headquarters goals are not fully supported
 
@@ -319,7 +327,7 @@ Hidden means visually de-emphasized, not disabled.
 | Show CTA | `Show Headquarters` |
 | Config inheritance | `Inherited from Headquarters` |
 | Revert override | `Revert to Headquarters` |
-| No-git goal notice | `This Headquarters goal runs in the server directory without a git worktree. Git branch and merge actions are unavailable.` |
+| No-git goal notice | `This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch and merge actions are unavailable.` |
 
 ## Consistency rationale
 

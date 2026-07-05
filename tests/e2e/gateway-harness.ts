@@ -54,7 +54,10 @@ export interface GatewayInfo {
 	port: number;
 	baseURL: string;
 	wsBase: string;
+	/** Headquarters directory. In default browser harness mode this is also the server run directory. */
 	bobbitDir: string;
+	/** Server run directory passed to setProjectRoot(). Split-mode specs use this for same-root project coverage. */
+	serverRoot: string;
 	sessionManager?: any;
 	teamManager?: any;
 	preferencesStore?: any;
@@ -73,7 +76,12 @@ export interface GatewayInfo {
 }
 
 function readHarnessToken(info: GatewayInfo): string {
-	try { return readFileSync(join(info.bobbitDir, "state", "token"), "utf-8").trim(); } catch {}
+	// Live token lives under serverSecretsDir() (BOBBIT_SECRETS_DIR); fall back to
+	// the legacy Headquarters-state location for older fixtures.
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR || join(info.bobbitDir, ".secrets");
+	for (const p of [join(secretsDir, "token"), join(info.bobbitDir, "state", "token")]) {
+		try { return readFileSync(p, "utf-8").trim(); } catch {}
+	}
 	const token = process.env.BOBBIT_TOKEN?.trim();
 	if (token && token.length >= 64) return token;
 	throw new Error(`missing token for ${info.bobbitDir}`);
@@ -171,7 +179,14 @@ function _pushLog(line: string): void {
 	console.error = (...a: unknown[]) => { _pushLog(fmt("error", a)); origError(...a); };
 }
 
-export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; enableDevHarnessRestart: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, {
+	enableMcp: boolean;
+	enableWorktreePool: boolean;
+	enableDevHarnessRestart: boolean;
+	splitHeadquartersServerRoot: boolean;
+	sameRootProjectAtStartup: boolean;
+	gateway: GatewayInfo;
+}>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -183,7 +198,15 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
 	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart }, use, workerInfo) => {
+	// Worker-scoped option for Headquarters split coverage. Default false preserves
+	// legacy harness topology for broad suites; Headquarters-specific specs opt in.
+	splitHeadquartersServerRoot: [false, { scope: "worker", option: true }],
+
+	// Worker-scoped option that seeds a visible normal project whose root equals
+	// the server run directory before gateway boot.
+	sameRootProjectAtStartup: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -206,6 +229,16 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);
 		} catch { /* not all platforms / first-call edge cases — fall back */ }
+		let serverRoot = bobbitDir;
+		if (splitHeadquartersServerRoot) {
+			serverRoot = join(
+				E2E_TEMP_ROOT,
+				`.e2e-browser-server-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
+			);
+			rmSync(serverRoot, { recursive: true, force: true });
+			mkdirSync(serverRoot, { recursive: true });
+			try { serverRoot = realpathSync(serverRoot); } catch { /* keep fallback */ }
+		}
 		const defaultProjectRoot = harnessDefaultProjectRoot(bobbitDir);
 		rmSync(defaultProjectRoot, { recursive: true, force: true });
 		mkdirSync(defaultProjectRoot, { recursive: true });
@@ -214,9 +247,32 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// with scaffolding and produces spurious ENOENT — creating them up
 		// front makes the server's writes idempotent.
 		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
+		let initialProjectsJson = "[]";
+		if (sameRootProjectAtStartup) {
+			const projectId = "same-root-startup-project";
+			mkdirSync(join(serverRoot, ".bobbit", "state"), { recursive: true });
+			mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
+			writeFileSync(join(serverRoot, ".bobbit", "config", "project.yaml"), [
+				"name: Same Root Startup Project",
+				"same_root_browser_marker: startup-normal-project",
+				"",
+			].join("\n"));
+			writeFileSync(join(serverRoot, ".bobbit", "state", "sessions.json"), "[]");
+			initialProjectsJson = JSON.stringify([
+				{
+					id: projectId,
+					name: "Same Root Startup Project",
+					rootPath: serverRoot,
+					position: 0,
+					createdAt: Date.now(),
+					colorLight: "#0ea5e9",
+					colorDark: "#38bdf8",
+				},
+			], null, 2);
+		}
 		// Seed projects.json. The server no longer auto-registers a default project;
 		// we register one via REST after startup (see below) so existing tests keep working.
-		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
+		writeFileSync(join(bobbitDir, "state", "projects.json"), initialProjectsJson);
 		// Mark setup as complete so the setup wizard doesn't appear in tests
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		// Default the system-scope Subgoals (Experimental) flag ON for browser
@@ -246,6 +302,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			delete process.env.BOBBIT_DEV_HARNESS;
 		}
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+		// land in the developer's real OS home dir (serverSecretsDir() default).
+		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -300,8 +359,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			return null;
 		});
 
-		setProjectRoot(bobbitDir);
-		scaffoldBobbitDir(bobbitDir);
+		setProjectRoot(serverRoot);
+		scaffoldBobbitDir(serverRoot);
 		const token = loadOrCreateToken();
 
 		// Seed inline test workflows BEFORE the gateway boots — direct file
@@ -335,7 +394,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		const gatewayConfig = {
 			host: "127.0.0.1",
 			authToken: token,
-			defaultCwd: bobbitDir,
+			defaultCwd: serverRoot,
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
 			staticDir: STATIC_DIR,
@@ -397,6 +456,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			baseURL: `http://127.0.0.1:${port}`,
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
+			serverRoot,
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
 			preferencesStore: (gw as any).preferencesStore,
@@ -479,6 +539,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				console.warn(`[gateway-harness] cleanup deferred for ${defaultProjectRoot}: ${msg}`);
 			},
 		});
+		if (splitHeadquartersServerRoot) {
+			await awaitableRm(serverRoot, {
+				onFinalFailure: (err) => {
+					const msg = (err as Error)?.message ?? String(err);
+					console.warn(`[gateway-harness] cleanup deferred for ${serverRoot}: ${msg}`);
+				},
+			});
+		}
 		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
 		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],

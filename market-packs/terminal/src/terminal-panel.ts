@@ -48,6 +48,7 @@ type SessionState = {
 	terminalDisposerCount?: number;
 	followOutput: boolean;
 	followDetachedByTouch?: boolean;
+	followLockedWrites?: number;
 	replayHydrating?: boolean;
 	channel?: HostChannel;
 	disposers: Array<() => void>;
@@ -340,6 +341,7 @@ function cleanupChannelListeners(state: SessionState): void {
 function resetTerminalForAttach(state: SessionState): void {
 	ensureTerminalMounted(state);
 	state.followDetachedByTouch = false;
+	state.followLockedWrites = 0;
 	state.followOutput = true;
 	state.term?.reset();
 	state.term?.clear();
@@ -348,30 +350,7 @@ function resetTerminalForAttach(state: SessionState): void {
 
 function handleFrame(state: SessionState, frame: HostChannelFrame): void {
 	if (frame.kind === "text") {
-		// Capture follow-intent BEFORE writing: xterm only auto-advances the
-		// viewport on write() when it was pinned at the EXACT bottom
-		// (viewportY === baseY, no tolerance), while this panel's own
-		// "at bottom" check (SCROLL_BOTTOM_EPSILON in
-		// updateFollowOutputFromViewport) is looser — a real-world resting
-		// position from a touch or wheel scroll can land within that epsilon
-		// without being exactly pinned. When that happens, growing `baseY`
-		// without xterm advancing `viewportY` fires xterm's own scroll event,
-		// which (via the plain `term.onScroll` listener, with no
-		// promptPinnedCountsAsBottom opt) recomputes the now-larger gap as
-		// "detached" and flips `followOutput` to false — synchronously, before
-		// this write's completion callback below runs. Restoring the
-		// pre-write intent here (unless a real touch-drag away from bottom is
-		// in progress) lets reconcileActivePrompt's keepPromptVisible() still
-		// catch the viewport up to the new bottom instead of being preempted
-		// by that spurious detach.
-		const wasFollowing = state.followOutput !== false;
-		state.term?.write(frame.data, () => {
-			if (state.replayHydrating) keepPromptVisible(state);
-			else {
-				if (wasFollowing && !state.followDetachedByTouch) state.followOutput = true;
-				reconcileActivePrompt(state);
-			}
-		});
+		writeTerminalText(state, frame.data);
 		return;
 	}
 	const data = objectOf(frame.data);
@@ -473,6 +452,25 @@ function fitNow(state: SessionState): { cols: number; rows: number } | undefined
 	return currentTerminalSize(state);
 }
 
+function writeTerminalText(state: SessionState, data: string): void {
+	const term = state.term;
+	if (!term) return;
+	const shouldFollow = state.followOutput !== false;
+	// xterm emits scroll events while parsing large replay/output frames. Keep
+	// follow-output sticky until the write drains unless the user explicitly touch-scrolls away.
+	if (shouldFollow) state.followLockedWrites = (state.followLockedWrites ?? 0) + 1;
+	term.write(data, () => {
+		if (shouldFollow) state.followLockedWrites = Math.max(0, (state.followLockedWrites ?? 1) - 1);
+		if (shouldFollow && !state.followDetachedByTouch) {
+			state.followOutput = true;
+			reconcileActivePrompt(state);
+			return;
+		}
+		if (state.replayHydrating) keepPromptVisible(state);
+		else reconcileActivePrompt(state);
+	});
+}
+
 function reconcileActivePrompt(state: SessionState): void {
 	keepPromptVisible(state);
 	pinPromptToPanelBottom(state);
@@ -529,6 +527,10 @@ function updateFollowOutputFromViewport(state: SessionState, opts: { promptPinne
 	const buffer = term?.buffer?.active;
 	if (!term || !buffer) {
 		state.followDetachedByTouch = false;
+		state.followOutput = true;
+		return;
+	}
+	if ((state.followLockedWrites ?? 0) > 0 && !state.followDetachedByTouch) {
 		state.followOutput = true;
 		return;
 	}

@@ -120,7 +120,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const path = requestPath(input);
 	if (path === "/api/projects") return response({ projects: [{ ...PROJECT }] });
 	if (path === "/api/preferences") return response({});
-	if (path === "/api/sandbox-status") return response({ available: false, configured: false });
+	if (path.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	if (path === "/api/staff" || path.startsWith("/api/staff?") || path === "/api/staff/orphaned") return response({ staff: [] });
 	if (path.startsWith("/api/goals?") && path.includes("archived=true")) {
 		return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });

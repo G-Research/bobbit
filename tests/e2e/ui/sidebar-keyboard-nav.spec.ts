@@ -10,7 +10,6 @@ import {
 	createGoal,
 	deleteSession,
 	deleteGoal,
-	nonGitCwd,
 	waitForHealth,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
@@ -32,7 +31,7 @@ async function registerProject(name: string): Promise<{ id: string; rootPath: st
 	});
 	expect(resp.status).toBe(201);
 	const data = await resp.json();
-	return { id: data.id, rootPath, name };
+	return { id: data.id, rootPath: data.rootPath || rootPath, name };
 }
 
 async function pressCtrlArrow(
@@ -240,7 +239,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 			title: `KBNavGoalA-${stamp}`,
 			projectId: project.id,
 			worktree: false,
-			cwd: nonGitCwd(),
+			cwd: project.rootPath,
 		});
 		liveGoalId = goal.id;
 		createdGoalIds.push(goal.id);

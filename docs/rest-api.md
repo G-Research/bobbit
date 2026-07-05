@@ -390,7 +390,7 @@ Validation and errors:
 - `commit` is optional. When present, it must be a 4- to 40-character hexadecimal SHA that resolves to a commit object; otherwise the endpoint returns `400 { "error": "Invalid commit" }`.
 - `file` is required for commit-scoped diffs. File paths that are empty, contain traversal (`..`), are POSIX/Windows absolute paths, or start with a Windows drive prefix are rejected with `400 { "error": "Invalid file path" }`.
 - If the selected commit/file pair has no diff, the endpoint returns `404 { "error": "No diff found" }`.
-- No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE", goalId, projectId, branch: null, worktreePath: null }` for git-dependent goal endpoints instead of falling back to the server checkout. Headquarters responses use copy explaining that the goal runs in the server directory without a git worktree.
+- No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE", goalId, projectId, branch: null, worktreePath: null }` for git-dependent goal endpoints instead of falling back to the server checkout. Headquarters responses use copy explaining that the goal runs in the Headquarters directory without a git worktree.
 - Unknown sessions/goals and missing worktrees use the same not-found responses as the existing git-status and git-diff endpoints.
 
 Verification coverage should include API tests for changed-file response shapes, commit-scoped diffs, invalid commits, invalid paths, and rename records; UI/browser fixture coverage should assert that commit rows expand, file status labels render, the rich diff viewer opens, and clicking a committed file fetches `git-diff` with both `commit` and `file`. Run `npm run check` and `npm run test:unit` for this area; run `npm run test:e2e` when endpoint behavior changes.
@@ -601,7 +601,7 @@ Tool and tool-policy resolution follows the same Headquarters alias rule as role
 | `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
 | `GET` | `/api/slash-skills/details` | Full slash skill details including content, file paths, and `directories` array listing all scanned directories (default + custom) |
 
-Slash-skill discovery normalizes `projectId=headquarters` to server/Headquarters config while using the server run directory as the discovery cwd.
+Slash-skill discovery normalizes `projectId=headquarters` to server/Headquarters config while using the Headquarters directory (`headquartersDir()`) as the discovery cwd.
 
 ### Assistant Prompts
 
@@ -745,17 +745,14 @@ For the user-facing sidebar behavior, see [Sidebar project drag reorder](sidebar
 
 ### Project resolution contract
 
-`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Headquarters satisfies this contract like any other registered project: pass `projectId: "headquarters"`, or a `cwd` inside the server run directory while Headquarters is registered. Resolution order (no silent fallback to an arbitrary normal project):
-
-1. If `body.projectId` is a non-empty string matching a registered project → use it.
-2. Else if `body.cwd` is a non-empty string inside some registered project's `rootPath` → use that project.
-3. Else → **400 Bad Request**.
+`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require an explicit `projectId` in the request body. `cwd`-based project inference has been removed: `cwd` is an execution directory validated *after* project selection, not a way to identify the project. Headquarters satisfies this contract like any other registered project: pass `projectId: "headquarters"` (its `rootPath` is the Headquarters directory `<server-run-dir>/.bobbit/headquarters`, not the server run directory itself).
 
 | Condition | Status | Body |
 |---|---|---|
-| No `projectId`, no `cwd` | 400 | `{"error":"projectId required: no projectId was provided and cwd (\"\") does not match any registered project"}` |
-| `cwd` provided, no containing registered project | 400 | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
-| `projectId` provided, unknown id | 400 | `{"error":"Invalid project"}` |
+| Missing `projectId` | 400 | `{"error":"projectId required","code":"PROJECT_ID_REQUIRED"}` |
+| `projectId` provided, unknown id | 404 | `{"error":"Project not found","code":"PROJECT_NOT_FOUND"}` |
+
+The helper implementing this is `resolveProjectForRequest` in `src/server/agent/resolve-project.ts`.
 
 The helper implementing this is `resolveProjectForRequest` in `src/server/agent/resolve-project.ts`. Callers in new handlers should invoke it at the top of the handler and return the 400 directly when `ok === false`.
 
@@ -765,10 +762,10 @@ The helper implementing this is `resolveProjectForRequest` in `src/server/agent/
 
 | `assistantType` | Scope | Project resolution |
 |---|---|---|
-| _(unset)_, `goal` | project | Standard contract above — `projectId` or matching `cwd` required, else 400. |
+| _(unset)_, `goal` | project | Standard contract above — explicit `projectId` required, else 400. |
 | `project`, `project-scaffolding` | project (new) | The server creates a provisional project registration so the session persists under its own context. |
 | `role`, `tool` | server | `projectId` is **optional**. When omitted, the server anchors the session at the synthetic `system` project (see [internals.md — Synthetic system project](internals.md#synthetic-system-project)). When the caller _does_ pass a `projectId` (e.g. the Roles/Tools pages when scoped to a project), it is honoured normally. |
-| `staff` | project | Standard project resolution — `projectId` or `cwd` inside a registered project required, else 400. Staff agents are project-scoped permanent sessions (they own a `projectId`, a `staff.json` entry under that project, and runtime cwd derived from that project), so the creation assistant must land in a real project context. The UI's **New staff** button passes `projectId` + `cwd` directly from the project header. |
+| `staff` | project | Explicit `projectId` required, else 400. Staff agents are project-scoped permanent sessions (they own a `projectId`, a `staff.json` entry under that project, and runtime cwd derived from that project), so the creation assistant must land in a real project context. The UI's **New staff** button passes `projectId` directly from the project header. |
 
 Why: `role` / `tool` assistants edit server-level config (custom roles, custom tools) that does not belong to any project. Forcing them through the project-resolution gate would make `npx bobbit` from a non-project directory return 400 just for opening the Roles page's "+ New Role" button. The system-project anchor gives those sessions a valid persistence store without requiring the user to register a real project first. `staff` is excluded from the carve-out because a staff agent is not server-level config — it is a long-lived agent that operates inside a specific project — so anchoring its creation assistant at the system project would orphan the record and risk launching from the server/default cwd.
 

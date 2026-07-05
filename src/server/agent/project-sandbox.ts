@@ -29,6 +29,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
+import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
 const execFileAsync = promisify(execFileCb);
 const DOCKER_BIN = "docker";
@@ -344,6 +345,15 @@ export class ProjectSandbox {
 
 	/** Create or reconnect to the project container. */
 	async init(): Promise<void> {
+		// Defensive: Headquarters / hidden `system` scopes are data-only /
+		// no-worktree / no-git and must never be sandboxed. If an HQ ProjectSandbox
+		// is somehow constructed, refuse to run rather than clone the server-run-dir
+		// checkout or create a one-off `<projectDir>/.bobbit/{state,config}` layout.
+		// The authoritative gate lives in SandboxManager.ensureForProject; this is
+		// belt-and-suspenders.
+		if (this.options.projectId === HEADQUARTERS_PROJECT_ID || this.options.projectId === SYSTEM_PROJECT_ID) {
+			throw new Error(`[project-sandbox] refusing to initialize a sandbox for exempt project ${this.options.projectId} (Headquarters/system are never sandboxed)`);
+		}
 		this._readyPromise = new Promise((resolve, reject) => {
 			this._readyResolve = resolve;
 			this._readyReject = reject;

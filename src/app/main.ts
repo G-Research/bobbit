@@ -60,6 +60,7 @@ function clearDashboardState(): void {
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { bootMark } from "./boot-timing.js";
 
 // Boot-timing: this fires only after the entire eager module graph has been
@@ -280,9 +281,10 @@ async function restoreExtRoute(routeId: string | undefined, params: Record<strin
 		// Reconcile BOTH registries before resolving: a cold-load `#/ext/<routeId>`
 		// must find its owning route (entrypoints) AND its target panel must be
 		// registered (panels) or openPackPanel no-ops against an unregistered panel.
+		const projectId = state.activeProjectId || HEADQUARTERS_PROJECT_ID;
 		await Promise.all([
-			ep.reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
-			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
+			ep.reconcilePackEntrypointsForProject(projectId),
+			reconcilePackPanelsForProject(projectId),
 		]);
 		await evaluateActiveExtRoute();
 	} catch { /* non-fatal — a bad deep-link must never break boot */ }
@@ -687,13 +689,14 @@ async function initApp() {
 					// and connecting to a session re-drives this with the SESSION's
 					// project (session-manager) so a reload / deep-link into a session
 					// whose project differs from the active/default resolves correctly.
-					await reconcilePackRenderersForProject(state.activeProjectId ?? undefined);
+					const projectId = state.activeProjectId || HEADQUARTERS_PROJECT_ID;
+					await reconcilePackRenderersForProject(projectId);
 					// Slice B4 — same lifecycle for pack-contributed side panels.
 					const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
-					await reconcilePackPanelsForProject(state.activeProjectId ?? undefined);
+					await reconcilePackPanelsForProject(projectId);
 					// Slice C1 — same lifecycle for pack-contributed entrypoints + deep-link routes.
 					const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
-					await reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined);
+					await reconcilePackEntrypointsForProject(projectId);
 				} catch { /* non-fatal — built-in renderers/panels are unaffected */ }
 			})();
 

@@ -30,10 +30,10 @@ import path from "node:path";
 import type { RouteTable } from "./route-table.js";
 import type { CoreRouteCtx } from "./core-route-ctx.js";
 import { runPreflight } from "../agent/project-preflight.js";
-import { archiveProjectBobbitDir, ArchiveError } from "../agent/bobbit-archive.js";
+import { archiveProjectBobbitDir, ArchiveError, GATEWAY_OWNED_FILES } from "../agent/bobbit-archive.js";
 import { SymlinkProjectRootError, PreflightFailedError, ProjectOrderError, HEADQUARTERS_PROJECT_ID, assertNormalMutableProject } from "../agent/project-registry.js";
 import { getRepoRoot, isGitRepo, detectBaseRefFromRemote, resolveBaseRef, parseBaseRef } from "../skills/git.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { getProjectRoot, bobbitDir } from "../bobbit-dir.js";
 
 /**
  * Resolve the repo path `base-ref/detect` should inspect: the primary
@@ -123,8 +123,33 @@ async function handleProjectsArchiveBobbit(ctx: CoreRouteCtx): Promise<void> {
 	const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
 	const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
 	const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
+	// Preserve the Headquarters/server workspace directory when it lives
+	// inside this project's `.bobbit/`. The default is `.bobbit/headquarters`,
+	// but a `BOBBIT_DIR`/`BOBBIT_PI_DIR` override (e.g. `.bobbit/custom-hq`)
+	// moves it — archiving a normal same-root project's `.bobbit` must never
+	// move or delete server/HQ state, so preserve the ACTUAL directory by its
+	// real relative segment, not just the literal `headquarters/` name.
+	const rootBobbitDir = path.join(body.rootPath, ".bobbit");
+	const preserveEntries: string[] = [];
+	if (fs.existsSync(path.join(rootBobbitDir, "headquarters"))) preserveEntries.push("headquarters/");
 	try {
-		const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned });
+		const realRootBobbit = fs.realpathSync(rootBobbitDir);
+		const actualHqDir = bobbitDir();
+		if (fs.existsSync(actualHqDir)) {
+			const rel = path.relative(realRootBobbit, fs.realpathSync(actualHqDir));
+			if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+				const entry = rel.replace(/\\/g, "/") + "/";
+				if (!preserveEntries.includes(entry)) preserveEntries.push(entry);
+			}
+		}
+	} catch { /* .bobbit or HQ dir missing — fall back to default headquarters/ preservation */ }
+	const allowlistEntries = [
+		...(gatewayOwned ? GATEWAY_OWNED_FILES : []),
+		...preserveEntries,
+	];
+	const allowlist = allowlistEntries.length > 0 ? allowlistEntries : undefined;
+	try {
+		const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned, ...(allowlist ? { allowlist } : {}) });
 		json(result);
 	} catch (err: any) {
 		if (err instanceof ArchiveError) {

@@ -7,10 +7,12 @@
 import { test, expect } from "./in-process-harness.js";
 import {
 	createSession,
+	deleteSession,
 	connectWs,
 	waitForHealth,
 	apiFetch,
 	agentEndPredicate,
+	registerProject,
 	type WsMsg,
 } from "./e2e-setup.js";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
@@ -24,6 +26,7 @@ import { join } from "node:path";
 // the same worker triggered discovery against nonGitCwd() before this
 // beforeAll wrote SKILL.md, the cache would mask our skill until it expires.
 let skillCwd: string;
+let skillProjectId: string;
 
 test.beforeAll(async () => {
 	await waitForHealth();
@@ -39,6 +42,16 @@ description: E2E test skill for slash command expansion
 EXPANDED_SKILL_CONTENT_E2E_MARKER
 `,
 	);
+	const project = await registerProject({
+		name: `slash-skill-${Date.now()}`,
+		rootPath: skillCwd,
+		seedWorkflows: false,
+	});
+	skillProjectId = project.id;
+});
+
+test.afterAll(async () => {
+	if (skillProjectId) await apiFetch(`/api/projects/${skillProjectId}`, { method: "DELETE" }).catch(() => {});
 });
 
 /** Predicate for user message_end events. */
@@ -57,7 +70,7 @@ function extractText(msg: WsMsg): string {
 test.describe("Slash skill E2E", () => {
 	test.describe.configure({ mode: "serial" });
 	test("story 32: prefix slash skill expands to skill content @smoke", async () => {
-		const sessionId = await createSession({ cwd: skillCwd });
+		const sessionId = await createSession({ cwd: skillCwd, projectId: skillProjectId });
 		const conn = await connectWs(sessionId);
 
 		try {
@@ -82,6 +95,7 @@ test.describe("Slash skill E2E", () => {
 			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 
@@ -93,7 +107,7 @@ test.describe("Slash skill E2E", () => {
 		expect(existsSync(skillFile), `Skill file must exist at ${skillFile}`).toBe(true);
 
 		// Verify the session's cwd matches where the skill was created.
-		const sessionId = await createSession({ cwd: skillCwd });
+		const sessionId = await createSession({ cwd: skillCwd, projectId: skillProjectId });
 		const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
 		const session = await sessionResp.json();
 		expect(session.cwd).toBe(skillCwd);
@@ -127,6 +141,7 @@ test.describe("Slash skill E2E", () => {
 			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 });

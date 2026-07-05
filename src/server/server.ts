@@ -13,6 +13,7 @@ import {
 	bobbitStateDir,
 	bobbitConfigDir,
 	bobbitDir,
+	headquartersDir,
 	getProjectRoot,
 	globalAgentDir,
 	getAgentDirApiState,
@@ -35,7 +36,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
-import { validateToken } from "./auth/token.js";
+import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
@@ -135,7 +136,7 @@ import {
 } from "./agent/compaction-sidecar.js";
 import { readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
-import type { TaskState } from "./agent/task-store.js";
+import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
@@ -180,6 +181,7 @@ function formatWaitText(result: WaitResult): string {
 	}
 	return lines.join("\n");
 }
+
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -610,7 +612,7 @@ import {
 } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
-import { resolveProjectForRequest } from "./agent/resolve-project.js";
+import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
@@ -619,7 +621,7 @@ import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy 
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
-import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
@@ -1017,6 +1019,37 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	return clampThinkingLevelForModel(known, provider, modelId);
 }
 
+// ── Headquarters session git isolation ──
+// Headquarters sessions default their cwd to the Headquarters directory
+// (`<serverRunDir>/.bobbit/headquarters`), which is physically INSIDE the
+// server run directory's git checkout. Running git/gh from there would leak
+// the parent repo's state. Headquarters never uses worktrees or git lifecycle,
+// so every session git/PR endpoint must short-circuit with an unavailable
+// response instead of shelling out from cwd. See design "Headquarters
+// git/worktree behavior".
+//
+// Note: the equivalent GOAL-level helpers (deleteRemoteGoalBranches,
+// hasGoalGitWorktree, noWorktreeGoalGitMessage, goalGitUnavailablePayload,
+// isMissingRemoteRefDeleteError, isIgnorableRemoteBranchDeleteError) already
+// live in ./skills/git-gh.js on this branch (imported above) — only these
+// SESSION-level helpers are new from upstream's HQ Split (#932).
+const HEADQUARTERS_NO_WORKTREE_SESSION_GIT_MESSAGE = "This Headquarters session runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+function isHeadquartersSession(session: { projectId?: string }): boolean {
+	return session.projectId === HEADQUARTERS_PROJECT_ID;
+}
+
+function sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown> {
+	return {
+		error: `${action} is unavailable. ${HEADQUARTERS_NO_WORKTREE_SESSION_GIT_MESSAGE}`,
+		code: "GOAL_GIT_UNAVAILABLE",
+		sessionId: session.id,
+		projectId: session.projectId ?? HEADQUARTERS_PROJECT_ID,
+		branch: null,
+		worktreePath: null,
+	};
+}
+
 /** Cached Docker availability result to avoid running `docker info` per session creation */
 let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
 
@@ -1238,6 +1271,13 @@ export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervi
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
+	migrateLegacyHeadquartersDirectory({
+		serverRunDir: getProjectRoot(),
+		headquartersDir: bobbitDir(),
+		headquartersStateDir: stateDir,
+		headquartersConfigDir: configDir,
+		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
+	});
 	fs.mkdirSync(stateDir, { recursive: true });
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
@@ -1273,7 +1313,7 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	try {
-		projectRegistry.ensureHeadquartersProject(getProjectRoot(), { stateDir, configDir });
+		projectRegistry.ensureHeadquartersProject(bobbitDir(), { stateDir, configDir });
 	} catch (err) {
 		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
 	}
@@ -1445,20 +1485,20 @@ export function createGateway(config: GatewayConfig) {
 	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
 	// Sources are global to the server; the cache + sources file live under
 	// the server scope. Install/resolve derive market-pack roots from a per-
-	// scope `base` via scopePaths() (design §1.3.1). Server base is the
-	// project root (getProjectRoot()), global-user is the home dir, project is
+	// scope `base` via scopePaths() (design §1.3.1). Server/HQ base is the
+	// physical Headquarters directory, global-user is the home dir, project is
 	// each project's rootPath.
 	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
-		serverBase: getProjectRoot(),
+		serverBase: headquartersDir(),
 		globalUserBase: os.homedir(),
 	});
 	// Resolve the on-disk base + pack_order store for an install scope.
 	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
-		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
+		if (scope === "server") return { base: headquartersDir(), store: projectConfigStore };
 		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
 		// project. Headquarters is the user-facing server scope, so it intentionally
 		// has no independent project-scope market pack layer.
@@ -1752,7 +1792,10 @@ export function createGateway(config: GatewayConfig) {
 		gatewayInfo: () => {
 			try {
 				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				// Secrets moved to serverSecretsDir() after the S1 relocation; readToken()
+				// is relocation-aware (new location + legacy fallback), so a fresh install
+				// with no legacy token still resolves instead of ENOENT-ing.
+				const token = readToken() ?? "";
 				return { baseUrl, token };
 			} catch {
 				return { baseUrl: "", token: "" };
@@ -1937,8 +1980,7 @@ export function createGateway(config: GatewayConfig) {
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
 			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
 			if (!role) return undefined;
-			const mcpManager = sessionManager.getMcpManagerForSession(sessionId)
-				?? ((session?.projectId ?? ps?.projectId ?? session?.cwd ?? ps?.cwd) ? null : sessionManager.getMcpManager());
+			const mcpManager = sessionManager.getMcpManagerForSession(sessionId);
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
@@ -1951,7 +1993,7 @@ export function createGateway(config: GatewayConfig) {
 		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
 			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
-			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : null;
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
 		},
 	});
@@ -2677,7 +2719,7 @@ export function createGateway(config: GatewayConfig) {
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
 				try {
-					await sessionManager.initMcp(process.cwd());
+					await sessionManager.initMcp(headquartersDir());
 				} catch (err) {
 					console.error('[mcp] MCP init failed:', (err as Error).message);
 				}
@@ -2936,6 +2978,9 @@ export function createGateway(config: GatewayConfig) {
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
+							// Headquarters is no-worktree — never enter git discovery or the
+							// sweeper. It has no worktrees/branches to reclaim.
+							if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 							const repoNames = ctx.projectConfigStore.repoNames();
 							const components = ctx.projectConfigStore.getComponents();
 							const isMultiRepoProject = components.some(c => c.repo !== ".");
@@ -3012,7 +3057,11 @@ export function createGateway(config: GatewayConfig) {
 					// walks up to find the host repo and the pool would allocate
 					// `pool/_pool-*` branches there. See
 					// `tests/system-project-pool-leak.test.ts`.
-					const contexts = Array.from(projectContextManager.visible());
+					// Headquarters never participates in the worktree pool — filter it
+					// out before any git probe or pool init.
+					const contexts = Array.from(projectContextManager.visible()).filter(
+						(ctx) => ctx.project.id !== HEADQUARTERS_PROJECT_ID && ctx.project.kind !== "headquarters",
+					);
 					console.log(`[boot] pool init start (${contexts.length} projects)`);
 					await Promise.all(contexts.map(async (ctx) => {
 						const tStart = Date.now();
@@ -3382,13 +3431,9 @@ async function handleApiRoute(
 	};
 	const samePath = (a: string, b: string): boolean => canonicalPathForCompare(a) === canonicalPathForCompare(b);
 	const headquartersProject = (): RegisteredProject | undefined => projectRegistry.get(HEADQUARTERS_PROJECT_ID);
-	const bobbitOwnerPath = (): string => path.dirname(bobbitDir());
 	const isHeadquartersOwnedPath = (candidatePath: string): boolean => {
 		const hq = headquartersProject();
-		return (hq ? samePath(candidatePath, hq.rootPath) : samePath(candidatePath, getProjectRoot()))
-			|| samePath(candidatePath, getProjectRoot())
-			|| samePath(candidatePath, bobbitDir())
-			|| samePath(candidatePath, bobbitOwnerPath());
+		return !!hq && samePath(candidatePath, hq.rootPath);
 	};
 	const shouldShowHeadquartersInProjectLists = (): boolean => preferencesStore.get("showHeadquartersInProjectLists") !== false;
 	const listProjectsForApi = (): RegisteredProject[] => projectRegistry.list().filter(project => {
@@ -3396,6 +3441,12 @@ async function handleApiRoute(
 		if (isHeadquartersProject(project) && !shouldShowHeadquartersInProjectLists()) return false;
 		return true;
 	});
+	const writeProjectResolutionError = (resolved: Extract<ReturnType<typeof resolveProjectForRequest>, { ok: false }>): void => {
+		json({ error: resolved.error, code: resolved.code }, resolved.status);
+	};
+	const writeCwdValidationError = (validation: Extract<ReturnType<typeof validateExecutionCwd>, { ok: false }>): void => {
+		json({ error: validation.error, code: validation.code }, validation.status);
+	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
 		if (!(err instanceof SpecialProjectMutationError)) return false;
 		json({ error: err.message, code: err.code }, err.status);
@@ -3532,23 +3583,74 @@ async function handleApiRoute(
 		| { scope: "server"; store: RoleStore; manager: RoleManager }
 		| { scope: "project"; store: RoleStore; projectId: string };
 
-	function roleMutationProjectId(value: unknown): string | undefined {
+	/**
+	 * The hidden internal `system` project is compatibility-only and never a
+	 * user-facing config scope. Role/tool config mutations that arrive scoped to
+	 * `system` — e.g. from server-scope role/tool assistant proposals whose
+	 * session resolves to the hidden system project — must instead resolve to
+	 * Headquarters (server/global) scope so the config lands in the visible
+	 * Headquarters store, not the hidden system role/tool store.
+	 */
+	function aliasSystemToHeadquartersScope(projectId: string | undefined): string | undefined {
+		return projectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : projectId;
+	}
+
+	function rawProjectId(value: unknown): string | undefined {
 		if (typeof value !== "string") return undefined;
 		const trimmed = value.trim();
-		return trimmed ? trimmed : undefined;
+		return trimmed || undefined;
+	}
+
+	function roleMutationProjectId(value: unknown): string | undefined {
+		const trimmed = rawProjectId(value);
+		return trimmed ? aliasSystemToHeadquartersScope(trimmed) : undefined;
+	}
+
+	type RequiredConfigProjectScope = {
+		ok: true;
+		requestedProjectId: string;
+		effectiveProjectId?: string;
+		context?: ProjectContext;
+	};
+	type RequiredConfigProjectScopeError = {
+		ok: false;
+		status: 400 | 404;
+		error: string;
+		code: string;
+	};
+
+	function resolveRequiredConfigProjectScope(projectIdValue: unknown, opts: { aliasSystem?: boolean } = {}): RequiredConfigProjectScope | RequiredConfigProjectScopeError {
+		const requestedProjectId = opts.aliasSystem ? roleMutationProjectId(projectIdValue) : rawProjectId(projectIdValue);
+		if (!requestedProjectId) {
+			return { ok: false, status: 400, error: "projectId required", code: "PROJECT_ID_REQUIRED" };
+		}
+		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
+		if (!effectiveProjectId) {
+			return { ok: true, requestedProjectId };
+		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: effectiveProjectId });
+		if (!resolved.ok) return resolved;
+		const context = projectContextManager.getOrCreate(effectiveProjectId);
+		if (!context) {
+			return { ok: false, status: 404, error: `Project not found: ${effectiveProjectId}`, code: "PROJECT_NOT_FOUND" };
+		}
+		return { ok: true, requestedProjectId, effectiveProjectId, context };
+	}
+
+	function writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void {
+		json({ error: error.error, code: error.code }, error.status);
 	}
 
 	/**
 	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
 	 * project ids still resolve to that project's role store.
 	 */
-	function resolveRoleMutationTarget(rawProjectId: unknown): RoleMutationTarget | null {
-		const requestedProjectId = roleMutationProjectId(rawProjectId);
-		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
-		if (!effectiveProjectId) return { scope: "server", store: serverRoleStore, manager: roleManager };
-		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
-		if (!ctx) return null;
-		return { scope: "project", store: ctx.roleStore, projectId: effectiveProjectId };
+	function resolveRoleMutationTarget(rawProjectId: unknown): { ok: true; target: RoleMutationTarget } | RequiredConfigProjectScopeError {
+		const resolved = resolveRequiredConfigProjectScope(rawProjectId, { aliasSystem: true });
+		if (!resolved.ok) return resolved;
+		if (!resolved.effectiveProjectId) return { ok: true, target: { scope: "server", store: serverRoleStore, manager: roleManager } };
+		if (!resolved.context) return { ok: false, status: 404, error: `Project not found: ${resolved.effectiveProjectId}`, code: "PROJECT_NOT_FOUND" };
+		return { ok: true, target: { scope: "project", store: resolved.context.roleStore, projectId: resolved.effectiveProjectId } };
 	}
 
 	/**
@@ -3558,12 +3660,15 @@ async function handleApiRoute(
 	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
 	 */
 	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			return headquartersProject()?.rootPath ?? bobbitDir();
+		}
 		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		if (effectiveProjectId && projectContextManager) {
 			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
 			if (ctx) return ctx.project.rootPath;
 		}
-		return projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : cwd;
+		return cwd;
 	}
 
 	/**
@@ -3575,8 +3680,9 @@ async function handleApiRoute(
 	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
 		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
 		const ctx = effectiveProjectId && projectContextManager ? projectContextManager.getOrCreate(effectiveProjectId) : undefined;
+		const hqRoot = headquartersProject()?.rootPath ?? bobbitDir();
 		return {
-			serverBase: getProjectRoot(),
+			serverBase: hqRoot,
 			globalUserBase: os.homedir(),
 			projectBase: ctx?.project.rootPath ?? "",
 			serverConfigStore: projectConfigStore,
@@ -3630,14 +3736,27 @@ async function handleApiRoute(
 		return tm;
 	}
 
-	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
-	function getTaskManagerForTask(taskId: string): TaskManager {
-		// Search all project contexts for the task
+	/** Get a task and its manager by looking up which project store owns it. */
+	function getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined {
 		for (const ctx of projectContextManager.all()) {
 			const task = ctx.taskStore.get(taskId);
-			if (task) return getTaskManagerForGoal(task.goalId);
+			if (task) return { task, taskManager: getTaskManagerForGoal(task.goalId), projectId: ctx.project.id };
 		}
+		return undefined;
+	}
+
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
+	function getTaskManagerForTask(taskId: string): TaskManager {
+		const record = getTaskRecordForTask(taskId);
+		if (record) return record.taskManager;
 		throw new Error(`Task "${taskId}" not found in any project`);
+	}
+
+	function sandboxCanAccessTask(task: PersistedTask): boolean {
+		if (!sandboxScope) return true;
+		if (sandboxScope.goalIds.has(task.goalId)) return true;
+		json({ error: "Forbidden: task is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+		return false;
 	}
 
 	// GET /api/harness-status — report whether the dev restart harness is active
@@ -3879,10 +3998,14 @@ async function handleApiRoute(
 
 	// GET /api/sandbox-status
 	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
-		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
+		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
+		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
-		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
 		json({ ...status, configured });
 		return;
@@ -3890,8 +4013,15 @@ async function handleApiRoute(
 
 	// POST /api/sandbox-image/build
 	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const body = await readBody(req).catch(() => null);
+		const projectId = (body && typeof body === "object" && typeof (body as any).projectId === "string")
+			? (body as any).projectId
+			: url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
+		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
+		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
 			return;
@@ -3922,6 +4052,12 @@ async function handleApiRoute(
 	// GET /api/projects/:id/structured, POST /api/projects/:id/rescan-repos
 	// moved to the core route registry (STR-01 cohort 1) — see
 	// src/server/routes/projects-routes.ts and docs/design/route-registry.md.
+	// Upstream's HQ Split (#932) added Headquarters-aware preflight relabeling
+	// and archive-bobbit preservation of a physically-nested Headquarters
+	// directory (custom BOBBIT_DIR case) to these handlers; both were ported
+	// into projects-routes.ts's handleProjectsPreflight/handleProjectsArchiveBobbit
+	// rather than reintroduced here. See docs/design/route-registry.md and
+	// tests/e2e/headquarters-api.spec.ts / tests/headquarters-server-scope-guards.test.ts.
 
 	// POST /api/create-directory
 	if (url.pathname === "/api/create-directory" && req.method === "POST") {
@@ -4631,17 +4767,48 @@ async function handleApiRoute(
 
 		// ── Delegate session creation ──
 		if (body?.delegateOf && body?.instructions) {
+			const parentId = typeof body.delegateOf === "string" ? body.delegateOf.trim() : "";
+			if (!parentId) {
+				json({ error: "delegateOf must reference a parent session" }, 400);
+				return;
+			}
 			// Sandbox guard: delegate parent must be own session or registered child
 			if (sandboxScope) {
-				const parentId = body.delegateOf;
 				if (!sandboxScope.sessionIds.has(parentId)) {
 					json({ error: "Forbidden: delegate parent must be own session" }, 403);
 					return;
 				}
 			}
+			const parentSession = sessionManager.getSession(parentId);
+			const parentPersisted = parentSession ? undefined : sessionManager.getPersistedSession(parentId);
+			if (!parentSession && !parentPersisted) {
+				json({ error: "Delegate parent session not found" }, 404);
+				return;
+			}
+			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
+			if (!parentProjectId) {
+				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
+				return;
+			}
+			const explicitDelegateProjectId = typeof body?.projectId === "string" && body.projectId.trim().length > 0
+				? body.projectId.trim()
+				: undefined;
+			if (explicitDelegateProjectId && explicitDelegateProjectId !== parentProjectId) {
+				json({ error: "projectId must match the delegate parent session's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
+				return;
+			}
+			const parentProject = resolveProjectForRequest(projectRegistry, { projectId: parentProjectId }, {
+				allowSystem: parentProjectId === SYSTEM_PROJECT_ID,
+			});
+			if (!parentProject.ok) { writeProjectResolutionError(parentProject); return; }
+			const requestedCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
+				? body.cwd.trim()
+				: undefined;
+			const cwd = requestedCwd ?? parentSession?.cwd ?? parentPersisted?.cwd ?? parentProject.project.rootPath;
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, parentProjectId, cwd, { kind: "session", sessionId: parentId });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 			try {
-				const cwd = body.cwd || config.defaultCwd;
-				const session = await sessionManager.createDelegateSession(body.delegateOf, {
+				const session = await sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
@@ -4655,6 +4822,7 @@ async function handleApiRoute(
 					id: session.id,
 					cwd: session.cwd,
 					status: session.status,
+					projectId: session.projectId,
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
@@ -4674,21 +4842,24 @@ async function handleApiRoute(
 			else if (body?.toolAssistant) assistantType = "tool";
 		}
 
-		// If creating under a goal, use the goal's cwd as default
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
+		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		const explicitProjectId = typeof body?.projectId === "string" && body.projectId.trim().length > 0
+			? body.projectId.trim()
+			: undefined;
+
+		// If creating under a goal, use the goal's cwd/project as the default.
+		// NOTE: the goal's auto-transition to in-progress is deferred until AFTER
+		// the sandbox ownership check below — a sandbox-scoped token must not be
+		// able to mutate another project's goal state before we've verified the
+		// goal is inside its scope.
+		let cwd = explicitCwd || config.defaultCwd;
+		let goalForSession: PersistedGoal | undefined;
 		if (goalId) {
-			const goal = getGoalAcrossProjects(goalId);
-			if (goal) {
-				cwd = body?.cwd || goal.cwd;
-				// Auto-transition goal to in-progress when first session starts
-				if (goal.state === "todo") {
-					await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
-				}
+			goalForSession = getGoalAcrossProjects(goalId);
+			if (goalForSession) {
+				cwd = explicitCwd || goalForSession.cwd;
 			}
 		}
 
@@ -4722,78 +4893,79 @@ async function handleApiRoute(
 		// ── Re-attempt support ──
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
 
-		// ── Sandbox validation ──
-		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape
+		// ── Sandbox request flag ──
+		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape.
+		// Config/Docker preflight is deferred until after projectId resolution so it
+		// uses the selected ProjectContext, not server/Headquarters config.
 		let sandboxed = body?.sandboxed === true;
 		if (sandboxScope) sandboxed = true;
-		if (sandboxed) {
-			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-			if (sandboxConfig !== "docker") {
-				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+
+		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
+		// Role/Tool assistants can deliberately use the hidden system project when
+		// no projectId is supplied. All normal user/work sessions need an explicit
+		// projectId or a persisted goal/reattempt source project.
+		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool";
+
+		// ── Sandbox scope ownership enforcement ──
+		// Authorized delegate creation (body.delegateOf + instructions) is handled
+		// and returned earlier. Any OTHER session creation reaching here under a
+		// sandbox-scoped token must stay strictly inside that token's project/goal
+		// scope. Enforce this BEFORE resolving the project or mutating any goal so a
+		// compromised container cannot escape its scope, promote assistant/server
+		// scope, or flip another project's goal to in-progress. Violations are 403.
+		if (sandboxScope) {
+			if (assistantType) {
+				json({ error: "Forbidden: sandbox tokens cannot create assistant or server-scope sessions", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
 				return;
 			}
-			// Skip Docker check if sandbox manager has ready containers.
-			// Otherwise use a cached result to avoid running `docker info` on every session creation.
-			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
-			if (!hasReadyContainer) {
-				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
-					const dockerStatus = await checkDockerAvailability();
-					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
-				}
-				if (!_dockerAvailCache.available) {
-					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
-					return;
-				}
+			if (!explicitProjectId || explicitProjectId !== sandboxScope.projectId) {
+				json({ error: "Forbidden: sandbox session projectId must match the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+			if (goalId && !sandboxScope.goalIds.has(goalId)) {
+				json({ error: "Forbidden: goal is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
+			}
+			if (reattemptGoalId && !sandboxScope.goalIds.has(reattemptGoalId)) {
+				json({ error: "Forbidden: reattempt goal is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
+				return;
 			}
 		}
 
-		// Auto-detect projectId from cwd if not explicitly provided.
-		// Project assistant sessions (assistantType "project" or "project-scaffolding") are
-		// setting up a NEW project — they get a provisional project registration so sessions
-		// persist under their own project context (survives page refresh).
-		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
-		// Role/Tool assistants edit server-scope config and do not require a
-		// project. When the client supplies a projectId we still attach to it (the
-		// Roles page can be scoped to a project); otherwise we skip project
-		// resolution entirely so `npx bobbit` in a non-project directory works.
-		// Staff assistants are project-scoped — they must resolve a project the
-		// same way `goal` assistants do (see the surface-staff-in-sessions design).
-		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool";
-		let resolvedProjectId = body?.projectId as string | undefined;
+		let resolvedProjectId = explicitProjectId;
+		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
+		let cwdSource: CwdOwnershipSource = { kind: "user-input" };
 
-		// If re-attempting a goal, inherit cwd and projectId from the original goal
-		if (reattemptGoalId && !body?.cwd) {
+		const goalProjectId = goalForSession?.projectId
+			?? (goalId ? projectContextManager.getContextForGoal(goalId)?.project.id : undefined);
+		if (goalProjectId) {
+			if (resolvedProjectId && resolvedProjectId !== goalProjectId) {
+				json({ error: "projectId must match the goal's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
+				return;
+			}
+			resolvedProjectId = goalProjectId;
+			if (!explicitCwd) cwdSource = { kind: "goal", goalId };
+		}
+
+		// If re-attempting a goal, inherit cwd and projectId from the original goal.
+		if (reattemptGoalId) {
 			const origGoal = getGoalAcrossProjects(reattemptGoalId);
 			if (origGoal) {
-				cwd = origGoal.cwd || cwd;
-				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+				if (!explicitCwd) cwd = origGoal.cwd || cwd;
+				const origProjectId = origGoal.projectId ?? projectContextManager.getContextForGoal(reattemptGoalId)?.project.id;
+				if (origProjectId) {
+					if (resolvedProjectId && resolvedProjectId !== origProjectId) {
+						json({ error: "projectId must match the reattempt goal's projectId", code: "PROJECT_ID_MISMATCH" }, 422);
+						return;
+					}
+					resolvedProjectId = origProjectId;
+					if (!explicitCwd) cwdSource = { kind: "goal", goalId: reattemptGoalId };
+				}
 			}
 		}
 
-		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
-		// or a project whose rootPath is gone). spawn(process.execPath, { cwd }) on Windows
-		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
-		// Fall back to the project rootPath when we have a resolved project to anchor the
-		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
-		// will reject a bogus cwd with the canonical 400 rather than silently rewriting
-		// it to defaultCwd (which would mask user error and match an unrelated project).
-		if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
-			const staleCwd = cwd;
-			const proj = projectRegistry.get(resolvedProjectId);
-			let fallback: string | undefined;
-			if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
-			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
-			if (fallback) {
-				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
-				cwd = fallback;
-			} else {
-				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
-				return;
-			}
-		}
-
-		// For project assistants, register a provisional project at the target cwd
+		// For project assistants, register a provisional project at the target cwd.
 		if (isProjectAssistant && cwd && !resolvedProjectId) {
 			let provisionalProject: RegisteredProject;
 			try {
@@ -4814,18 +4986,100 @@ async function handleApiRoute(
 			}
 		}
 
-		// Project must be resolvable explicitly or from cwd — no silent default fallback.
-		// (Provisional-project handling above may already have set resolvedProjectId;
-		// if so, skip the resolver.)
-		// Server-scope assistants (role/tool/staff) without an explicit projectId
-		// anchor at the synthetic system project so they have a valid persistence
-		// store without forcing the user to register a real project.
 		if (!resolvedProjectId && isServerScopeAssistant) {
 			resolvedProjectId = SYSTEM_PROJECT_ID;
-		} else if (!resolvedProjectId) {
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			resolvedProjectId = resolved.projectId;
+		}
+		if (!resolvedProjectId) {
+			const missing = resolveProjectForRequest(projectRegistry, { projectId: undefined });
+			if (!missing.ok) writeProjectResolutionError(missing);
+			return;
+		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: resolvedProjectId }, {
+			allowSystem: isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID,
+		});
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		resolvedProjectId = resolved.projectId;
+		resolvedProject = resolved.project;
+		const resolvedProjectContext = projectContextManager.getOrCreate(resolvedProjectId);
+
+		// Server-scope assistants (role/tool) resolve to the hidden `system`
+		// project, which has no user-facing root. They must operate strictly
+		// under the Headquarters workspace directory (bobbitDir()), which is a
+		// distinct location from the server run dir / system project rootPath.
+		const isSystemScopeAssistant = isServerScopeAssistant && resolvedProjectId === SYSTEM_PROJECT_ID;
+		if (!explicitCwd && !goalForSession && !reattemptGoalId && !isSystemScopeAssistant) {
+			cwd = resolvedProject.rootPath;
+		} else if (isSystemScopeAssistant && !goalForSession && !reattemptGoalId) {
+			// Server-scope assistants (role/tool) must always create successfully
+			// regardless of the caller-supplied cwd — they operate strictly under
+			// the Headquarters workspace directory (bobbitDir()). Coerce the cwd:
+			// honor an explicit cwd only when it is inside the Headquarters
+			// directory (validated against the Headquarters project scope, whose
+			// rootPath IS bobbitDir()); otherwise force it to the Headquarters
+			// directory. Never reject a server-scope assistant over its cwd.
+			const hqDir = bobbitDir();
+			if (explicitCwd) {
+				const hqCwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, HEADQUARTERS_PROJECT_ID, explicitCwd, { kind: "user-input" });
+				cwd = hqCwdValidation.ok ? explicitCwd : hqDir;
+			} else {
+				cwd = hqDir;
+			}
+		}
+
+		// System-scope assistants were already constrained to the Headquarters
+		// directory above; all other scopes must validate the resolved cwd
+		// against the resolved project scope (never bypassed).
+		const shouldValidateCwd = !isSystemScopeAssistant;
+		if (shouldValidateCwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+		}
+
+		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted).
+		// Only server-selected/persisted cwd values may fall back; explicit user cwd
+		// must fail rather than being silently replaced with the project root.
+		if (cwd && !fs.existsSync(cwd)) {
+			const staleCwd = cwd;
+			if (explicitCwd) {
+				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+				return;
+			}
+			let fallback: string | undefined;
+			if (fs.existsSync(resolvedProject.rootPath)) fallback = resolvedProject.rootPath;
+			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
+			if (fallback) {
+				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
+				cwd = fallback;
+				if (shouldValidateCwd) {
+					const fallbackValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+					if (!fallbackValidation.ok) { writeCwdValidationError(fallbackValidation); return; }
+				}
+			} else {
+				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+				return;
+			}
+		}
+
+		// ── Sandbox validation ──
+		if (sandboxed) {
+			const sandboxConfig = resolvedProjectContext?.projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig !== "docker") {
+				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+				return;
+			}
+			// Skip Docker check if sandbox manager has ready containers.
+			// Otherwise use a cached result to avoid running `docker info` on every session creation.
+			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
+			if (!hasReadyContainer) {
+				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
+					const dockerStatus = await checkDockerAvailability();
+					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
+				}
+				if (!_dockerAvailCache.available) {
+					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
+					return;
+				}
+			}
 		}
 
 		if (roleId && typeof roleId === "string") {
@@ -4843,7 +5097,9 @@ async function handleApiRoute(
 		// even though it isn't itself a git repo. Without this, the `isGitRepo(cwd)`
 		// check below returns false for the container directory and sessions would
 		// run with no worktree at all.
-		if (wantWorktree) {
+		// Headquarters is no-worktree: skip the git probe entirely so no worktree
+		// is ever resolved for HQ sessions (worktreeOpts stays undefined).
+		if (wantWorktree && resolvedProjectId !== HEADQUARTERS_PROJECT_ID) {
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
@@ -4867,6 +5123,12 @@ async function handleApiRoute(
 		if (sandboxed && !goalId && !assistantType) {
 			const shortId = randomUUID().slice(0, 8);
 			autoSandboxBranch = `session/s-${shortId}`;
+		}
+
+		// Auto-transition the goal to in-progress only after all request
+		// validation has passed and immediately before creating the session.
+		if (goalId && goalForSession && goalForSession.state === "todo") {
+			await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
 		}
 
 		try {
@@ -4896,7 +5158,7 @@ async function handleApiRoute(
 				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
-			// Store projectId on the session if resolved (explicit or auto-detected).
+			// Store projectId on the session if resolved from an explicit or persisted scope.
 			// Project assistant sessions keep their provisional projectId so they
 			// persist under the provisional project's store and appear in the sidebar.
 			if (resolvedProjectId) {
@@ -4907,6 +5169,7 @@ async function handleApiRoute(
 				id: session.id,
 				cwd: session.cwd,
 				status: session.status,
+				projectId: session.projectId ?? resolvedProjectId,
 				goalId: session.goalId,
 				assistantType: session.assistantType,
 				// Legacy boolean fields for backward compat
@@ -5157,12 +5420,10 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
 		const title = body?.title;
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
+		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		let cwd = explicitCwd || config.defaultCwd;
 		const spec = body?.spec || "";
 		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
@@ -5191,12 +5452,12 @@ async function handleApiRoute(
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
 			}
-			// Resolve target project — explicit projectId or cwd-match. No fallback.
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const resolved = resolveProjectForRequest(projectRegistry, { projectId: body.projectId });
+			if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 			const targetProjectId = resolved.projectId;
-			// If caller passed a projectId but no cwd, use the project's rootPath.
-			if (!body?.cwd) cwd = resolved.project.rootPath;
+			if (!explicitCwd) cwd = resolved.project.rootPath;
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, targetProjectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -5432,7 +5693,7 @@ async function handleApiRoute(
 				metadata,
 				worktree: explicitWorktree,
 			});
-			// Set projectId (explicit or auto-detected from cwd)
+			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
 				goal.projectId = targetProjectId;
@@ -5752,6 +6013,19 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const prevSpec = putGoal?.spec ?? "";
+			// The goal id already fixes the project scope; a caller-supplied cwd
+			// update must still be constrained to that scope (Headquarters dir for
+			// HQ goals, or the normal project root / an owned worktree for normal
+			// goals). Reuse the ownership-aware validator used for session/team
+			// creation rather than forwarding body.cwd unchecked.
+			if (typeof body.cwd === "string" && body.cwd.trim().length > 0) {
+				const goalProjectId = putGoal?.projectId
+					?? projectContextManager.getContextForGoal(id)?.project.id;
+				if (goalProjectId) {
+					const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, goalProjectId, body.cwd, { kind: "goal", goalId: id });
+					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+				}
+			}
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -5818,8 +6092,14 @@ async function handleApiRoute(
 
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveTools(projectId);
+		// Require an explicit projectId. First-party UI/test helpers pass
+		// `headquarters` for the server scope; normalize it before any downstream
+		// config/toolManager/marketplace lookup so the synthetic HQ id never leaks
+		// into project-context calls.
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const effectiveConfigProjectId = projectScope.effectiveProjectId;
+		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
 		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
 		// the renderer/action endpoints + /api/ext/contributions use) so a tool
@@ -5829,7 +6109,7 @@ async function handleApiRoute(
 		// pack-scoped contribution field.
 		const toolPackTm = resolveActionToolManager(
 			toolManager,
-			projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined,
+			projectScope.context?.toolManager,
 		);
 		const tools: Array<Record<string, unknown>> = resolved.map(r => {
 			const out = withOrigin(r as any);
@@ -5842,14 +6122,14 @@ async function handleApiRoute(
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId }))) {
+			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: effectiveConfigProjectId }))) {
 				if (!resolvedNames.has(t.name)) {
 					tools.push({ ...t, origin: t.origin ?? "mcp" });
 				}
 			}
 		}
-		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId)));
-		const toolDiagnostics = toolDiagnosticsForProject(projectId);
+		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId)));
+		const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
 		attachToolDiagnostics(tools, toolDiagnostics);
 		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
 		return;
@@ -5861,22 +6141,24 @@ async function handleApiRoute(
 		const name = decodeURIComponent(toolMatch[1]);
 
 		if (req.method === "GET") {
-			// Resolve via the project's toolManager when a projectId is supplied so
-			// project-scope market-pack tools are visible (their `tools/` roots are
-			// wired into that context's manager — finding #1). Falls back to the
-			// server-level manager (server + global-user market packs + builtins).
-			const projectId = url.searchParams.get("projectId") || undefined;
-			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
-			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId));
+			// Resolve via the selected project's toolManager so project-scope
+			// market-pack tools are visible. Headquarters normalizes to the
+			// server/global scope; missing or unknown projectId never falls back.
+			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const effectiveConfigProjectId = projectScope.effectiveProjectId;
+			const tm = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
+			const fallbackTm = fallbackToolManagerForConfig(projectScope.context?.configDir ?? bobbitConfigDir());
+			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));
 			const piTool = piRows.find((row) => row.name === name);
-			const tool = tm.getToolByName(name);
+			const tool = tm.getToolByName(name) ?? fallbackTm?.getToolByName(name);
 			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
 			// Merge in cascade origin metadata so the detail payload carries the same
 			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
 			// Without this, the tools edit page replaces the cascade list item with the
 			// raw detail and a market-pack tool loses its origin badge + read-only state.
-			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
-			const toolDiagnostics = toolDiagnosticsForProject(projectId);
+			const cascadeEntry = configCascade.resolveTools(effectiveConfigProjectId).find(r => r.item.name === name);
+			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
 			if (cascadeEntry && tool) {
 				const withMeta = withOrigin(cascadeEntry as any);
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
@@ -5902,17 +6184,35 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = toolManager.updateToolMetadata(name, {
+			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
+			const targetConfigDir = projectScope.context?.configDir ?? bobbitConfigDir();
+			const updates = {
 				description: body.description,
 				group: body.group,
 				docs: body.docs,
 				detail_docs: body.detail_docs,
 				grantPolicy: body.grantPolicy,
-			});
+			};
+			const ok = targetToolManager.updateToolMetadata(name, updates)
+				|| (fallbackToolManagerForConfig(targetConfigDir)?.updateToolMetadata(name, updates) ?? false);
 			if (!ok) { json({ error: "Tool not found" }, 404); return; }
 			json({ ok: true });
 			return;
 		}
+	}
+
+	function runtimeBuiltinToolsDir(): string {
+		const moduleDefaults = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		if (fs.existsSync(moduleDefaults)) return moduleDefaults;
+		return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "defaults", "tools");
+	}
+
+	function fallbackToolManagerForConfig(configDirForScope: string): ToolManager | null {
+		const builtinToolsDir = runtimeBuiltinToolsDir();
+		if (!fs.existsSync(builtinToolsDir)) return null;
+		return new ToolManager(configDirForScope, builtinToolsDir);
 	}
 
 	// Shared helper: find which group subdirectory contains a tool by scanning YAML files.
@@ -5954,14 +6254,14 @@ async function handleApiRoute(
 	const rendererMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/renderer$/);
 	if (rendererMatch && req.method === "GET") {
 		const tool = decodeURIComponent(rendererMatch[1]);
-		// Resolve through the PROJECT-scoped tool manager when a projectId is given
-		// (design §4b — same `?? toolManager` fallback as GET /api/tools): a pack
-		// installed at PROJECT scope, or one that shadows a same-named global tool,
-		// must serve the PROJECT winner — never the split-brain server-level one.
-		const rendererProjectId = url.searchParams.get("projectId") || undefined;
+		// Require the same explicit config project scope as GET /api/tools. Headquarters
+		// aliases the server/global layer; unknown normal projects fail before any
+		// server-scope fallback can leak a different pack renderer.
+		const rendererScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!rendererScope.ok) { writeConfigProjectScopeError(rendererScope); return; }
 		const rendererTm = resolveActionToolManager(
 			toolManager,
-			rendererProjectId ? projectContextManager.getOrCreate(rendererProjectId)?.toolManager : undefined,
+			rendererScope.context?.toolManager,
 		);
 		// Resolve the WINNING tool's on-disk location independent of `provider:`
 		// (design §4b — a pack renderer needs no provider). resolveToolLocation
@@ -6004,8 +6304,9 @@ async function handleApiRoute(
 	if (extPanelMatch && req.method === "GET") {
 		const packId = decodeURIComponent(extPanelMatch[1]);
 		const panelId = decodeURIComponent(extPanelMatch[2]);
-		const panelProjectId = url.searchParams.get("projectId") || undefined;
-		const panel = packContributionRegistry.getPanel(panelProjectId, packId, panelId);
+		const panelScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!panelScope.ok) { writeConfigProjectScopeError(panelScope); return; }
+		const panel = packContributionRegistry.getPanel(panelScope.effectiveProjectId, packId, panelId);
 		if (!panel) {
 			json({ error: "no such panel in this pack" }, 404);
 			return;
@@ -6033,8 +6334,9 @@ async function handleApiRoute(
 	// installed + active pack emits a row (empty arrays allowed) — the frozen
 	// always-emit contract so the client reconcile is deterministic.
 	if (url.pathname === "/api/ext/contributions" && req.method === "GET") {
-		const contribProjectId = url.searchParams.get("projectId") || undefined;
-		const packs = packContributionRegistry.list(contribProjectId).map((p) => ({
+		const contribScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!contribScope.ok) { writeConfigProjectScopeError(contribScope); return; }
+		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
 			panels: p.panels.map((panel) => {
@@ -7050,7 +7352,9 @@ async function handleApiRoute(
 	if (toolCustomizeMatch && req.method === "POST") {
 		const name = decodeURIComponent(toolCustomizeMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		// Find the tool in the cascade to get its origin
 		const resolved = configCascade.resolveTools(projectId);
@@ -7058,7 +7362,7 @@ async function handleApiRoute(
 		if (!source) { json({ error: "Tool not found" }, 404); return; }
 
 		// Find the groupDir by scanning tool directories to locate this tool's YAML
-		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		const builtinToolsDir = runtimeBuiltinToolsDir();
 		const serverToolsDir = path.join(bobbitConfigDir(), "tools");
 
 		// Find groupDir from the source layer
@@ -7114,7 +7418,9 @@ async function handleApiRoute(
 	if (toolOverrideMatch && req.method === "DELETE") {
 		const name = decodeURIComponent(toolOverrideMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		// Determine the tools directory for the target scope
 		let targetToolsDir: string;
@@ -7127,7 +7433,7 @@ async function handleApiRoute(
 		}
 
 		// Find which group directory contains this tool
-		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		const builtinToolsDir = runtimeBuiltinToolsDir();
 
 		// Find groupDir in the target scope (the override we're deleting)
 		let groupDir = findToolGroupDir(name, targetToolsDir);
@@ -7148,8 +7454,9 @@ async function handleApiRoute(
 
 	// GET /api/tool-group-policies
 	if (url.pathname === "/api/tool-group-policies" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		json(configCascade.resolveToolGroupPolicies(projectId));
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		json(configCascade.resolveToolGroupPolicies(projectScope.effectiveProjectId));
 		return;
 	}
 
@@ -7164,7 +7471,12 @@ async function handleApiRoute(
 			json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
 			return;
 		}
-		groupPolicyStore.setGroupPolicy(group, body.policy || null);
+		// Scope the mutation to a project-level store when projectId is given.
+		// Headquarters/system alias to server scope (mirrors resolveRoleMutationTarget).
+		const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const targetStore: ToolGroupPolicyStore = projectScope.context?.toolGroupPolicyStore ?? groupPolicyStore;
+		targetStore.setGroupPolicy(group, body.policy || null);
 		json({ ok: true });
 		return;
 	}
@@ -7473,13 +7785,11 @@ async function handleApiRoute(
 
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId");
-		const effectiveProjectId = normalizeConfigProjectId(projectId ?? undefined);
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const resolvedCwd = effectiveProjectId && projectContextManager
-			? projectContextManager.getOrCreate(effectiveProjectId)?.project.rootPath ?? config.defaultCwd
-			: (projectId === HEADQUARTERS_PROJECT_ID ? getProjectRoot() : config.defaultCwd);
-		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
+		json(getAllConfigDirectories(resolved.project.rootPath, resolvedStore));
 		return;
 	}
 
@@ -7490,8 +7800,9 @@ async function handleApiRoute(
 			json({ error: "Missing 'path' in body" }, 400);
 			return;
 		}
-		const projectId = (body as any).projectId as string | null ?? null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: (body as any).projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
 		removeBuiltinDirectory(resolvedStore, (body as any).path);
 		json({ ok: true });
 		return;
@@ -7500,8 +7811,9 @@ async function handleApiRoute(
 	// POST /api/config-directories/reset — reset all config dirs to defaults
 	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
 		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? ((body as any).projectId as string | null ?? null) : null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: body && typeof body === "object" ? (body as any).projectId : undefined });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
 		resetConfigDirectories(resolvedStore);
 		json({ ok: true });
 		return;
@@ -7512,7 +7824,11 @@ async function handleApiRoute(
 	// update/uninstall, pack-order, pack-activation, mcp-operation toggles,
 	// purge-runtime) and GET /api/packs/conflicts moved to the core route
 	// registry (STR-01 cohort 2) — see src/server/routes/marketplace-routes.ts
-	// and docs/design/route-registry.md.
+	// and docs/design/route-registry.md. Upstream's HQ Split (#932) changed the
+	// "server" scope base for pack-runtime-context/activation-catalogue lookups
+	// from getProjectRoot() to headquartersDir(); ported into
+	// marketplace-routes.ts's resolvePackRuntimeContext/buildActivationCatalogue
+	// rather than reintroduced here.
 
 	// PUT /api/project-config — update server-scope project config fields
 	if (url.pathname === "/api/project-config" && req.method === "PUT") {
@@ -8074,9 +8390,13 @@ async function handleApiRoute(
 
 	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveRoles(projectId);
-		json({ roles: resolved.map(r => withRoleResolution(r as any, projectId)) });
+		// Require an explicit projectId. `headquarters` aliases the server/global
+		// scope via normalizeConfigProjectId; use only the normalized value below.
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const effectiveConfigProjectId = projectScope.effectiveProjectId;
+		const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
+		json({ roles: resolved.map(r => withRoleResolution(r as any, effectiveConfigProjectId)) });
 		return;
 	}
 
@@ -8084,8 +8404,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
 		try {
-			const target = resolveRoleMutationTarget(body?.projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(body?.projectId ?? url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 			if (target.scope === "server") {
 				const role = target.manager.createRole({
@@ -8128,20 +8449,19 @@ async function handleApiRoute(
 	if (roleCustomizeMatch && req.method === "POST") {
 		const name = decodeURIComponent(roleCustomizeMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		const resolved = configCascade.resolveRoles(projectId);
 		const source = resolved.find(r => r.item.name === name);
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
 		let targetStore: RoleStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const target = resolveRoleMutationTarget(projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
-			targetStore = target.store;
+		if (scope === "project" && projectId) {
+			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
 		} else {
-			// scope === "server" (or unspecified) → system/server layer
+			// scope === "server" (or Headquarters project scope) → system/server layer
 			targetStore = serverRoleStore;
 		}
 
@@ -8157,16 +8477,15 @@ async function handleApiRoute(
 	if (roleOverrideMatch && req.method === "DELETE") {
 		const name = decodeURIComponent(roleOverrideMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		let targetStore: RoleStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const target = resolveRoleMutationTarget(projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
-			targetStore = target.store;
+		if (scope === "project" && projectId) {
+			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
 		} else {
-			// scope === "server" (or unspecified) → system/server layer
+			// scope === "server" (or Headquarters project scope) → system/server layer
 			targetStore = serverRoleStore;
 		}
 
@@ -8181,15 +8500,19 @@ async function handleApiRoute(
 		const name = decodeURIComponent(roleMatch[1]);
 
 		if (req.method === "GET") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const resolved = configCascade.resolveRoles(qProjectId);
+			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const effectiveConfigProjectId = projectScope.effectiveProjectId;
+			const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
 			const found = resolved.find(r => r.item.name === name);
 			if (found) {
-				json(withRoleResolution(found as any, qProjectId));
-			} else {
+				json(withRoleResolution(found as any, effectiveConfigProjectId));
+			} else if (!effectiveConfigProjectId) {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
-				json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name, qProjectId) });
+				json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name, effectiveConfigProjectId) });
+			} else {
+				json({ error: "Role not found" }, 404);
 			}
 			return;
 		}
@@ -8197,9 +8520,9 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const target = resolveRoleMutationTarget(qProjectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			if (target.scope === "project") {
 				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
@@ -8279,9 +8602,9 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const target = resolveRoleMutationTarget(qProjectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			if (target.scope === "project") {
 				target.store.remove(name);
 				json({ ok: true });
@@ -9323,9 +9646,10 @@ async function handleApiRoute(
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
 			try {
-				const task = getTaskManagerForTask(id).getTask(id);
-				if (!task) { json({ error: "Task not found" }, 404); return; }
-				json(task);
+				const record = getTaskRecordForTask(id);
+				if (!record) { json({ error: "Task not found" }, 404); return; }
+				if (!sandboxCanAccessTask(record.task)) return;
+				json(record.task);
 			} catch {
 				json({ error: "Task not found" }, 404);
 			}
@@ -9337,9 +9661,12 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			try {
-				const tm = getTaskManagerForTask(id);
-				const task = tm.getTask(id);
-				const prevState = task?.state;
+				const record = getTaskRecordForTask(id);
+				if (!record) { json({ error: "Task not found" }, 404); return; }
+				if (!sandboxCanAccessTask(record.task)) return;
+				const tm = record.taskManager;
+				const task = record.task;
+				const prevState = task.state;
 				const ok = tm.updateTask(id, {
 					title: body.title,
 					spec: body.spec,
@@ -9391,7 +9718,10 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskAssignMatch[1];
-			const tm = getTaskManagerForTask(taskId);
+			const record = getTaskRecordForTask(taskId);
+			if (!record) { json({ error: "Task not found" }, 400); return; }
+			if (!sandboxCanAccessTask(record.task)) return;
+			const tm = record.taskManager;
 			const ok = tm.assignTask(taskId, sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 
@@ -9431,8 +9761,11 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskTransitionMatch[1];
-			const tm = getTaskManagerForTask(taskId);
-			const task = tm.getTask(taskId);
+			const record = getTaskRecordForTask(taskId);
+			if (!record) { json({ error: "Task not found" }, 400); return; }
+			if (!sandboxCanAccessTask(record.task)) return;
+			const tm = record.taskManager;
+			const task = record.task;
 			const ok = tm.transitionTask(taskId, state as TaskState);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 
@@ -11310,6 +11643,22 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
+			if (proposalType === "goal" || proposalType === "staff") {
+				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+				const sessionProjectId = proposalSession?.projectId;
+				if (!sessionProjectId) {
+					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
+					return;
+				}
+				const proposalProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined;
+				if (proposalProjectId && proposalProjectId !== sessionProjectId) {
+					json({ ok: false, code: "PROJECT_ID_MISMATCH", message: "proposal projectId must match the session projectId" }, 422);
+					return;
+				}
+				enrichedArgs = { ...enrichedArgs, projectId: sessionProjectId };
+			}
 			if (proposalType === "goal") {
 				const sess = sessionManager.getSession(sessionId);
 				if (sess?.role === "team-lead" && sess.teamGoalId) {
@@ -11333,7 +11682,7 @@ async function handleApiRoute(
 			// when the session has no resolvable project or the project has zero
 			// workflows (empty-state behaviour preserved).
 			if (proposalType === "goal") {
-				const projectId = sessionManager.getSession(sessionId)?.projectId;
+				const projectId = (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
 				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
 				if (projectId) {
 					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
@@ -11342,7 +11691,7 @@ async function handleApiRoute(
 						if (ctx) workflows = ctx.workflowStore.getAll();
 					}
 				}
-				const wfErr = validateGoalProposalWorkflow(args as Record<string, unknown>, workflows);
+				const wfErr = validateGoalProposalWorkflow(enrichedArgs, workflows);
 				if (wfErr) { json(wfErr, 400); return; }
 			}
 			try {
@@ -11723,6 +12072,7 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git status"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 
@@ -12043,6 +12393,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git diff"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12072,6 +12423,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: 'Session not found' }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Commit history"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
@@ -12120,6 +12472,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12153,6 +12506,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git pull"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12169,10 +12523,11 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-push — push local commits to remote
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git push"), 409); return; }
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12191,10 +12546,11 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to project primary
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Squash push"), 409); return; }
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12284,6 +12640,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Rebase on primary"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12351,6 +12708,7 @@ async function handleApiRoute(
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR merge"), 409); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -12383,12 +12741,14 @@ async function handleApiRoute(
 	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
 	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
 		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
 		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
 		// Skill files live on the host, so resolve the project rootPath for discovery.
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
 		return;
 	}
@@ -12396,27 +12756,56 @@ async function handleApiRoute(
 	// GET /api/file-mentions — bounded file enumeration for @-mention autocomplete.
 	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
 	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const sessionId = url.searchParams.get("sessionId");
+		const rawCwd = url.searchParams.get("cwd") || undefined;
+		const sessionId = url.searchParams.get("sessionId") || undefined;
+		const rawProjectId = url.searchParams.get("projectId") || undefined;
 		const q = url.searchParams.get("q") || undefined;
 		const limitRaw = url.searchParams.get("limit");
 		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
 		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
-		// Enumerate the session's HOST worktree, NOT the project root. The
-		// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
-		// discovery but wrong here: file mentions must see the goal/session
-		// worktree's branch-local, untracked and gitignored files. worktreePath
-		// is the host path; for sandboxed sessions cwd is a container path so
-		// worktreePath is required. Fall back to the raw `cwd` param (never the
-		// project root) when no session is bound.
-		let cwd = rawCwd;
+
+		let resolvedProjectId: string;
+		let cwd: string;
+		let cwdSource: CwdOwnershipSource;
 		if (sessionId) {
 			const session = sessionManager.getSession(sessionId);
-			const persisted = sessionManager.getPersistedSession(sessionId);
-			const worktree = session?.worktreePath || persisted?.worktreePath;
-			const sessionCwd = session?.cwd || persisted?.cwd;
-			cwd = worktree || sessionCwd || rawCwd;
+			const persisted = session
+				? undefined
+				: (sessionManager.getPersistedSession(sessionId) ?? projectContextManager.getContextForSession(sessionId)?.sessionStore.get(sessionId));
+			if (!session && !persisted) {
+				json({ error: `Session "${sessionId}" not found` }, 404);
+				return;
+			}
+			const sessionProjectId = session?.projectId ?? persisted?.projectId;
+			if (!sessionProjectId) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
+				return;
+			}
+			if (rawProjectId && rawProjectId !== sessionProjectId) {
+				json({ error: "projectId does not match session projectId", code: "PROJECT_SCOPE_MISMATCH" }, 422);
+				return;
+			}
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: sessionProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+			// Enumerate the session's HOST worktree, NOT the project root. The
+			// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
+			// discovery but wrong here: file mentions must see the goal/session
+			// worktree's branch-local, untracked and gitignored files. worktreePath
+			// is the host path; for sandboxed sessions cwd is a container path so
+			// worktreePath is required.
+			cwd = session?.worktreePath || persisted?.worktreePath || session?.cwd || persisted?.cwd || rawCwd || resolvedProject.project.rootPath;
+			cwdSource = { kind: "session", sessionId };
+		} else {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+			resolvedProjectId = resolvedProject.projectId;
+			cwd = rawCwd || resolvedProject.project.rootPath;
+			cwdSource = { kind: "user-input" };
 		}
+
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		const files = await enumerateFiles(cwd, { query: q, limit });
 		json({ files: files.map((p) => ({ path: p })) });
 		return;
@@ -12425,10 +12814,12 @@ async function handleApiRoute(
 	// GET /api/slash-skills/details — full slash skill details including content and file paths
 	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
 		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
 		const directories = getSkillDirectories(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })), directories });
 		return;
@@ -12436,7 +12827,8 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows — project-scoped only. Without projectId returns [].
+	// GET /api/workflows — a missing projectId returns an empty list (there is no
+	// server-scope workflow set); a projectId returns that project's workflows.
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -13464,23 +13856,11 @@ async function handleApiRoute(
 		const explicitProjectId = typeof body.projectId === "string" && body.projectId.trim().length > 0
 			? body.projectId.trim()
 			: undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: explicitProjectId, cwd: explicitCwd });
-		if (!resolved.ok) {
-			json({ error: resolved.error }, resolved.status);
-			return;
-		}
-		if (resolved.project.hidden || resolved.projectId === SYSTEM_PROJECT_ID) {
-			json({ error: "projectId required: staff agents must be created in a registered project" }, 400);
-			return;
-		}
-		if (explicitCwd && explicitProjectId) {
-			const cwdProject = projectRegistry.findByCwd(explicitCwd);
-			if (!cwdProject || cwdProject.id !== resolved.projectId) {
-				json({ error: "cwd must be inside the selected project" }, 400);
-				return;
-			}
-		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: explicitProjectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const cwd = explicitCwd ?? resolved.project.rootPath;
+		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolved.projectId, cwd, { kind: "user-input" });
+		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 		const projectId = resolved.projectId;
 		// Validate the referenced role exists in the selected project's cascade.
 		// roleId omitted or null/empty is allowed — staff with no role behave as before.
@@ -13602,11 +13982,8 @@ async function handleApiRoute(
 						json({ error: "Staff agent is not attached to a registered project" }, 400);
 						return;
 					}
-					const cwdProject = projectRegistry.findByCwd(requestedCwd);
-					if (!cwdProject || cwdProject.id !== staffProject.id) {
-						json({ error: "cwd must be inside the staff agent's project" }, 400);
-						return;
-					}
+					const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, staffProject.id, requestedCwd, { kind: "staff", staffId: staff.id });
+					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 					cwdUpdate = requestedCwd;
 				}
 			}
@@ -13797,10 +14174,15 @@ async function handleApiRoute(
 	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		if (cwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+		}
 		const ensure = url.searchParams.get("ensure") === "true";
-		const mcpManager = projectId || cwd
-			? (ensure ? await sessionManager.ensureMcpManager({ projectId, cwd }) : sessionManager.getMcpManager({ projectId, cwd }))
-			: sessionManager.getMcpManager();
+		const resolvedProjectId = resolvedProject.projectId;
+		const mcpManager = ensure ? await sessionManager.ensureMcpManager({ projectId: resolvedProjectId }) : sessionManager.getMcpManager({ projectId: resolvedProjectId });
 		if (!mcpManager) {
 			json([]);
 			return;
@@ -13847,9 +14229,14 @@ async function handleApiRoute(
 	if (mcpRestartMatch && req.method === "POST") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const cwd = url.searchParams.get("cwd") || undefined;
-		const mcpManager = projectId || cwd
-			? await sessionManager.ensureMcpManager({ projectId, cwd })
-			: sessionManager.getMcpManager();
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		if (cwd) {
+			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProject.projectId, cwd, { kind: "user-input" });
+			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+		}
+		const resolvedProjectId = resolvedProject.projectId;
+		const mcpManager = await sessionManager.ensureMcpManager({ projectId: resolvedProjectId });
 		if (!mcpManager) {
 			json({ error: "MCP not initialized" }, 500);
 			return;
@@ -13915,6 +14302,10 @@ async function handleApiRoute(
 			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
+				return;
+			}
+			if (!(mcpSession?.projectId ?? persistedSession?.projectId)) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
 				return;
 			}
 			const mcpManager = await sessionManager.resolveMcpManagerForSession(mcpSessionId, scopeKey);
@@ -13999,6 +14390,10 @@ async function handleApiRoute(
 			);
 			if (!liveSession && !persistedSession) {
 				json({ error: `Session "${describeSessionId}" not found` }, 403);
+				return;
+			}
+			if (!(liveSession?.projectId ?? persistedSession?.projectId)) {
+				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
 				return;
 			}
 			const mcpManager = await sessionManager.resolveMcpManagerForSession(describeSessionId, scopeKey);

@@ -54,7 +54,7 @@ import type { ProjectConfigStore, PackOrderScope } from "../agent/project-config
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "../agent/pack-types.js";
 import { PackRuntimeNotFoundError, PackRuntimeBadRequestError, encodePackRuntimeId, readRuntimeStartPolicy } from "../runtimes/index.js";
 import { discoverSlashSkillsResolved } from "../skills/slash-skills.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { headquartersDir } from "../bobbit-dir.js";
 
 // GET/POST/PUT/DELETE/PATCH /api/marketplace/* and GET /api/packs/conflicts.
 // See the file header for why this is one handler rather than one per route.
@@ -167,7 +167,7 @@ async function handleMarketplaceRequest(ctx: CoreRouteCtx): Promise<void> {
 		store: PackOrderStore,
 		packName: string,
 	): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown>; hasDeploymentSurface: boolean } | null => {
-		const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
+		const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 		if (base === undefined) return null;
 		const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
 		let entry = entries.find((e) => e.manifest?.name === packName);
@@ -584,7 +584,7 @@ async function handleMarketplaceRequest(ctx: CoreRouteCtx): Promise<void> {
 		packName: string,
 		projectId?: string,
 	): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
-		const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
+		const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 		if (base === undefined) return null;
 		const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
 		let entry = entries.find((e) => e.manifest?.name === packName);

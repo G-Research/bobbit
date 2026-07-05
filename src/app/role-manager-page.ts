@@ -4,7 +4,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo, type RoleFieldSource } from "./api.js";
+import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, fetchRoleDetail, type RoleData, type ToolInfo, type AssistantPromptInfo, type RoleFieldSource } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { connectToSession } from "./session-manager.js";
 import { showConnectionError, confirmAction } from "./dialogs.js";
@@ -12,8 +12,9 @@ import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { renderModelRow, formatModelPref, getRoleDefaultModel, getRoleDefaultModelPrefKey, ensureModelDefaultsLoaded } from "./settings-page.js";
+import { HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession } from "./headquarters.js";
 
 // ============================================================================
 // HELPERS
@@ -111,7 +112,8 @@ let originalPrompts: Map<string, string> = new Map(); // type -> original conten
  * fetching unscoped `/api/roles`. See `_proposalRolesCache` in render.ts.
  */
 export async function fetchRolesForProject(projectId?: string): Promise<RoleData[]> {
-	const url = projectId ? `/api/roles?projectId=${encodeURIComponent(projectId)}` : "/api/roles";
+	const apiProjectId = !projectId || projectId === "system" ? HEADQUARTERS_PROJECT_ID : projectId;
+	const url = `/api/roles?projectId=${encodeURIComponent(apiProjectId)}`;
 	try {
 		const res = await gatewayFetch(url);
 		if (!res.ok) return [];
@@ -124,7 +126,7 @@ export async function fetchRolesForProject(projectId?: string): Promise<RoleData
 }
 
 async function fetchRolesScoped(): Promise<RoleData[]> {
-	return fetchRolesForProject(getConfigProjectId());
+	return fetchRolesForProject(getConfigApiProjectId());
 }
 
 export async function loadRolePageData(): Promise<void> {
@@ -137,7 +139,8 @@ export async function loadRolePageData(): Promise<void> {
 	// Load default model prefs + model registry so inherited list rows can show
 	// a resolved "<model> · default" label without requiring a Settings visit.
 	ensureModelDefaultsLoaded();
-	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(), fetchGroupPolicies()]);
+	const scopedProjectId = getConfigApiProjectId();
+	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(scopedProjectId), fetchGroupPolicies(scopedProjectId)]);
 	roles = r;
 	availableTools = t;
 	groupPolicies = gp;
@@ -202,11 +205,21 @@ export function navigateToRoleEdit(roleName: string): void {
 	const role = roles.find((r) => r.name === roleName);
 	if (role) {
 		initEditState(role);
-	} else {
-		currentView = "list";
-		selectedRole = null;
+		renderApp();
+		return;
 	}
+	currentView = "list";
+	selectedRole = null;
 	renderApp();
+	void fetchRoleDetail(roleName, getConfigApiProjectId()).then((detail) => {
+		if (detail) {
+			initEditState(detail);
+		} else {
+			currentView = "list";
+			selectedRole = null;
+		}
+		renderApp();
+	});
 }
 
 async function createRoleAssistantSession(): Promise<void> {
@@ -215,11 +228,12 @@ async function createRoleAssistantSession(): Promise<void> {
 	renderApp();
 	try {
 		const bodyObj: Record<string, any> = { assistantType: "role" };
-		const projectId = getConfigProjectId();
+		const projectId = getConfigApiProjectId();
 		if (projectId) {
 			bodyObj.projectId = projectId;
 			const project = state.projects.find(p => p.id === projectId);
-			if (project) bodyObj.cwd = project.rootPath;
+			const cwd = defaultCwdForProjectSession(project);
+			if (cwd) bodyObj.cwd = cwd;
 		}
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
@@ -248,7 +262,7 @@ async function handleSave(): Promise<void> {
 	renderApp();
 
 	if (selectedRole) {
-		const projectId = getConfigProjectId();
+		const projectId = getConfigApiProjectId();
 		const ok = await updateRole(selectedRole.name, {
 			label: editLabel,
 			promptTemplate: editPrompt,
@@ -256,7 +270,7 @@ async function handleSave(): Promise<void> {
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
 			model: editModelOverride,
 			thinkingLevel: editThinkingOverride,
-		}, projectId || undefined);
+		}, projectId);
 
 		// Save dirty sub-prompts
 		const dirtyPrompts = Array.from(editedPrompts.entries()).filter(
@@ -391,7 +405,7 @@ async function handleDelete(): Promise<void> {
 
 	deleting = true;
 	renderApp();
-	const ok = await deleteRole(selectedRole.name, getConfigProjectId() || undefined);
+	const ok = await deleteRole(selectedRole.name, getConfigApiProjectId());
 	if (ok) {
 		const [r] = await Promise.all([fetchRolesScoped()]);
 		roles = r;
@@ -565,7 +579,7 @@ async function handleDeleteFromList(role: RoleData): Promise<void> {
 	);
 	if (!confirmed) return;
 
-	const ok = await deleteRole(role.name, getConfigProjectId() || undefined);
+	const ok = await deleteRole(role.name, getConfigApiProjectId());
 	if (ok) {
 		const [r] = await Promise.all([fetchRolesScoped()]);
 		roles = r;
@@ -1526,12 +1540,12 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	}
 
 	const scope = getConfigScope();
-	const projectId = getConfigProjectId();
+	const projectId = getConfigApiProjectId();
 
 	if (scope === "system") {
 		if (origin === "builtin") {
 			return html`<button class="config-action-btn" @click=${async () => {
-				if (await customizeItem("roles", selectedRole!.name, "server")) {
+				if (await customizeItem("roles", selectedRole!.name, "server", projectId)) {
 					roles = await fetchRolesScoped();
 					const updated = roles.find(r => r.name === selectedRole!.name);
 					if (updated) showEdit(updated);
@@ -1540,7 +1554,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
-				if (await revertOverride("roles", selectedRole!.name, "server")) {
+				if (await revertOverride("roles", selectedRole!.name, "server", projectId)) {
 					roles = await fetchRolesScoped();
 					const updated = roles.find(r => r.name === selectedRole!.name);
 					if (updated) showEdit(updated); else showList();

@@ -50,6 +50,19 @@ const matrix: MatrixRow[] = [
 	// doesn't know by regex, and should override the heuristic when present.
 	{ label: "metadata-driven xhigh", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
 	{ label: "metadata disables xhigh despite heuristic match", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: null } }, expected: ALL_BASE },
+	// thinkingLevelMap semantics mirror pi-ai's getSupportedThinkingLevels: a
+	// level mapped to null is DROPPED (unsupported), an absent level is KEPT,
+	// and xhigh is kept only when present with a non-null value.
+	// Claude Fable 5: off:null = forced adaptive thinking, so "off" is dropped.
+	{ label: "Claude Fable 5 (off:null, xhigh)", model: { id: "claude-fable-5", provider: "anthropic", reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } }, expected: ["minimal", "low", "medium", "high", "xhigh"] },
+	// Opus-style map that only pins xhigh → full ladder + xhigh (all others absent-so-kept).
+	{ label: "map {xhigh:'xhigh'} keeps full ladder + xhigh", model: { id: "claude-opus-4-8", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
+	// gpt-5.5-style map: off remapped (kept), minimal:null (dropped), xhigh pinned.
+	{ label: "map {off:'none', xhigh, minimal:null} drops only minimal", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { off: "none", xhigh: "xhigh", minimal: null } }, expected: ["off", "low", "medium", "high", "xhigh"] },
+	// A reasoning model WITHOUT a map stays on the family heuristic (unchanged).
+	{ label: "reasoning, no map → heuristic base ladder", model: { id: "claude-sonnet-4-6", provider: "anthropic", reasoning: true }, expected: ALL_BASE },
+	// Non-reasoning short-circuits to off regardless of any map.
+	{ label: "reasoning:false → off only", model: { id: "claude-fable-5", provider: "anthropic", reasoning: false, thinkingLevelMap: { off: null, xhigh: "xhigh" } }, expected: ["off"] },
 	// OpenAI families that do NOT get xhigh.
 	{ label: "gpt-5.1-codex (no -max)", model: { id: "gpt-5.1-codex", provider: "openai", reasoning: true }, expected: ALL_BASE },
 	{ label: "gpt-5", model: { id: "gpt-5", provider: "openai", reasoning: true }, expected: ALL_BASE },
@@ -168,6 +181,20 @@ test("clampThinkingLevel: medium on gpt-5.2 stays medium", () => {
 	assert.equal(clampThinkingLevel("medium", gpt52), "medium");
 });
 
+test("clampThinkingLevel: gpt-5.5 dropped middle level clamps UP (pi-ai direction), never to off", () => {
+	// gpt-5.5's map drops "minimal" (minimal:null) while keeping low+; a request
+	// for the unsupported "minimal" must clamp UP to "low" (matching pi-ai), not
+	// DOWN to "off" — otherwise valid reasoning intent is silently disabled.
+	const gpt55: ModelLike = {
+		id: "gpt-5.5", provider: "openai", reasoning: true,
+		thinkingLevelMap: { off: "none", xhigh: "xhigh", minimal: null },
+	};
+	assert.deepEqual(getSupportedThinkingLevels(gpt55), ["off", "low", "medium", "high", "xhigh"]);
+	assert.equal(clampThinkingLevel("minimal", gpt55), "low");
+	assert.equal(clampThinkingLevel("off", gpt55), "off");
+	assert.equal(clampThinkingLevel("xhigh", gpt55), "xhigh");
+});
+
 test("clampThinkingLevel: high on OpenRouter/AIGW GLM 5.2 stays high but xhigh clamps to high", () => {
 	for (const provider of ["openrouter", "aigw"]) {
 		const glm52: ModelLike = { id: "z-ai/glm-5.2", provider, reasoning: true };
@@ -200,6 +227,17 @@ test("clampThinkingLevel: trims whitespace before validating", () => {
 	const opus47: ModelLike = { id: "claude-opus-4-7", provider: "anthropic", reasoning: true };
 	assert.equal(clampThinkingLevel("  high  ", opus47), "high");
 	assert.equal(clampThinkingLevel("\txhigh\n", opus47), "xhigh");
+});
+
+test("clampThinkingLevel: Fable (off:null) clamps off UP to minimal, keeps high", () => {
+	// off:null means "off" is unsupported (forced adaptive). Clamp must step UP
+	// to the lowest supported level rather than returning an unsupported "off".
+	const fable: ModelLike = { id: "claude-fable-5", provider: "anthropic", reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } };
+	assert.equal(clampThinkingLevel("off", fable), "minimal");
+	assert.equal(clampThinkingLevel("high", fable), "high");
+	assert.equal(clampThinkingLevel("xhigh", fable), "xhigh");
+	// Unknown token resolves to off then clamps UP to minimal on Fable.
+	assert.equal(clampThinkingLevel("garbage", fable), "minimal");
 });
 
 test("getSupportedThinkingLevels: undefined reasoning defaults to reasoning-capable", () => {

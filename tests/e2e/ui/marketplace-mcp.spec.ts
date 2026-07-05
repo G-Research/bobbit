@@ -21,6 +21,7 @@ const SOURCE_ID = "mcp-gateway-1";
 const JIRA_REF = "jira";
 const JIRA_PACK = `mcp-jira-${SOURCE_ID}`;
 const RUNTIME_SERVER = "gr";
+const HEADQUARTERS_PROJECT_ID = "headquarters";
 
 const PROVIDERS: Provider[] = [
 	{ id: "confluence", label: "Confluence", description: "Confluence pages and spaces", ops: [{ op: "confluence_search", description: "Search Confluence" }] },
@@ -323,7 +324,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await toggleAgain.uncheck();
 	await expect(toggleAgain).not.toBeChecked();
 	await expect(page.locator(`[data-testid="market-mcp-status-${JIRA_REF}"]`)).toContainText("Disabled", { timeout: 15_000 });
-	await expect.poll(async () => page.evaluate(() => fetch("/api/mcp-servers").then((r) => r.json()).then((rows) => rows[0]?.activeSubNamespaces ?? [])), { timeout: 10_000 }).toEqual([]);
+	await expect.poll(async () => page.evaluate((projectId) => fetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId)}`).then((r) => r.json()).then((rows) => rows[0]?.activeSubNamespaces ?? []), HEADQUARTERS_PROJECT_ID), { timeout: 10_000 }).toEqual([]);
 
 	await page.reload();
 	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });

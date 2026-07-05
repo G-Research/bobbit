@@ -1,7 +1,7 @@
 import type { SessionInfo, SessionManager } from "../agent/session-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { applyModelString } from "../agent/review-model-override.js";
-import { inferMeta } from "../agent/aigw-manager.js";
+import { resolveModelStateMeta } from "../agent/model-registry.js";
 import type { ServerMessage } from "./protocol.js";
 
 type RuntimeModelSessionManager = Pick<SessionManager, "persistSessionModel" | "getPersistedSession" | "updateModelNameFile">;
@@ -35,7 +35,7 @@ export async function applyRuntimeSessionModelSelection(
 	const actualProvider = persisted?.modelProvider ?? provider;
 	const actualId = persisted?.modelId ?? modelId;
 	sessionManager.updateModelNameFile(session.id, `${actualProvider}/${actualId}`);
-	const meta = inferMeta(actualId);
+	const meta = resolveModelStateMeta(actualProvider, actualId);
 	broadcastModelState?.(session.clients, {
 		type: "state",
 		data: {
@@ -45,6 +45,7 @@ export async function applyRuntimeSessionModelSelection(
 				contextWindow: meta.contextWindow,
 				maxTokens: meta.maxTokens,
 				reasoning: meta.reasoning,
+				...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 			},
 		},
 	});

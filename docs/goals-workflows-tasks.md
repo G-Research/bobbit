@@ -8,7 +8,7 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath` when worktree support is enabled.
 
-`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` inside a registered project's `rootPath`. Headquarters is a valid built-in project with `projectId: "headquarters"`. There is no fallback to an arbitrary normal project — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
+`POST /api/goals` requires an explicit `projectId` in the request body. Headquarters is a valid built-in project with `projectId: "headquarters"`. `cwd`-based project inference has been removed — `cwd` is an execution directory validated after project selection, not a project identifier. A missing `projectId` returns **400 PROJECT_ID_REQUIRED**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs.
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). That flag is evaluated only during the goal creation / setup flow: after worktree setup completes, the server may call `teamManager.startTeam()` so no manual "Start Team" click is needed. The retry-setup handler also respects the same flag. Data-only no-worktree goals should normally use `autoStartTeam: false` unless the chosen workflow/team path is known to be git-independent.
 
@@ -33,7 +33,7 @@ Supported no-worktree flows include goal listing, archive, gates, signals, tasks
 
 Git-dependent affordances are guarded instead of falling back to the server checkout. Goal git status, diff, commit history, PR status, PR merge, and child-goal merge return `409` with `code: "GOAL_GIT_UNAVAILABLE"` when the goal lacks branch/worktree data. The UI shows this copy and hides branch/merge/PR actions:
 
-> This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.
+> This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.
 
 ### Workflows
 

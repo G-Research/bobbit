@@ -175,15 +175,36 @@ function manifestRead() {
 		fileLimit: 50,
 		totalFiles: files.length,
 		files: files.map((file) => ({
+			file_id: `file:${file.path}`,
 			path: file.path,
 			old_path: file.old_path,
 			status: file.status,
+			category: file.path.includes("added") ? "source" : "source",
 			additions: file.additions,
 			deletions: file.deletions,
 			is_binary: file.is_binary,
 			is_generated: file.is_generated,
 			is_truncated: file.is_truncated,
 			hunks: file.hunks.length,
+			hunk_manifest: file.hunks.map((hunk, index) => ({
+				hunk_id: hunk.id,
+				file: file.path,
+				file_id: `file:${file.path}`,
+				hunk_index: index,
+				header: hunk.header,
+				old_start: hunk.old_start,
+				old_lines: hunk.old_lines,
+				new_start: hunk.new_start,
+				new_lines: hunk.new_lines,
+				additions: hunk.lines.filter((line) => line.kind === "add").length,
+				deletions: hunk.lines.filter((line) => line.kind === "del").length,
+				changed_lines: hunk.lines.filter((line) => line.kind === "add" || line.kind === "del").length,
+				category: "source",
+				is_binary: file.is_binary,
+				is_generated: file.is_generated,
+				is_truncated: file.is_truncated,
+			})),
+			hunk_manifest_truncated: false,
 		})),
 		truncated: false,
 	};
@@ -241,6 +262,7 @@ describe("PR walkthrough compact bundle formatting", () => {
 		assert.match(output, /file:\s*src\/added\.ts/);
 		assert.match(output, /status:\s*added/i);
 		assert.match(output, /\+3\/-0|\+3\/0/);
+		assert.match(output, /hunk:\s*h0\s+id=block-added:h0\s+hunkOffset=0/i);
 		assert.match(output, /@@ -0,0 \+1,3 @@/);
 		assert.match(output, /^\+export const added = 1;$/m);
 		assert.match(output, /^\+export const kept = true;$/m);
@@ -275,6 +297,17 @@ describe("PR walkthrough compact bundle formatting", () => {
 		assert.match(output, /generated=false/i);
 		assert.match(output, /hunks:.*1.*1.*of 2/i);
 		assert.match(output, /hunks:.*truncated=true/i);
+	});
+
+	it("surfaces bounded read receipt summaries in compact output", () => {
+		const output = formatCompact(fileRead(modifiedFile(), {
+			read_receipt: { id: "rr-1", mode: "file", format: "compact", hunkIds: ["block-modified:h1"], truncated: true },
+			read_receipts: { total: 3, bodyReadHunkIds: ["block-modified:h0", "block-modified:h1"], truncatedReads: 1 },
+		}), { mode: "file", path: "src/modified.ts" });
+
+		assert.match(output, /read_receipts:/);
+		assert.match(output, /current id=rr-1 mode=file format=compact hunkIds=block-modified:h1 truncated=true/);
+		assert.match(output, /total=3 body_read_hunks=block-modified:h0,block-modified:h1 truncated_reads=1/);
 	});
 
 	it("preserves invalid or missing line fields with neutral markers and formatter warnings outside hunk bodies", () => {
@@ -345,6 +378,8 @@ describe("PR walkthrough compact bundle formatting", () => {
 		assert.match(output, /limits/i);
 		assert.match(output, /src\/added\.ts/);
 		assert.match(output, /src\/modified\.ts/);
+		assert.match(output, /h0\s+block-added:h0\s+@@ -0,0 \+1,3 @@\s+\+3\/-0\s+changed=3/i);
+		assert.match(output, /h1\s+block-modified:h1\s+@@ -30,3 \+31,3 @@ function second\(\)\s+\+1\/-1\s+changed=2/i);
 	});
 
 	it("suppresses repeated full envelopes for compact summary, files, and file follow-up reads", () => {
@@ -402,7 +437,7 @@ describe("PR walkthrough compact bundle tool integration", () => {
 		});
 	});
 
-	it("accepts format=compact without forwarding format to the internal bundle route", async () => {
+	it("forwards format=compact as a read-receipt hint without changing compact rendering", async () => {
 		const { tools, restoreEnv } = installEnvAndRegisterTools();
 		const bundleTool = tools.get("read_pr_walkthrough_bundle");
 		assert.ok(bundleTool, "expected read_pr_walkthrough_bundle to be registered");
@@ -418,6 +453,7 @@ describe("PR walkthrough compact bundle tool integration", () => {
 
 				assert.deepEqual(postedBody, {
 					mode: "file",
+					format: "compact",
 					path: "src/modified.ts",
 					index: 3,
 					offset: 4,

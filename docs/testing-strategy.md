@@ -168,7 +168,7 @@ See `tests/e2e/sandbox-recovery-docker.spec.ts` for the same pattern in API-leve
 
 #### Worker-scoped project state and helper self-healing
 
-Every E2E worker starts with its own temp `BOBBIT_DIR`, token, port, project registry, and gateway state. Startup auto-ensures Headquarters. The harnesses also register one normal visible project named `default` beside Headquarters through the REST API. That normal project is test scaffolding only: production has Headquarters as the built-in server workspace, and normal project work still requires an explicit `projectId` or a `cwd` matching a registered project (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)). Tests must not depend on the developer's real `.bobbit/` state or on a global fallback project.
+Every E2E worker starts with its own temp `BOBBIT_DIR`, token, port, project registry, and gateway state. Startup auto-ensures Headquarters. The harnesses also register one normal visible project named `default` beside Headquarters through the REST API. That normal project is test scaffolding only: production has Headquarters as the built-in server workspace, and normal project work requires an explicit `projectId` — cwd-based project inference has been removed (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)). Tests must not depend on the developer's real `.bobbit/` state or on a global fallback project.
 
 The shared helpers in `tests/e2e/e2e-setup.ts` keep this worker default healthy for high-level test setup:
 

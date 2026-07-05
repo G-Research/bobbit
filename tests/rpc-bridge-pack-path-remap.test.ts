@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { getProjectRoot, setProjectRoot } from "../src/server/bobbit-dir.ts";
+import { getProjectRoot, headquartersDir, setProjectRoot } from "../src/server/bobbit-dir.ts";
 import { buildDockerRunArgs } from "../src/server/agent/docker-args.ts";
 import {
 	BUILTIN_PACKS_CONTAINER_DIR,
@@ -202,9 +202,13 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		const missingProjectRoot = path.join(missingRoot, "project");
 		const missingProjectMarketPacksRoot = path.join(missingProjectRoot, ".bobbit", "config", "market-packs");
 		const previousRoot = getProjectRoot();
+		const previousMissingBobbitDir = process.env.BOBBIT_DIR;
+		const previousMissingPiDir = process.env.BOBBIT_PI_DIR;
 		try {
+			delete process.env.BOBBIT_DIR;
+			delete process.env.BOBBIT_PI_DIR;
 			setProjectRoot(missingServerRoot);
-			const missingServerMarketPacksRoot = scopePaths("server", missingServerRoot).marketPacksRoot;
+			const missingServerMarketPacksRoot = scopePaths("server", headquartersDir()).marketPacksRoot;
 			assert.equal(fs.existsSync(missingServerMarketPacksRoot), false);
 			assert.equal(fs.existsSync(missingProjectMarketPacksRoot), false);
 
@@ -221,6 +225,10 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 			assert.ok(args.includes(`${toDockerPath(missingServerMarketPacksRoot)}:${SERVER_MARKET_PACKS_CONTAINER_DIR}:ro`));
 			assert.ok(args.includes(`${toDockerPath(missingProjectMarketPacksRoot)}:${PROJECT_MARKET_PACKS_CONTAINER_DIR}:ro`));
 		} finally {
+			if (previousMissingBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousMissingBobbitDir;
+			if (previousMissingPiDir === undefined) delete process.env.BOBBIT_PI_DIR;
+			else process.env.BOBBIT_PI_DIR = previousMissingPiDir;
 			setProjectRoot(previousRoot);
 			fs.rmSync(missingRoot, { recursive: true, force: true });
 		}

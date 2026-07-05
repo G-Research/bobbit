@@ -16,6 +16,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
+import { isHeadquartersProject } from "./project-registry.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -219,6 +220,20 @@ export class GoalManager {
 		return [];
 	}
 
+	private forceHeadquartersNoWorktree(goal: PersistedGoal): void {
+		const live = this.store.get(goal.id) ?? goal;
+		delete live.worktreePath;
+		delete live.repoWorktrees;
+		delete live.repoPath;
+		delete live.branch;
+		delete live.setupError;
+		live.cwd = goal.projectId && this.projectRootResolver
+			? this.projectRootResolver(goal.projectId) ?? live.cwd
+			: live.cwd;
+		live.setupStatus = "ready";
+		this.store.put(live);
+	}
+
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore, stateDir?: string) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
@@ -302,6 +317,10 @@ export class GoalManager {
 	private _recoverStuckSetups(): void {
 		for (const goal of this.store.getAll()) {
 			if (goal.setupStatus === "preparing") {
+				if (isHeadquartersProject(goal.projectId)) {
+					this.forceHeadquartersNoWorktree(goal);
+					continue;
+				}
 				// Skip goals in state='blocked' — they legitimately have
 				// setupStatus='preparing' while waiting for deps to merge.
 				// Their setup will begin when integrate-child auto-unblocks them.
@@ -322,7 +341,8 @@ export class GoalManager {
 	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string }): Promise<PersistedGoal> {
 		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup } = opts ?? {};
 		const team = true;
-		const worktree = opts?.worktree !== false;
+		const headquartersGoal = isHeadquartersProject(projectId);
+		const worktree = !headquartersGoal && opts?.worktree !== false;
 		const now = Date.now();
 		const id = randomUUID();
 
@@ -343,11 +363,13 @@ export class GoalManager {
 		// `<rootPath>-wt/<branch>/`) ONLY when at least one component is a git repo
 		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
 		// and to no-worktree when that also fails (never throws).
-		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
-		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
-		const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-		const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef });
-		if (support.supported) repoPath = support.repoPath;
+		if (!headquartersGoal) {
+			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
+			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef });
+			if (support.supported) repoPath = support.repoPath;
+		}
 
 		// Compute worktree path and branch (but don't create yet)
 		if (worktree && repoPath) {
@@ -507,7 +529,14 @@ export class GoalManager {
 	 */
 	async setupWorktree(goalId: string): Promise<void> {
 		const goal = this.store.get(goalId);
-		if (!goal || !goal.repoPath || !goal.branch) {
+		if (!goal) {
+			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
+		}
+		if (isHeadquartersProject(goal.projectId)) {
+			this.forceHeadquartersNoWorktree(goal);
+			return;
+		}
+		if (!goal.repoPath || !goal.branch) {
 			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
 		}
 
@@ -592,6 +621,11 @@ export class GoalManager {
 	 * state). Throws after recording setupStatus:"error" when all attempts fail.
 	 */
 	private async _provisionGoalWorktree(goal: PersistedGoal, preliminaryOffset: string): Promise<ProvisionedWorktree | "no-worktree"> {
+		if (isHeadquartersProject(goal.projectId)) {
+			this.forceHeadquartersNoWorktree(goal);
+			return "no-worktree";
+		}
+
 		// Resolved timeout for per-component setup commands run here.
 		const setupTimeoutMs = this.resolveGoalSetupTimeout(goal);
 
@@ -755,6 +789,12 @@ export class GoalManager {
 	 * Uses a callback to avoid circular dependency with TeamManager.
 	 */
 	async setupWorktreeAndStartTeam(goalId: string, startTeamFn: () => Promise<any>): Promise<void> {
+		const goal = this.store.get(goalId);
+		if (goal && isHeadquartersProject(goal.projectId)) {
+			this.forceHeadquartersNoWorktree(goal);
+			await startTeamFn();
+			return;
+		}
 		await this.setupWorktree(goalId);
 		await startTeamFn();
 	}
@@ -1067,7 +1107,7 @@ export class GoalManager {
 		if (!existing) return false;
 
 		// If toggling team mode ON for a non-team goal, auto-create worktree
-		if (updates.team === true && !existing.team && !existing.worktreePath) {
+		if (updates.team === true && !existing.team && !existing.worktreePath && !isHeadquartersProject(existing.projectId)) {
 			const cwd = updates.cwd ?? existing.cwd;
 			if (await isGitRepo(cwd)) {
 				const repoRoot = await getRepoRoot(cwd);

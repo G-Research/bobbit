@@ -45,10 +45,10 @@ import {
 	resetSidebarTreeIndentPreference,
 	applySidebarTreeLayoutVars,
 } from "./state.js";
-import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
-import { setConfigScope, getConfigScope, getConfigProjectId } from "./config-scope.js";
+import { setConfigScope, getConfigScope, getConfigProjectId, getConfigApiProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { GW_URL_KEY, GW_TOKEN_KEY } from "./gateway-fetch.js";
 import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
@@ -379,6 +379,7 @@ async function resetProjectScopeField(projectId: string, key: string): Promise<v
 // ── Sandbox section state ──
 let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
 let sandboxStatusLoaded = false;
+let sandboxStatusProjectId = "";
 let sandboxBuildInProgress = false;
 let sandboxBuildError = "";
 let worktreePoolStatus: { enabled: boolean; ready?: number; target?: number; filling?: boolean } | null = null;
@@ -391,10 +392,11 @@ let hostTokensLoaded = false;
 const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[]>();
 const _sandboxMountEntries = new Map<string, string[]>();
 
-function loadSandboxStatus(): void {
-	if (sandboxStatusLoaded) return;
+function loadSandboxStatus(projectId = getConfigApiProjectId(getActiveScope())): void {
+	if (sandboxStatusLoaded && sandboxStatusProjectId === projectId) return;
 	sandboxStatusLoaded = true;
-	fetchSandboxStatus().then(s => {
+	sandboxStatusProjectId = projectId;
+	fetchSandboxStatus(projectId).then(s => {
 		sandboxStatusLocal = s;
 		state.sandboxStatus = s;
 		renderApp();
@@ -567,7 +569,8 @@ function renderSandboxSection(
 	inputClass: string,
 	labelClass: string,
 ) {
-	loadSandboxStatus();
+	const apiProjectId = getConfigApiProjectId(getActiveScope());
+	loadSandboxStatus(apiProjectId);
 	initSandboxEntries(projectId, resolved);
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
@@ -624,7 +627,7 @@ function renderSandboxSection(
 																sandboxBuildError = "";
 																renderApp();
 																try {
-																	const resp = await gatewayFetch("/api/sandbox-image/build", { method: "POST" });
+																	const resp = await gatewayFetch("/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: apiProjectId }) });
 																	let result: any = {};
 																	try { result = await resp.json(); } catch (_e) { /* non-JSON */ }
 																	if (resp.ok && result.success) {
@@ -3260,11 +3263,8 @@ function loadConfigDirs(): void {
 	(async () => {
 		try {
 			const dirParams = new URLSearchParams();
-			const scope = getActiveScope();
-			if (scope && scope !== "system") {
-				dirParams.set("projectId", scope);
-			}
-			const res = await gatewayFetch(`/api/config-directories${dirParams.toString() ? '?' + dirParams.toString() : ''}`);
+			dirParams.set("projectId", getConfigApiProjectId(getActiveScope()));
+			const res = await gatewayFetch(`/api/config-directories?${dirParams.toString()}`);
 			if (res.ok) {
 				configDirs = await res.json();
 				configDirsLoaded = true;
@@ -3720,7 +3720,10 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 				@click=${() => { setHashRoute("settings", headquartersTarget, true); }}
 			>
 				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent(HEADQUARTERS_PROJECT_ID), "xs")}</span>
-				${HEADQUARTERS_PROJECT_NAME}
+				<span class="inline-flex flex-col items-start leading-tight">
+					<span>${HEADQUARTERS_PROJECT_NAME}</span>
+					<span class="text-[11px] text-muted-foreground">${HEADQUARTERS_HELPER_TEXT}</span>
+				</span>
 			</button>
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;

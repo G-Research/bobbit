@@ -2,14 +2,15 @@
  * Unit coverage for `cleanupWorkerTempCwds()` in tests/e2e/e2e-setup.ts
  * (Finding W2.R).
  *
- * `nonGitCwd()`/`gitCwd()` memoize one directory each per Playwright worker
- * process directly under `os.tmpdir()` — NOT under the harness's own
- * `bobbitDir`/`defaultProjectRoot`, which in-process-harness.ts and
- * gateway-harness.ts already `awaitableRm()` at worker teardown. Nothing
- * ever removed these two, so every worker in every E2E run left one or two
- * `bobbit-e2e-<port>-*` / `bobbit-e2e-git-<port>-*` directories behind
- * permanently — confirmed by a live host survey finding 21k+ stale entries
- * under the shared E2E temp root after a night of repeated full-suite runs.
+ * `nonGitCwd()`/`gitCwd()` memoize one directory each per
+ * `${port}|${harnessDefaultProjectRoot()}` key, nested under the harness's
+ * default-project root. That root is cleared at harness startup, but nothing
+ * removed these two mid-session, so a long-lived worker process accumulated
+ * one or two stale `non-git-*` / `git-*` directories per test file — confirmed
+ * by a live host survey finding 21k+ stale entries under the shared E2E temp
+ * root after a night of repeated full-suite runs (back when these lived
+ * directly under `os.tmpdir()`, before they were relocated under the
+ * default-project root for Headquarters/normal-project separation).
  *
  * Lives at the top level (tests/*.test.ts, not tests/e2e/**) so it is
  * claimed by the unit·node phase only, mirroring e2e-build-staleness.test.ts

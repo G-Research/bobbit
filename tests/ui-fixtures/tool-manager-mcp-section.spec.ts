@@ -154,7 +154,7 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr",
 			method: "PUT",
-			body: { policy: "never" },
+			body: { policy: "never", projectId: "headquarters" },
 		});
 
 		await gr.locator('[data-testid="mcp-server-toggle"]').click();
@@ -163,7 +163,7 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr__ai-adoption",
 			method: "PUT",
-			body: { policy: "ask" },
+			body: { policy: "ask", projectId: "headquarters" },
 		});
 	});
 
@@ -195,14 +195,14 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr",
 			method: "PUT",
-			body: { policy: "never" },
+			body: { policy: "never", projectId: "headquarters" },
 		});
 		await expect(jiraTool).toHaveAttribute("data-policy-key", "mcp__gr__jira");
 		await jiraTool.locator('[data-testid="mcp-tool-policy"]').selectOption("ask");
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr__jira",
 			method: "PUT",
-			body: { policy: "ask" },
+			body: { policy: "ask", projectId: "headquarters" },
 		});
 
 		await jiraTool.locator('[data-testid="mcp-tool-toggle"]').click();
@@ -226,7 +226,7 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr__jira",
 			method: "PUT",
-			body: { policy: "ask" },
+			body: { policy: "ask", projectId: "headquarters" },
 		});
 		await expect(jiraPolicy).toHaveValue("ask");
 		await expect(jiraPolicy.locator("option:checked")).toHaveText("Ask");
@@ -235,7 +235,7 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr__jira",
 			method: "PUT",
-			body: { policy: null },
+			body: { policy: null, projectId: "headquarters" },
 		});
 		await expect(jiraPolicy).toHaveValue("");
 		await expect(jiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
@@ -272,7 +272,7 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
 			url: "/api/tool-group-policies/mcp__gr",
 			method: "PUT",
-			body: { policy: null },
+			body: { policy: null, projectId: "headquarters" },
 		});
 		await expect(serverSelect).toHaveValue("");
 

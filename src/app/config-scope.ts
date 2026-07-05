@@ -6,7 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, type TemplateResult } from "lit";
 import { state } from "./state.js";
 import { gatewayFetch } from "./api.js";
-import { HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 
 export type ConfigOrigin = "builtin" | "server" | "user" | "project";
 
@@ -30,6 +30,13 @@ export function getConfigProjectId(options?: { preserveHeadquarters?: boolean })
 	if (_configScope === "system") return undefined;
 	if (isHeadquartersProject(_configScope) && !options?.preserveHeadquarters) return undefined;
 	return _configScope;
+}
+
+/** Get an explicit projectId for APIs that require a project scope.
+ *  The presentation "system" scope is backed by the Headquarters project. */
+export function getConfigApiProjectId(scope = _configScope): string {
+	if (!scope || scope === "system" || isHeadquartersProject(scope)) return HEADQUARTERS_PROJECT_ID;
+	return scope;
 }
 
 // ============================================================================
@@ -87,7 +94,10 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 				@click=${() => onScopeChange("system")}
 			>
 				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent("headquarters"), "xs")}</span>
-				${HEADQUARTERS_PROJECT_NAME}
+				<span class="inline-flex flex-col items-start leading-tight">
+					<span>${HEADQUARTERS_PROJECT_NAME}</span>
+					<span class="text-[11px] text-muted-foreground">${HEADQUARTERS_HELPER_TEXT}</span>
+				</span>
 			</button>`}
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
@@ -109,7 +119,10 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 						${headquarters
 							? html`<span data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} class="inline-flex items-center" style="color:${color};">${icon(projectIconComponent(project), "xs")}</span>`
 							: html`<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>`}
-						${headquarters ? HEADQUARTERS_PROJECT_NAME : project.name}
+						<span class="inline-flex flex-col items-start leading-tight">
+							<span>${headquarters ? HEADQUARTERS_PROJECT_NAME : project.name}</span>
+							${headquarters ? html`<span class="text-[11px] text-muted-foreground">${HEADQUARTERS_HELPER_TEXT}</span>` : ""}
+						</span>
 					</button>
 				`;
 			})}

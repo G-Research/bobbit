@@ -51,6 +51,7 @@ import "../ui/components/ErrorDetails.js";
 import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
+import { defaultCwdForProjectSession } from "./headquarters.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -363,8 +364,8 @@ function promptSymlinkConfirm(
 /**
  * Render the preflight panel inside the add-project dialog. Surfaces the
  * pass/warn/fail checks from `GET /api/projects/preflight` and exposes the
- * inline archive CTA on the `bobbit.existing` row. Stateless: caller owns
- * the report + loading flags and re-renders on change.
+ * inline archive CTA only when the backend provides archive-bobbit remediation.
+ * Stateless: caller owns the report + loading flags and re-renders on change.
  */
 function renderPreflightPanel(opts: {
 	report: PreflightReport | null;
@@ -415,7 +416,7 @@ function renderPreflightPanel(opts: {
 						<div class="flex-1 min-w-0">
 							<div class="flex items-center gap-2 flex-wrap">
 								<span class="text-foreground font-medium">${check.title}</span>
-								${check.id === "bobbit.existing" && check.level !== "pass"
+								${check.remediation?.kind === "archive-bobbit"
 									? html`<button
 										class="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 transition-colors disabled:opacity-50"
 										@click=${opts.onArchive}
@@ -1153,7 +1154,29 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	// Load roles for the picker
 	if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
 
+	// Guard against text-selection drags: if the mouse-down starts inside the
+	// modal (e.g. selecting the title text) and the mouse-up lands on the
+	// backdrop, the resulting click targets the backdrop and would otherwise
+	// close the dialog. Only a genuine mouse-down on the backdrop should close.
+	let mouseDownInsideModal = false;
+	const onDocMouseDown = (e: MouseEvent) => {
+		const backdrop = container.querySelector(".z-40");
+		mouseDownInsideModal = !!backdrop && e.target !== backdrop;
+	};
+	const onDocClickCapture = (e: MouseEvent) => {
+		const backdrop = container.querySelector(".z-40");
+		if (mouseDownInsideModal && backdrop && e.target === backdrop) {
+			// Swallow the backdrop click so Dialog's onClose doesn't fire.
+			e.stopPropagation();
+		}
+		mouseDownInsideModal = false;
+	};
+	document.addEventListener("mousedown", onDocMouseDown, true);
+	document.addEventListener("click", onDocClickCapture, true);
+
 	const cleanup = () => {
+		document.removeEventListener("mousedown", onDocMouseDown, true);
+		document.removeEventListener("click", onDocClickCapture, true);
 		titleChangeUnsub?.();
 		titleChangeUnsub = null;
 		render(html``, container);
@@ -1293,7 +1316,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 				children: html`
 					${DialogContent({
 						children: html`
-							${DialogHeader({ title: "Edit Session" })}
+							${DialogHeader({ title: "Modify Session" })}
 							<div class="mt-4 flex flex-col gap-4">
 								<!-- Title -->
 								<div>
@@ -1498,7 +1521,8 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 		if (projectId) {
 			bodyObj.projectId = projectId;
 			const project = state.projects.find(p => p.id === projectId);
-			if (project) bodyObj.cwd = project.rootPath;
+			const cwd = defaultCwdForProjectSession(project);
+			if (cwd) bodyObj.cwd = cwd;
 		}
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",

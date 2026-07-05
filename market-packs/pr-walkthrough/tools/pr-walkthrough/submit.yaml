@@ -7,4 +7,8 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Prefer submit_pr_walkthrough_chunk for durable incremental progress. This migration wrapper stores the full document as the document chunk, validates it, publishes the final payload, and remains available for older reviewer prompts.
+  Prefer submit_pr_walkthrough_chunk plus finalize_pr_walkthrough_submission for durable incremental progress. This migration wrapper stores the full document as the document chunk, validates it, publishes the final payload, and remains available for older reviewer prompts.
+
+  Use this only when no section chunks have been saved or when the incremental workflow is unavailable. It conflicts with existing section chunks and finalizes through the same validation path as finalize_pr_walkthrough_submission.
+
+  Complete YAML must follow the same V2 review contract: logical review_chunks, ordered narrative entries, explicit hunk_id references and placement values, skip_reason for skipped hunks, no raw diff bodies, and `files` as metadata rather than file-wide diff expansion.

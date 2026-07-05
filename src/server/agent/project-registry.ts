@@ -6,7 +6,7 @@ import {
   DEFAULT_PROJECT_COLOR_LIGHT,
   PALETTE_PRIMARY_COLORS,
 } from "../../shared/palette-colors.js";
-import { getProjectRoot } from "../bobbit-dir.js";
+import { getProjectRoot, headquartersDir } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
@@ -238,36 +238,161 @@ export class ProjectRegistry {
     return positions.length > 0 ? Math.max(...positions) + 1 : 0;
   }
 
-  /** Read projects from disk. Missing file is treated as empty registry. */
-  load(): void {
-    let changed = false;
-    try {
-      const raw = fs.readFileSync(this.storePath, "utf-8");
-      const arr: any[] = JSON.parse(raw);
-      this.projects.clear();
-      for (const p of arr) {
-        // Migration: ensure colorLight/colorDark always present
-        if (!p.colorLight || !p.colorDark) {
-          if (p.color) {
-            p.colorLight = p.colorLight || p.color;
-            p.colorDark = p.colorDark || p.color;
-          } else {
-            p.colorLight = p.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
-            p.colorDark = p.colorDark || DEFAULT_PROJECT_COLOR_DARK;
-          }
-          changed = true;
-        }
-        this.projects.set(p.id, p as RegisteredProject);
+  /**
+   * Guard: throw if another registered project already occupies `rootPath`
+   * (compared by canonical path), excluding `opts.excludeId`.
+   *
+   * Duplicate normal/provisional projects at the same canonical path are
+   * always rejected, and the physical Headquarters directory is always
+   * immutable. `opts.allowSpecialAnchors` controls hidden/system anchors:
+   *
+   * - `register()` passes `true` so the synthetic `system` anchor and other
+   *   hidden synthetic projects do not block registering a normal project
+   *   sharing their path (e.g. the server run directory).
+   * - `update()` passes `false` so a normal project can never be repointed
+   *   onto Headquarters, the system anchor, or any hidden/special workspace.
+   */
+  private assertRootPathAvailable(
+    rootPath: string,
+    opts: { excludeId?: string; allowSpecialAnchors: boolean },
+  ): void {
+    for (const existing of this.projects.values()) {
+      if (opts.excludeId !== undefined && existing.id === opts.excludeId) continue;
+      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
+      if (isHeadquartersProject(existing)) {
+        throw new SpecialProjectMutationError(
+          "HEADQUARTERS_IMMUTABLE",
+          `Headquarters owns ${rootPath}; choose the server run directory instead of the Headquarters directory.`,
+        );
       }
-    } catch {
-      // File missing or corrupt — start empty
-      this.projects.clear();
-      return;
+      if (isSystemProject(existing)) {
+        if (opts.allowSpecialAnchors) continue;
+        throw new SpecialProjectMutationError(
+          "SYSTEM_PROJECT_IMMUTABLE",
+          `The system workspace owns ${rootPath}; choose a different directory.`,
+        );
+      }
+      if (existing.hidden) {
+        if (opts.allowSpecialAnchors) continue;
+        throw new SpecialProjectMutationError(
+          "HIDDEN_PROJECT_IMMUTABLE",
+          `A server-managed workspace owns ${rootPath}; choose a different directory.`,
+        );
+      }
+      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+    }
+  }
+
+  /**
+   * Read projects from disk.
+   *
+   * A MISSING file is the normal fresh-start condition: clear the map and
+   * return an empty registry (no throw).
+   *
+   * A PRESENT-but-unparseable file (invalid JSON, a non-ENOENT read error on
+   * an existing path, or a parsed value that is not an array) is FATAL.
+   * `projects.json` is the authoritative record of durable project identity;
+   * silently discarding it and continuing would let startup overwrite it with
+   * only synthetic records, permanently losing every normal project. Instead
+   * we preserve a timestamped raw-bytes backup and throw so startup fails
+   * loudly and the corrupt file is never overwritten.
+   */
+  load(): void {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.storePath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+        // File missing — fresh start.
+        this.projects.clear();
+        return;
+      }
+      // Present but unreadable (permissions, etc.) — corrupt/fatal.
+      this.failCorruptRegistry(err);
+    }
+
+    let arr: any[];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error(`expected a JSON array, got ${parsed === null ? "null" : typeof parsed}`);
+      }
+      arr = parsed;
+    } catch (err) {
+      this.failCorruptRegistry(err);
+    }
+
+    let changed = false;
+    this.projects.clear();
+    for (const p of arr) {
+      // Migration: ensure colorLight/colorDark always present
+      if (!p.colorLight || !p.colorDark) {
+        if (p.color) {
+          p.colorLight = p.colorLight || p.color;
+          p.colorDark = p.colorDark || p.color;
+        } else {
+          p.colorLight = p.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
+          p.colorDark = p.colorDark || DEFAULT_PROJECT_COLOR_DARK;
+        }
+        changed = true;
+      }
+      this.projects.set(p.id, p as RegisteredProject);
     }
 
     if (this.normalizeVisiblePositions()) changed = true;
     if (changed) {
       try { this.save(); } catch (err) { console.warn(`[project-registry] failed to persist migrations: ${err}`); }
+    }
+  }
+
+  /**
+   * Preserve a raw-bytes backup of the corrupt registry, then throw a clear
+   * fatal error. Never returns.
+   */
+  private failCorruptRegistry(cause: unknown): never {
+    const backupPath = this.backupCorruptRegistry();
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const backupNote = backupPath
+      ? `A raw backup was saved to ${backupPath}.`
+      : `A raw backup could not be created.`;
+    throw new Error(
+      `Authoritative project registry ${this.storePath} is malformed (${reason}); ` +
+      `refusing to start to avoid overwriting durable project identity. ` +
+      `${backupNote} Repair or restore projects.json and restart.`,
+    );
+  }
+
+  /**
+   * Best-effort: copy the corrupt registry to a timestamped
+   * `projects.json.corrupt-<epochMs>` sibling so the raw bytes are preserved
+   * before we refuse to start. Skips writing if an existing `.corrupt-*`
+   * backup already holds identical bytes (so repeated boots don't spam
+   * near-duplicate files). Returns the backup path, or null if none could be
+   * created.
+   */
+  private backupCorruptRegistry(): string | null {
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(this.storePath);
+    } catch {
+      return null;
+    }
+    try {
+      const dir = path.dirname(this.storePath);
+      const base = path.basename(this.storePath);
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(`${base}.corrupt-`)) continue;
+        try {
+          if (fs.readFileSync(path.join(dir, name)).equals(bytes)) {
+            return path.join(dir, name);
+          }
+        } catch { /* ignore an unreadable sibling backup */ }
+      }
+      const backupPath = path.join(dir, `${base}.corrupt-${Date.now()}`);
+      fs.writeFileSync(backupPath, bytes);
+      return backupPath;
+    } catch {
+      return null;
     }
   }
 
@@ -412,11 +537,10 @@ export class ProjectRegistry {
       }
     }
 
-    // Check for duplicate rootPath
-    const existing = this.getByPath(rootPath);
-    if (existing) {
-      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
-    }
+    // Check for duplicate normal projects by canonical path. Special hidden
+    // anchors do not block registering the server run directory as a normal
+    // project, but the physical Headquarters directory itself is immutable.
+    this.assertRootPathAvailable(rootPath, { allowSpecialAnchors: true });
 
     // Defense in depth: re-run preflight server-side. The REST endpoint may
     // have already shown the report to the user, but we never trust the
@@ -492,6 +616,20 @@ export class ProjectRegistry {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
     assertNormalMutableProject(project, "updated");
+
+    // Root-path collision guard. Reject repointing this normal project onto
+    // another visible normal/provisional project's canonical root or onto any
+    // server-owned special anchor (Headquarters, the system project, or a
+    // hidden synthetic anchor) before mutating any fields. Only Headquarters
+    // plus a single same-root normal project may share a directory
+    // relationship, and that is established via register(), never by editing a
+    // normal project onto a special anchor.
+    if (updates.rootPath !== undefined) {
+      this.assertRootPathAvailable(path.resolve(updates.rootPath), {
+        excludeId: id,
+        allowSpecialAnchors: false,
+      });
+    }
 
     if (updates.parentProjectId !== undefined) {
       const v = updates.parentProjectId;
@@ -615,9 +753,13 @@ export class ProjectRegistry {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
 
+    // Compatibility: older startup code passed the server run directory here.
+    // Treat that as a request for the physical Headquarters directory; callers
+    // updated for the split pass headquartersDir() directly.
+    const requestedRoot = sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
     const canonicalRoot = (() => {
-      try { return path.resolve(fs.realpathSync(rootPath)); }
-      catch { return path.resolve(rootPath); }
+      try { return path.resolve(fs.realpathSync(requestedRoot)); }
+      catch { return path.resolve(requestedRoot); }
     })();
 
     try { if (opts.stateDir) fs.mkdirSync(opts.stateDir, { recursive: true }); } catch { /* best-effort */ }
@@ -642,7 +784,10 @@ export class ProjectRegistry {
     project.name = HEADQUARTERS_PROJECT_NAME;
     project.rootPath = canonicalRoot;
     project.kind = "headquarters";
-    project.hidden = false;
+    // hide/show is presentation-only preference state — remove the field rather
+    // than pinning `hidden: false` here, consistent with the position/provisional/
+    // parentProjectId cleanup below.
+    delete project.hidden;
     delete project.provisional;
     delete project.position;
     delete project.parentProjectId;
@@ -651,9 +796,8 @@ export class ProjectRegistry {
     project.color = project.color || project.colorLight;
 
     this.projects.set(HEADQUARTERS_PROJECT_ID, project);
-    // Leave any legacy normal project at the server root in place for
-    // migrateToPerProjectState(), which rewrites its structured references
-    // before removing the duplicate. Doing it here would lose the old id.
+    // Same-root normal projects are independent user scopes; never promote,
+    // delete, or rewrite them as part of Headquarters repair.
 
     this.normalizeVisiblePositions();
     this.save();
@@ -736,7 +880,7 @@ export class ProjectRegistry {
    * Register a provisional project (used by project assistant sessions).
    * Provisional projects are real persisted projects with `provisional: true`.
    * For scaffolding (Path C), the rootPath may not exist yet — skip existence check.
-   * Deduplicates: if a provisional project already exists at the same rootPath, reuse it.
+   * Deduplicates: if a normal or provisional project already exists at the same canonical rootPath, reuse it.
    */
   registerProvisional(name: string, rootPath: string): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
@@ -751,15 +895,18 @@ export class ProjectRegistry {
       if (sym.symlink) rootPath = sym.canonical;
     }
 
-    // Deduplicate: reuse existing provisional project at same path
+    // Deduplicate by canonical root. Project-assistant setup should attach to
+    // an existing visible normal/provisional scope instead of creating a second
+    // project at the same path. Hidden/system anchors remain internal and do
+    // not block provisioning; Headquarters' physical directory stays immutable.
     const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
-      if (p.provisional && path.resolve(p.rootPath) === normalized) {
-        return p;
-      }
-      if (sameProjectPath(p.rootPath, normalized) && (isHeadquartersProject(p) || isSystemProject(p) || p.hidden)) {
+      if (!sameProjectPath(p.rootPath, normalized)) continue;
+      if (isHeadquartersProject(p)) {
         assertNormalMutableProject(p, "used as a provisional project");
       }
+      if (p.hidden || isSystemProject(p)) continue;
+      return p;
     }
 
     // Scaffold .bobbit directories only if rootPath exists

@@ -30,8 +30,12 @@ function writeMeta(packDir: string, packName: string): void {
 	].join("\n") + "\n", "utf-8");
 }
 
-function writePack(root: string, packName: string): string {
-	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+function serverMarketPackDir(headquartersDir: string, packName: string): string {
+	return path.join(headquartersDir, "config", "market-packs", packName);
+}
+
+function writePack(headquartersDir: string, packName: string): string {
+	const packDir = serverMarketPackDir(headquartersDir, packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "lib"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
@@ -61,8 +65,8 @@ function piExtensionRefs(rows: any[]): string[] {
 	return rows.map((row) => typeof row === "string" ? row : String(row?.ref ?? row?.listName ?? "")).filter(Boolean);
 }
 
-function writeSchema1Pack(root: string, packName: string): string {
-	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+function writeSchema1Pack(headquartersDir: string, packName: string): string {
+	const packDir = serverMarketPackDir(headquartersDir, packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "lib"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [

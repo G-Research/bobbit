@@ -42,6 +42,7 @@ import {
 	buildSessionSidecar,
 } from "./session-sidecar.js";
 import { trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { isHeadquartersProject } from "./project-registry.js";
 
 const execFile = promisify(execFileCb);
 
@@ -1814,8 +1815,10 @@ export class TeamManager {
 		// must be gated here so a user cannot bypass the scheduler block.
 		if (goal.state === "blocked") throw new GoalPausedError(goalId);
 
-		// Use the goal's worktree/cwd for the team lead
-		const cwd = goal.worktreePath || goal.cwd;
+		const headquartersGoal = isHeadquartersProject(goal.projectId);
+		// Use the goal's worktree/cwd for the team lead. Headquarters is always
+		// no-worktree, even if a legacy record still carries branch/worktree fields.
+		const cwd = headquartersGoal ? goal.cwd : (goal.worktreePath || goal.cwd);
 
 		// Build the Team Lead role prompt with structural placeholders only
 		// Secrets (gateway URL, auth token, goal ID) are passed as env vars, NOT embedded in prompt text
@@ -1861,8 +1864,9 @@ export class TeamManager {
 				roleName: "team-lead",
 				env: { BOBBIT_GOAL_ID: goalId },
 				sandboxed,
-				// For sandboxed goals, create a worktree at the goal branch inside the container
-				sandboxBranch: sandboxed && goal.branch ? goal.branch : undefined,
+				// For sandboxed goals, create a worktree at the goal branch inside the container.
+				// Headquarters is always no-worktree, so never pass a branch to sandbox wiring.
+				sandboxBranch: sandboxed && !headquartersGoal && goal.branch ? goal.branch : undefined,
 				// Only pass initialModel/initialThinkingLevel when this goal carries an
 				// EPHEMERAL inline-role override for team-lead (goal.inlineRoles — a
 				// one-off role snapshot that never reaches the project/server/builtin
@@ -1894,7 +1898,7 @@ export class TeamManager {
 		this.sessionManager.updateSessionMeta(session.id, {
 			role: "team-lead",
 			teamGoalId: goalId,
-			worktreePath: goal.worktreePath,
+			worktreePath: headquartersGoal ? undefined : goal.worktreePath,
 			accessory: teamLeadAccessory,
 		});
 
@@ -2059,7 +2063,9 @@ export class TeamManager {
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.
-		const useWorktree = !!goal.repoPath;
+		// Headquarters never gets member worktrees, even if a legacy goal record
+		// still has repo/branch fields from the pre-split implementation.
+		const useWorktree = !isHeadquartersProject(goal.projectId) && !!goal.repoPath && !!goal.branch;
 
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
@@ -2191,8 +2197,9 @@ export class TeamManager {
 			this.sessionManager.setTitle(session.id, `${roleLabel}: ${roleName}`);
 			session.titleGenerated = true;
 			const roleAccessory = storedRoleDef.accessory;
-			// For sandboxed sessions, the actual worktree is session.cwd (set by ProjectSandbox.createWorktree)
-			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed ? session.cwd : undefined);
+			// For sandboxed sessions, the actual worktree is session.cwd (set by ProjectSandbox.createWorktree).
+			// No-worktree goals, including Headquarters, must not persist cwd as a worktree.
+			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed && useWorktree ? session.cwd : undefined);
 			const memberSessionMeta = {
 				role,
 				teamGoalId: goalId,

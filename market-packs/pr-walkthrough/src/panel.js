@@ -383,14 +383,79 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		queueMicrotask(() => moveCard({ ...entry, reviewStatus }, host, paramKey, 1));
 	};
 
-	const blockKey = (card, block) => `${asText(card && card.id, "card")}::${asText(block && (block.id || block.filePath || block.path || block.label), "diff")}`;
+	const hunkIdentity = (hunk, index) => asText(hunk && (hunk.id || hunk.hunkId || hunk.hunk_id || hunk.header), `hunk-${index}`);
+	const placementValue = (value) => {
+		const raw = asText(value, "primary").trim().replace(/-/g, "_");
+		return raw === "secondary" || raw === "skip" || raw === "completion_sweep" ? raw : "primary";
+	};
+	const placementHunkId = (placement) => asText(placement && (placement.hunkId || placement.hunk_id || placement.id));
+	const placementCardId = (placement) => asText(placement && (placement.primaryCardId || placement.primary_card_id));
+	const placementCardTitle = (placement) => asText(placement && (placement.primaryCardTitle || placement.primary_card_title));
+	const hunkPlacementsOf = (card) => [...arrayOf(card && card.hunkPlacements), ...arrayOf(card && card.hunk_placements)];
+	const placementMatchesHunk = (placement, block, hunk, index) => {
+		const id = hunkIdentity(hunk, index);
+		const targetId = placementHunkId(placement);
+		if (targetId && targetId === id) return true;
+		const blockId = asText(block && (block.id || block.blockId || block.block_id));
+		const targetBlockId = asText(placement && (placement.blockId || placement.block_id));
+		if (targetBlockId && blockId && targetBlockId !== blockId) return false;
+		const filePath = asText(block && (block.filePath || block.path));
+		const targetFile = asText(placement && (placement.filePath || placement.file_path || placement.file || placement.path));
+		if (targetFile && filePath && targetFile !== filePath) return false;
+		const header = asText(hunk && hunk.header);
+		const targetHeader = asText(placement && (placement.hunkHeader || placement.hunk_header || placement.header));
+		const targetIndex = placement && (placement.hunkIndex ?? placement.hunk_index);
+		return Boolean((targetBlockId || targetFile || targetHeader || targetIndex !== undefined)
+			&& (!targetHeader || targetHeader === header)
+			&& (targetIndex === undefined || Number(targetIndex) === index));
+	};
+	const normalizePlacement = (placement, block, hunk, index) => {
+		const value = placementValue(placement && placement.placement);
+		const explicitExpanded = placement && (placement.defaultExpanded ?? placement.default_expanded);
+		return {
+			...(placement || {}),
+			hunkId: placementHunkId(placement) || hunkIdentity(hunk, index),
+			blockId: asText((placement && (placement.blockId || placement.block_id)) || (block && (block.id || block.blockId || block.block_id))),
+			filePath: asText((placement && (placement.filePath || placement.file_path || placement.file || placement.path)) || (block && (block.filePath || block.path))),
+			hunkHeader: asText((placement && (placement.hunkHeader || placement.hunk_header || placement.header)) || (hunk && hunk.header)),
+			placement: value,
+			defaultExpanded: typeof explicitExpanded === "boolean" ? explicitExpanded : value !== "secondary",
+			primaryCardId: placementCardId(placement),
+			primaryCardTitle: placementCardTitle(placement),
+			whyRelevant: asText(placement && (placement.whyRelevant || placement.why_relevant)),
+			skipReason: asText(placement && (placement.skipReason || placement.skip_reason)),
+		};
+	};
+	const placementForHunk = (card, block, hunk, index) => {
+		if (block && block.__prwPlacement) return normalizePlacement(block.__prwPlacement, block, hunk, index);
+		for (const placement of hunkPlacementsOf(card)) {
+			if (placementMatchesHunk(placement, block, hunk, index)) return normalizePlacement(placement, block, hunk, index);
+		}
+		if (hunk && (hunk.placement || hunk.defaultExpanded !== undefined || hunk.default_expanded !== undefined || hunk.primaryCardId || hunk.primary_card_id)) return normalizePlacement(hunk, block, hunk, index);
+		if (block && (block.placement || block.defaultExpanded !== undefined || block.default_expanded !== undefined || block.primaryCardId || block.primary_card_id || block.hunkId || block.hunk_id)) return normalizePlacement(block, block, hunk, index);
+		return normalizePlacement(undefined, block, hunk, index);
+	};
+	const blockPlacement = (card, block) => {
+		if (block && block.__prwPlacement) return normalizePlacement(block.__prwPlacement, block, arrayOf(block && block.hunks)[0], 0);
+		const hunks = arrayOf(block && block.hunks);
+		return hunks.length === 1 ? placementForHunk(card, block, hunks[0], 0) : normalizePlacement(block, block, hunks[0], 0);
+	};
+	const placementAwareBlockKey = (card, block) => {
+		if (block && block.__prwBlockKey) return block.__prwBlockKey;
+		const placement = blockPlacement(card, block);
+		if (placement && placement.hunkId && (placement.placement !== "primary" || block && (block.placement || block.__prwPlacement || block.hunkId || block.hunk_id) || arrayOf(block && block.hunks).length === 1)) {
+			return `${asText(card && card.id, "card")}::${placement.hunkId}::${placement.placement}`;
+		}
+		return `${asText(card && card.id, "card")}::${asText(block && (block.id || block.filePath || block.path || block.label), "diff")}`;
+	};
+	const blockKey = (card, block) => placementAwareBlockKey(card, block);
 	const lineIdentifier = (line) => asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine || line.text), "line");
 	const lineKey = (card, block, line) => `${blockKey(card, block)}::${lineIdentifier(line)}::${asText(line && line.kind, "ctx")}`;
 	const lineDomId = (key) => `prw-line-comment-${safeDomId(key)}`;
-	const blockIdentifiers = (block) => new Set([block && block.id, block && block.filePath, block && block.path, block && block.label].map((value) => asText(value)).filter(Boolean));
+	const blockIdentifiers = (block) => new Set([block && block.id, block && block.__prwSourceBlockId, block && block.blockId, block && block.block_id, block && block.filePath, block && block.path, block && block.label, block && block.hunkId, block && block.hunk_id, block && block.__prwPlacement && block.__prwPlacement.hunkId, ...arrayOf(block && block.hunks).map((hunk, index) => hunkIdentity(hunk, index))].map((value) => asText(value)).filter(Boolean));
 	const suggestionBody = (suggestion) => asText(suggestion && (suggestion.body || suggestion.text || suggestion.summary), suggestion);
 	const suggestionMatchesBlock = (suggestion, block) => {
-		const target = asText(suggestion && (suggestion.diffBlockId || suggestion.diff_block_id || suggestion.blockId || suggestion.filePath || suggestion.path));
+		const target = asText(suggestion && (suggestion.hunkId || suggestion.hunk_id || suggestion.diffBlockId || suggestion.diff_block_id || suggestion.blockId || suggestion.block_id || suggestion.filePath || suggestion.file_path || suggestion.path));
 		return !target || blockIdentifiers(block).has(target);
 	};
 	const suggestionMatchesLine = (suggestion, line) => {
@@ -702,7 +767,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 	const effectiveDiffMode = (entry) => (entry.diffMode === "inline" ? "inline" : "split");
 	const normKind = (line) => (line && (line.kind === "add" || line.kind === "del") ? line.kind : "context");
-	const hunkId = (hunk, index) => asText(hunk && (hunk.id || hunk.header), `hunk-${index}`);
+	const hunkId = hunkIdentity;
 	const lineId = (line) => asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine || line.text), "line");
 	const commentsForLineKey = (entry, key) => arrayOf((entry.lineComments || {})[key]).filter((comment) => asText(comment).trim());
 
@@ -997,17 +1062,36 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		try { const url = new URL(asText(value), globalThis.location && globalThis.location.href ? globalThis.location.href : "https://example.invalid/"); return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined; } catch { return undefined; }
 	};
 	const externalFileUrl = (block) => safeExternalUrl(block && (block.externalUrl || block.blobUrl || block.rawUrl || block.contentsUrl));
+	const cardNumberFor = (entry, cardId) => {
+		const index = cardsOf(entry).findIndex((candidate) => asText(candidate && candidate.id) === asText(cardId));
+		return index >= 0 ? index + 1 : undefined;
+	};
+	const repeatedHunkHint = (entry, placement) => {
+		if (!placement || placement.placement !== "secondary") return "";
+		const cardNumber = cardNumberFor(entry, placement.primaryCardId);
+		const title = placement.primaryCardTitle || (cardsOf(entry).find((card) => asText(card && card.id) === placement.primaryCardId) || {}).title || placement.primaryCardId;
+		return `Also shown in ${cardNumber ? `Card ${cardNumber}` : "an earlier card"}${title ? `: ${title}` : ""}`;
+	};
+	const isCollapsedDiffBlock = (entry, card, block) => {
+		const key = blockKey(card, block);
+		const persisted = entry.collapsedDiffBlocks || {};
+		if (Object.prototype.hasOwnProperty.call(persisted, key)) return Boolean(persisted[key]);
+		const placement = blockPlacement(card, block);
+		return placement ? !placement.defaultExpanded : false;
+	};
 	const renderDiffBlock = (entry, host, paramKey, card, block) => {
 		const filePath = asText(block && (block.filePath || block.path), "unknown");
 		const label = asText(block && (block.label || block.filePath || block.path), "Diff block");
 		const key = blockKey(card, block);
-		const collapsed = Boolean((entry.collapsedDiffBlocks || {})[key]);
+		const collapsed = isCollapsedDiffBlock(entry, card, block);
+		const placement = blockPlacement(card, block);
+		const repeatedHint = repeatedHunkHint(entry, placement);
 		const stats = diffStats(block);
 		const comments = blockCommentCount(entry, card, block);
 		const href = externalFileUrl(block);
 		const oldPath = asText(block && block.oldPath);
 		const mode = effectiveDiffMode(entry);
-		return html`<section class=${`diff-block ${collapsed ? "closed" : "open"}`} data-testid="pr-walkthrough-diff-block" data-file-path=${filePath} data-diff-mode=${mode} data-expanded=${String(!collapsed)}><div class="diff-file-header-row"><button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${String(!collapsed)} @click=${() => updateNestedMap(entry, host, paramKey, "collapsedDiffBlocks", key, !collapsed)}><span class="caret">▸</span><span class="diff-path"><b>${oldPath && oldPath !== filePath ? `${oldPath} → ${filePath}` : label}</b></span>${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}<span class="diff-counts" data-testid="pr-walkthrough-diff-counts" aria-label=${`${stats.additions} additions, ${stats.deletions} deletions`}><span class="diff-add-count" data-testid="pr-walkthrough-diff-additions">+${stats.additions}</span><span class="diff-del-count" data-testid="pr-walkthrough-diff-deletions">-${stats.deletions}</span></span></button>${href ? html`<a class="diff-external-link" href=${href} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link" title="Open file" aria-label=${`Open ${filePath}`}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a>` : nothing}</div>${collapsed ? nothing : mode === "inline" ? renderInlineDiff(entry, host, paramKey, card, block || {}) : renderSplitDiff(entry, host, paramKey, card, block || {})}</section>`;
+		return html`<section class=${`diff-block ${collapsed ? "closed" : "open"} placement-${placement.placement || "primary"}`} data-testid="pr-walkthrough-diff-block" data-file-path=${filePath} data-hunk-id=${placement.hunkId || ""} data-hunk-placement=${placement.placement || "primary"} data-diff-mode=${mode} data-expanded=${String(!collapsed)}><div class="diff-file-header-row"><button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${String(!collapsed)} @click=${() => updateNestedMap(entry, host, paramKey, "collapsedDiffBlocks", key, !collapsed)}><span class="caret">▸</span><span class="diff-path"><b>${oldPath && oldPath !== filePath ? `${oldPath} → ${filePath}` : label}</b>${repeatedHint ? html`<span class="diff-repeat-hint" data-testid="prw-secondary-hunk-hint">${repeatedHint}</span>` : nothing}</span>${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}<span class="diff-counts" data-testid="pr-walkthrough-diff-counts" aria-label=${`${stats.additions} additions, ${stats.deletions} deletions`}><span class="diff-add-count" data-testid="pr-walkthrough-diff-additions">+${stats.additions}</span><span class="diff-del-count" data-testid="pr-walkthrough-diff-deletions">-${stats.deletions}</span></span></button>${href ? html`<a class="diff-external-link" href=${href} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link" title="Open file" aria-label=${`Open ${filePath}`}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a>` : nothing}</div>${collapsed ? nothing : mode === "inline" ? renderInlineDiff(entry, host, paramKey, card, block || {}) : renderSplitDiff(entry, host, paramKey, card, block || {})}</section>`;
 	};
 	const renderDiffBlockSafe = (entry, host, paramKey, card, block) => {
 		try { return renderDiffBlock(entry, host, paramKey, card, block || {}); }
@@ -1109,6 +1193,157 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
+	const narrativeEntries = (card) => arrayOf(card && card.narrative).filter((item) => item && typeof item === "object" && item.type);
+	const narrativeBlockId = (item, index) => safeDomId(item && item.id ? item.id : `${asText(item && item.type, "entry")}-${index}`);
+	const anchorHunkId = (anchor) => asText(anchor && (anchor.hunkId || anchor.hunk_id || anchor.id));
+	const narrativeHunkIds = (item) => [
+		item && (item.hunkId || item.hunk_id),
+		...arrayOf(item && (item.hunkIds || item.hunk_ids)),
+		...arrayOf(item && item.hunks).map((hunk) => typeof hunk === "string" ? hunk : hunk && (hunk.hunkId || hunk.hunk_id || hunk.id)),
+	].map((value) => asText(value).trim()).filter(Boolean);
+	const hunkMatchesTarget = (card, block, hunk, hunkIndex, targetId) => {
+		if (!targetId) return false;
+		if (hunkIdentity(hunk, hunkIndex) === targetId) return true;
+		const placement = placementForHunk(card, block, hunk, hunkIndex);
+		return placement && placement.hunkId === targetId;
+	};
+	const blockCloneForHunk = (card, block, hunk, hunkIndex, targetId) => {
+		const placement = placementForHunk(card, block, hunk, hunkIndex);
+		const hId = targetId || placement.hunkId || hunkIdentity(hunk, hunkIndex);
+		const p = { ...placement, hunkId: hId };
+		const blockId = asText(block && (block.id || block.blockId || block.block_id || block.filePath || block.path), "diff");
+		return {
+			...(block || {}),
+			id: `${blockId}::${hId}`,
+			__prwSourceBlockId: blockId,
+			hunks: [hunk],
+			__prwPlacement: p,
+			__prwBlockKey: `${asText(card && card.id, "card")}::${hId}::${p.placement || "primary"}`,
+		};
+	};
+	const narrativeDiffBlocks = (card, item) => {
+		const explicit = arrayOf(item && (item.diffBlocks || item.diff_blocks));
+		if (explicit.length) return explicit.map((block) => ({ ...block }));
+		const targets = narrativeHunkIds(item);
+		if (!targets.length) return [];
+		const result = [];
+		const seen = new Set();
+		for (const target of targets) {
+			for (const block of arrayOf(card && card.diffBlocks)) {
+				const hunks = arrayOf(block && block.hunks);
+				for (let index = 0; index < hunks.length; index += 1) {
+					const hunk = hunks[index];
+					if (!hunkMatchesTarget(card, block, hunk, index, target)) continue;
+					const clone = blockCloneForHunk(card, block, hunk, index, target);
+					if (!seen.has(clone.__prwBlockKey)) {
+						seen.add(clone.__prwBlockKey);
+						result.push(clone);
+					}
+				}
+			}
+		}
+		return result;
+	};
+	const renderNarrativeText = (item, index) => html`<section class="narrative-block narrative-text" data-testid="prw-narrative-text" data-narrative-id=${narrativeBlockId(item, index)}><p>${asText(item && (item.body || item.text))}</p></section>`;
+	const renderNarrativeNote = (item, index) => {
+		const anchor = anchorHunkId(item && item.anchor);
+		return html`<aside class="narrative-block narrative-note" data-testid="prw-narrative-note" data-narrative-id=${narrativeBlockId(item, index)}>${anchor ? html`<div class="phase-label">Note · ${anchor}</div>` : html`<div class="phase-label">Note</div>`}<p>${asText(item && (item.body || item.text))}</p></aside>`;
+	};
+	const renderNarrativeSuggestedComment = (item, index) => {
+		const severity = asText(item && item.severity, "comment").replace(/_/g, "-");
+		const intent = asText(item && item.intent, "summary").replace(/_/g, " ");
+		const anchor = anchorHunkId(item && item.anchor);
+		return html`<aside class="narrative-block narrative-suggested-comment prw-suggested-comment" data-testid="prw-narrative-suggested-comment" data-narrative-id=${narrativeBlockId(item, index)} data-severity=${severity} data-intent=${intent}>
+			<div class="prw-suggestion-anchor">Suggested ${intent} comment · ${severity}${anchor ? ` · ${anchor}` : ""}</div>
+			<div>${suggestionBody(item)}</div>
+		</aside>`;
+	};
+	const renderNarrativeChecklist = (item, index) => {
+		const items = arrayOf(item && item.items).map((value) => asText(value)).filter(Boolean);
+		return items.length ? html`<section class="narrative-block narrative-checklist" data-testid="prw-narrative-checklist" data-narrative-id=${narrativeBlockId(item, index)}><div class="phase-label">Review checks</div><ul class="checklist prw-checklist">${items.map((value) => html`<li>${value}</li>`)}</ul></section>` : nothing;
+	};
+	const renderNarrativeDiff = (entry, host, paramKey, card, item, index) => {
+		const blocks = narrativeDiffBlocks(card, item);
+		return html`<section class="narrative-block narrative-diff" data-testid="prw-narrative-diff" data-narrative-id=${narrativeBlockId(item, index)}>
+			${blocks.length ? html`<div class="diff-list prw-diff-list">${blocks.map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block))}</div>` : html`<div class="no-diff prw-no-diff"><span>Referenced diff is unavailable.</span></div>`}
+		</section>`;
+	};
+	const renderNarrativeEntry = (entry, host, paramKey, card, item, index) => {
+		switch (asText(item && item.type)) {
+			case "text": return renderNarrativeText(item, index);
+			case "diff": return renderNarrativeDiff(entry, host, paramKey, card, item, index);
+			case "note": return renderNarrativeNote(item, index);
+			case "suggested_comment": return renderNarrativeSuggestedComment(item, index);
+			case "checklist": return renderNarrativeChecklist(item, index);
+			default: return nothing;
+		}
+	};
+	const coverageValue = (coverage, keys) => {
+		const sources = [coverage, objectOf(coverage && coverage.summary), objectOf(coverage && coverage.counts)].filter(Boolean);
+		for (const source of sources) for (const key of keys) {
+			const value = source[key];
+			if (Array.isArray(value)) return value.length;
+			if (value !== undefined && value !== null && value !== "") return value;
+		}
+		return undefined;
+	};
+	const coverageList = (card, coverage, keys) => {
+		for (const source of [coverage, card].filter(Boolean)) for (const key of keys) {
+			if (Array.isArray(source[key])) return source[key];
+		}
+		return [];
+	};
+	const coverageItemLabel = (item) => {
+		const file = asText(item && (item.filePath || item.file_path || item.file || item.path), "unknown file");
+		const header = asText(item && (item.hunkHeader || item.hunk_header || item.header || item.hunkId || item.hunk_id || item.id));
+		const reason = asText(item && (item.skipReason || item.skip_reason || item.reason));
+		return html`<li><strong>${file}</strong>${header ? html`<span>${header}</span>` : nothing}${reason ? html`<em>${reason}</em>` : nothing}</li>`;
+	};
+	const renderCoverageList = (label, items, testId) => arrayOf(items).length ? html`<div class="coverage-list" data-testid=${testId}><strong>${label}</strong><ul>${arrayOf(items).slice(0, 8).map(coverageItemLabel)}</ul>${arrayOf(items).length > 8 ? html`<p>${arrayOf(items).length - 8} more…</p>` : nothing}</div>` : nothing;
+	const renderCoverageSummary = (card) => {
+		const coverage = objectOf(card && (card.coverage || card.coverageSummary || card.coverage_summary));
+		if (!coverage) return nothing;
+		const counts = [
+			["Primary reviewed", coverageValue(coverage, ["primaryReviewed", "primary_reviewed", "primaryReviewedCount", "primary_reviewed_count"])],
+			["Repeated", coverageValue(coverage, ["repeatedSecondaryReferences", "repeated_secondary_references", "repeatedReferenceCount", "repeated_reference_count", "secondaryReferences", "secondary_references"])],
+			["Skipped", coverageValue(coverage, ["skipped", "skippedCount", "skipped_count"])],
+			["Unread", coverageValue(coverage, ["unread", "unreadPrimary", "unread_primary", "unreadCount", "unread_count"])],
+			["Completion sweep", coverageValue(coverage, ["completionSweepRemaining", "completion_sweep_remaining", "remaining", "remainingCount", "remaining_count"])],
+		].filter(([, value]) => value !== undefined && value !== null && value !== "");
+		const remaining = coverageList(card, coverage, ["completionSweepRemaining", "completion_sweep_remaining", "remainingHunks", "remaining_hunks"]);
+		const skipped = coverageList(card, coverage, ["skippedHunks", "skipped_hunks", "skipped"]);
+		const unread = coverageList(card, coverage, ["unreadHunks", "unread_hunks", "unread"]);
+		const major = coverageList(card, coverage, ["majorRemaining", "major_remaining", "majorRemainingHunks", "major_remaining_hunks"]);
+		if (!counts.length && !remaining.length && !skipped.length && !unread.length && !major.length) return nothing;
+		return html`<section class="coverage-summary" data-testid="prw-coverage-summary">
+			<div class="phase-label">Coverage summary</div>
+			${counts.length ? html`<div class="coverage-counts">${counts.map(([label, value]) => html`<span><strong>${value}</strong>${label}</span>`)}</div>` : nothing}
+			${renderCoverageList("Completion sweep remaining", remaining, "prw-completion-sweep")}
+			${renderCoverageList("Skipped hunks", skipped, "prw-skipped-hunks")}
+			${renderCoverageList("Unread hunks", unread, "prw-unread-hunks")}
+			${renderCoverageList("Major remaining", major, "prw-major-remaining")}
+		</section>`;
+	};
+	const renderNarrativeCardBody = (entry, host, paramKey, card) => {
+		const entries = narrativeEntries(card);
+		const hasDiffs = entries.some((item) => asText(item && item.type) === "diff");
+		return html`
+			<article class="card prw-card narrative-card" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
+				<span data-testid="prw-card" hidden></span>
+				<div class="inner prw-card-story">
+					<header class="card-head"><div><div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</div><h2 data-testid="pr-walkthrough-card-title">${card.title || "Review card"}</h2></div><span class="nav-label">${deriveNavLabel(card)}</span></header>
+					${card.summary ? html`<p class="summary prw-summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>` : nothing}
+					${card.rationale ? html`<p class="rationale prw-rationale">${card.rationale}</p>` : nothing}
+				</div>
+				${hasDiffs ? html`<div class="diff-toolbar prw-diff-toolbar"><div><div class="phase-label">Diff review</div><small>Review each referenced hunk in narrative order.</small></div>${renderDiffModeControls(entry, host, paramKey)}</div>` : nothing}
+				<div class="narrative" data-testid="prw-narrative">${entries.map((item, index) => renderNarrativeEntry(entry, host, paramKey, card, item, index))}</div>
+				${renderCoverageSummary(card)}
+				${renderCardComments(entry, host, paramKey, card)}
+				${renderAuditDraft(entry, host, paramKey, card)}
+			</article>
+		`;
+	};
+
 	const renderReviewControls = (entry, host, paramKey, card) => {
 		const prev = previousCardId(entry, card);
 		const hasComments = hasSavedUserComments(entry, card);
@@ -1132,6 +1367,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 	const renderCardBody = (entry, host, paramKey, card) => {
 		if (cardPhase(card) === "orientation" && arrayOf(card.sections).length) return renderOrientationGuideCard(entry, host, paramKey, card);
+		if (narrativeEntries(card).length) return renderNarrativeCardBody(entry, host, paramKey, card);
 		const anchoredIds = anchoredSuggestionIds(card);
 		const suggestedComments = arrayOf(card.suggestedComments).filter((suggestion) => !anchoredIds.has(asText(suggestion && suggestion.id, suggestionBody(suggestion))));
 		return html`
@@ -1146,6 +1382,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				${arrayOf(card.diffBlocks).length || suggestedComments.length ? html`<div class="diff-toolbar prw-diff-toolbar"><div><div class="phase-label">Diff review</div><small>Review each grouped file hunk and leave anchored feedback.</small></div>${renderDiffModeControls(entry, host, paramKey)}</div>` : nothing}
 				<div class="diff-list prw-diff-list">${arrayOf(card.diffBlocks).length ? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block)) : html`<div class="no-diff prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}</div>
 				${suggestedComments.length ? html`<section class="line-suggestions prw-line-suggestions"><div class="phase-label">Other line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment(entry, host, paramKey, card))}</section>` : nothing}
+				${renderCoverageSummary(card)}
 				${renderCardComments(entry, host, paramKey, card)}
 				${renderAuditDraft(entry, host, paramKey, card)}
 			</article>
@@ -1430,7 +1667,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const isPending = status === "running" || status === "publishing"
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
-			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
 			const progressLabel = (kind) => kind === "pending" ? "Generating review cards" : kind === "draft" ? "Saved draft" : "Walkthrough unavailable";
 			const stateLabel = (kind) => kind === "error" ? "Error" : kind === "neutral" ? "No walkthrough" : kind === "draft" ? "Draft saved" : kind === "missing" ? "Missing" : "Pending";
 			const renderChunkSummary = (summary) => {
@@ -1477,7 +1713,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							<div class="phase-label">${phase}</div>
 							<h2>${title}</h2>
 							<p>${body}</p>
-							<div class="pending-progress-row"><span class="pr-pill">${spinner}</span><div class="progress-wrap"><span>${label}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${String(value)}><div class=${`progress-fill ${indeterminate ? "prw-progress-indeterminate" : ""}`} style=${`width:${width}%`}></div></div></div></div>
+							<div class="pending-progress-row"><div class="progress-wrap"><span>${label}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${String(value)}><div class=${`progress-fill ${indeterminate ? "prw-progress-indeterminate" : ""}`} style=${`width:${width}%`}></div></div></div></div>
 							${detail}
 							<div class="state-skeleton"><span></span><span></span><span></span></div>
 						</article>
@@ -1489,7 +1725,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 			return html`
 				<style>
-					@keyframes prw-spin { to { transform: rotate(360deg); } }
 					.prw-root { color: var(--foreground); background: var(--background); padding: 0; min-height: 100%; height: 100%; box-sizing: border-box; }
 					.prw-root .prw-shell { border: 0; border-radius: 0; background: var(--card); overflow: hidden; box-shadow: none; }
 					.prw-root .prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
@@ -1588,7 +1823,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .prw-dislike-button { color: var(--foreground); }
 					.prw-root .prw-dislike-button:hover:not(:disabled), .prw-root .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }
 					.prw-root button:disabled { opacity: .48; cursor: not-allowed; }
-					.prw-root .prw-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: prw-spin .8s linear infinite; }
 					.prw-root .prw-pending, .prw-root .prw-empty, .prw-root .prw-neutral, .prw-root .prw-error { display: flex; align-items: center; gap: 8px; padding: 18px; color: var(--muted-foreground); }
 					.prw-root .prw-error { color: var(--negative); }
 					@media (max-width: 760px) {
@@ -1652,6 +1886,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .diff-block.open .caret { transform: rotate(90deg); }
 					.prw-root .diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
 					.prw-root .diff-path b { color: var(--foreground); }
+					.prw-root .diff-repeat-hint { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; color: var(--muted-foreground); font: 11px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.prw-root .placement-secondary .diff-file-header { background: color-mix(in oklch, var(--info) 8%, transparent); }
 					.prw-root .diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
 					.prw-root .diff-add-count { color: var(--positive); }
 					.prw-root .diff-del-count { color: var(--negative); }
@@ -1829,13 +2065,27 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .content::-webkit-scrollbar-thumb:hover { background: color-mix(in oklch, var(--muted-foreground) 56%, transparent); border: 2px solid transparent; background-clip: padding-box; }
 					.prw-root .card { max-width: none; margin: 0 0 12px; display: grid; gap: 8px; }
 					.prw-root .inner, .prw-root .guide { border: 0; border-radius: 0; background: transparent; padding: 0; box-shadow: none; }
-					.prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .state-card, .prw-root .audit-draft, .prw-root .coverage-summary, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
 					.prw-root .card-head, .prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
 					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
 					.prw-root .summary { margin: 8px 0 0; color: var(--muted-foreground); }
 					.prw-root .beat > .summary { margin-top: 0; color: var(--foreground); font-size: 16px; line-height: 1.5; max-width: 72ch; }
 					.prw-root .rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
+					.prw-root .narrative { display: grid; gap: 10px; }
+					.prw-root .narrative-block { min-width: 0; }
+					.prw-root .narrative-text p, .prw-root .narrative-note p { margin: 0; max-width: 86ch; color: var(--foreground); line-height: 1.55; }
+					.prw-root .narrative-note { border-left: 3px solid var(--info); padding: 8px 10px; border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--info) 7%, transparent); }
+					.prw-root .narrative-suggested-comment { margin-top: 0; }
+					.prw-root .narrative-checklist .checklist { margin-top: 6px; }
+					.prw-root .coverage-summary { display: grid; gap: 10px; }
+					.prw-root .coverage-counts { display: flex; flex-wrap: wrap; gap: 8px; }
+					.prw-root .coverage-counts span { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 4px 8px; color: var(--muted-foreground); background: color-mix(in oklch, var(--background) 64%, transparent); }
+					.prw-root .coverage-counts strong { color: var(--foreground); font-variant-numeric: tabular-nums; }
+					.prw-root .coverage-list ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted-foreground); }
+					.prw-root .coverage-list li + li { margin-top: 4px; }
+					.prw-root .coverage-list strong { display: block; color: var(--foreground); }
+					.prw-root .coverage-list span, .prw-root .coverage-list em { display: block; color: var(--muted-foreground); font-style: normal; overflow-wrap: anywhere; }
 					.prw-root .checklist { margin: 10px 0 0; color: var(--muted-foreground); }
 					.prw-root .nav-label { color: var(--muted-foreground); font-size: 11px; }
 					.prw-root .diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
@@ -1918,9 +2168,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .pending-modal { width: min(360px, calc(100% - 20px)); padding: 18px; border-radius: 18px; background: color-mix(in oklch, var(--card) 94%, var(--background)); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); }
 					.prw-root .pending-modal h2 { margin: 8px 0 0; font-size: clamp(20px, 4vw, 28px); line-height: 1.15; letter-spacing: -.02em; }
 					.prw-root .pending-modal p { margin: 12px 0 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.55; }
-					.prw-root .pending-progress-row { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 16px; }
-					.prw-root .pending-progress-row .pr-pill { width: 34px; height: 34px; padding: 0; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 74%, var(--card)); }
-					.prw-root .pending-progress-row .progress-wrap { display: grid; gap: 4px; color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .pending-progress-row { display: flex; justify-content: center; margin-top: 16px; }
+					.prw-root .pending-progress-row .progress-wrap { width: min(280px, 100%); gap: 4px; text-align: center; color: var(--muted-foreground); font-size: 12px; }
 					.prw-root .state-shell { grid-template-rows: auto minmax(0, 1fr); }
 					.prw-root .state-shell .state-header { height: auto; min-height: 68px; grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); gap: 12px; padding: 10px 14px; align-items: center; }
 					.prw-root .state-shell .title-group { min-width: 0; }

@@ -37,6 +37,47 @@ async function getServerModules() {
 	return serverModules;
 }
 
+/**
+ * Poll `fetch` until `matches(value)` is true or the deadline passes.
+ *
+ * Regression this pins: a naive `while (Date.now() - start < timeoutMs)` loop
+ * checks the deadline *before* fetching, so it can exit in the window between
+ * the last in-loop poll and a state transition landing on the server. The old
+ * `waitForGateStatus` then did a final fetch but threw unconditionally — even
+ * when that final status already matched the target (observed as
+ * `last: failed` while waiting for `failed`). We therefore always perform one
+ * final authoritative fetch after the deadline and accept it if it matches,
+ * instead of racing the timeout. The last fetched value is returned either way
+ * so callers can build a precise timeout message.
+ */
+export interface PollForMatchResult<T> {
+	matched: boolean;
+	value: T;
+	elapsedMs: number;
+}
+
+export async function pollForMatch<T>(
+	fetch: () => Promise<T>,
+	matches: (value: T) => boolean,
+	opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<PollForMatchResult<T>> {
+	const timeoutMs = opts.timeoutMs ?? 15_000;
+	const intervalMs = opts.intervalMs ?? 20;
+	const start = Date.now();
+	let value = await fetch();
+	while (!matches(value)) {
+		if (Date.now() - start >= timeoutMs) {
+			// Deadline reached — one final authoritative fetch. A transition may
+			// have landed since the last poll; accept it if it now matches.
+			value = await fetch();
+			return { matched: matches(value), value, elapsedMs: Date.now() - start };
+		}
+		await new Promise((r) => setTimeout(r, intervalMs));
+		value = await fetch();
+	}
+	return { matched: true, value, elapsedMs: Date.now() - start };
+}
+
 export interface WsMsg { type: string; [key: string]: any }
 
 export interface WsHandle {
@@ -55,6 +96,8 @@ export interface TestGateway {
 	token: string;
 	/** HTTP base URL — only set if startHttp was true. */
 	baseURL: string;
+	/** Default project id created during gateway setup. */
+	projectId: string;
 
 	// ── Convenience helpers that call HTTP APIs on this gateway ──
 
@@ -63,6 +106,7 @@ export interface TestGateway {
 	/** Create a goal. */
 	createGoal(opts: {
 		title: string;
+		projectId?: string;
 		cwd?: string;
 		spec?: string;
 		team?: boolean;
@@ -73,7 +117,7 @@ export interface TestGateway {
 	/** Delete a goal (best-effort). */
 	deleteGoal(id: string): Promise<void>;
 	/** Create a session. */
-	createSession(opts?: { cwd?: string; goalId?: string }): Promise<string>;
+	createSession(opts?: { projectId?: string; cwd?: string; goalId?: string }): Promise<string>;
 	/** Delete a session (best-effort). */
 	deleteSession(id: string): Promise<void>;
 	/** Signal a gate with optional content/metadata. */
@@ -128,6 +172,7 @@ export async function createTestGateway(opts?: {
 
 	let baseURL = "";
 	let wsBase = "";
+	let projectId = "";
 	if (startHttp) {
 		const port = await gw.start();
 		baseURL = `http://127.0.0.1:${port}`;
@@ -148,8 +193,9 @@ export async function createTestGateway(opts?: {
 			if (createRes.ok) {
 				const project = await createRes.json() as { id?: string };
 				if (project?.id) {
+					projectId = project.id;
 					const { seedTestWorkflows } = await import("../../e2e/seed-workflows.js");
-					await seedTestWorkflows({ baseURL, token, projectId: project.id });
+					await seedTestWorkflows({ baseURL, token, projectId });
 				}
 			}
 		} catch { /* best-effort */ }
@@ -226,12 +272,13 @@ export async function createTestGateway(opts?: {
 		sessionManager: gw.sessionManager,
 		token,
 		baseURL,
+		projectId,
 		fetch: doFetch,
 
 		async createGoal(opts) {
 			const res = await doFetch("/api/goals", {
 				method: "POST",
-				body: { cwd: dir, worktree: false, ...opts },
+				body: { cwd: dir, worktree: false, ...opts, projectId: opts.projectId ?? projectId },
 			});
 			if (res.status !== 201) throw new Error(`createGoal failed (${res.status}): ${JSON.stringify(res.body)}`);
 			return res.body;
@@ -244,7 +291,11 @@ export async function createTestGateway(opts?: {
 		async createSession(opts) {
 			const res = await doFetch("/api/sessions", {
 				method: "POST",
-				body: { cwd: opts?.cwd ?? dir, goalId: opts?.goalId },
+				body: {
+					projectId: opts?.projectId ?? projectId,
+					cwd: opts?.cwd ?? dir,
+					goalId: opts?.goalId,
+				},
 			});
 			if (res.status !== 201) throw new Error(`createSession failed (${res.status}): ${JSON.stringify(res.body)}`);
 			return res.body.id;
@@ -266,16 +317,15 @@ export async function createTestGateway(opts?: {
 			return res.body;
 		},
 
-		async waitForGateStatus(goalId, gateId, status, timeoutMs = 5_000) {
+		async waitForGateStatus(goalId, gateId, status, timeoutMs = 15_000) {
 			const targets = Array.isArray(status) ? status : [status];
-			const start = Date.now();
-			while (Date.now() - start < timeoutMs) {
-				const gate = await tg.getGate(goalId, gateId);
-				if (gate?.status && targets.includes(gate.status)) return gate;
-				await new Promise(r => setTimeout(r, 20));
-			}
-			const final = await tg.getGate(goalId, gateId);
-			throw new Error(`Gate ${gateId} did not reach ${targets.join("|")} in ${timeoutMs}ms (last: ${final?.status})`);
+			const result = await pollForMatch(
+				() => tg.getGate(goalId, gateId),
+				(gate) => Boolean(gate?.status && targets.includes(gate.status)),
+				{ timeoutMs, intervalMs: 20 },
+			);
+			if (result.matched) return result.value;
+			throw new Error(`Gate ${gateId} did not reach ${targets.join("|")} in ${timeoutMs}ms (last: ${result.value?.status})`);
 		},
 
 		connectWs,

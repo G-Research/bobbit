@@ -36,6 +36,7 @@ import { clearProposalAnnotations } from "../ui/components/review/proposal-annot
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 import { getExpiredAccountOAuthCredentials } from "./account-oauth-providers.js";
+import { HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
 
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -78,7 +79,7 @@ function extractProposalBody(
 	return String((fields as any).prompt ?? "");
 }
 
-function projectRootForSession(sessionId: string): string {
+function projectIdForSession(sessionId: string): string | undefined {
 	const session = state.gatewaySessions.find(s => s.id === sessionId)
 		|| state.archivedSessions.find(s => s.id === sessionId);
 	let projectId = session?.projectId;
@@ -86,21 +87,68 @@ function projectRootForSession(sessionId: string): string {
 	if (!projectId && (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId)) {
 		projectId = state.chatPanel?.agentInterface?.projectId;
 	}
-	if (!projectId) return "";
-	return state.projects.find(p => p.id === projectId)?.rootPath || "";
+	return projectId || undefined;
 }
 
 function proposalCwdOrProjectRoot(proposalCwd: unknown, sessionId: string): string {
 	const cwd = typeof proposalCwd === "string" ? proposalCwd : "";
-	return cwd.trim() ? cwd : projectRootForSession(sessionId);
+	if (cwd.trim()) return cwd;
+	const projectId = projectIdForSession(sessionId);
+	const project = projectId ? state.projects.find(p => p.id === projectId) : undefined;
+	return defaultCwdForProjectSession(project) || "";
+}
+
+function projectIdForGoal(goalId?: string): string | undefined {
+	if (!goalId) return undefined;
+	return state.goals.find(g => g.id === goalId)?.projectId;
+}
+
+function defaultProjectIdForNewSession(): string | undefined {
+	if (state.activeProjectId && state.projects.some(p => p.id === state.activeProjectId)) return state.activeProjectId;
+	const activeId = activeSessionId();
+	if (activeId) {
+		const fromSession = projectIdForSession(activeId);
+		if (fromSession && state.projects.some(p => p.id === fromSession)) return fromSession;
+	}
+	if (state.projects.length > 0) return state.projects[0].id;
+	return HEADQUARTERS_PROJECT_ID;
+}
+
+function projectIdForProposalSlot(sessionId: string, fields?: Record<string, unknown>): string | undefined {
+	const explicit = fields?.projectId;
+	if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
+	return projectIdForSession(sessionId);
+}
+
+function withSessionProjectId(type: ProposalType, sessionId: string, fields: Record<string, unknown>): Record<string, unknown> {
+	if (type === "project") return fields;
+	const projectId = projectIdForProposalSlot(sessionId, fields);
+	return projectId && fields.projectId !== projectId ? { ...fields, projectId } : fields;
+}
+
+function isProposalDismissedForSession(sessionId: string, type: ProposalType, fields: Record<string, unknown>): boolean {
+	if (isProposalDismissedTyped(sessionId, type, fields)) return true;
+	const scopedFields = withSessionProjectId(type, sessionId, fields);
+	if (scopedFields !== fields && isProposalDismissedTyped(sessionId, type, scopedFields)) return true;
+	// Some persisted proposal files predate projectId stamping while the UI slot is
+	// normalized with the session projectId before rendering. Treat that client-side
+	// projectId as dismissal-equivalent so hidden off-screen proposals stay hidden.
+	if (type !== "project" && typeof fields.projectId === "string") {
+		const unscopedFields = { ...fields };
+		delete unscopedFields.projectId;
+		if (isProposalDismissedTyped(sessionId, type, unscopedFields)) return true;
+	}
+	return false;
 }
 
 function resetStaffProposalPreview(sessionId: string): void {
+	const projectId = projectIdForSession(sessionId);
+	const project = projectId ? state.projects.find(p => p.id === projectId) : undefined;
 	state.staffPreviewName = "";
 	state.staffPreviewDescription = "";
 	state.staffPreviewPrompt = "";
 	state.staffPreviewTriggers = "[]";
-	state.staffPreviewCwd = projectRootForSession(sessionId);
+	state.staffPreviewCwd = defaultCwdForProjectSession(project) || "";
 	state.staffPreviewWorktree = true;
 	state.staffPreviewNameEdited = false;
 	state.staffPreviewDescriptionEdited = false;
@@ -474,7 +522,7 @@ const goalDraft = createDraftManager({
 			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
 			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
 			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
-			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
+			if (isProposalDismissedForSession(_sessionId, "goal", fields)) {
 				// User previously dismissed this proposal — keep the draft on disk
 				// (so future edit_proposal events can rehydrate it) but don't
 				// re-open the panel or re-populate the proposal-mirror preview
@@ -594,10 +642,28 @@ function mirrorGoalSetupFields(src: { metadata?: unknown }, opts?: { authoritati
 	if (opts?.authoritative) state.previewMetadataRows = [];
 }
 
+function clearGoalFormMirrorForDismissal(): void {
+	state.previewTitle = "";
+	state.previewSpec = "";
+	state.previewCwd = "";
+	state.previewTitleEdited = false;
+	state.previewSpecEdited = false;
+	state.previewCwdEdited = false;
+	state.previewMetadataEdited = false;
+	state.previewMetadataRows = [];
+}
+
 function reconcileGoalSlotIntoFormMirror(sessionId: string): boolean {
 	const goalSlot = state.activeProposals.goal;
 	if (!goalSlot || goalSlot.sessionId !== sessionId) return false;
-	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; metadata?: unknown };
+	if (isProposalDismissedForSession(sessionId, "goal", goalSlot.fields as Record<string, unknown>)) {
+		delete state.activeProposals.goal;
+		clearGoalFormMirrorForDismissal();
+		state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
+		return false;
+	}
+	const g = goalSlot.fields as { title?: string; spec?: string; cwd?: string; workflow?: string; projectId?: string; metadata?: unknown };
+	if (typeof g.projectId === "string" && g.projectId.trim()) state.previewProjectId = g.projectId.trim();
 	if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 	if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 	if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
@@ -1712,7 +1778,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// proposal, don't re-populate the form-mirror preview fields.
 				if (
 					!state.activeProposals.goal &&
-					isProposalDismissedTyped(sessionId, "goal", proposal as unknown as Record<string, unknown>)
+					isProposalDismissedForSession(sessionId, "goal", proposal as unknown as Record<string, unknown>)
 				) {
 					return;
 				}
@@ -1727,6 +1793,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const goalSlot = state.activeProposals.goal;
 				const serverAuthoritative = !_streaming && goalSlot?.sessionId === sessionId && (goalSlot.rev ?? 0) > 0;
 				if (!serverAuthoritative) {
+					if (typeof (proposal as any).projectId === "string" && (proposal as any).projectId.trim()) state.previewProjectId = (proposal as any).projectId.trim();
 					if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 					if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 					if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -1900,7 +1967,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (!shouldApplyProposalUpdate({ hasServerRev, serverRev, prevRev, streaming: streaming === true, isFirstEmit })) {
 				return;
 			}
-			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
+			const scopedFields = withSessionProjectId(type, sessionId, fields);
+			const merged = plugin.mergeFields(prev?.fields ?? {}, scopedFields);
 			// Inline-comments: a new proposal body invalidates any pending
 			// annotations because character offsets won't survive a rewrite.
 			// Only fires for goal/role/staff and only on a true content change
@@ -1914,11 +1982,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					showProposalToast("Proposal updated — comments cleared");
 				}
 			}
-			// First-emit dismissal short-circuit — generalised from the goal-only
-			// check at session-manager.ts:1062. Skip this only when (a) it's the
-			// very first emit for this slot AND (b) the user previously dismissed
-			// an identical-fingerprint proposal of this type.
-			if (isFirstEmit && isProposalDismissedTyped(sessionId, type, merged)) {
+			// Dismissal short-circuit — a dismissed proposal must stay hidden even
+			// when a fast-path draft restore or replay populated the slot before the
+			// rehydrate event arrives. The comparison tolerates session projectId
+			// normalization, while revised proposal content still surfaces normally.
+			if (isProposalDismissedForSession(sessionId, type, merged)) {
+				if (type === "goal" || type === "role" || type === "staff") {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+				}
+				delete state.activeProposals[type];
+				if (type === "goal" && state.assistantType === "goal") {
+					clearGoalFormMirrorForDismissal();
+				}
+				state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
+				renderApp();
 				return;
 			}
 			// Server-stamped rev (from proposal_update events) is the source of truth.
@@ -1979,7 +2057,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// callback so in-progress user edits are never clobbered. Runs on every
 			// non-dismissed goal proposal (first-emit, revision, edit, rehydrate).
 			if (type === "goal" && state.assistantType === "goal") {
-				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string; metadata?: unknown };
+				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string; projectId?: string; metadata?: unknown };
+				if (typeof g.projectId === "string" && g.projectId.trim()) state.previewProjectId = g.projectId.trim();
 				if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
 				if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
 				if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
@@ -2569,13 +2648,20 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 	state.creatingSessionForGoalId = goalId || null;
 	renderApp();
 	try {
+		const resolvedProjectId = projectId || projectIdForGoal(goalId) || (!goalId ? defaultProjectIdForNewSession() : undefined);
+		if (!resolvedProjectId && !goalId) {
+			showConnectionError("No project selected", "Choose a project before starting a session.");
+			return;
+		}
 		const body: any = {};
 		if (goalId) body.goalId = goalId;
 		if (roleId) body.roleId = roleId;
+		const headquartersScope = isHeadquartersProject(resolvedProjectId);
 		if (cwd) body.cwd = cwd;
-		if (worktree !== undefined) body.worktree = worktree;
+		if (headquartersScope) body.worktree = false;
+		else if (worktree !== undefined) body.worktree = worktree;
 		if (sandboxed) body.sandboxed = true;
-		if (projectId) body.projectId = projectId;
+		if (resolvedProjectId) body.projectId = resolvedProjectId;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -3400,12 +3486,14 @@ export async function startReattempt(goalId: string): Promise<void> {
 	if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
 	renderApp();
 	try {
+		const body: Record<string, unknown> = {
+			assistantType: "goal",
+			reattemptGoalId: goalId,
+		};
+		if (goal?.projectId) body.projectId = goal.projectId;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({
-				assistantType: "goal",
-				reattemptGoalId: goalId,
-			}),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));

@@ -562,8 +562,8 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url.startsWith(`/api/projects/${PROJECT_ID}/qa-testing-config`)) return response({ configured: false });
 	if (url.startsWith("/api/projects")) return response({ projects: [PROJECT] });
 	if (url.startsWith("/api/workflows")) return response({ workflows: [{ id: "general", name: "General", description: "General workflow", gates: [] }] });
-	if (url === "/api/tools") return response({ tools: [] });
-	if (url === "/api/roles") return response({ roles: [] });
+	if (url.startsWith("/api/tools")) return response({ tools: [] });
+	if (url.startsWith("/api/roles")) return response({ roles: [] });
 	if (url.startsWith("/api/staff")) return response({ staff: [] });
 	if (url.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: false });

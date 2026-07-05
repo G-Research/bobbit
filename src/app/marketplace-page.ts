@@ -23,6 +23,7 @@ import {
 	Trash2,
 } from "lucide";
 import type { IconNode } from "lucide";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { renderApp, state } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
@@ -307,7 +308,7 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 	const needsProject = !!projectId && installed.some((p) => p.scope === "project" && packHasMcp(p));
 	const jobs: Array<Promise<void>> = [];
 	if (needsDefault) {
-		jobs.push(fetchMcpServers().then((servers) => {
+		jobs.push(fetchMcpServers({ projectId: HEADQUARTERS_PROJECT_ID }).then((servers) => {
 			mcpRuntimeByScope.set("default", new Map(servers.map((s) => [s.name, s])));
 		}).catch(() => {}));
 	}

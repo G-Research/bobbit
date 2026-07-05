@@ -48,10 +48,16 @@ export default async function globalTeardown() {
 		let token = "";
 		const bobbitDir = process.env.BOBBIT_DIR;
 		if (bobbitDir) {
-			try {
-				token = readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
-			} catch {
-				// token file may not exist
+			// Live token lives under serverSecretsDir() (BOBBIT_SECRETS_DIR); fall
+			// back to the legacy Headquarters-state location.
+			const secretsDir = process.env.BOBBIT_SECRETS_DIR || path.join(bobbitDir, ".secrets");
+			for (const p of [path.join(secretsDir, "token"), path.join(bobbitDir, "state", "token")]) {
+				try {
+					token = readFileSync(p, "utf-8").trim();
+					if (token) break;
+				} catch {
+					// token file may not exist at this candidate
+				}
 			}
 		}
 		if (token) {

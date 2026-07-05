@@ -677,6 +677,45 @@ describe("McpManager marketplace discovery primitives", () => {
     assert.equal(sameGroup.ownerContributions[0].origin.scope, "manual");
   });
 
+  it("loads Bobbit MCP config from the selected project scope", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-selected-project-config-"));
+    const stateDir = path.join(root, "state");
+    const headquartersDir = path.join(root, "headquarters");
+    const projectRoot = path.join(root, "normal-project");
+    const projectServerName = `project_selected_${path.basename(root).replace(/[^a-zA-Z0-9]/g, "_")}`;
+    const headquartersServerName = `hq_selected_${path.basename(root).replace(/[^a-zA-Z0-9]/g, "_")}`;
+    fs.mkdirSync(path.join(headquartersDir, "config"), { recursive: true });
+    fs.mkdirSync(path.join(projectRoot, ".bobbit", "config"), { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(headquartersDir, "config", "mcp.json"), JSON.stringify({
+      mcpServers: { [headquartersServerName]: { command: "headquarters" } },
+    }));
+    fs.writeFileSync(path.join(projectRoot, ".bobbit", "config", "mcp.json"), JSON.stringify({
+      mcpServers: { [projectServerName]: { command: "normal-project" } },
+    }));
+
+    const oldBobbitDir = process.env.BOBBIT_DIR;
+    process.env.BOBBIT_DIR = headquartersDir;
+    try {
+      const projectMgr = new McpManager(projectRoot, undefined, stateDir, { projectId: "normal-project" });
+      const projectDiscovered = projectMgr.discoverServers();
+      assert.deepEqual(projectDiscovered[projectServerName], { command: "normal-project" });
+      // Server-level (Headquarters) config is the global base layer — it is loaded
+      // for ALL scopes including normal projects, so project-level configs layer ON
+      // TOP of (not replace) the server config. The project manager therefore also
+      // discovers servers from bobbitConfigDir()/mcp.json.
+      assert.deepEqual(projectDiscovered[headquartersServerName], { command: "headquarters" });
+
+      const headquartersMgr = new McpManager(headquartersDir, undefined, stateDir, { projectId: "headquarters" });
+      const headquartersDiscovered = headquartersMgr.discoverServers();
+      assert.deepEqual(headquartersDiscovered[headquartersServerName], { command: "headquarters" });
+      assert.equal(headquartersDiscovered[projectServerName], undefined);
+    } finally {
+      if (oldBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+      else process.env.BOBBIT_DIR = oldBobbitDir;
+    }
+  });
+
   it("reloadDiscoveredServers is single-flight, fingerprints unchanged servers, and forgets removed tools", async () => {
     const { cwd, stateDir } = tmpDirs();
     let current: ResolvedMcpContribution[] = [contrib("one", "one", { command: "one" })];
@@ -851,20 +890,24 @@ describe("SessionManager scoped MCP manager creation", () => {
     }
   });
 
-  it("routes no-project sessions to their cwd-scoped MCP manager when no scopeKey is supplied", async () => {
+  it("fails closed for no-project MCP sessions without cwd/default fallback", async () => {
     const { cwd } = tmpDirs();
     const sessionManager = new SessionManager() as any;
     const defaultMgr = { marker: "default" };
-    const cwdMgr = { marker: "cwd", connectAll: async () => {} };
+    const createMcpManagerCalls: unknown[] = [];
     const sessionId = "cwd-session";
     sessionManager.mcpManager = defaultMgr;
-    sessionManager.createMcpManager = () => cwdMgr;
+    sessionManager.createMcpManager = (...args: unknown[]) => {
+      createMcpManagerCalls.push(args);
+      throw new Error("projectless sessions must not create cwd-scoped MCP managers");
+    };
     sessionManager.sessions.set(sessionId, { id: sessionId, cwd });
 
-    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), cwdMgr);
-    assert.equal(sessionManager.getMcpManagerForSession(sessionId), cwdMgr);
-    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), cwdMgr);
-    assert.notEqual(await sessionManager.resolveMcpManagerForSession(sessionId), defaultMgr);
+    assert.equal(await sessionManager.ensureMcpManagerForSession(sessionId), null);
+    assert.equal(sessionManager.getMcpManagerForSession(sessionId), null);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId), null);
+    assert.equal(await sessionManager.resolveMcpManagerForSession(sessionId, `cwd:${path.resolve(cwd)}`), null);
+    assert.deepEqual(createMcpManagerCalls, []);
   });
 
   it("refreshes external MCP tool registrations after pending marketplace reloads complete", async () => {

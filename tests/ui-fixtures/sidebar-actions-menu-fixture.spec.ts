@@ -159,7 +159,7 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	await openMenu(page, "session", ids.session);
 	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
 	await expect.poll(() => menuTitleMap(page)).toMatchObject({
-		modify: "Rename this session",
+		modify: "Modify session. Edit the name, colour, and Role",
 		"refresh-agent": "Restart this agent with the latest prompt, tools, and auth state",
 		fork: "Create a new session from this session's history",
 		"copy-link": "Copy a link to this session",

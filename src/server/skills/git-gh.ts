@@ -95,7 +95,7 @@ export async function deleteRemoteGoalBranches(
 	})));
 }
 
-const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the server directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
+const HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
 const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
 
 export function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {

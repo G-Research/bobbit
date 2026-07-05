@@ -10,7 +10,8 @@ import { showConnectionError } from "./dialogs.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 
 // ============================================================================
 // CONSTANTS
@@ -399,7 +400,7 @@ function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Re
 // ============================================================================
 
 async function fetchToolsScoped(): Promise<ToolInfo[]> {
-	const response = await fetchToolsResponse(getConfigProjectId());
+	const response = await fetchToolsResponse(getConfigApiProjectId());
 	toolDiagnostics = response.diagnostics;
 	return response.tools;
 }
@@ -410,7 +411,8 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(), fetchGroupPolicies(), fetchMcpServers()]);
+	const scopedProjectId = getConfigApiProjectId();
+	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(scopedProjectId), fetchGroupPolicies(scopedProjectId), fetchMcpServers({ projectId: scopedProjectId })]);
 	tools = t;
 	roles = r;
 	groupPolicies = gp;
@@ -488,7 +490,7 @@ export function navigateToToolEdit(toolName: string): void {
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
-		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
+		fetchToolDetail(toolName, getConfigApiProjectId()).then((detail) => {
 			if (detail && selectedTool?.name === toolName) {
 				selectedTool = detail;
 				// Only update docs from detail if user hasn't changed it
@@ -506,7 +508,7 @@ export function navigateToToolEdit(toolName: string): void {
 		});
 	} else {
 		// Not in cache, fetch directly
-		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
+		fetchToolDetail(toolName, getConfigApiProjectId()).then((detail) => {
 			if (detail) {
 				currentView = "edit";
 				selectedTool = detail;
@@ -531,13 +533,12 @@ async function createToolAssistantSession(): Promise<void> {
 	renderApp();
 	try {
 		// Bind the tool-assistant session to whichever scope the Tools page is
-		// currently editing. System scope routes to the synthetic "system"
-		// project that the server registers at startup; project scope routes
-		// to that project. Either way the POST always carries a projectId so
+		// currently editing. System scope is the user-facing Headquarters
+		// workspace; project scope routes to that project. Either way the POST always carries a projectId so
 		// the server's resolveProjectForRequest() never 400s on a missing
 		// project.
 		const scope = getConfigScope();
-		const projectId = scope === "system" ? "system" : scope;
+		const projectId = scope === "system" ? HEADQUARTERS_PROJECT_ID : scope;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ toolAssistant: true, projectId }),
@@ -565,13 +566,14 @@ async function handleSave(): Promise<void> {
 	saving = true;
 	renderApp();
 
+	const scopedProjectId = getConfigApiProjectId();
 	const ok = await updateTool(selectedTool.name, {
 		description: editDescription,
 		group: editGroup,
 		docs: editDocs,
 		detail_docs: editDetailDocs,
 		grantPolicy: editGrantPolicy || null,
-	});
+	}, scopedProjectId);
 
 	if (ok) {
 		// Refresh tools list and update selectedTool
@@ -580,7 +582,7 @@ async function handleSave(): Promise<void> {
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
 			// Fetch full detail to get docs back
-			const detail = await fetchToolDetail(updated.name, getConfigProjectId());
+			const detail = await fetchToolDetail(updated.name, getConfigApiProjectId());
 			if (detail) {
 				showEdit(detail);
 			} else {
@@ -676,8 +678,9 @@ function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
 }
 
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
-	await updateGroupPolicy(key, value || null);
-	groupPolicies = await fetchGroupPolicies();
+	const scopedProjectId = getConfigApiProjectId();
+	await updateGroupPolicy(key, value || null, scopedProjectId);
+	groupPolicies = await fetchGroupPolicies(scopedProjectId);
 	renderApp();
 }
 
@@ -1094,8 +1097,9 @@ function renderListView(): TemplateResult {
 								@change=${async (e: Event) => {
 									e.stopPropagation();
 									const val = (e.target as HTMLSelectElement).value;
-									await updateGroupPolicy(groupName, val || null);
-									groupPolicies = await fetchGroupPolicies();
+									const scopedProjectId = getConfigApiProjectId();
+									await updateGroupPolicy(groupName, val || null, scopedProjectId);
+									groupPolicies = await fetchGroupPolicies(scopedProjectId);
 									renderApp();
 								}}>
 								<option value="" ?selected=${!currentGroupPolicy}>Allow (default)</option>
@@ -1176,8 +1180,9 @@ function renderAccessTab(): TemplateResult {
 							async (val) => {
 								const updated = { ...(role.toolPolicies || {}) };
 								if (val) { updated[toolName] = val; } else { delete updated[toolName]; }
-								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-								roles = await fetchRoles();
+								const scopedProjectId = getConfigApiProjectId();
+								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} }, scopedProjectId);
+								roles = await fetchRoles(scopedProjectId);
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,
@@ -1344,12 +1349,12 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!origin) return "";
 
 	const scope = getConfigScope();
-	const projectId = getConfigProjectId();
+	const projectId = getConfigApiProjectId();
 
 	if (scope === "system") {
 		if (origin === "builtin") {
 			return html`<button class="config-action-btn" @click=${async () => {
-				if (await customizeItem("tools", selectedTool!.name, "server")) {
+				if (await customizeItem("tools", selectedTool!.name, "server", projectId)) {
 					tools = await fetchToolsScoped();
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
@@ -1358,7 +1363,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
-				if (await revertOverride("tools", selectedTool!.name, "server")) {
+				if (await revertOverride("tools", selectedTool!.name, "server", projectId)) {
 					tools = await fetchToolsScoped();
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
