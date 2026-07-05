@@ -215,6 +215,35 @@ function controlledSessionModelFallback(prefs: PreferencesStore | undefined): { 
 	};
 }
 
+export function isClaudeCodeReviewModel(modelStr: string | undefined): boolean {
+	if (!modelStr) return false;
+	const slash = modelStr.indexOf("/");
+	return slash > 0 && modelStr.slice(0, slash) === "claude-code";
+}
+
+function isCanonicalModelString(modelStr: string | undefined): boolean {
+	if (!modelStr) return false;
+	const slash = modelStr.indexOf("/");
+	return slash > 0 && slash < modelStr.length - 1;
+}
+
+/**
+ * Verification/direct review sessions are always Pi-backed. Ignore local
+ * Claude Code runtime model selections here so a review preference or role
+ * override cannot silently spawn Claude Code or send Pi an unsupported
+ * `set_model claude-code/*`; fall through to the next Pi-compatible choice.
+ */
+export function resolvePiBackedReviewInitialModel(roleModel: string | undefined, reviewModelPref: string | undefined): string | undefined {
+	for (const model of [roleModel, reviewModelPref]) {
+		if (isCanonicalModelString(model) && !isClaudeCodeReviewModel(model)) return model;
+	}
+	return undefined;
+}
+
+export function filterPiBackedReviewModelForSetModel(modelStr: string | undefined): string | undefined {
+	return isClaudeCodeReviewModel(modelStr) ? undefined : modelStr;
+}
+
 export interface VerificationToolActivationDeps {
 	toolManager?: ToolManager;
 	groupPolicyStore?: GroupPolicyProvider;
@@ -4351,9 +4380,7 @@ export class VerificationHarness {
 			const _preRoleOverrides = this.resolveRoleForGoal(roleName, goalId);
 			const _preRoleModel = _preRoleOverrides?.model;
 			const _preReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-			const _preInitialModel = (_preRoleModel && /^[^/]+\/.+$/.test(_preRoleModel))
-				? _preRoleModel
-				: ((_preReviewPref && /^[^/]+\/.+$/.test(_preReviewPref)) ? _preReviewPref : undefined);
+			const _preInitialModel = resolvePiBackedReviewInitialModel(_preRoleModel, _preReviewPref);
 			const _preRoleThinking = _preRoleOverrides?.thinkingLevel;
 			const _preReviewThinkingPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 			const _validLevels = THINKING_LEVELS as readonly string[];
@@ -4410,30 +4437,33 @@ export class VerificationHarness {
 			const roleOverrides_r = this.resolveRoleForGoal(roleName, goalId);
 			const roleModel_r = roleOverrides_r?.model;
 			const roleThinking_r = roleOverrides_r?.thinkingLevel;
+			const piRoleModel_r = filterPiBackedReviewModelForSetModel(roleModel_r);
 
-			// Override model: role wins, else default.reviewModel preference.
+			// Override model: role wins, else default.reviewModel preference. Claude
+			// Code models are local-runtime selections, so verification ignores them
+			// and remains Pi-backed instead of spawning/switching runtimes.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
 			// `skipSetModel` is true when the spawn already pinned the same model;
 			// the read-back verification still runs and still hard-fails on mismatch.
-			if (roleModel_r) {
+			if (piRoleModel_r) {
 				try {
-					await applyModelString(session.rpcClient, roleModel_r, {
+					await applyModelString(session.rpcClient, piRoleModel_r, {
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						contextLabel: `role.${roleName}.model`,
-						skipSetModel: _preInitialModel === roleModel_r,
+						skipSetModel: _preInitialModel === piRoleModel_r,
 						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Applied role model policy for reviewer ${sessionId} (selected="${roleModel_r}", role=${roleName})`);
+					console.log(`[verification] Applied role model policy for reviewer ${sessionId} (selected="${piRoleModel_r}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_r, 500)}" failed for reviewer ${sessionId}: ${sanitizeModelErrorForLog(err)}`);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(piRoleModel_r, 500)}" failed for reviewer ${sessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) },
+						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						role: "reviewer",
@@ -4463,7 +4493,7 @@ export class VerificationHarness {
 				}
 				// Clamp against the reviewer's resolved model so xhigh on a model
 				// that doesn't support it degrades to high before the RPC.
-				level = clampReviewThinking(level, roleModel_r ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
+				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_r, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
 				if (_preInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
 				} else {
@@ -4716,9 +4746,7 @@ export class VerificationHarness {
 			const _preQaRoleOverrides = this.resolveRoleForGoal(qaRoleName, goalId);
 			const _preQaRoleModel = _preQaRoleOverrides?.model;
 			const _preQaReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-			const _preQaInitialModel = (_preQaRoleModel && /^[^/]+\/.+$/.test(_preQaRoleModel))
-				? _preQaRoleModel
-				: ((_preQaReviewPref && /^[^/]+\/.+$/.test(_preQaReviewPref)) ? _preQaReviewPref : undefined);
+			const _preQaInitialModel = resolvePiBackedReviewInitialModel(_preQaRoleModel, _preQaReviewPref);
 			const _preQaRoleThinking = _preQaRoleOverrides?.thinkingLevel;
 			const _preQaReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
 			const _qaValidLevels = THINKING_LEVELS as readonly string[];
@@ -4771,28 +4799,30 @@ export class VerificationHarness {
 			const roleOverrides_q = this.resolveRoleForGoal(qaRoleName, goalId);
 			const roleModel_q = roleOverrides_q?.model;
 			const roleThinking_q = roleOverrides_q?.thinkingLevel;
+			const piRoleModel_q = filterPiBackedReviewModelForSetModel(roleModel_q);
 
-			// Override model: role wins, else default.reviewModel preference.
+			// Override model: role wins, else default.reviewModel preference. Claude
+			// Code models are ignored here so agent QA remains on the Pi runtime.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (roleModel_q) {
+			if (piRoleModel_q) {
 				try {
-					await applyModelString(session.rpcClient, roleModel_q, {
+					await applyModelString(session.rpcClient, piRoleModel_q, {
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						contextLabel: `role.${qaRoleName}.model`,
-						skipSetModel: _preQaInitialModel === roleModel_q,
+						skipSetModel: _preQaInitialModel === piRoleModel_q,
 						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Applied role model policy for QA ${qaSessionId} (selected="${roleModel_q}", role=${qaRoleName})`);
+					console.log(`[verification] Applied role model policy for QA ${qaSessionId} (selected="${piRoleModel_q}", role=${qaRoleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_q, 500)}" failed for QA ${qaSessionId}: ${sanitizeModelErrorForLog(err)}`);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(piRoleModel_q, 500)}" failed for QA ${qaSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) },
+						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : this.preferencesStore!.get(k) },
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						role: "qa",
@@ -4818,7 +4848,7 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, roleModel_q ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
+				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_q, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
 				if (_preQaInitialThinking === level) {
 					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
 				} else {
@@ -4958,9 +4988,7 @@ export class VerificationHarness {
 		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName) : undefined;
 		const _preLegacyRoleModel = _preLegacyRoleOverrides?.model;
 		const _preLegacyReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		const _preLegacyInitialModel = (_preLegacyRoleModel && /^[^/]+\/.+$/.test(_preLegacyRoleModel))
-			? _preLegacyRoleModel
-			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
+		const _preLegacyInitialModel = resolvePiBackedReviewInitialModel(_preLegacyRoleModel, _preLegacyReviewPref);
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			model: bridgeOptions.initialModel,
@@ -5009,29 +5037,32 @@ export class VerificationHarness {
 			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName) : undefined;
 			const roleModel_s = roleOverrides_s?.model;
 			const roleThinking_s = roleOverrides_s?.thinkingLevel;
+			const piRoleModel_s = filterPiBackedReviewModelForSetModel(roleModel_s);
 
-			// Override model: role wins, else default.reviewModel preference.
+			// Override model: role wins, else default.reviewModel preference. The
+			// legacy direct path is an explicit RpcBridge/Pi sub-session; ignore
+			// claude-code/* so it never sends unsupported set_model commands.
 			// Sub-session path: no UI session, no persistence (sessionManager=null).
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (roleModel_s) {
+			if (piRoleModel_s) {
 				try {
-					await applyModelString(rpc, roleModel_s, {
+					await applyModelString(rpc, piRoleModel_s, {
 						sessionManager: null,
 						sessionId: null,
 						contextLabel: `role.${roleName}.model`,
-						skipSetModel: _preLegacyInitialModel === roleModel_s,
+						skipSetModel: _preLegacyInitialModel === piRoleModel_s,
 						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
 					});
-					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${roleModel_s}", role=${roleName})`);
+					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${piRoleModel_s}", role=${roleName})`);
 				} catch (err) {
-					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
+					console.error(`[verification] Role model "${sanitizeModelErrorForLog(piRoleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
 					throw err;
 				}
 			} else if (this.preferencesStore) {
-				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				const reviewModelPref = filterPiBackedReviewModelForSetModel(this.preferencesStore.get("default.reviewModel") as string | undefined);
 				try {
 					await applyReviewModelOverrides(rpc, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) },
+						prefs: { get: (k) => k === "default.reviewModel" ? reviewModelPref : this.preferencesStore!.get(k) },
 						sessionManager: null,
 						sessionId: null,
 						role: "subsession",
@@ -5057,7 +5088,7 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, roleModel_s ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
+				level = clampReviewThinking(level, resolvePiBackedReviewInitialModel(roleModel_s, this.preferencesStore?.get("default.reviewModel") as string | undefined)) ?? level;
 				if (_preLegacyInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${subSessionId}`);
 				} else {
