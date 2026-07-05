@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
+import type { PromptProfile } from "./system-prompt.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -164,6 +165,17 @@ export interface PersistedGoal {
 	 * unaffected. See docs/design/swarm-orchestration-w0.md.
 	 */
 	swarmGroup?: string;
+	/**
+	 * SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1, staged-plan item
+	 * 4.0/4.5): F2/F22 prompt-slimming profile to apply to THIS goal's
+	 * team-lead session, stamped at creation and read by `TeamManager.startTeam`.
+	 * Absent ⇒ current behaviour (no profile, resolved the normal way) at
+	 * every edge — this is a narrow, additive per-goal override, not a new
+	 * cascade. Today's only production writer is `swarm-plan-fan-in.ts`'s
+	 * plan-phase siblings (via `createBestOfNSwarm`'s `siblingPromptProfile`
+	 * option) — best-of-n/orchestrator-worker/build children never set this.
+	 */
+	promptProfile?: PromptProfile;
 }
 
 /**

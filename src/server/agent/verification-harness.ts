@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
@@ -1441,6 +1441,8 @@ function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
 
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+/** SWARM-W4.5 — how long the plan-fan-in synthesis role gets to go idle before its reduce step is declared failed (see `_maybeTriggerPlanSynthesis`). Generous but bounded: it's a single-turn, tool-light read-and-summarize call over already-short plan text, not an open-ended build. */
+const PLAN_SYNTHESIS_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 function isRetryableLlmReviewRecovery(output: string): boolean {
 	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
@@ -6320,11 +6322,22 @@ export class VerificationHarness {
 			.filter(g => g.swarmGroup === swarmGroup)
 			.map(g => g.id);
 
+		// SWARM-W4.5: read BEFORE `recordArtifact` (no `await` in between — see
+		// `_maybeTriggerPlanSynthesis`'s doc for why this ordering, not a
+		// separate "already triggered" flag, is what makes the trigger
+		// exactly-once-safe against two siblings landing "at once").
+		const wasBarrierFired = ctx.swarmGroupStore.get(swarmGroup)?.barrierFired ?? false;
 		const record = ctx.swarmGroupStore.recordArtifact(swarmGroup, artifact, siblingIds, child.rootGoalId);
 
 		if (status === "done") this._maybeEarlyKillSiblings(ctx, record).catch((err) => {
 			console.warn(`[verification-harness] early-kill check failed for group ${swarmGroup} (non-fatal):`, err);
 		});
+
+		if (!wasBarrierFired && record.barrierFired) {
+			this._maybeTriggerPlanSynthesis(ctx, record).catch((err) => {
+				console.warn(`[verification-harness] plan-fan-in synthesis trigger failed for group ${swarmGroup} (non-fatal):`, err);
+			});
+		}
 	}
 
 	/**
@@ -6368,6 +6381,93 @@ export class VerificationHarness {
 		for (const goalId of stillRunning) {
 			this.hardKillSwarmNode(goalId, `superseded — sibling ${justDone.goalId} already verified passed:true (early-kill)`, { killReason: "superseded" })
 				.catch((err) => console.warn(`[swarm-governor] early-kill hardKillSwarmNode failed for ${goalId} (non-fatal):`, err));
+		}
+	}
+
+	/**
+	 * SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1) — plan-fan-in's
+	 * synthesis reduce step: the instant the barrier fires for a
+	 * `topology: "plan-fan-in"` group, spawn exactly ONE `TeamManager.spawnRole`
+	 * node (role "reviewer" — read-only tool policy, no `edit`/`bash_bg`,
+	 * see defaults/roles/reviewer.yaml — a deliberate safety fit for a node
+	 * that must never touch files) that reads the N plan siblings' distilled
+	 * `SwarmArtifact.output` (already populated via `SessionManager.
+	 * getSessionOutput` by `_captureSwarmArtifactIfTagged` above — no new
+	 * transcript reader, per the design doc's own reuse note) and produces ONE
+	 * merged plan.
+	 *
+	 * Exactly-once trigger: the ONLY call site (`notifyChildTerminal` above)
+	 * calls this iff its own barrier-just-fired check (`!wasBarrierFired &&
+	 * record.barrierFired`) is true — since that check happens with no
+	 * `await` between reading the prior state and calling `recordArtifact`,
+	 * and Node is single-threaded, at most ONE terminal-artifact event can
+	 * observe the false→true transition for a given group, so this method
+	 * itself needs no additional idempotency guard.
+	 *
+	 * NOT restart-durable: if the server restarts while `synthesis.status ===
+	 * "pending"`, this wave does not re-derive/resume it — see
+	 * `SwarmGroupRecord.synthesis`'s doc. Deliberately out of scope, mirroring
+	 * how SWARM-W1's restart-resume (SWARM-W2) shipped as its own, later wave.
+	 *
+	 * Best-effort: never throws (all failures recorded via
+	 * `SwarmGroupStore.recordSynthesisResult`'s `{error}` shape and logged by
+	 * the caller) — a failed/stuck synthesis surfaces for human triage exactly
+	 * like an `allFailed` best-of-n group, never silently retried.
+	 */
+	private async _maybeTriggerPlanSynthesis(ctx: ProjectContext, record: SwarmGroupRecord): Promise<void> {
+		const config = record.config as { topology?: string; parentGoalId?: string } | undefined;
+		if (config?.topology !== "plan-fan-in") return;
+		const parentGoalId = config.parentGoalId;
+		if (!parentGoalId) {
+			ctx.swarmGroupStore.recordSynthesisStarted(record.swarmGroup);
+			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { error: "plan-fan-in group config is missing parentGoalId — cannot spawn the synthesis role" });
+			return;
+		}
+		if (!this.teamManager || !this.sessionManager) {
+			ctx.swarmGroupStore.recordSynthesisStarted(record.swarmGroup);
+			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { error: "team/session manager not wired into this harness — cannot spawn the synthesis role" });
+			return;
+		}
+
+		ctx.swarmGroupStore.recordSynthesisStarted(record.swarmGroup);
+
+		const orderedPlans = record.artifacts
+			.slice()
+			.sort((a, b) => a.capturedAt - b.capturedAt)
+			.map((a, i) => `## Candidate plan ${i + 1} (sibling ${a.goalId.slice(0, 8)}, status: ${a.status})\n\n${(a.output || "").trim() || "(no output captured — this sibling produced nothing usable)"}`)
+			.join("\n\n---\n\n");
+
+		const synthesisPrompt = [
+			"You are the SYNTHESIS step of a swarm plan-fan-in group.",
+			`${record.artifacts.length} sibling agents independently proposed an approach for the SAME task, WITHOUT modifying any files (planning-only — you cannot modify files either).`,
+			"Read every candidate plan below and produce exactly ONE merged, coherent plan that takes the best ideas from across the candidates — resolve disagreements explicitly rather than listing them.",
+			"",
+			orderedPlans,
+			"",
+			"Output ONLY the final synthesized plan as your final message (no meta-commentary about the synthesis process itself), then go idle. A human will review it before any build starts.",
+		].join("\n");
+
+		let sessionId: string | undefined;
+		try {
+			const spawned = await this.teamManager.spawnRole(parentGoalId, "reviewer", synthesisPrompt);
+			sessionId = spawned.sessionId;
+			ctx.swarmGroupStore.recordSynthesisSessionId(record.swarmGroup, sessionId);
+			// `spawnRole` dispatches the kickoff prompt fire-and-forget — the
+			// session can still read `status:"idle"` for a tick before its first
+			// turn actually starts. Wait for `agent_start` first (same idiom as
+			// this file's own resumed-reviewer reminder path above) so the
+			// `waitForIdle` below can't resolve instantly against a
+			// not-yet-started turn and read empty output.
+			await this.sessionManager.waitForStreaming(sessionId, 10_000).catch(() => {});
+			await this.sessionManager.waitForIdle(sessionId, PLAN_SYNTHESIS_IDLE_TIMEOUT_MS);
+			const output = (await this.sessionManager.getSessionOutput(sessionId)).trim();
+			if (!output) throw new Error("Synthesis session went idle without producing any output");
+			const planHash = createHash("sha256").update(output).digest("base64url");
+			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { output, planHash });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[verification-harness] plan-fan-in synthesis failed for group ${record.swarmGroup} (session ${sessionId ?? "never spawned"}, non-fatal — group stays pending, needs human triage):`, err);
+			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { error: message });
 		}
 	}
 
