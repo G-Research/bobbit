@@ -731,7 +731,14 @@ not come from over-parallelising a shared filesystem.
 
 Configured in `playwright-e2e.config.ts`:
 
-- Top-level: `workers: 4`, `retries: 3`, `fullyParallel: true`.
+- Top-level: adaptive workers — base 6 at idle, scaled down by 1-min loadavg
+  via `computeAdaptiveConcurrency` (`scripts/lib/adaptive-concurrency.mjs`,
+  the same formula as the unit phase; floors at 2). `BOBBIT_E2E_WORKERS`
+  always wins as an explicit override. Historically a fixed 4 (lowered from
+  6 for FS-contention flakes); re-validated at 6 on 2026-07-05 with two full
+  mutex-serialised runs under loadavg ~12–18 showing zero new failures vs
+  the 4-worker baseline — evidence in the comment at the `workers` field.
+  `retries: 3`, `fullyParallel: true`.
 - `api` project: `workers: 2` and inherited `fullyParallel: true`.
 - `api-realpush` project: `workers: 1`, `fullyParallel: false`.
 - `browser` project: `workers: 3`, `fullyParallel: false`.
