@@ -58,7 +58,10 @@ function assertVerifierCreateSessionIsPreStamped(methodBody: string, kind: "llm-
 
 describe("reviewer archive metadata persistence", () => {
 	it("threads verifier/team metadata through createSession options into setup plans before startup", () => {
-		const manager = src("session-manager.ts");
+		// SM decomposition c6: createSession's body (setup-plan construction)
+		// lives in session-spawn.ts; session-manager.ts keeps a same-signature
+		// delegating wrapper.
+		const manager = src("session-spawn.ts");
 
 		assert.match(
 			manager,
