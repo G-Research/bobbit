@@ -93,6 +93,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/roles-routes.ts",
 	// STR-01 cohort 14 (Add Project directory browser/create routes).
 	"src/server/routes/directory-browser-routes.ts",
+	// Skills write path (propose_skill acceptance, PR #195).
+	"src/server/routes/skills-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

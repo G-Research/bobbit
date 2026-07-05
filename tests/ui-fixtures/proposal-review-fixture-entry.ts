@@ -97,6 +97,16 @@ export const PROPOSAL_FIXTURES: ProposalFixture[] = [
 		initial: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder", projectId: PROJECT_ID },
 		partial: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "", role: "coder", projectId: PROJECT_ID },
 	},
+	{
+		type: "workflow",
+		initial: { id: "parity-workflow", name: "Parity Workflow", description: "Parity workflow body.", gates: [{ id: "gate-1", name: "Gate One", dependsOn: [], verify: [] }], projectId: PROJECT_ID },
+		partial: { id: "parity-workflow", name: "Parity Workflow — edited", description: "Parity workflow body.", gates: [{ id: "gate-1", name: "Gate One", dependsOn: [], verify: [] }], projectId: PROJECT_ID },
+	},
+	{
+		type: "skill",
+		initial: { name: "parity-skill", description: "Parity skill description.", content: "Parity skill body.", projectId: PROJECT_ID },
+		partial: { name: "parity-skill", description: "parity-skill-edited", content: "Parity skill body.", projectId: PROJECT_ID },
+	},
 ];
 
 let fetchLog: FetchLogEntry[] = [];

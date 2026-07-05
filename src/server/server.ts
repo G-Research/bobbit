@@ -97,6 +97,9 @@ import { registerConfigDirectoriesRoutes } from "./routes/config-directories-rou
 import { registerRolesRoutes } from "./routes/roles-routes.js";
 // STR-01 cohort 14: Add Project directory browser/create routes.
 import { registerDirectoryBrowserRoutes } from "./routes/directory-browser-routes.js";
+// F26: propose_skill acceptance endpoint — new route, registered directly
+// rather than added to the legacy if/else chain.
+import { registerSkillsRoutes } from "./routes/skills-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3318,6 +3321,7 @@ export function createGateway(config: GatewayConfig) {
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
 			}
+			await sessionManager.getPiProcessPool().drain();
 			await sessionManager.shutdown();
 			await projectContextManager.closeAll();
 			if (sandboxManager) {
@@ -3428,6 +3432,7 @@ registerPreferencesRoutes(coreRouteTable);
 registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
 registerDirectoryBrowserRoutes(coreRouteTable);
+registerSkillsRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -10825,7 +10830,10 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
-			if (proposalType === "goal" || proposalType === "staff") {
+			// Workflows are project-scoped only (no Headquarters/system-scope
+			// workflow store — see workflows-routes.ts), so a workflow proposal
+			// needs the same resolvable-project guard as goal/staff.
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "workflow") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
 				if (!sessionProjectId) {

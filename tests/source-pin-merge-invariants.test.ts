@@ -565,7 +565,7 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("roles route handlers wire modelResolution into the /api/roles GET routes (restored by the w2-role-model-resolution-restore fix)", () => {
+	it("roles-routes.ts wires modelResolution into the /api/roles GET routes (restored by the w2-role-model-resolution-restore fix)", () => {
 		const text = read("src/server/routes/roles-routes.ts");
 		assertTextInOrder(
 			text,
@@ -579,6 +579,7 @@ describe("Source pin — merge-loss invariants", () => {
 				// not plain withOrigin(), on both /api/roles list and detail responses.
 				"json({ roles: resolved.map(r => withRoleResolution(ctx, r as any, effectiveConfigProjectId)) });",
 				"json(withRoleResolution(ctx, found as any, effectiveConfigProjectId));",
+				"json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name, effectiveConfigProjectId) });",
 			],
 			"src/server/routes/roles-routes.ts must serialize /api/roles (list) and /api/roles/:name (detail)\n" +
 			"responses through withRoleResolution(), not the plain withOrigin() helper, so each role\n" +
@@ -588,8 +589,8 @@ describe("Source pin — merge-loss invariants", () => {
 			"falls back to guessing from the plain model/thinkingLevel strings. Originally added by\n" +
 			"1fe14164, silently dropped by merge commit b687d93d alongside the config-cascade.ts\n" +
 			"types/method (same merge, same hunk-loss pattern as getRawPack/activeWhenConfig above);\n" +
-			"restored by the w2-role-model-resolution-restore fix. DO NOT delete this pin — restore\n" +
-			"the dropped wiring instead.",
+			"restored by the w2-role-model-resolution-restore fix, then moved to roles-routes.ts by\n" +
+			"STR-05. DO NOT delete this pin — restore the dropped wiring instead.",
 		);
 	});
 	it("server-host-api.ts exposes host.agents.spawnGoal, the experiment-runner seam (restored by W2.G)", () => {
