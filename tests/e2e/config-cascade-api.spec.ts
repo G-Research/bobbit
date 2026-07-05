@@ -50,11 +50,13 @@ async function deleteProject(id: string) {
 
 test.describe("Config Cascade API", () => {
 
-	test("GET /api/tools and /api/roles require explicit projectId", async () => {
+	test("GET /api/tools and /api/roles default a missing projectId to the server (Headquarters) scope", async () => {
+		// server == Headquarters: config-cascade reads default a missing projectId to
+		// the server/global scope (explicit default, not cwd inference). Project-runtime
+		// routes (mcp-servers/sandbox-*) still require an explicit projectId.
 		for (const pathname of ["/api/tools", "/api/roles"]) {
 			const res = await rawApiFetch(pathname);
-			expect(res.status).toBe(400);
-			expect((await res.json()).code).toBe("PROJECT_ID_REQUIRED");
+			expect(res.status).toBe(200);
 		}
 	});
 
