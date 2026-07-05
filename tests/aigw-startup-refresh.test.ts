@@ -63,7 +63,7 @@ beforeEach(() => {
 	delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
 });
 
-const { startupAigwCheck, discoverAigwModels } = await import("../src/server/agent/aigw-manager.js");
+const { startupAigwCheck, discoverAigwModels, configureAigwRuntimeFlags } = await import("../src/server/agent/aigw-manager.js");
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.js");
 
 function readModels(): any {
@@ -187,7 +187,7 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 			writeFileSync(path.join(tmp, "models.json"), JSON.stringify(sentinel, null, 2));
 			const before = readFileSync(path.join(tmp, "models.json"));
 
-			process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+			configureAigwRuntimeFlags({ skipAigwDiscovery: true });
 			const prefs = new PreferencesStore(stateDir);
 			prefs.set("aigw.url", mock.url);
 
@@ -203,6 +203,7 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 				"AWS_ENDPOINT_URL_BEDROCK_RUNTIME must be set even under skip flag",
 			);
 		} finally {
+			configureAigwRuntimeFlags({ skipAigwDiscovery: false });
 			await mock.close();
 		}
 	});
@@ -210,7 +211,7 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 	it("BOBBIT_TEST_NO_EXTERNAL blocks external AIGW discovery but permits local mocks", async () => {
 		const mock = await startMockGateway(["openai/local-only"]);
 		try {
-			process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+			configureAigwRuntimeFlags({ testNoExternal: true });
 			await assert.rejects(
 				() => discoverAigwModels("https://api.example.invalid/v1"),
 				/External AI Gateway discovery is disabled in tests/,
@@ -220,6 +221,7 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 			assert.equal(models.length, 1);
 			assert.equal(mock.requestCount(), 1, "local mock gateway should still be reachable under the external-network guard");
 		} finally {
+			configureAigwRuntimeFlags({ testNoExternal: false });
 			await mock.close();
 		}
 	});
