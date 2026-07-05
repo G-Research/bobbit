@@ -39,8 +39,14 @@ describe("classifyToolApprove — table-driven rule tests", () => {
 		{ name: "grep → allow", arg: { toolName: "grep", toolGroup: "File System" }, expected: "select-allow" },
 		{ name: "find → allow", arg: { toolName: "find", toolGroup: "File System" }, expected: "select-allow" },
 		{ name: "read-only-safe match is case-insensitive", arg: { toolName: "READ", toolGroup: "File System" }, expected: "select-allow" },
+		{ name: "read-only-safe group match is case-insensitive too", arg: { toolName: "read", toolGroup: "file system" }, expected: "select-allow" },
 
 		// --- abstain: everything not covered by either rule ---
+		// Group scoping (CQ-03 precondition — see tool-approve-heuristic.ts's
+		// header): a tool merely NAMED like a read-only-safe builtin, but in a
+		// different group (e.g. pack/MCP-provided), must NOT collect an allow.
+		{ name: "a non-File-System tool named 'read' → abstain (allow rule requires the builtin group)", arg: { toolName: "read", toolGroup: "mcp__some-pack" }, expected: "abstain" },
+		{ name: "a non-File-System tool named 'ls' → abstain", arg: { toolName: "ls", toolGroup: "Custom Tools" }, expected: "abstain" },
 		{ name: "write (mutating File System tool) → abstain", arg: { toolName: "write", toolGroup: "File System" }, expected: "abstain" },
 		{ name: "edit (mutating File System tool) → abstain", arg: { toolName: "edit", toolGroup: "File System" }, expected: "abstain" },
 		{ name: "bash (unrestricted shell — no argument visibility) → abstain", arg: { toolName: "bash", toolGroup: "Shell" }, expected: "abstain" },

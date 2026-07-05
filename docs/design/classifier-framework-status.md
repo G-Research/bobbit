@@ -74,7 +74,11 @@ sources rather than inventing new ones:
   a pinning test that parses that YAML file directly).
 - **`select(allow)`** for a hand-curated read-only-safe allowlist: the
   builtin File System tools that are non-mutating by construction (`read`,
-  `ls`, `grep`, `find`). Deliberately excludes `bash`/`bash_bg` even though
+  `ls`, `grep`, `find`), matched on the tool name **and** the builtin
+  "File System" group — a pack/MCP tool merely *named* `read` in another
+  group abstains, so a future CQ-03 auto-apply consumer can trust recorded
+  `allow` verdicts (harmless telemetry today, a widening hazard later without
+  the group restriction). Deliberately excludes `bash`/`bash_bg` even though
   they're very often used read-only — this classifier has no visibility into
   the actual command, so treating the whole tool as safe would be wrong the
   moment it's used for anything else.

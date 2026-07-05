@@ -34,11 +34,19 @@
 //     in `tool-approve-classifier.ts`: an auto-`allow` needs the CQ-03
 //     operator-confirmation permit for widening, which is NOT built yet):
 //     a hand-curated list of the builtin File System tools that are
-//     read-only by construction — `read`, `ls`, `grep`, `find`. Deliberately
-//     excludes `bash`/`bash_bg` even though they are very often used for
-//     read-only commands (`cat`, `ls`, `rg`) — this classifier has no
-//     visibility into the actual command being run, so treating the WHOLE
-//     tool as safe would be wrong the moment it is used for anything else.
+//     read-only by construction — `read`, `ls`, `grep`, `find`. The rule
+//     matches on BOTH the tool name AND the builtin "File System" group — a
+//     pack/MCP-provided tool merely NAMED `read` in some other group must
+//     NOT collect an `allow` verdict: harmless telemetry today, but a real
+//     widening hazard the day the CQ-03 permit machinery exists and starts
+//     consuming recorded `allow`s. CQ-03 PRECONDITION: any future
+//     auto-apply wiring may treat this rule's verdicts as trustworthy ONLY
+//     because of this group restriction — never loosen it to name-only.
+//     Deliberately excludes `bash`/`bash_bg` even though they are very
+//     often used for read-only commands (`cat`, `ls`, `rg`) — this
+//     classifier has no visibility into the actual command being run, so
+//     treating the WHOLE tool as safe would be wrong the moment it is used
+//     for anything else.
 //   - Everything else: `abstain`. No ambiguity guessing (same discipline as
 //     `thinking-router-classifier.ts`'s rule table) — a tool this classifier
 //     doesn't recognize defers entirely to the existing human-ask flow.
@@ -60,10 +68,18 @@ export const TOOL_APPROVE_HEURISTIC_CLASSIFIER_ID = "builtin.tool-approve-heuris
 export const DANGEROUS_TOOL_GROUPS: readonly string[] = ["Children", "Team", "PR Walkthrough"];
 
 /** Hand-curated read-only-safe builtin tool names (File System group's
- *  non-mutating members). Matched case-insensitively against `toolName`.
- *  Deliberately excludes `edit`/`write` (mutate files) and `bash`/`bash_bg`
- *  (arbitrary command execution — see this file's header comment). */
+ *  non-mutating members). Matched case-insensitively against `toolName`,
+ *  AND the arg's `toolGroup` must be {@link READ_ONLY_SAFE_TOOL_GROUP} — a
+ *  same-named tool from any other group abstains (see the header comment's
+ *  CQ-03 precondition). Deliberately excludes `edit`/`write` (mutate files)
+ *  and `bash`/`bash_bg` (arbitrary command execution — see this file's
+ *  header comment). */
 export const READ_ONLY_SAFE_TOOL_NAMES: readonly string[] = ["read", "ls", "grep", "find"];
+
+/** The builtin group the read-only-safe rule is scoped to — matches the
+ *  `group: File System` field in `defaults/tools/filesystem/*.yaml`.
+ *  Compared case-insensitively (same trim/lower idiom as the deny rule). */
+export const READ_ONLY_SAFE_TOOL_GROUP = "File System";
 
 interface ToolApproveRule {
 	id: string;
@@ -74,6 +90,7 @@ interface ToolApproveRule {
 
 const DANGEROUS_TOOL_GROUPS_LOWER = new Set(DANGEROUS_TOOL_GROUPS.map((g) => g.toLowerCase()));
 const READ_ONLY_SAFE_TOOL_NAMES_LOWER = new Set(READ_ONLY_SAFE_TOOL_NAMES.map((t) => t.toLowerCase()));
+const READ_ONLY_SAFE_TOOL_GROUP_LOWER = READ_ONLY_SAFE_TOOL_GROUP.toLowerCase();
 
 const RULES: readonly ToolApproveRule[] = [
 	{
@@ -86,9 +103,14 @@ const RULES: readonly ToolApproveRule[] = [
 	{
 		id: "read-only-safe",
 		verdict: "allow",
-		match: (arg) => READ_ONLY_SAFE_TOOL_NAMES_LOWER.has(arg.toolName.trim().toLowerCase()),
+		// Name AND builtin File System group — a same-named tool from any
+		// other group (e.g. a pack/MCP tool named "read") must abstain; see
+		// the header comment's CQ-03 precondition.
+		match: (arg) =>
+			READ_ONLY_SAFE_TOOL_NAMES_LOWER.has(arg.toolName.trim().toLowerCase())
+			&& arg.toolGroup.trim().toLowerCase() === READ_ONLY_SAFE_TOOL_GROUP_LOWER,
 		rationale: (arg) =>
-			`matched deterministic rule 'read-only-safe': tool "${arg.toolName}" is on the hand-curated read-only-safe allowlist — record-only this wave, no CQ-03 permit to auto-apply`,
+			`matched deterministic rule 'read-only-safe': tool "${arg.toolName}" (builtin "${READ_ONLY_SAFE_TOOL_GROUP}" group) is on the hand-curated read-only-safe allowlist — record-only this wave, no CQ-03 permit to auto-apply`,
 	},
 ];
 
