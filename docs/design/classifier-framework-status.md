@@ -1,6 +1,7 @@
 # CLF — Classifier Framework lane: in-repo status ledger
 
-Status: Wave 5 shipped (gate-risk classifier, observe-only). Wave 4 shipped
+Status: Wave 5 shipped (gate-risk classifier, observe-only). SWARM-W4.3
+shipped (swarm-topology classifier, observe-only). Wave 4 shipped
 (model-tier classifier, observe-only). Wave 3 (F14
 thinking-router apply mode) shipped behind `BOBBIT_CLF_THINKING_ROUTER=enforce`,
 defaulting to observe — unset/`=observe` stays byte-identical to Wave 1(b).
@@ -297,3 +298,24 @@ removed, semantic diffing) — this classifier will only ever reason about
 changed-file identity/shape, same as every other rule table in this lane;
 tuning `LARGE_CHANGESET_FILE_THRESHOLD` or the high-risk-surface list against
 real data (that's exactly what this wave's own telemetry is for).
+
+## SWARM-W4.3 — swarm-topology classifier (observe-only, no apply path)
+
+`swarm-topology-classifier.ts`: the first real classifier at the SWARM-W4.2
+decision point, `(goal-create, swarm-topology)`, registered unconditionally
+from `server.ts` like the model-tier and gate-risk classifiers. The consult
+site is the existing best-of-N create route; the route records the classifier
+decision but never reads it back, so topology remains 100% caller-supplied.
+
+**Rule table v1 is deliberately narrow:** only the two already-typed
+deterministic signals are used. `requestedFanOut >= 2 && hasVerifyCommand`
+selects `{topology:"best-of-n", fanOut: requestedFanOut, earlyKill:false}`
+with the rationale that the caller already wants fan-out and a deterministic
+verifier exists. `requestedFanOut >= 2 && !hasVerifyCommand` abstains, and
+everything else abstains. No spec-text heuristics, no prompt parsing, no new
+arg fields.
+
+**Deliberately not built this wave:** any apply/enforce flag, any consumer
+that changes the topology based on the decision, and any interaction with
+`forceIntegrateSwarmWinner` or operator-confirmation. Those human-gated
+integration paths stay owned by the existing `/confirm` route.
