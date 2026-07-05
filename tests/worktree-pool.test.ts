@@ -195,7 +195,7 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 		console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
 		try {
-			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 0, remotePolicy: { skipNonLocalRemoteGit: true } });
 			await (pool as any).freshen(repo, "session/no-remote");
 		} finally {
 			console.warn = originalWarn;
@@ -443,6 +443,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 				repoPath: repo,
 				targetSize: 1,
 				componentsResolver: () => components,
+				worktreeSetupRuntime: { skipNpmCi: true },
 			});
 			pool.startFilling();
 			for (let i = 0; i < 100 && pool.size === 0; i++) {

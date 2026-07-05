@@ -1,7 +1,6 @@
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
 export type GithubDiffLineKind = "context" | "add" | "del";
@@ -116,6 +115,7 @@ export interface ResolveGithubPrOptions {
 	fetch?: FetchLike;
 	commandRunner?: CommandRunner;
 	apiBaseUrl?: string;
+	noExternal?: boolean;
 	maxFiles?: number;
 	maxPatchBytes?: number;
 	maxLinesPerFile?: number;
@@ -177,11 +177,6 @@ type FetchLike = (url: string, init?: {
 
 const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
 const DEFAULT_MAX_LINES_PER_FILE = 2_000;
-
-function externalNetworkBlockedForTests(): boolean {
-	const flags = getLegacyTestRuntimeFlags();
-	return flags.testNoExternal || flags.e2e;
-}
 
 function isLocalHttpUrl(raw: string): boolean {
 	try {
@@ -280,7 +275,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	}
 
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
-	if (externalNetworkBlockedForTests() && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
+	if (options.noExternal && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
 		throw new GithubPrAdapterError(`External GitHub API access is disabled in tests: ${apiBaseUrl}`, {
 			status: 403,
 			code: "github_external_network_disabled",

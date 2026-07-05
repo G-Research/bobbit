@@ -1,4 +1,3 @@
-import { execFile as execFileCb, execFileSync } from "node:child_process";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { realClock, realCommandRunner } from "../gateway-deps.js";
 import { randomUUID } from "node:crypto";
@@ -6,7 +5,6 @@ import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import type { WebSocket } from "ws";
 import type {
 	ServerMessage,
@@ -57,7 +55,7 @@ import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-pro
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -115,7 +113,6 @@ import {
 	relativeSandboxCwdOffset,
 } from "./session-setup.js";
 
-const execFileAsync = promisify(execFileCb);
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
@@ -1057,6 +1054,9 @@ export interface SessionManagerOptions {
 	commandRunner?: CommandRunner;
 	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
 	skipTitleGeneration?: boolean;
+	remoteGitPolicy?: RemoteGitPolicy;
+	testPreparingDelayMs?: string;
+	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
 }
 
 type RestoreCoordinator = {
@@ -1079,6 +1079,9 @@ export class SessionManager {
 	private readonly clock: Clock;
 	private readonly commandRunner: CommandRunner;
 	private readonly skipTitleGeneration: boolean;
+	private readonly remoteGitPolicy: RemoteGitPolicy;
+	private readonly testPreparingDelayMs?: string;
+	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
 	private _testBgProcessStore: BgProcessStore | null = null;
@@ -1337,19 +1340,19 @@ export class SessionManager {
 
 					// Check if worktree still exists (volumes may survive rm -f)
 					try {
-						await execFileAsync("docker", [
+						await this.commandRunner.execFile("docker", [
 							"exec", newContainerId, "test", "-d", session.cwd,
 						], { timeout: 5_000 });
 						worktreeOk = true;
 					} catch {
 						// Try git worktree repair first
 						try {
-							await execFileAsync("docker", [
+							await this.commandRunner.execFile("docker", [
 								"exec", "-w", "/workspace", newContainerId,
 								"git", "worktree", "repair",
 							], { timeout: 10_000 });
 							// Re-check after repair
-							await execFileAsync("docker", [
+							await this.commandRunner.execFile("docker", [
 								"exec", newContainerId, "test", "-d", session.cwd,
 							], { timeout: 5_000 });
 							worktreeOk = true;
@@ -1477,6 +1480,9 @@ export class SessionManager {
 		this.clock = options?.clock ?? realClock;
 		this.commandRunner = options?.commandRunner ?? realCommandRunner;
 		this.skipTitleGeneration = options?.skipTitleGeneration ?? false;
+		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
+		this.testPreparingDelayMs = options?.testPreparingDelayMs;
+		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -1499,7 +1505,7 @@ export class SessionManager {
 			this._testBgProcessStore = new BgProcessStore(stateDir, this.clock);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime });
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 			// Empty-but-real PR status store for in-process E2E harnesses that
 			// construct SessionManager without a full ProjectContextManager but
@@ -1775,6 +1781,9 @@ export class SessionManager {
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
 			prStatusStore: this.prStatusStore!,
+			testPreparingDelayMs: this.testPreparingDelayMs,
+			worktreeSetupRuntime: this.worktreeSetupRuntime,
+			remoteGitPolicy: this.remoteGitPolicy,
 			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
 			// The pipeline (tool activation, prompt order, bridge-install) resolves the
 			// effective (inherited) metadata for a session's goal through this single
@@ -1793,7 +1802,7 @@ export class SessionManager {
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
 		try {
-			await execFileAsync("docker", [
+			await this.commandRunner.execFile("docker", [
 				"network", "create", name,
 				"--driver", "bridge",
 				"--opt", "com.docker.network.bridge.enable_icc=false",
@@ -1816,7 +1825,7 @@ export class SessionManager {
 	 */
 	async cleanupSandboxNetwork(): Promise<void> {
 		try {
-			await execFileAsync("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
+			await this.commandRunner.execFile("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
 			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
 		} catch {
 			// Non-fatal — network may not exist or may have connected containers
@@ -2009,7 +2018,7 @@ export class SessionManager {
 		// Get project-scoped config/secrets when available.
 		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore, this.commandRunner);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
 		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
 		ensureSandboxAgentAuthFile({
@@ -2395,7 +2404,7 @@ export class SessionManager {
 		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
 		// `setupTimeoutResolver` reads `worktree_setup_timeout_ms` so the project
 		// default applies to per-component setup during pool prebuild.
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot, commandRunner: this.commandRunner, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -4879,7 +4888,7 @@ export class SessionManager {
 				console.log(`[session-manager] Recovering worktree for "${ps.title}" (${ps.id}): ${reason}, branch: ${ps.branch}`);
 				try {
 					const { recoverWorktree } = await import("../skills/git.js");
-					const recovered = await recoverWorktree(ps.repoPath, ps.branch, ps.worktreePath);
+					const recovered = await recoverWorktree(ps.repoPath, ps.branch, ps.worktreePath, this.commandRunner, this.remoteGitPolicy);
 					if (recovered) {
 						console.log(`[session-manager] Worktree recovered: ${recovered}`);
 					} else {
@@ -5121,7 +5130,7 @@ export class SessionManager {
 			// Verify the sandbox worktree still exists inside the container
 			if (ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
 				try {
-					await execFileAsync("docker", [
+					await this.commandRunner.execFile("docker", [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
 					], { timeout: 5_000 });
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
@@ -5131,12 +5140,12 @@ export class SessionManager {
 
 					// Try git worktree repair first — handles broken .git link files after hard container kill
 					try {
-						await execFileAsync("docker", [
+						await this.commandRunner.execFile("docker", [
 							"exec", "-w", "/workspace", bridgeOptions.containerId!,
 							"git", "worktree", "repair",
 						], { timeout: 10_000 });
 						// Re-check if worktree now exists after repair
-						await execFileAsync("docker", [
+						await this.commandRunner.execFile("docker", [
 							"exec", bridgeOptions.containerId!, "test", "-d", ps.cwd!,
 						], { timeout: 5_000 });
 						console.log(`[session-manager] Sandbox worktree repaired for ${ps.id}: ${ps.cwd}`);
@@ -7706,13 +7715,13 @@ export class SessionManager {
 		const persistedForBranchDelete = terminateStore.get(id);
 		const sessionBranch = persistedForBranchDelete?.branch;
 		const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
-		const skipRemoteBranchDelete = shouldSkipRemotePush() || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner);
+		const skipRemoteBranchDelete = shouldSkipRemotePush(this.remoteGitPolicy) || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner, this.remoteGitPolicy);
 		eagerDeleteRemoteSessionBranch({
 			branch: sessionBranch,
 			repoPath: repoPathForBranchDelete,
 			delegateOf: session.delegateOf,
 			skipPush: skipRemoteBranchDelete,
-			detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner),
+			detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner, this.remoteGitPolicy),
 			runGit: async (args, cwd) => {
 				await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
 			},
@@ -8544,7 +8553,7 @@ export class SessionManager {
 		}
 		const branchDeleted = !(await this.localBranchExistsUncached(item.repoPath, item.branch));
 		if (!branchDeleted) return false;
-		if (!(await shouldSkipRemotePushForTests(item.repoPath, "origin", this.commandRunner))) {
+		if (!(await shouldSkipRemotePushForTests(item.repoPath, "origin", this.commandRunner, this.remoteGitPolicy))) {
 			try {
 				await this.commandRunner.execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
 			} catch {
@@ -9493,7 +9502,7 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
+export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
 	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
@@ -9518,14 +9527,14 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
 	}
 
 	// ── Legacy fallback: sandbox_tokens not set ──
-	return resolveLegacySandboxCredentials(prefs, projectConfig);
+	return resolveLegacySandboxCredentials(prefs, projectConfig, commandRunner);
 }
 
 /**
  * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
  * Used as fallback when sandbox_tokens is not configured.
  */
-export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json
@@ -9577,7 +9586,8 @@ export function resolveLegacySandboxCredentials(prefs?: import("./preferences-st
 			result["GITHUB_TOKEN"] = hostGhToken;
 		} else {
 			try {
-				const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
+				if (!commandRunner.execFileSync) throw new Error("CommandRunner does not support execFileSync");
+				const token = String(commandRunner.execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" })).trim();
 				if (token) {
 					result["GITHUB_TOKEN"] = token;
 				}

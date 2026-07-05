@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CommandRunner, ExecFileOptions, ExecFileResult } from "../../src/server/gateway-deps.js";
+import type { CommandRunner, ExecFileOptions, ExecFileResult, ExecFileSyncOptions, SpawnOptions } from "../../src/server/gateway-deps.js";
 import { realCommandRunner } from "../../src/server/gateway-deps.js";
 
 export interface FakeCommandResponse {
@@ -57,6 +57,16 @@ async function resolveRemoteName(remote: string, cwd: string | undefined): Promi
 	}
 }
 
+function resolveRemoteNameSync(remote: string, cwd: string | undefined): string | null {
+	if (!cwd || !/^[A-Za-z0-9_.-]+$/.test(remote)) return null;
+	try {
+		const stdout = realCommandRunner.execFileSync!("git", ["remote", "get-url", remote], { cwd, encoding: "utf-8", timeout: 5_000 });
+		return String(stdout).trim() || null;
+	} catch {
+		return null;
+	}
+}
+
 function remoteCandidate(subcommand: string, args: readonly string[]): string | null {
 	const rest = args.slice(1);
 	for (let i = 0; i < rest.length; i++) {
@@ -86,6 +96,18 @@ async function assertGitRemoteAllowed(args: readonly string[], options?: ExecFil
 	}
 }
 
+function assertGitRemoteAllowedSync(args: readonly string[], options?: ExecFileSyncOptions | SpawnOptions): void {
+	const subcommand = args[0];
+	if (!NETWORK_GIT_COMMANDS.has(subcommand)) return;
+	const cwd = typeof options?.cwd === "string" ? options.cwd : undefined;
+	const candidate = remoteCandidate(subcommand, args);
+	if (!candidate) throw new Error(`[fenced-command-runner] blocked git ${subcommand}: remote is required`);
+	const resolved = resolveRemoteNameSync(candidate, cwd) ?? candidate;
+	if (!isAllowedLocalRemote(resolved, cwd)) {
+		throw new Error(`[fenced-command-runner] blocked git ${subcommand} to non-local remote: ${candidate}`);
+	}
+}
+
 export function createFencedCommandRunner(opts: FencedCommandRunnerOptions = {}): CommandRunner {
 	return {
 		async execFile(file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> {
@@ -105,12 +127,14 @@ export function createFencedCommandRunner(opts: FencedCommandRunnerOptions = {})
 			const name = commandName(file);
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
+			if (name === "git") assertGitRemoteAllowedSync(args, options);
 			return realCommandRunner.execFileSync!(file, args, options);
 		},
 		spawn(file, args, options) {
 			const name = commandName(file);
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
+			if (name === "git") assertGitRemoteAllowedSync(args, options);
 			return realCommandRunner.spawn!(file, args, options);
 		},
 	};

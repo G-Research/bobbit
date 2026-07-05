@@ -180,6 +180,7 @@ describe("host worktree push policy", () => {
 			const { commands } = await withGitCommandLog(() => createWorktree(repo, branch, {
 				startPoint: "origin/master",
 				pushPolicy: "publish",
+				remotePolicy: { skipRemotePush: true },
 			}));
 
 			assert.equal(await remoteRef(root, origin, `refs/heads/${branch}`), null, "test no-push mode must not publish");

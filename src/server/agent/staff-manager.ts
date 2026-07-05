@@ -10,7 +10,7 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
 import { SYSTEM_PROJECT_ID } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
-import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, shouldSkipRemoteGitForTests } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, shouldSkipRemoteGitForTests, type RemoteGitPolicy } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 import { shouldCreateWorktree } from "./worktree-decision.js";
@@ -42,9 +42,13 @@ interface StaffWorktreePlan {
 export class StaffManager {
 	private pcm: ProjectContextManager;
 	private inboxManager: InboxManager | null = null;
+	private readonly remotePolicy: RemoteGitPolicy;
+	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
 
-	constructor(pcm: ProjectContextManager) {
+	constructor(pcm: ProjectContextManager, opts: { remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
 		this.pcm = pcm;
+		this.remotePolicy = opts.remotePolicy ?? {};
+		this.worktreeSetupRuntime = opts.worktreeSetupRuntime ?? {};
 		this.logOrphansOnce();
 	}
 
@@ -226,7 +230,7 @@ export class StaffManager {
 		let repoWorktrees: Record<string, string> | undefined;
 
 		if (support.multiRepo) {
-			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef });
+			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef, remotePolicy: this.remotePolicy });
 			// createWorktreeSet skips a non-git `.` container entry; if NO git
 			// sub-repo remained it returns an empty set (no container created).
 			// Fall back to no-worktree (session cwd unchanged) rather than pointing
@@ -235,7 +239,7 @@ export class StaffManager {
 			worktreePath = set.container;
 			repoWorktrees = Object.fromEntries(set.worktrees.map(w => [w.repo, w.worktreePath]));
 		} else {
-			const worktreeResult = await createWorktree(support.repoPath, branchName, { configuredBaseRef, worktreeRoot });
+			const worktreeResult = await createWorktree(support.repoPath, branchName, { configuredBaseRef, worktreeRoot, remotePolicy: this.remotePolicy });
 			worktreePath = worktreeResult.worktreePath;
 			branchName = worktreeResult.branchName;
 		}
@@ -246,6 +250,8 @@ export class StaffManager {
 					components: support.components,
 					branchContainer: worktreePath,
 					primaryWorktreeRoot: support.repoPath,
+					skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
+					recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
 					exec: async (cmd, setupCwd, env) => {
 						await execShellCommand(cmd, { cwd: setupCwd, env, timeout: 120_000 });
 					},
@@ -300,7 +306,7 @@ export class StaffManager {
 	private async cleanupStaffWorktree(staff: PersistedStaff, projectId?: string): Promise<void> {
 		const entries = this.staffWorktreeEntries(staff, projectId);
 		if (entries.length === 0) return;
-		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true)));
+		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, undefined, this.remotePolicy)));
 		for (const result of results) {
 			if (result.status === "rejected") {
 				console.error(`[staff-manager] Failed to clean up one worktree for staff ${staff.id}:`, result.reason);
@@ -571,7 +577,7 @@ export class StaffManager {
 		for (const entry of entries) {
 			const wt = entry.worktreePath;
 			try {
-				if (await shouldSkipRemoteGitForTests(wt)) continue;
+				if (await shouldSkipRemoteGitForTests(wt, "origin", undefined, this.remotePolicy)) continue;
 				await execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
 			} catch (err) {
 				console.warn(`[staff-manager] git fetch failed in ${wt} (non-fatal):`, err);
@@ -612,6 +618,8 @@ export class StaffManager {
 					components,
 					branchContainer: staff.worktreePath,
 					primaryWorktreeRoot: staff.repoPath ?? ctx?.project.rootPath ?? staff.cwd,
+					skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
+					recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
 					exec: async (cmd, cwd, env) => {
 						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},

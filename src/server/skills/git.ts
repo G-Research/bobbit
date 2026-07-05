@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
@@ -72,12 +71,17 @@ async function execGit(
 	}
 }
 
-/**
- * Whether remote git push operations should be skipped.
- * Set BOBBIT_TEST_NO_PUSH=1 in E2E tests to prevent any network traffic to GitHub.
- */
-export function shouldSkipRemotePush(): boolean {
-	return getLegacyTestRuntimeFlags().skipRemotePush;
+export interface RemoteGitPolicy {
+	skipRemotePush?: boolean;
+	skipNonLocalRemoteGit?: boolean;
+	e2eTmpRoot?: string;
+}
+
+const DEFAULT_REMOTE_GIT_POLICY: RemoteGitPolicy = Object.freeze({});
+
+/** Whether remote git push operations should be skipped. */
+export function shouldSkipRemotePush(remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): boolean {
+	return !!remotePolicy.skipRemotePush;
 }
 
 function isLocalGitRemoteUrl(rawUrl: string): boolean {
@@ -102,8 +106,8 @@ function isLocalGitRemoteUrl(rawUrl: string): boolean {
  * non-local remote. Local bare/file remotes are allowed so tests can exercise
  * fetch/reset semantics without network access.
  */
-export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin", commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
-	if (!getLegacyTestRuntimeFlags().skipNonLocalRemoteGit) return false;
+export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin", commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<boolean> {
+	if (!remotePolicy.skipNonLocalRemoteGit) return false;
 	try {
 		const { stdout } = await execGit(["remote", "get-url", remote], { cwd, timeout: 5_000 }, commandRunner);
 		return !isLocalGitRemoteUrl(stdout.toString());
@@ -112,8 +116,8 @@ export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin"
 	}
 }
 
-export async function shouldSkipRemotePushForTests(cwd: string, remote = "origin", commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
-	return shouldSkipRemotePush() || await shouldSkipRemoteGitForTests(cwd, remote, commandRunner);
+export async function shouldSkipRemotePushForTests(cwd: string, remote = "origin", commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<boolean> {
+	return shouldSkipRemotePush(remotePolicy) || await shouldSkipRemoteGitForTests(cwd, remote, commandRunner, remotePolicy);
 }
 
 /**
@@ -151,7 +155,7 @@ export function stripTokenFromGitUrl(url: string): string {
  * templates as `{{baseBranch}}` (the legacy alias `{{master}}` resolves through
  * here too).
  */
-export async function detectPrimaryBranch(cwd: string, commandRunner: CommandRunner = realCommandRunner): Promise<string> {
+export async function detectPrimaryBranch(cwd: string, commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<string> {
 	try {
 		const { stdout } = await execGit(["symbolic-ref", "refs/remotes/origin/HEAD"], {
 			cwd,
@@ -168,20 +172,20 @@ export async function detectPrimaryBranch(cwd: string, commandRunner: CommandRun
 		await execGit(["rev-parse", "--verify", "refs/heads/main"], { cwd, timeout: 5_000 }, commandRunner);
 		return "main";
 	} catch { /* ignore */ }
-	await warnPrimaryBranchFallbackIfUseful(cwd, commandRunner);
+	await warnPrimaryBranchFallbackIfUseful(cwd, commandRunner, remotePolicy);
 	return "master";
 }
 
-async function warnPrimaryBranchFallbackIfUseful(cwd: string, commandRunner: CommandRunner = realCommandRunner): Promise<void> {
-	if (!await shouldWarnPrimaryBranchFallback(cwd, commandRunner)) return;
+async function warnPrimaryBranchFallbackIfUseful(cwd: string, commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<void> {
+	if (!await shouldWarnPrimaryBranchFallback(cwd, commandRunner, remotePolicy)) return;
 	const key = path.resolve(cwd);
 	if (primaryBranchFallbackWarningCwds.has(key)) return;
 	primaryBranchFallbackWarningCwds.add(key);
 	console.warn(`[git] detectPrimaryBranch(${cwd}): could not detect primary branch; defaulting to "master"`);
 }
 
-async function shouldWarnPrimaryBranchFallback(cwd: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
-	const expectedTempFallbackPath = isExpectedTempPrimaryBranchFallbackPath(cwd);
+async function shouldWarnPrimaryBranchFallback(cwd: string, commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<boolean> {
+	const expectedTempFallbackPath = isExpectedTempPrimaryBranchFallbackPath(cwd, remotePolicy);
 	try {
 		await execGit(["remote", "get-url", "origin"], { cwd, timeout: 5_000 }, commandRunner);
 		return true;
@@ -211,7 +215,7 @@ async function shouldWarnPrimaryBranchFallback(cwd: string, commandRunner: Comma
 	}
 }
 
-function isExpectedTempPrimaryBranchFallbackPath(cwd: string): boolean {
+function isExpectedTempPrimaryBranchFallbackPath(cwd: string, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): boolean {
 	const resolved = path.resolve(cwd);
 	const tmpRoot = path.resolve(os.tmpdir());
 	if (sameOrInsidePath(resolved, tmpRoot)) {
@@ -219,7 +223,7 @@ function isExpectedTempPrimaryBranchFallbackPath(cwd: string): boolean {
 		if (hasExpectedTempHarnessComponent(resolved)) return true;
 	}
 
-	const e2eRoot = path.resolve(getLegacyTestRuntimeFlags().e2eTmpRoot || defaultE2eTempRoot());
+	const e2eRoot = path.resolve(remotePolicy.e2eTmpRoot || defaultE2eTempRoot());
 	return sameOrInsidePath(resolved, e2eRoot);
 }
 
@@ -377,9 +381,9 @@ export function parseLsRemoteSymref(output: string): string | null {
  * Used to pin a concrete `base_ref` from the live remote at project-add time.
  * See docs/design/base-ref.md.
  */
-export async function detectBaseRefFromRemote(repoPath: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+export async function detectBaseRefFromRemote(repoPath: string, commandRunner: CommandRunner = realCommandRunner, remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY): Promise<string | null> {
 	try {
-		if (await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner)) return null;
+		if (await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner, remotePolicy)) return null;
 		const { stdout } = await execGit(["ls-remote", "--symref", "origin", "HEAD"], {
 			cwd: repoPath,
 			timeout: 10_000,
@@ -538,6 +542,7 @@ export interface CreateWorktreeOptions {
 	worktreeRoot?: string;
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
+	remotePolicy?: RemoteGitPolicy;
 	/** Backward-compatible default for this low-level primitive: "publish". */
 	pushPolicy?: WorktreePushPolicy;
 	/** Deprecated compatibility shim; true maps to local-only. */
@@ -548,6 +553,7 @@ export interface CreateWorktreeSetOptions {
 	worktreeRoot?: string;
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
+	remotePolicy?: RemoteGitPolicy;
 	pushPolicy?: WorktreePushPolicy;
 	skipPush?: boolean;
 }
@@ -582,6 +588,7 @@ export interface WorktreeResult {
  */
 export async function createWorktree(repoPath: string, branchName: string, opts?: CreateWorktreeOptions): Promise<WorktreeResult> {
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
+	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
@@ -623,7 +630,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	// Fetch the start point to ensure it's up to date. Test harnesses must never
 	// reach real remotes; local bare origins used by explicit remote specs remain allowed.
 	try {
-		if (!(await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner))) {
+		if (!(await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner, remotePolicy))) {
 			const remote = startPoint.startsWith("origin/") ? startPoint.replace("origin/", "") : startPoint;
 			await runGit(["fetch", "origin", remote], { cwd: repoPath, timeout: 30_000 });
 		}
@@ -697,7 +704,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	// Set upstream tracking only after that safe publish succeeds so git-status can
 	// report ahead/behind and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
 	const pushPolicy: WorktreePushPolicy = opts?.skipPush ? "local-only" : (opts?.pushPolicy ?? "publish");
-	const shouldPublish = pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(worktreePath, "origin", commandRunner));
+	const shouldPublish = pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(worktreePath, "origin", commandRunner, remotePolicy));
 	if (shouldPublish) {
 		try {
 			await runGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
@@ -774,6 +781,7 @@ export async function createWorktreeSet(
 	const slug = branchToSlug(branchName);
 	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
+	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
 	const pushPolicy: WorktreePushPolicy = opts?.skipPush ? "local-only" : (opts?.pushPolicy ?? "local-only");
 
@@ -786,6 +794,7 @@ export async function createWorktreeSet(
 			worktreeRoot: opts?.worktreeRoot,
 			configuredBaseRef: opts?.configuredBaseRef,
 			commandRunner,
+			remotePolicy,
 		};
 		if (opts?.pushPolicy) createOpts.pushPolicy = opts.pushPolicy;
 		if (opts?.skipPush !== undefined) createOpts.skipPush = opts.skipPush;
@@ -883,7 +892,7 @@ export async function createWorktreeSet(
 			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
 		}
 
-		if (pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(wtPath, "origin", commandRunner))) {
+		if (pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(wtPath, "origin", commandRunner, remotePolicy))) {
 			try {
 				await runGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
 					cwd: wtPath,
@@ -937,6 +946,7 @@ export async function cleanupWorktree(
 	branchName?: string,
 	deleteBranch = false,
 	commandRunner: CommandRunner = realCommandRunner,
+	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<void> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
 	if (!fs.existsSync(repoPath)) {
@@ -971,7 +981,7 @@ export async function cleanupWorktree(
 		}
 		// Also delete the remote branch (best-effort — remote may be unreachable,
 		// or the repo may have no remote configured, e.g. in E2E tests).
-		if (!(await shouldSkipRemotePushForTests(repoPath, "origin", commandRunner))) {
+		if (!(await shouldSkipRemotePushForTests(repoPath, "origin", commandRunner, remotePolicy))) {
 			try {
 				await runGit(["push", "origin", "--delete", branchName], {
 					cwd: repoPath,
@@ -1024,6 +1034,7 @@ export async function mergeChildBranchLocal(
 	childBranch: string,
 	parentCwd: string,
 	commandRunner: CommandRunner = realCommandRunner,
+	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<MergeChildResult> {
 	if (!parentBranch || !childBranch) {
 		throw new Error(`mergeChildBranchLocal: parentBranch and childBranch are required (got "${parentBranch}", "${childBranch}")`);
@@ -1051,7 +1062,7 @@ export async function mergeChildBranchLocal(
 	// Best-effort fetch — child branch may be local-only. In tests, only local
 	// bare origins are allowed so the suite never contacts a real remote.
 	try {
-		if (!(await shouldSkipRemoteGitForTests(parentCwd, "origin", commandRunner))) {
+		if (!(await shouldSkipRemoteGitForTests(parentCwd, "origin", commandRunner, remotePolicy))) {
 			await execGit(["fetch", "origin", childBranch], { cwd: parentCwd, timeout: 30_000 }, commandRunner);
 		}
 	} catch {
@@ -1135,6 +1146,7 @@ export async function recoverWorktree(
 	branchName: string,
 	worktreePath: string,
 	commandRunner: CommandRunner = realCommandRunner,
+	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<string | null> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
 	if (!fs.existsSync(repoPath)) {
@@ -1196,7 +1208,7 @@ export async function recoverWorktree(
 		// Fetch to make sure we have the branch ref. In tests, only local bare
 		// origins are allowed so recovery never contacts a real remote.
 		try {
-			if (!(await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner))) {
+			if (!(await shouldSkipRemoteGitForTests(repoPath, "origin", commandRunner, remotePolicy))) {
 				await runGit(["fetch", "origin", branchName], {
 					cwd: repoPath,
 					timeout: 30_000,

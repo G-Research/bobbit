@@ -27,10 +27,14 @@
 
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
-const PROFILE = getLegacyTestRuntimeFlags().e2eProfile;
-const FLUSH_INTERVAL_MS = Number(getLegacyTestRuntimeFlags().e2eProfileFlushMs) || 5000;
+let PROFILE = false;
+let FLUSH_INTERVAL_MS = 5000;
+
+export function configureProfilingRuntime(opts: { e2eProfile?: boolean; e2eProfileFlushMs?: string } = {}): void {
+	PROFILE = !!opts.e2eProfile;
+	FLUSH_INTERVAL_MS = Number(opts.e2eProfileFlushMs) || 5000;
+}
 
 interface Bucket {
 	samples: number[];

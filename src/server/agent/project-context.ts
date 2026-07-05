@@ -22,6 +22,7 @@ import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
+import type { RemoteGitPolicy } from "../skills/git.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -72,7 +73,7 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
     this.project = project;
     const fsImpl = opts.fsImpl;
     const clock = opts.clock;
@@ -121,7 +122,7 @@ export class ProjectContext {
     // GoalManager depends on workflowStore (GoalManager requires WorkflowStore — fail-loud). Constructed
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
-    this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock });
+    this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock, remotePolicy: opts.remotePolicy, worktreeSetupRuntime: opts.worktreeSetupRuntime });
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */

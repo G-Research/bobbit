@@ -333,13 +333,15 @@ export class ProjectSandbox {
 	private _recovering = false;
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
+	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
 
-	constructor(private options: ProjectSandboxOptions, deps: { commandRunner?: CommandRunner; clock?: Clock } = {}) {
+	constructor(private options: ProjectSandboxOptions, deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
 		if (!options || typeof options !== "object" || typeof options.projectId !== "string" || !options.projectId) {
 			throw new Error("[project-sandbox] ProjectSandbox constructor requires ProjectSandboxOptions with a non-empty projectId");
 		}
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.clock = deps.clock ?? realClock;
+		this.worktreeSetupRuntime = deps.worktreeSetupRuntime ?? {};
 	}
 
 	private execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
@@ -582,6 +584,8 @@ export class ProjectSandbox {
 				components,
 				branchContainer: container,
 				primaryWorktreeRoot: "/workspace",
+				skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
+				recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
 				exec: async (cmd, cwd, env) => {
 					const execEnv: Record<string, string> = {};
 					if (env.SOURCE_REPO) execEnv.SOURCE_REPO = String(env.SOURCE_REPO);

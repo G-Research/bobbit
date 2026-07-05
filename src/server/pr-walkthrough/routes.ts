@@ -145,6 +145,7 @@ export type PrWalkthroughRouteDeps = {
 	 *  (Decision C — REQUIRED for the binding-routed submit-yaml/bundle paths). */
 	sessionSecretStore?: SessionSecretStore;
 	commandRunner?: CommandRunner;
+	noExternal?: boolean;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -335,7 +336,7 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Explicit confirmation is required before submitting a GitHub review", { code: "CONFIRMATION_REQUIRED" });
 				return true;
 			}
-			const result = await submitExport(changesetId, stored.payload, body);
+			const result = await submitExport(changesetId, stored.payload, body, deps);
 			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
 			return true;
 		}
@@ -442,7 +443,7 @@ async function tryResolveGithubWithDelegation(input: Record<string, unknown>, de
 	const module = await optionalPrModule("github-adapter");
 	const resolveGithubPr = module?.resolveGithubPr;
 	if (typeof resolveGithubPr !== "function") return undefined;
-	const resolved = await resolveGithubPr({ ...input, commandRunner: deps.commandRunner ?? realCommandRunner });
+	const resolved = await resolveGithubPr({ ...input, commandRunner: deps.commandRunner ?? realCommandRunner, noExternal: deps.noExternal });
 	return normalizeGithubResolvedWalkthrough(resolved, deps, context);
 }
 
@@ -807,7 +808,7 @@ function mapComment(comment: any, cards: WalkthroughCard[]): Record<string, unkn
 	};
 }
 
-async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any): Promise<Record<string, unknown>> {
+async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any, deps: PrWalkthroughRouteDeps = { defaultCwd: process.cwd(), readBody: async () => ({}) }): Promise<Record<string, unknown>> {
 	void changesetId;
 	if (payload.export?.provider !== "github" || payload.export.available !== true) {
 		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
@@ -817,7 +818,7 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 	const submitGithubReview = module?.submitGithubReview;
 	if (typeof buildGithubReviewPreview === "function" && typeof submitGithubReview === "function") {
 		const preview = buildGithubReviewPreview(body.draft, payload.cards, payload.changeset);
-		return submitGithubReview(preview, { confirm: true, event: body.event });
+		return submitGithubReview(preview, { confirm: true, event: body.event }, { noExternal: deps.noExternal });
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }
@@ -1366,7 +1367,7 @@ async function resolveDiffForBindingTarget(
 	if (typeof deps.preflightGithubLaunch === "function") {
 		await deps.preflightGithubLaunch({ jobId: "", target } as unknown as PrWalkthroughJobRecord);
 	}
-	const resolved = await resolveGithubPr({ cwd, prUrl: target.prUrl, prNumber: target.number, trustedHosts });
+	const resolved = await resolveGithubPr({ cwd, prUrl: target.prUrl, prNumber: target.number, trustedHosts, commandRunner: deps.commandRunner ?? realCommandRunner, noExternal: deps.noExternal });
 	return {
 		changeset: resolved.changeset as WalkthroughParsedDiffForYamlMapping["changeset"],
 		files: resolved.files as unknown as WalkthroughParsedDiffForYamlMapping["files"],

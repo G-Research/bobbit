@@ -233,19 +233,13 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	const harness = new VerificationHarness(
 		STATE_DIR, stubGateStore, () => {}, roleStore, undefined,
 		stubSessionManager, stubTeamManager, undefined, undefined, undefined,
+		{ skipLlmReview: true },
 	) as any;
 
-	// BOBBIT_LLM_REVIEW_SKIP makes _rerunLlmReviewStep return a trivial pass
+	// skipLlmReview makes _rerunLlmReviewStep return a trivial pass
 	// without spawning a real agent — so a PASSED gate can ONLY have come from
 	// the rerun arm (the resume itself failed transiently).
-	const prev = process.env.BOBBIT_LLM_REVIEW_SKIP;
-	process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
-	try {
-		await resumeWithDeadline(harness);
-	} finally {
-		if (prev === undefined) delete process.env.BOBBIT_LLM_REVIEW_SKIP;
-		else process.env.BOBBIT_LLM_REVIEW_SKIP = prev;
-	}
+	await resumeWithDeadline(harness);
 
 	const statuses = gateStatusCalls(calls);
 	assert.strictEqual(

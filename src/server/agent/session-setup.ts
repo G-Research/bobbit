@@ -38,13 +38,12 @@ import type { ContextBlock } from "./context-blocks.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
-import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -370,6 +369,11 @@ export interface PipelineContext {
 	persistSessionMetadata?: (session: SessionInfo) => Promise<void>;
 	/** PR status store — source of truth for goal PR URLs (re-attempt context). */
 	prStatusStore: PrStatusStore;
+	/** Runtime boundary flag for legacy BOBBIT_TEST_PREPARING_DELAY_MS behavior. */
+	testPreparingDelayMs?: string;
+	/** Runtime boundary flags for legacy worktree setup test hooks. */
+	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
+	remoteGitPolicy?: RemoteGitPolicy;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -1116,7 +1120,7 @@ export async function executeWorktreeAsync(
 	// "preparing" by SessionManager.createSession before this fn is invoked, so
 	// sleeping here keeps the session visibly preparing without changing
 	// production behaviour (gated on the env var being set).
-	const preparingDelayMs = getLegacyTestRuntimeFlags().testPreparingDelayMs;
+	const preparingDelayMs = ctx.testPreparingDelayMs;
 	if (preparingDelayMs) {
 		const delayMs = Number(preparingDelayMs);
 		if (Number.isFinite(delayMs) && delayMs > 0) {
@@ -1153,11 +1157,12 @@ export async function executeWorktreeAsync(
 			worktreeRoot?: string;
 			configuredBaseRef?: string;
 			pushPolicy?: WorktreePushPolicy;
+			remotePolicy?: RemoteGitPolicy;
 		};
 		if (isMulti) {
 			const { createWorktreeSet } = await import("../skills/git.js");
 			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
-			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, pushPolicy: plan.worktreePushPolicy };
+			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
 			const result = await withRetry(
 				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, worktreeOptions),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
@@ -1179,7 +1184,7 @@ export async function executeWorktreeAsync(
 			try {
 				worktreeCwd = await withRetry(
 					async () => {
-						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, pushPolicy: plan.worktreePushPolicy };
+						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
 						const result = await createWorktree(plan.repoPath!, plan.branch!, worktreeOptions);
 						return result.worktreePath;
 					},
@@ -1203,6 +1208,8 @@ export async function executeWorktreeAsync(
 					components,
 					branchContainer: worktreeCwd,
 					primaryWorktreeRoot: plan.repoPath!,
+					skipNpmCi: ctx.worktreeSetupRuntime?.skipNpmCi,
+					recordSetupPath: ctx.worktreeSetupRuntime?.recordSetupPath,
 					exec: async (cmd, cwd, env) => {
 						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},
@@ -1692,7 +1699,7 @@ export function handleSetupFailure(
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
 		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
-			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
+			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, undefined, ctx.remoteGitPolicy).catch(() => {});
 		} else {
 			console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
 		}

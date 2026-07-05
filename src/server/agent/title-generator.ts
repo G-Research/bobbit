@@ -9,7 +9,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
-import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import { discoverAigwModels } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
@@ -444,7 +443,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	const fetchImpl = options?.fetchImpl ?? defaultFetch;
 	// Skip title generation entirely when tests/CI opt out - avoids real
 	// outbound calls to api.anthropic.com for every prompted test.
-	if (options?.skipTitleGeneration ?? getLegacyTestRuntimeFlags().skipTitleGeneration) return null;
+	if (options?.skipTitleGeneration ?? false) return null;
 	const preview = extractConversationPreview(messages);
 	if (!preview.trim()) {
 		console.error("[title-gen] No conversation content to summarise");
@@ -649,7 +648,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
  */
 export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
 	const fetchImpl = options?.fetchImpl ?? defaultFetch;
-	if (options?.skipTitleGeneration ?? getLegacyTestRuntimeFlags().skipTitleGeneration) return null;
+	if (options?.skipTitleGeneration ?? false) return null;
 	if (!goalTitle.trim()) {
 		console.error("[title-gen] No goal title to summarise");
 		return null;
