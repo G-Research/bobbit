@@ -1,3 +1,5 @@
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
+
 export type GithubReviewEvent = "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
 export type GithubReviewSide = "RIGHT" | "LEFT";
 
@@ -218,7 +220,8 @@ export function buildGithubReviewPreview(
 }
 
 function externalNetworkBlockedForTests(): boolean {
-	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
+	const flags = getLegacyTestRuntimeFlags();
+	return flags.testNoExternal || flags.e2e;
 }
 
 function isLocalHttpUrl(raw: string): boolean {

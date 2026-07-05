@@ -2,7 +2,7 @@ import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { configureLegacyTestRuntimeFlags, resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+import { configureLegacyTestRuntimeFlags, getLegacyTestRuntimeFlags, resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -4108,7 +4108,7 @@ async function handleApiRoute(
 	// dedupe by seq and the message list stays stable.
 	const replayMatch = url.pathname.match(/^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/);
 	if (replayMatch && req.method === "POST") {
-		if (process.env.BOBBIT_E2E !== "1") { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
+		if (!getLegacyTestRuntimeFlags().e2e) { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
 		const sessionId = replayMatch[1];
 		const session = sessionManager.getSession(sessionId);
 		if (!session) { json({ error: "session not found" }, 404); return; }

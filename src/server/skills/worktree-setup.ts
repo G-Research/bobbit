@@ -18,6 +18,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnosti
 import { componentRoot } from "./worktree-paths.js";
 import type { Component } from "../agent/project-config-store.js";
 import { realClock, type Clock } from "../gateway-deps.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
 /**
  * Single source of truth for the worktree-setup timeout fallback.
@@ -90,7 +91,7 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 		// Global escape hatch — used by E2E/CI to skip slow npm/pip installs in
 		// freshly-claimed pool/staff worktrees. Mirrors the legacy gate that lived
 		// inside `createWorktree` before per-component setup was the canonical path.
-		if (process.env.BOBBIT_SKIP_NPM_CI) { if (counters) counters.skippedByEnv = 1; return; }
+		if (getLegacyTestRuntimeFlags().skipNpmCi) { if (counters) counters.skippedByEnv = 1; return; }
 		for (const c of opts.components) {
 			if (!c.worktreeSetupCommand) continue;  // data-only or no hook
 			if (counters) counters.commands++;
@@ -107,7 +108,7 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 			// line to the file pointed at by the env var. The browser E2E for
 			// multi-repo flows uses this to assert per-component invocation
 			// without standing up a real npm/dependency install.
-			const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
+			const recordPath = getLegacyTestRuntimeFlags().testRecordSetup;
 			if (recordPath) {
 				try {
 					fs.mkdirSync(path.dirname(recordPath), { recursive: true });
