@@ -87,4 +87,33 @@ export class SessionSecretStore {
 		if (secret) this.secretToSession.delete(secret);
 		this.sessionToSecret.delete(sessionId);
 	}
+
+	/**
+	 * Re-point an existing secret at a DIFFERENT session id.
+	 *
+	 * Warm-pool support (docs/design/warm-pi-process-pool.md): a claimed pool
+	 * entry's child process is already running with a secret minted for the
+	 * pool's own placeholder id (baked into its env at spawn — unchangeable
+	 * post-spawn, same as cwd/extensions). `rebind` lets the claiming
+	 * session's REAL id become what that secret authenticates as, so
+	 * orchestration authz (`resolveSessionIdBySecret`) reports the live
+	 * session, not the placeholder. Cleans up BOTH stale directions so no
+	 * dangling map entry survives the rebind:
+	 *   - the placeholder id's OWN `sessionToSecret` entry (it no longer owns
+	 *     this secret), and
+	 *   - any secret PREVIOUSLY registered for `newSessionId` (a session id
+	 *     is 1:1 with a secret; the old one becomes unreachable dead weight
+	 *     otherwise).
+	 * A no-op for a blank/whitespace-only secret.
+	 */
+	rebind(secret: string, newSessionId: string): void {
+		const s = secret?.trim();
+		if (!s) return;
+		const previousOwner = this.secretToSession.get(s);
+		if (previousOwner && previousOwner !== newSessionId) this.sessionToSecret.delete(previousOwner);
+		const previousSecretForNewOwner = this.sessionToSecret.get(newSessionId);
+		if (previousSecretForNewOwner && previousSecretForNewOwner !== s) this.secretToSession.delete(previousSecretForNewOwner);
+		this.secretToSession.set(s, newSessionId);
+		this.sessionToSecret.set(newSessionId, s);
+	}
 }
