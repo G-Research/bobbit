@@ -388,4 +388,43 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 	}, { auto: true }],
 });
 
+function injectHeadquartersDiscoveryProjectId(path: string, method: string): string {
+	if (method !== "GET") return path;
+	if (!/^\/api\/(tools|roles|workflows)(\?|$)/.test(path)) return path;
+	if (/[?&]projectId=/.test(path)) return path;
+	return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
+}
+
+function injectHeadquartersDiscoveryUrl(input: RequestInfo | URL, init?: RequestInit): RequestInfo | URL {
+	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+	if (method !== "GET") return input;
+	// rawApiFetch deliberately exercises missing-projectId guard paths.
+	if ((new Error().stack || "").includes("rawApiFetch")) return input;
+	const value = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+	let parsed: URL;
+	try { parsed = new URL(value); } catch { return input; }
+	const nextPath = injectHeadquartersDiscoveryProjectId(`${parsed.pathname}${parsed.search}`, method);
+	if (nextPath === `${parsed.pathname}${parsed.search}`) return input;
+	parsed.pathname = nextPath.split("?")[0] || parsed.pathname;
+	parsed.search = nextPath.includes("?") ? nextPath.slice(nextPath.indexOf("?")) : "";
+	if (typeof input === "string") return parsed.href;
+	if (input instanceof URL) return parsed;
+	return new Request(parsed.href, input);
+}
+
+const FETCH_PATCH_KEY = Symbol.for("bobbit.inProcessHarness.discoveryProjectIdFetchPatch");
+const globalWithPatch = globalThis as typeof globalThis & { [FETCH_PATCH_KEY]?: true };
+if (!globalWithPatch[FETCH_PATCH_KEY]) {
+	const originalFetch = globalThis.fetch.bind(globalThis);
+	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => originalFetch(injectHeadquartersDiscoveryUrl(input, init), init)) as typeof fetch;
+	globalWithPatch[FETCH_PATCH_KEY] = true;
+}
+
+/** In-process authenticated fetch helper with explicit Headquarters discovery scope. */
+export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method || "GET").toUpperCase();
+	const { apiFetch: setupApiFetch } = await import("./e2e-setup.js");
+	return setupApiFetch(injectHeadquartersDiscoveryProjectId(path, method), opts);
+}
+
 export { expect } from "@playwright/test";
