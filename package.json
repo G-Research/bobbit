@@ -25,7 +25,12 @@
     "dev:watchdog": "npm run build:server && concurrently -n watchdog,ui -c red,green \"node dist/server/watchdog.js -- --cwd . --no-ui\" \"vite\"",
     "restart-server": "node dist/server/harness-signal.js",
     "start": "node dist/server/cli.js --cwd .",
-    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.tests2.json --noEmit",
+    "test:v2": "node scripts/testing-v2/run-v2.mjs",
+    "test:v2:core": "vitest run --config vitest.config.ts",
+    "test:v2:changed": "vitest --config vitest.config.ts --changed",
+    "test:v2:browser": "playwright test --config playwright-v2.config.ts",
+    "test:daily": "node scripts/testing-v2/run-daily.mjs",
     "pretest:unit": "node -e \"require('fs').existsSync('dist/server')||require('child_process').execSync('npm run build:server',{stdio:'inherit'})\"",
     "test:unit": "node scripts/run-unit.mjs",
     "test:bundle": "npm run build:ui && npx tsx --test tests/bundle-size.test.ts",
@@ -98,11 +103,14 @@
     "c8": "^11.0.0",
     "concurrently": "^10.0.3",
     "esbuild": "^0.28.1",
+    "happy-dom": "^20.10.6",
     "highlight.js": "^11.11.1",
     "knip": "^6.1.0",
+    "memfs": "^4.57.8",
     "rollup-plugin-visualizer": "^7.0.1",
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^3.2.6"
   }
 }

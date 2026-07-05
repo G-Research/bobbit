@@ -656,6 +656,29 @@ Foundation gate decision procedure:
 3. If warm per-fork transform is **>5 s**, switch the gateway fixture to a content-hash-cached esbuild prebundle of the server graph. Target: ~1-2 s per worker after cache hit.
 4. Record the measured cold/warm numbers and chosen path in the v2 foundation gate output. Do not change the decision later without a new measurement.
 
+## Foundation measurement (Gate 4)
+
+Measured on the 24-core dev laptop with the Gate-4A harness (vitest 3.2.6, `pool:"forks"`, `isolate:false`), booting `createGateway` from `src/` (no dist build).
+
+**Per-fork source transform / gateway boot** (single gateway-booting file, 3 boots + assertions):
+
+| Condition | vite transform | collect (transform + top-level graph exec) | file wall |
+|---|---:|---:|---:|
+| Cold (`node_modules/.vite` removed) | 1.86 s | 3.15 s | 4.02 s |
+| Warm run 1 | 1.84 s | 3.10 s | 3.97 s |
+| Warm run 2 | 1.83 s | 3.12 s | 3.99 s |
+
+Cold ≈ warm: the SSR transform of the `src/server` graph dominates and is paid per fork process (~1.85 s), but is already comfortably under the R5 threshold. Vite's on-disk dep cache does not meaningfully change it because the cost is source SSR transform, not dep pre-bundling.
+
+**R5 decision: KEEP direct source imports.** Warm per-fork transform ≈ **1.85 s ≤ 5 s**, so no esbuild prebundle of the server graph is introduced. Revisit only with a fresh measurement if the `src/server` graph grows enough to push warm per-fork transform above 5 s (per §7 step 4).
+
+**Full tier-1 run** (`npm run test:v2:core` → all vitest projects; currently 6 files / 13 tests across v2-core + v2-integration; v2-dom empty via `passWithNoTests`):
+
+- Wall ≈ **10.0 s** (transform ≈ 4.7 s, collect ≈ 8.0 s, tests ≈ 1.9 s), `retries:0`, 3/3 reps green.
+- Well inside the tier-1 ≤100 s / ≤7.5 CPU-min budget with headroom for the mass-migration file count.
+
+**Pool-stability note.** Under `pool:"forks"` + `isolate:false`, tinypool spinning DOWN an idle fork mid-run (a fast file finishes while a slow gateway-boot fork is still working) surfaces a spurious `Error: Terminating worker thread` unhandled rejection that fails the whole run despite every test passing. The fix, pinned in `vitest.config.ts`, is a fixed-size pool (`minForks === maxForks`) so the pool is torn down exactly once, after all files complete. The ledger sets that fixed size per invocation.
+
 ## 8. Parity proof mechanics
 
 `scripts/testing-v2/parity.mjs` is the gate command for the parity-proof gate. It fails closed and writes `.profiles/testing-v2/parity/<timestamp>.{json,md}`.
