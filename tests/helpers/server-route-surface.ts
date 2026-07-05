@@ -81,6 +81,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/maintenance-routes.ts",
 	// STR-01 cohort 9 (server/system routes).
 	"src/server/routes/server-system-routes.ts",
+	// STR-01 cohort 10 (staff CRUD + MCP operator/internal-MCP routes).
+	"src/server/routes/staff-mcp-operator-routes.ts",
 	// STR-01 cohort 11 (OAuth account routes).
 	"src/server/routes/oauth-account-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));

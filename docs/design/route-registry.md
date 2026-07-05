@@ -59,10 +59,14 @@ protocol future cohorts should follow, and what's left after cohort 1.
   status routes, plus the E2E replay hook
   (`src/server/routes/server-system-routes.ts`) — see
   [Cohort 9: server/system routes](#cohort-9-serversystem-routes) below.
+- **Cohort 10: staff CRUD + MCP operator routes** — `/api/staff*` CRUD
+  outside inbox plus `GET`/`POST` MCP runtime/meta-tool routes
+  (`src/server/routes/staff-mcp-operator-routes.ts`) — see
+  [Cohort 10](#cohort-10-staff-crud--mcp-operator-routes) below.
+- Everything else in `handleApiRoute` (~298 remaining routes) is unchanged,
 - **Cohort 11: OAuth account routes** — the five `/api/oauth/*` account
   endpoints (`src/server/routes/oauth-account-routes.ts`) — see
   [Cohort 11: OAuth account routes](#cohort-11-oauth-account-routes) below.
-- Everything else in `handleApiRoute` (~310 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -377,12 +381,9 @@ the same generic terminal 404 as a wholly-unmatched path. `RouteTable`'s
 before testing the regex), so simply not registering other methods on these
 path shapes reproduces that fall-through exactly.
 
-**Scope note**: only the inbox sub-family was migrated, not the rest of
-`/api/staff*` (list, create, get/patch/put/delete by `:id` — its own larger
-review unit involving project reassignment, worktree/sandbox provisioning,
-and role-cascade validation) or the lexically-adjacent deprecated
-`GET /api/staff/:id/sessions` 410 stub (unrelated one-liner that merely
-sits next to the inbox block in `server.ts`).
+**Scope note**: only the inbox sub-family was migrated here. The surrounding
+`/api/staff*` CRUD family and deprecated `GET /api/staff/:id/sessions` stub
+were migrated later in cohort 10.
 
 `staffManager` and `inboxManager` were appended to `CoreRouteCtx` — both
 already existed as `handleApiRoute` params shared with the not-yet-migrated
@@ -702,6 +703,46 @@ Parity evidence to run: `tests/e2e/harness-restart-api.spec.ts`,
 `tests/e2e/per-project-worktree-pool.spec.ts`, and the browser replay
 coverage in `tests/e2e/ui/stories-streaming.spec.ts`.
 
+## Cohort 10: staff CRUD + MCP operator routes
+
+One new module, registered after cohort 9's in `server.ts`:
+`src/server/routes/staff-mcp-operator-routes.ts`.
+
+This cohort picked the late legacy-chain operator/configuration slice:
+the remaining staff CRUD routes noted as deliberately deferred by cohort 5,
+plus the immediately adjacent MCP status/restart and internal MCP meta-tool
+routes. The family is in the second half of the remaining route list, avoids
+the in-flight maintenance/search-admin/session-utility/workflows/review
+families, and keeps the work to documented operator surfaces rather than the
+larger session prompt/steer hot paths.
+
+| Method | Path |
+|---|---|
+| GET | `/api/staff/orphaned` |
+| GET | `/api/staff` |
+| POST | `/api/staff` |
+| GET | `/api/staff/:id` |
+| PATCH | `/api/staff/:id` |
+| PUT | `/api/staff/:id` |
+| DELETE | `/api/staff/:id` |
+| GET | `/api/staff/:id/sessions` |
+| GET | `/api/mcp-servers` |
+| POST | `/api/mcp-servers/:name/restart` |
+| POST | `/api/internal/mcp-call` |
+| POST | `/api/internal/mcp-describe` |
+
+`CoreRouteCtx` grew append-only by three fields: `resolveRoleForProject`
+(shared staff and MCP policy role lookup), `groupPolicyStore` (MCP per-op
+policy resolution), and `refreshMcpExternalTools` (MCP restart re-registration).
+Leaf helpers used only by the migrated handlers are imported directly by the
+route module (`resolveProjectForRequest`, `validateExecutionCwd`,
+`resolveGrantPolicy`, `parseMcpToolName`, and `SYSTEM_PROJECT_ID`).
+
+**Fall-through parity: no 405 shim needed.** Every exact route in this cohort
+was method-gated before any shared resolution work. The staff `:id` block was
+path-first, but it only performed work inside method-specific branches; an
+unhandled method fell out to the terminal 404. The registry preserves that by
+registering only the handled methods and letting all others fall through.
 ## Cohort 11: OAuth account routes
 
 `src/server/routes/oauth-account-routes.ts`.

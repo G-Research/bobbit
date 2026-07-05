@@ -34,6 +34,8 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import type { ReviewAnnotationStore } from "../review-annotation-store.js";
 import type { BgProcessManager } from "../agent/bg-process-manager.js";
 import type { ToolManager } from "../agent/tool-manager.js";
+import type { ToolGroupPolicyStore } from "../agent/tool-group-policy-store.js";
+import type { Role } from "../agent/role-store.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
@@ -209,4 +211,9 @@ export interface CoreRouteCtx {
 	sandboxManager?: SandboxManager;
 	getAigwUrl(prefs: PreferencesStore): string | undefined;
 	writeProjectResolutionError(resolved: Extract<ResolvedProject, { ok: false }>): void;
+
+	// ── Cohort 10 (staff CRUD + MCP operator routes) additions — append-only.
+	groupPolicyStore: ToolGroupPolicyStore;
+	refreshMcpExternalTools(): void;
+	resolveRoleForProject(roleId: string, projectId?: string): Role | undefined;
 }
