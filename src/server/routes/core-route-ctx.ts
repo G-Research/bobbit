@@ -44,6 +44,7 @@ import type { ResolvedProject } from "../agent/resolve-project.js";
 import type { TsServerSupervisor } from "../lsp/supervisor.js";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { TaskManager } from "../agent/task-manager.js";
+import type { Workflow } from "../agent/workflow-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -268,4 +269,10 @@ export interface CoreRouteCtx {
 
 	// ── Cohort 16b (preview routes) additions — append-only.
 	broadcastToSession?: (sessionId: string, event: any) => void;
+
+	// ── Cohort 17 (editable proposal routes) additions — append-only.
+	validateGoalProposalWorkflow(
+		args: Record<string, unknown>,
+		workflows: Workflow[],
+	): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null;
 }

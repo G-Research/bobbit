@@ -107,6 +107,8 @@ import { registerModelProviderRoutes } from "./routes/model-provider-routes.js";
 import { registerCostRoutes } from "./routes/cost-routes.js";
 // STR-01 cohort 16b: preview mount/artifact/SSE endpoints.
 import { registerPreviewRoutes } from "./routes/preview-routes.js";
+// STR-01 cohort 17: editable proposal REST endpoints.
+import { registerSessionProposalRoutes } from "./routes/session-proposal-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -148,7 +150,7 @@ import {
 	stripPlaywrightErrorContextBoilerplate,
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
-import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { handleSidePanelWorkspaceRoute } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -660,20 +662,6 @@ import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
-import {
-	deleteProposalFile,
-	editProposalFile,
-	isProposalType,
-	latestRev,
-	listProposalFiles,
-	parseProposalFile,
-	readProposalFile,
-	readSnapshot,
-	restoreSnapshot,
-	writeProposalFile,
-	getProposalTypePlugin,
-	type ProposalType,
-} from "./proposals/proposal-files.js";
 import { validateGoalInlineWorkflow } from "./proposals/proposal-types.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
@@ -3449,6 +3437,7 @@ registerSkillsRoutes(coreRouteTable);
 registerModelProviderRoutes(coreRouteTable);
 registerCostRoutes(coreRouteTable);
 registerPreviewRoutes(coreRouteTable);
+registerSessionProposalRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -3723,6 +3712,8 @@ async function handleApiRoute(
 	// cohort 13, config-directories routes
 	// (src/server/routes/config-directories-routes.ts);
 	// STR-05, roles routes (src/server/routes/roles-routes.ts).
+	// cohort 17, editable proposal REST routes
+	// (src/server/routes/session-proposal-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3770,6 +3761,8 @@ async function handleApiRoute(
 				getGoalAcrossProjects, getTaskManagerForTask,
 				// Cohort 16b (preview routes) additions — append-only.
 				broadcastToSession: _broadcastToSession,
+				// Cohort 17 (editable proposal routes) additions — append-only.
+				validateGoalProposalWorkflow,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -10231,319 +10224,9 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Editable proposals (file-on-disk source of truth) ──────────────
-	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
-	if (proposalRouteMatch) {
-		const sessionId = proposalRouteMatch[1];
-		const typeStr = proposalRouteMatch[2];
-		const suffix = proposalRouteMatch[3] || "";
-		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
-			json({ error: "Invalid sessionId" }, 400);
-			return;
-		}
-		if (!isProposalType(typeStr)) {
-			json({ error: `Unknown proposal type: ${typeStr}` }, 400);
-			return;
-		}
-		const proposalType = typeStr as ProposalType;
-		const proposalStateDir = bobbitStateDir();
-
-		// GET /api/sessions/:id/proposal/:type — read raw file
-		if (suffix === "" && req.method === "GET") {
-			try {
-				const content = await readProposalFile(proposalStateDir, sessionId, proposalType);
-				if (content === undefined) {
-					json({ ok: false, code: "FILE_NOT_FOUND", message: `No ${proposalType} proposal draft. Call propose_${proposalType} first.` }, 404);
-					return;
-				}
-				const contentType = proposalType === "goal" ? "text/markdown; charset=utf-8" : "application/yaml; charset=utf-8";
-				res.writeHead(200, { "Content-Type": contentType });
-				res.end(content);
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		// GET /api/sessions/:id/proposal/:type/snapshot?rev=N — read a historical snapshot without mutating the live draft.
-		if (suffix === "/snapshot" && req.method === "GET") {
-			const revParam = url.searchParams.get("rev") || "";
-			const rev = Number.parseInt(revParam, 10);
-			if (!Number.isInteger(rev) || rev < 1 || String(rev) !== revParam) {
-				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
-				return;
-			}
-			try {
-				const content = await readSnapshot(proposalStateDir, sessionId, proposalType, rev);
-				if (content === undefined) {
-					json({ ok: false, code: "SNAPSHOT_NOT_FOUND", message: `No snapshot rev ${rev} for ${proposalType} proposal` }, 404);
-					return;
-				}
-				const parsed = getProposalTypePlugin(proposalType).parse(content);
-				if (!parsed.ok) {
-					json(parsed, 400);
-					return;
-				}
-				json({ ok: true, rev, fields: parsed.value.fields });
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		// DELETE /api/sessions/:id/proposal/:type
-		if (suffix === "" && req.method === "DELETE") {
-			try {
-				await deleteProposalFile(proposalStateDir, sessionId, proposalType);
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, { type: "proposal_cleared", sessionId, proposalType });
-				}
-				res.writeHead(204);
-				res.end();
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
-		if (suffix === "/edit" && req.method === "POST") {
-			const body = await readBody(req);
-			if (!body || typeof body !== "object") {
-				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
-				return;
-			}
-			const { old_text, new_text } = body as { old_text?: unknown; new_text?: unknown };
-			if (typeof old_text !== "string" || typeof new_text !== "string") {
-				json({ ok: false, code: "INVALID_BODY", message: "old_text and new_text must be strings" }, 400);
-				return;
-			}
-			try {
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
-				if (!result.ok) {
-					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
-					json(result, status);
-					return;
-				}
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: result.parsed.fields,
-						rev: result.rev,
-						streaming: false,
-						source: "edit",
-					});
-				}
-				json({ ok: true, newContent: result.newContent, rev: result.rev });
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		// POST /api/sessions/:id/proposal/:type/seed — called from propose_* execute()
-		if (suffix === "/seed" && req.method === "POST") {
-			const body = await readBody(req);
-			if (!body || typeof body !== "object") {
-				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
-				return;
-			}
-			const args = (body as { args?: unknown }).args;
-			if (!args || typeof args !== "object" || Array.isArray(args)) {
-				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
-				return;
-			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
-			// but only when the current goal is actually allowed to spawn a child.
-			// If subgoals are disabled globally or for this parent, an omitted
-			// parentGoalId must remain omitted so accepting the proposal creates a
-			// top-level goal instead of a hidden invalid child proposal.
-			let enrichedArgs = args as Record<string, unknown>;
-			// Workflows are project-scoped only (no Headquarters/system-scope
-			// workflow store — see workflows-routes.ts), so a workflow proposal
-			// needs the same resolvable-project guard as goal/staff.
-			if (proposalType === "goal" || proposalType === "staff" || proposalType === "workflow") {
-				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-				const sessionProjectId = proposalSession?.projectId;
-				if (!sessionProjectId) {
-					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
-					return;
-				}
-				const proposalProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined;
-				if (proposalProjectId && proposalProjectId !== sessionProjectId) {
-					json({ ok: false, code: "PROJECT_ID_MISMATCH", message: "proposal projectId must match the session projectId" }, 422);
-					return;
-				}
-				enrichedArgs = { ...enrichedArgs, projectId: sessionProjectId };
-			}
-			if (proposalType === "goal") {
-				const sess = sessionManager.getSession(sessionId);
-				if (sess?.role === "team-lead" && sess.teamGoalId) {
-					const existingParent = enrichedArgs.parentGoalId;
-					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
-						const parent = getGoalAcrossProjects(sess.teamGoalId);
-						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-						const canSpawnImplicitChild = !!parent && checkCanSpawnChild(
-							parent,
-							prefs,
-							(id) => getGoalAcrossProjects(id),
-						).ok;
-						if (canSpawnImplicitChild) {
-							enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
-						}
-					}
-				}
-			}
-			// Validate workflow + optional steps for goal proposals BEFORE persisting,
-			// so a stale/hallucinated workflow never produces a broken draft. Skipped
-			// when the session has no resolvable project or the project has zero
-			// workflows (empty-state behaviour preserved).
-			if (proposalType === "goal") {
-				const projectId = (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) {
-						const ctx = projectContextManager.getOrCreate(projectId);
-						if (ctx) workflows = ctx.workflowStore.getAll();
-					}
-				}
-				const wfErr = validateGoalProposalWorkflow(enrichedArgs, workflows);
-				if (wfErr) { json(wfErr, 400); return; }
-			}
-			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
-				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
-				if (!parsed.ok) {
-					json(parsed, 400);
-					return;
-				}
-				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
-				await openSidePanelWorkspaceTab({
-					sessionManager,
-					readBody,
-					broadcastToSession: _broadcastToSession,
-					packContributionRegistry,
-				}, sessionId, {
-					id: `proposal:${proposalType}`,
-					kind: "proposal",
-					title: `${proposalLabel} Proposal`,
-					label: proposalLabel,
-					source: { type: "proposal", sessionId, proposalType },
-					updatedAt: Date.now(),
-				}, { focus: true, placeAfterActive: true }).catch((err) => {
-					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
-				});
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: parsed.value.fields,
-						rev: writeRes.rev,
-						streaming: false,
-						source: "seed",
-					});
-				}
-				json({ ok: true, rev: writeRes.rev });
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		// POST /api/sessions/:id/proposal/:type/restore — restore a snapshot
-		if (suffix === "/restore" && req.method === "POST") {
-			const body = await readBody(req);
-			if (!body || typeof body !== "object") {
-				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
-				return;
-			}
-			const rev = (body as { rev?: unknown }).rev;
-			if (typeof rev !== "number" || !Number.isInteger(rev) || rev < 1) {
-				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
-				return;
-			}
-			try {
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
-				if (!result.ok) {
-					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
-					json(result, status);
-					return;
-				}
-				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
-				await openSidePanelWorkspaceTab({
-					sessionManager,
-					readBody,
-					broadcastToSession: _broadcastToSession,
-					packContributionRegistry,
-				}, sessionId, {
-					id: `proposal:${proposalType}`,
-					kind: "proposal",
-					title: `${proposalLabel} Proposal`,
-					label: proposalLabel,
-					source: { type: "proposal", sessionId, proposalType },
-					updatedAt: Date.now(),
-				}, { focus: true, placeAfterActive: true }).catch((err) => {
-					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
-				});
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: result.fields,
-						rev: result.newRev,
-						streaming: false,
-						source: "restore",
-					});
-				}
-				json({ ok: true, newRev: result.newRev, fields: result.fields });
-			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
-			}
-			return;
-		}
-
-		json({ error: "Method not allowed" }, 405);
-		return;
-	}
-
-	// GET /api/sessions/:id/proposals — list all parsed proposal drafts for the session.
-	//
-	// Mirrors the WS-auth `proposal_update {source:"rehydrate"}` broadcast in
-	// `ws/handler.ts` but as a one-shot REST call. Used by the client's fast-path
-	// session switch-back (no fresh WS auth fires, so the broadcast doesn't run
-	// and the client's in-memory proposal slot would otherwise stay stale).
-	const proposalsListMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposals$/);
-	if (proposalsListMatch && req.method === "GET") {
-		const sessionId = proposalsListMatch[1];
-		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
-			json({ error: "Invalid sessionId" }, 400);
-			return;
-		}
-		const stateDir = bobbitStateDir();
-		try {
-			const types = await listProposalFiles(stateDir, sessionId);
-			const proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> = [];
-			for (const proposalType of types) {
-				const parsed = await parseProposalFile(stateDir, sessionId, proposalType);
-				if (parsed.ok) {
-					const rev = await latestRev(stateDir, sessionId, proposalType);
-					proposals.push({ proposalType, fields: parsed.value.fields, rev });
-				}
-			}
-			json({ proposals });
-		} catch (err) {
-			json({ error: String((err as Error)?.message ?? err) }, 500);
-		}
-		return;
-	}
+	// Editable proposal REST endpoints moved to the core route registry
+	// (STR-01 cohort 17) — see src/server/routes/session-proposal-routes.ts
+	// and docs/design/route-registry.md.
 
 	// POST /api/sessions/:id/generate-title — auto-generate a title from chat history.
 	// Works for live sessions (calls SessionManager.autoGenerateTitle) and archived

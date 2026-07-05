@@ -1249,7 +1249,7 @@ The Preview-mode markdown body of goal, role, and staff proposals is mounted via
 |---|---|
 | `src/server/proposals/proposal-files.ts` | Atomic file API (`writeProposalFile`, `editProposalFile`, `parseProposalFile`, `deleteProposalFile`). |
 | `src/server/proposals/proposal-types.ts` | Per-type plugins: filename, serialize, parse, requiredFields. |
-| `src/server/server.ts` | Proposal-draft REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[...]`). |
+| `src/server/routes/session-proposal-routes.ts` | Proposal-draft REST handlers (registry-routed at `/api/sessions/:id/proposal/:type[...]`). |
 | `src/server/ws/protocol.ts` | `proposal_update` / `proposal_cleared` server messages. |
 | `src/server/ws/handler.ts` | Rehydrate-on-attach. |
 | `src/server/agent/session-manager.ts::terminateSession` | Per-session directory cleanup. |
