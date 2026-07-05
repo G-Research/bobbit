@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/cwd-path-normalize.spec.ts (v2-dom tier).
 // The legacy fixture copied getRecentCwds() verbatim. This port drives the REAL
 // getRecentCwds() + cwdCombobox() from src/app/cwd-combobox.ts against the real

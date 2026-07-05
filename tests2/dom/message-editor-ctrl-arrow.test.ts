@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/message-editor-ctrl-arrow.spec.ts (v2-dom tier).
 // The legacy fixture mirrored MessageEditor's history+arrow logic in plain JS; per
 // the porting guide we render the REAL <message-editor> component instead and drive

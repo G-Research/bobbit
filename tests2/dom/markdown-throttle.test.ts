@@ -3,22 +3,23 @@
 // the esbuild file:// bundle. Pins the streaming markdown-block content throttle:
 // mid-stream updates are coalesced, final content is always accurate, and the
 // throttle snapshot resets across distinct messages.
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { syncCustomElements } from "./_setup/custom-elements.js";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
-// happy-dom realm, but the module graph is cached across files in the fork — so
-// a component module's top-level @customElement define only ever registers the
-// tag in the FIRST importing file's realm. `vi.resetModules()` forces this file
-// to re-evaluate the component graph fresh, so its decorators define the tag in
-// THIS realm. Importing after the reset (dynamically) also keeps the component's
-// lit instance the same one this file uses. We evaluate session-manager first to
-// initialize the pack-panels ⇄ session-manager cycle before Messages.js's app/*
-// imports hit it as a TDZ error under vite's native-ESM ordering.
+// happy-dom window while the module graph is cached across files — so a
+// component's top-level @customElement define only registers the tag (and lit
+// only parses templates) in the FIRST importing file's window. The shared
+// _setup/custom-elements bridge records every define and `syncCustomElements()`
+// replays them into both this window and lit-html's pinned window. We import the
+// components dynamically in order (session-manager first, to initialize the
+// pack-panels ⇄ session-manager cycle before Messages.js's app/* imports hit it
+// as a TDZ error) then sync — reusing the single shared lit instance.
 beforeAll(async () => {
-	vi.resetModules();
 	await import("../../src/app/session-manager.js");
 	await import("../../src/ui/components/Messages.js");
 	await import("../../src/ui/lazy/safe-markdown-block.js");
+	syncCustomElements();
 	await customElements.whenDefined("assistant-message");
 });
 

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/idle-nudge-timer.spec.ts (v2-dom tier).
 // Pure-logic test of the REAL formatElapsed helper — no DOM, imported directly
 // from src (same symbol the legacy spec imported).

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/goal-proposal-dismiss.spec.ts (v2-dom tier).
 // The legacy Playwright fixture mirrored the dismiss-persistence logic in plain
 // JS. Here we drive the REAL dismissal helpers from src/app/proposal-helpers.ts

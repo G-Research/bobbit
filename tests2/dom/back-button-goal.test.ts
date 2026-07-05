@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/back-button-goal.spec.ts (v2-dom tier).
 // The legacy file:// fixture REPRODUCED setHashRoute inline; per the migration
 // guide this port imports the REAL setHashRoute (src/app/routing.ts). Pins that

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/color-migration.spec.ts (v2-dom tier).
 // The legacy fixture inlined the migration index mappings and a `migrateIndex`
 // helper. This port exercises the REAL migration logic through ColorStore

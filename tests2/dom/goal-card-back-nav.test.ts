@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/goal-card-back-nav.spec.ts (v2-dom tier).
 // The legacy Playwright fixture was a self-contained hash-router replica of the
 // mobile goal-card navigation design. We rebuild that same DOM + routing logic

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/goal-dashboard-setup-poll.spec.ts (v2-dom tier).
 // The legacy Playwright fixture modelled goal-dashboard.ts's setup-status
 // polling in plain JS (there is no cleanly-mountable real component). We recreate

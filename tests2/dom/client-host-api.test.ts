@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/client-host-api.spec.ts (v2-dom tier).
 // Exercises the REAL Phase-1 CLIENT Host API getHostApi (src/app/host-api.ts)
 // under happy-dom (was an esbuild file:// bundle). Pure logic — fetch /

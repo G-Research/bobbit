@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-inspect-renderer.spec.ts (v2-dom tier).
 // The legacy fixture reimplemented the renderer's decision logic in plain JS. This
 // port renders the REAL GateInspectRenderer via lit into happy-dom and asserts the

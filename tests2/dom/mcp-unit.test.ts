@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/mcp-unit.spec.ts (v2-dom tier).
 // The legacy spec INLINED a copy of jsonSchemaToTypeBox; per the porting guide we
 // import the REAL exported function from src instead (higher fidelity) and assert

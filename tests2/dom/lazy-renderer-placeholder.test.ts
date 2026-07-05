@@ -5,20 +5,19 @@
 // flow, loader-rejection fallback, pack { override } precedence + uninstall
 // reconciliation, and the generation-guarded stale-load drops (TOCTOU + the
 // writer-ordering matrix). No geometry — pure registry/event/lit logic.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { syncCustomElements } from "./_setup/custom-elements.js";
+import { html, render } from "lit";
 import type { ToolRenderer } from "../../src/ui/tools/types.js";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
-// happy-dom realm while the module graph is cached across files in the fork — so
-// Messages.js's top-level @customElement define only registers <tool-message> in
-// the FIRST importing file's realm. `vi.resetModules()` forces this file to
-// re-evaluate the graph fresh so the decorator defines the tag in THIS realm; we
-// bind lit's html/render + the registry API from that same fresh graph (dynamic
-// import) so the renderers and this test share one lit + registry instance.
-// session-manager is imported first to initialize the pack-panels ⇄
+// happy-dom window while the module graph is cached across files — so
+// Messages.js's @customElement define (and lit's template parsing) only happen
+// in the FIRST importing file's window. The shared _setup/custom-elements bridge
+// records every define and syncCustomElements() replays them into both this
+// window and lit-html's pinned window, so we reuse the single shared lit
+// instance. session-manager is imported first to initialize the pack-panels ⇄
 // session-manager cycle before Messages.js's app/* imports hit it as a TDZ error.
-let html: typeof import("lit").html;
-let render: typeof import("lit").render;
 let registerLazyToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js").registerLazyToolRenderer;
 let registerToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js").registerToolRenderer;
 let unregisterPackRenderer: typeof import("../../src/ui/tools/renderer-registry.js").unregisterPackRenderer;
@@ -26,11 +25,10 @@ let getToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js").ge
 let TOOL_RENDERER_LOADED_EVENT: string;
 
 beforeAll(async () => {
-	vi.resetModules();
-	({ html, render } = await import("lit"));
 	await import("../../src/app/session-manager.js");
 	({ registerLazyToolRenderer, registerToolRenderer, unregisterPackRenderer, getToolRenderer, TOOL_RENDERER_LOADED_EVENT } = await import("../../src/ui/tools/renderer-registry.js"));
 	await import("../../src/ui/components/Messages.js");
+	syncCustomElements();
 	await customElements.whenDefined("tool-message");
 	document.addEventListener(TOOL_RENDERER_LOADED_EVENT, (e) => {
 		const name = (e as CustomEvent).detail?.toolName;

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/goal-dashboard-setup-poll-repro.spec.ts (v2-dom tier).
 // Reproduction test for the stale-worktree-status bug. The legacy fixture models
 // goal-dashboard.ts's setup polling; with the fix in place the default

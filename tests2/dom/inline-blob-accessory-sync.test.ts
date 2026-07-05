@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/inline-blob-accessory-sync.spec.ts (v2-dom tier).
 // The legacy fixture hand-copied a minimal CSS repro and asserted, via
 // getComputedStyle, that inline-blob accessories inherit the same

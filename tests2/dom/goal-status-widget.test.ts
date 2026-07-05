@@ -7,27 +7,25 @@
 // dot, sign-off card, and the review-document event the Start Review button
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { syncCustomElements } from "./_setup/custom-elements.js";
+import { html, render } from "lit";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
-// happy-dom realm while the module graph is cached across files in the fork — so
-// a component module's top-level @customElement define only registers the tag in
-// the FIRST importing file's realm. `vi.resetModules()` forces this file to
-// re-evaluate the component graph fresh so its decorators define the tags in
-// THIS realm; we bind lit's html/render + app state from that same fresh graph
-// (dynamic import) so the widget and this test share one lit + state instance.
-// session-manager is imported first to initialize the pack-panels ⇄
+// happy-dom window while the module graph is cached across files — so a
+// component's @customElement define (and lit's template parsing) only happen in
+// the FIRST importing file's window. The shared _setup/custom-elements bridge
+// records every define and syncCustomElements() replays them into both this
+// window and lit-html's pinned window, so we can reuse the single shared lit
+// instance. session-manager is imported first to initialize the pack-panels ⇄
 // session-manager cycle before the widget's app/* imports hit it as a TDZ error.
-let html: typeof import("lit").html;
-let render: typeof import("lit").render;
 let state: typeof import("../../src/app/state.js").state;
 
 beforeAll(async () => {
-	vi.resetModules();
-	({ html, render } = await import("lit"));
 	await import("../../src/app/session-manager.js");
 	({ state } = await import("../../src/app/state.js"));
 	await import("../../src/ui/components/GoalStatusWidget.js");
 	await import("../../src/ui/lazy/safe-markdown-block.js");
+	syncCustomElements();
 	await customElements.whenDefined("goal-status-widget");
 });
 

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/config-page-toggle.spec.ts (v2-dom tier).
 // The legacy fixture copied getRouteFromHash + activeSessionId verbatim. This port
 // drives the REAL functions from src/app/routing.ts + src/app/state.ts, mutating the

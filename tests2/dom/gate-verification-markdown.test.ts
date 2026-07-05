@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-verification-markdown.spec.ts (v2-dom tier).
 // The legacy fixture reimplemented the step-output rendering decisions in plain JS.
 // This port renders the REAL <gate-verification-live> and <verification-output-modal>

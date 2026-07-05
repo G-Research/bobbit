@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/bell-toggle.spec.ts (v2-dom tier).
 // Renders the REAL <bell-toggle> lit component under happy-dom (was an esbuild
 // file:// bundle). The beep preference lives on documentElement.dataset and is

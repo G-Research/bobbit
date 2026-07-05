@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-verification-reconcile.spec.ts (v2-dom tier).
 // The legacy Playwright fixture exposed a set of pure reconciliation functions
 // on `window` (a faithful copy of the logic that lives, module-private, inside

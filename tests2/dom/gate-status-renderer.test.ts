@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-status-renderer.spec.ts (v2-dom tier).
 // Renders the REAL GateStatusRenderer via lit into happy-dom (was an esbuild
 // file:// bundle). gate-verification-live is stubbed as in the legacy entry.

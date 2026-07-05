@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/bg-process-renderer.spec.ts (v2-dom tier).
 // The legacy file:// fixture was a PLAIN-JS MIRROR of the renderer + a stub
 // console-block. Per the migration guide this port renders the REAL

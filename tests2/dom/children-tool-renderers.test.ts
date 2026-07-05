@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/children-tool-renderers.spec.ts (v2-dom tier).
 // Renders the REAL nine Children tool renderers via lit into happy-dom (was an
 // esbuild file:// bundle) and asserts on rendered DOM. The two interactive

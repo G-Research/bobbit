@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/api-error-forwarding.spec.ts (v2-dom tier).
 // Drives the REAL createGoal (src/app/api.ts) → connection-error dialog
 // (src/app/dialogs.ts) → <error-details> (src/ui/components/ErrorDetails.ts)

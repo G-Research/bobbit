@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/hashchange-greeting-race.spec.ts (v2-dom tier).
 // The legacy spec loaded a self-contained file:// fixture that SIMULATES the
 // src/app main.ts ⇄ session-manager.ts hashchange/connect race (the real

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/ask-user-choices-renderer.spec.ts (v2-dom tier).
 // Renders the REAL AskUserChoicesRenderer via lit into happy-dom, replacing the
 // esbuild file:// bundle. Pins the gating between error chip and interactive

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/client-session-write.spec.ts (v2-dom tier).
 // Exercises the REAL C2 client session WRITE (host.session.postMessage) and its two
 // gates — the trusted-WS transport (session-write-bridge) and the user-activation

@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/notification-policy.spec.ts (v2-dom tier).
 // The legacy spec bundled a file:// entry that exposed __seed/__check/__checkSplit/
 // __checkIdleTransition over the REAL predicates + app state. We import those same

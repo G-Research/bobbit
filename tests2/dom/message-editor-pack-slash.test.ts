@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/message-editor-pack-slash.spec.ts (v2-dom tier).
 // Renders the REAL <message-editor> with the client pack launcher registry
 // (registerPackEntrypoints + setLauncherHostFactory), replacing the esbuild

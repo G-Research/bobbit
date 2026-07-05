@@ -3,7 +3,8 @@
 // esbuild file:// bundle. Pins the dollar-in-template-literal regression (fenced
 // + inline code preserve `^${foo}$`), KaTeX math rendering for the supported
 // delimiters, and the link-scheme sanitizer allow/deny list.
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { syncCustomElements } from "./_setup/custom-elements.js";
 
 const REPRO_MARKDOWN = [
 	"## Header",
@@ -131,12 +132,11 @@ async function renderMarkdown(markdown: string): Promise<MarkdownSnapshot> {
 }
 
 beforeAll(async () => {
-	// See markdown-throttle.test.ts: vi.resetModules() re-evaluates the markdown
-	// chunk fresh so its `customElements.define("markdown-block")` registers the
-	// tag in THIS file's happy-dom realm (the cached module otherwise only defines
-	// it in the first importing file's realm under isolate:false).
-	vi.resetModules();
+	// See markdown-throttle.test.ts + _setup/custom-elements.ts: the shared bridge
+	// records markdown-block's define and syncCustomElements() replays it into this
+	// file's fresh happy-dom window and lit-html's pinned window.
 	await import("../../src/ui/lazy/safe-markdown-block.js");
+	syncCustomElements();
 	if (!document.getElementById("container")) {
 		const c = document.createElement("div");
 		c.id = "container";
