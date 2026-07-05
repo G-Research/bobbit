@@ -216,6 +216,9 @@ export class ModuleHost {
 				// The calling session's project id (when resolvable) so a route handler
 				// can scope to the real project instead of fabricating one.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+				// Trusted session context for route-owned auto tags (e.g. Hindsight manual retain).
+				goalId: (req.ctx as { goalId?: unknown } | undefined)?.goalId,
+				roleName: (req.ctx as { roleName?: unknown } | undefined)?.roleName,
 				// P3/P4 — the managed-runtime linkage the route endpoint resolved for a
 				// managed-mode pack (`{ baseUrl, headers, status }`). A plain serializable
 				// object, so it crosses the MessagePort intact; absent in external mode and

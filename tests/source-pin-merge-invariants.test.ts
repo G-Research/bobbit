@@ -520,6 +520,32 @@ describe("Source pin — merge-loss invariants", () => {
 			"boundary\" test in tests/extension-host-route-dispatcher.test.ts.",
 		);
 	});
+
+	it("module-host-worker.ts forwards ctx.goalId/ctx.roleName across the route worker boundary (restored by the w2-ctx-goalid-forwarding fix, Finding W2.L)", () => {
+		const text = read("src/server/extension-host/module-host-worker.ts");
+		assert.ok(
+			/goalId:\s*\(req\.ctx as \{ goalId\?: unknown \} \| undefined\)\?\.goalId,/.test(text)
+			&& /roleName:\s*\(req\.ctx as \{ roleName\?: unknown \} \| undefined\)\?\.roleName,/.test(text),
+			"src/server/extension-host/module-host-worker.ts::ModuleHost must serialize\n" +
+			"`req.ctx.goalId` and `req.ctx.roleName` onto the route worker's `serCtx`\n" +
+			"alongside sessionId/tool/projectId/runtime/workingDir. Without these two lines\n" +
+			"the trusted goal/role context that action-dispatcher.ts's ActionHandlerCtx\n" +
+			"carries (goalId derived from session state, then teamGoalId; roleName from the\n" +
+			"calling session) never crosses the MessagePort into the confined route module —\n" +
+			"module-host-bootstrap.ts's `goalId: msg.ctx.goalId, roleName: msg.ctx.roleName`\n" +
+			"reconstruction receives both as undefined even though the host resolved trusted\n" +
+			"values, so a route handler (e.g. Hindsight manual retain auto-tagging) can never\n" +
+			"tag a retained memory with the calling goal/role. Originally added by eba1ee3d\n" +
+			"(\"Auto-tag Hindsight retain route context\"); silently dropped end-to-end by the\n" +
+			"same merge that dropped the sibling ctx.runtime forwarding line (see the\n" +
+			"pin above) — same class of loss, same file, same worker-boundary blind spot.\n" +
+			"Restored by the w2-ctx-goalid-forwarding fix (Finding W2.L). DO NOT delete this\n" +
+			"pin — restore the dropped forwarding instead. Independently pinned end-to-end by\n" +
+			"the \"forwards trusted goal and role context to route handlers\" test in\n" +
+			"tests/extension-host-route-dispatcher.test.ts.",
+		);
+	});
+
 	it("config-cascade.ts exposes resolveRoleModelResolution + RoleModelResolution (restored by the w2-role-model-resolution-restore fix)", () => {
 		const text = read("src/server/agent/config-cascade.ts");
 		assert.ok(
