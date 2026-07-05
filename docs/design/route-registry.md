@@ -80,7 +80,12 @@ protocol future cohorts should follow, and what's left after cohort 1.
   (`src/server/routes/config-directories-routes.ts`) — see
   [Cohort 13: config-directories routes](#cohort-13-config-directories-routes)
   below.
-- Everything else in `handleApiRoute` (~283 remaining routes) is unchanged,
+- **Cohort 14: directory browser routes** — `POST /api/create-directory` and
+  `GET /api/browse-directory`
+  (`src/server/routes/directory-browser-routes.ts`) — see
+  [Cohort 14: directory browser routes](#cohort-14-directory-browser-routes)
+  below.
+- Everything else in `handleApiRoute` (~281 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -936,6 +941,37 @@ Remaining closure inventory after this slice:
 - Gateway-lifetime mutable handles remain explicit deps: `routeRegistry`,
   `extensionChannelServices`, `packRuntimeSupervisor`, `sandboxManager`, and
   per-request `sandboxScope`.
+
+## Cohort 14: directory browser routes
+
+`src/server/routes/directory-browser-routes.ts`.
+
+This cohort moved the small Add Project directory helper surface. It is
+lexically near the already-migrated project detection routes, but is its own
+family because it handles host filesystem browsing/creation rather than
+project registry mutation.
+
+| Method | Path |
+|---|---|
+| POST | `/api/create-directory` |
+| GET | `/api/browse-directory` |
+
+`CoreRouteCtx` grew append-only by one field: `defaultCwd`, copied from the
+gateway config so `GET /api/browse-directory` preserves its legacy fallback
+when no `path` query parameter is supplied.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+Registry count reconciliation: cohort 13 left ~283 remaining legacy routes.
+Moving these 2 routes leaves ~281 routes in the legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/source-pin-merge-invariants.test.ts`,
+and `tests/client-api-orphan-pinning.test.ts`. Directory helper behavior is
+covered by `tests/e2e/project-detect-browse.spec.ts` and Add Project UI specs.
 
 ## Pins
 

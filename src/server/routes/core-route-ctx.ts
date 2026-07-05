@@ -245,4 +245,7 @@ export interface CoreRouteCtx {
 	roleManager: RoleManager;
 	serverRoleStore: RoleStore;
 	writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void;
+
+	// ── Cohort 14 (directory browser routes) additions — append-only.
+	defaultCwd: string;
 }
