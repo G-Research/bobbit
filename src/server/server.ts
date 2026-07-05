@@ -2066,6 +2066,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
+	// Keep the cascade's first-party pack band aligned with the runtime tool loader
+	// (buildMarketToolRootsForProject below also resolves via config.builtinPacksDir).
+	// Passing the identical resolved dir prevents a split-brain where a shipped pack
+	// tool exists at runtime but is missing from the cascade (surfacing as origin
+	// "mcp"). Production passes undefined ⇒ same dist default the constructor uses.
+	configCascade.setBuiltinPacksDir(resolveBuiltinPacksDir(config.builtinPacksDir));
 	sessionManager.configCascade = configCascade;
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
