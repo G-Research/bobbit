@@ -694,7 +694,6 @@ function renderMobileLanding() {
 														<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} style="color:${color};">${icon(projectIconComponent(project), "sm")}</span>
 													<span class="flex-1 min-w-0 flex flex-col leading-tight">
 														<span class="truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
-														${isHeadquartersProject(project) ? html`<span class="truncate text-xs text-muted-foreground normal-case tracking-normal">${HEADQUARTERS_HELPER_TEXT}</span>` : nothing}
 													</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button

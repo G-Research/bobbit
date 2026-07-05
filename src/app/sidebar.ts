@@ -77,7 +77,7 @@ let _suppressProjectHeaderClick = false;
 let _suppressProjectHeaderClickTimer: number | null = null;
 
 function currentProjectIds(): string[] {
-	return state.projects.filter((project) => !isHeadquartersProject(project)).map((project) => project.id);
+	return state.projects.map((project) => project.id);
 }
 
 function completeProjectOrderIds(projectIds: string[]): string[] {
@@ -100,17 +100,15 @@ function completeProjectOrderIds(projectIds: string[]): string[] {
 function orderProjectsByIds(projects: Project[], projectIds: string[]): Project[] {
 	const byId = new Map(projects.map((project) => [project.id, project]));
 	const seen = new Set<string>();
-	const headquarters = projects.filter((project) => isHeadquartersProject(project));
-	const ordered: Project[] = [...headquarters];
-	for (const project of headquarters) seen.add(project.id);
+	const ordered: Project[] = [];
 	for (const id of projectIds) {
 		const project = byId.get(id);
-		if (!project || seen.has(id) || isHeadquartersProject(project)) continue;
+		if (!project || seen.has(id)) continue;
 		seen.add(id);
 		ordered.push(project);
 	}
 	for (const project of projects) {
-		if (seen.has(project.id) || isHeadquartersProject(project)) continue;
+		if (seen.has(project.id)) continue;
 		seen.add(project.id);
 		ordered.push(project);
 	}
@@ -195,7 +193,6 @@ function beginProjectReorder(): void {
 
 export function startProjectReorder(e: PointerEvent, projectId: string): void {
 	if (e.pointerType === "mouse" && e.button !== 0) return;
-	if (isHeadquartersProject(projectId)) return;
 	e.preventDefault();
 	e.stopPropagation();
 	if (_projectReorderState) return;
@@ -266,9 +263,12 @@ function handleProjectReorderPointerUp(e: PointerEvent): void {
 	if (!reorder || reorder.keyboard || reorder.pointerId !== e.pointerId) return;
 	e.preventDefault();
 	e.stopPropagation();
-	const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-	const droppedInsideList = !!target?.closest("[data-project-reorder-list]");
-	void finishProjectReorder(!reorder.dragging || !droppedInsideList);
+	// Commit the previewed order on any release while dragging, even when the
+	// pointer is dropped outside the list (e.g. far above it). The preview is
+	// always clamped to a valid slot, so releasing anywhere saves that slot.
+	// Only a non-drag (a click that never crossed the drag threshold) is a no-op;
+	// cancellation is reserved for Escape / pointercancel.
+	void finishProjectReorder(!reorder.dragging);
 }
 
 function handleProjectReorderPointerCancel(e: PointerEvent): void {
@@ -383,7 +383,6 @@ export async function finishProjectReorder(cancel = false): Promise<void> {
 }
 
 export function renderProjectReorderHandle(project: Project) {
-	if (isHeadquartersProject(project)) return nothing;
 	const active = _projectReorderState?.activeId === project.id && _projectReorderState.dragging;
 	return html`
 		<button
@@ -1314,7 +1313,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 		<div class="group project-header relative flex items-center gap-1 pr-1 py-0.5 rounded-md ${reordering ? "cursor-default" : "cursor-pointer"} ${reorderActive ? "project-reorder-active" : ""} ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
 			data-testid="project-header"
 			data-project-id=${project.id}
-			data-project-reorder-id=${isHeadquarters ? nothing : project.id}
+			data-project-reorder-id=${project.id}
 			data-project-reordering=${reordering ? "true" : "false"}
 			data-project-reorder-active=${reorderActive ? "true" : "false"}
 			data-nav-id=${navId}
