@@ -70,7 +70,12 @@ protocol future cohorts should follow, and what's left after cohort 1.
   `POST /api/preferences/claude-code/confirmation`
   (`src/server/routes/preferences-routes.ts`) — see
   [Cohort 12: preferences routes](#cohort-12-preferences-routes) below.
-- Everything else in `handleApiRoute` (~295 remaining routes) is unchanged,
+- **STR-05 slice: roles routes** — `GET`/`POST /api/roles`,
+  `GET`/`PUT`/`DELETE /api/roles/:name`, assistant prompt routes, and
+  customize/override routes (`src/server/routes/roles-routes.ts`) — see
+  [STR-05: roles route-handler hoist](#str-05-roles-route-handler-hoist)
+  below.
+- Everything else in `handleApiRoute` (~286 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -815,6 +820,57 @@ and `tests/helpers/server-route-surface*`. Preference behavior is covered by
 `tests/e2e/claude-code-confirmation-localhost.spec.ts`, and related UI
 settings specs.
 
+## STR-05: roles route-handler hoist
+
+`src/server/routes/roles-routes.ts`.
+
+STR-05 is the follow-on to the route-registry cohorts: hoist coherent legacy
+handler families out of `handleApiRoute` to shrink its captured closure scope
+before STR-06 introduces an explicit deps object. This slice moved the roles
+configuration family:
+
+| Method | Path |
+|---|---|
+| GET | `/api/roles/assistant/prompts` |
+| PUT | `/api/roles/assistant/prompts/*` |
+| GET | `/api/roles` |
+| POST | `/api/roles` |
+| POST | `/api/roles/:name/customize` |
+| DELETE | `/api/roles/:name/override` |
+| GET | `/api/roles/:name` |
+| PUT | `/api/roles/:name` |
+| DELETE | `/api/roles/:name` |
+
+The assistant prompt PUT route stays a prefix registration because the legacy
+handler used `startsWith("/api/roles/assistant/prompts/")` and treated the
+full remaining suffix as the prompt type. The role `:name` block was
+path-first with method branches inside; unhandled methods fell through to the
+terminal 404, so the registry registers only handled methods and needs no
+parity shim.
+
+Captured deps made explicit through `CoreRouteCtx`: `clampRoleThinking`,
+`resolveRequiredConfigProjectScope`, `roleManager`, `serverRoleStore`, and
+`writeConfigProjectScopeError`. Role-only helpers
+`withRoleResolution` and `resolveRoleMutationTarget` moved with the route
+module; shared config-scope helpers remain in `server.ts` for the still-inline
+tools and tool-group policy routes.
+
+Registry count reconciliation: cohort 12 left ~295 remaining legacy routes.
+Moving these 9 routes leaves ~286 routes in the legacy chain.
+
+Remaining-handler inventory for the next STR-05 slice: large inline families
+still include sessions create/prompt/continue/output/git/PR helpers, goals/
+tasks/gates/team endpoints, tools/extension-host routes, model/provider/
+agent-directory settings routes, preview routes, cost routes, and the
+internal verification/user-question routes.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/orient-api-route-families.test.ts`,
+`tests/client-api-orphan-pinning.test.ts`, and `tests/prompt-api-drift.test.ts`.
+Role behavior is covered by `tests/e2e/role-manager-api.spec.ts`,
+`tests/e2e/config-cascade-api.spec.ts`, `tests/e2e/tool-policy.spec.ts`,
+`tests/e2e/mcp-tool-permission.spec.ts`, and role-manager UI specs.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -895,7 +951,7 @@ settings specs.
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~310 routes, including the largest/highest-traffic families
+- The other ~286 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
