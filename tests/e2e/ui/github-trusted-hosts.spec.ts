@@ -8,6 +8,18 @@
  *      dialog; confirming adds the host to preferences and the launch proceeds
  *      (no untrusted error); cancelling creates no walkthrough tab.
  *
+ * MIGRATED (docs/design/pack-settings-contribution.md §4.5): this widget now
+ * renders as a pack-owned Settings SECTION contribution
+ * (market-packs/pr-walkthrough/settings/trusted-hosts.yaml +
+ * lib/TrustedHostsSection.js), not core `settings-page.ts`. The section's
+ * internal element testids (`github-trusted-host-*`) are unchanged — only the
+ * OUTER wrapper is new: every settings-section renders under a
+ * `{packId}-{sectionId}` testid (§4.6's collision-safety requirement), here
+ * `pr-walkthrough-pr-walkthrough.trusted-hosts`. `openGeneralSettings()` now
+ * waits on that outer wrapper first, so this spec also pins that the pack
+ * contribution actually loads + mounts on the General tab, not just that its
+ * (unchanged) internal markup exists.
+ *
  * Pattern: tests/e2e/ui/settings.spec.ts (settings) +
  *          tests/e2e/ui/pr-walkthrough-panel.spec.ts (launch).
  */
@@ -17,6 +29,7 @@ import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const tid = (id: string) => `[data-testid="${id}"]`;
+const TRUSTED_HOSTS_SECTION_TESTID = "pr-walkthrough-pr-walkthrough.trusted-hosts";
 
 async function resetTrustedHosts(): Promise<void> {
 	await apiFetch("/api/preferences", {
@@ -35,6 +48,9 @@ async function readTrustedHosts(): Promise<string[]> {
 
 async function openGeneralSettings(page: Page): Promise<void> {
 	await navigateToHash(page, "#/settings/system/general");
+	// Wait on the pack-owned settings-section's OUTER wrapper first — proves the
+	// contribution loaded + mounted, not just that its internal markup exists.
+	await expect(page.locator(tid(TRUSTED_HOSTS_SECTION_TESTID))).toBeVisible({ timeout: 10_000 });
 	await expect(page.locator(tid("github-trusted-host-input"))).toBeVisible({ timeout: 10_000 });
 }
 
