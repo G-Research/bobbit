@@ -127,7 +127,7 @@ import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-clas
 import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
 import { registerModelTierClassifier } from "./agent/model-tier-classifier.js";
 import { registerGateRiskClassifier } from "./agent/gate-risk-classifier.js";
-import { SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND } from "./agent/swarm-topology-classifier.js";
+import { registerSwarmTopologyClassifier } from "./agent/swarm-topology-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1921,17 +1921,13 @@ export function createGateway(config: GatewayConfig) {
 	// question needs (RECONCILIATION-2026-07-05.md's dark-flags lane), never
 	// applied by this wave.
 	registerGateRiskClassifier(sessionManager.lifecycleHub);
-	// SWARM-W4.2 — swarm-topology decision seam HARNESS at `(goal-create,
-	// swarm-topology)`. Allow-lists the pair so the real production consult in
-	// `swarm-routes.ts` (best-of-N creation) never hits `dispatchDecision`'s
-	// allow-list-rejection throw — but deliberately registers NO classifier
-	// here (unlike the thinking router / model-tier classifiers above). Zero
-	// classifiers ⇒ every consult abstains ⇒ topology stays 100%
-	// caller-supplied, byte-identical to SWARM-W1's existing behavior,
-	// regardless of this seam's presence. See swarm-topology-classifier.ts's
-	// header for the full scope/rationale — a real observe-mode heuristic
-	// classifier is a deliberately separate follow-up PR (SWARM-W4.3).
-	sessionManager.lifecycleHub.allowDecisionPoint(SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND);
+	// SWARM-W4.3 — swarm-topology classifier: registered unconditionally, same
+	// pattern as CLF-W4's model-tier classifier above — no apply/enforce mode
+	// this wave either (see swarm-topology-classifier.ts's header for why).
+	// Pure telemetry, zero behavior change; the best-of-N route consults this
+	// classifier but never reads the decision back, so topology remains 100%
+	// caller-supplied.
+	registerSwarmTopologyClassifier(sessionManager.lifecycleHub);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;
