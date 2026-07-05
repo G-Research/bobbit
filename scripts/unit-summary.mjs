@@ -33,3 +33,39 @@ export function computeUnitSummary(results) {
 export function formatUnitSummaryLine(summary) {
 	return `[unit-summary] node=${summary.node} browser=${summary.browser}`;
 }
+
+/**
+ * Masked-failure cross-check (independent of the child process's own exit
+ * code): each sub-phase's human reporter prints an unambiguous failure count
+ * near the end of its output — node's TAP reporter emits `# fail N`,
+ * Playwright's default reporter emits `N failed`. 13 real browser-fixture
+ * failures were once observed alongside a 0 exit code from run-unit.mjs on a
+ * loaded shared machine (root cause not fully pinned down — see
+ * tests/run-unit-wrapper.test.ts); this never trusts a runner's reported
+ * code alone when its own output says otherwise. Mirrors the precedent
+ * already established for the E2E phase's masked-failures incident
+ * (scripts/playwright-json-summary.mjs) — never reconstruct pass/fail from
+ * decorated human text when that can be avoided, but when the ONLY signal
+ * available is that text (the unit phase's reporters are not JSON), treat a
+ * nonzero count in it as authoritative over a reported-0 exit code. This
+ * never overrides an ALREADY-failing code; it only promotes a reported-0
+ * result to failed.
+ *
+ * @param {string} label - "node-logic" or "browser-fixtures".
+ * @param {string} outputText - the runner's captured stdout+stderr tail.
+ * @returns {number} the detected failure count, or 0 if the output shows no
+ *   failure signature (including for a label with no known signature).
+ */
+const FAILURE_SIGNATURES = {
+	"node-logic": /^# fail (\d+)\s*$/m,
+	"browser-fixtures": /^[ \t]*(\d+) failed\b/m,
+};
+
+export function detectMaskedFailureCount(label, outputText) {
+	const pattern = FAILURE_SIGNATURES[label];
+	if (!pattern) return 0;
+	const match = pattern.exec(String(outputText ?? ""));
+	if (!match) return 0;
+	const n = Number(match[1]);
+	return Number.isFinite(n) && n > 0 ? n : 0;
+}
