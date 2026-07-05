@@ -30,6 +30,7 @@ import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
+import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
@@ -5828,13 +5829,15 @@ async function handleApiRoute(
 		} else {
 			// Always include archived children of live sessions/goals so the sidebar
 			// can render chevrons/nesting without a separate fetch.
+			//
+			// PERF-03: this is the hottest REST route (sidebar poll, ~5s) and the
+			// ?since generation guard above is frequently defeated during active
+			// streaming (generation bumps on every activity update). Avoid
+			// materializing (cloning) EVERY archived session across every visible
+			// context on each request — index by parent key once, then walk only
+			// the subgraph reachable from live seeds, cloning/enriching just the
+			// sessions that end up in the response. See archived-session-bfs.ts.
 			const liveIdSet = new Set(sessions.map(s => s.id));
-			const allArchivedForBfsNonPaginated: typeof sessions = [];
-			for (const ctx of projectContextManager.visible()) {
-				for (const s of ctx.sessionStore.getArchived()) {
-					allArchivedForBfsNonPaginated.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
-				}
-			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIdsNonPaginated: string[] = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -5842,8 +5845,17 @@ async function handleApiRoute(
 					if (!g.archived) liveGoalIdsNonPaginated.push(g.id);
 				}
 			}
+			function* visibleArchivedRaw() {
+				for (const ctx of projectContextManager.visible()) {
+					for (const s of ctx.sessionStore.getArchived()) yield s;
+				}
+			}
 			// BFS: live parents/goals → their archived children → children of those, etc.
-			const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIdsNonPaginated], allArchivedForBfsNonPaginated);
+			const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
+				[...liveIdSet, ...liveGoalIdsNonPaginated],
+				visibleArchivedRaw(),
+				(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+			);
 			json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
 		}
 		return;
