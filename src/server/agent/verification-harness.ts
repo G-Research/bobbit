@@ -4453,6 +4453,7 @@ export class VerificationHarness {
 				rolePrompt: combinedPrompt,
 				roleName,
 				...reviewerMeta,
+				promptProfile: "reviewer",
 				sandboxed: isSandboxed,
 				projectId: goalProjectId,
 				sessionId,
@@ -4823,6 +4824,7 @@ export class VerificationHarness {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
 				...qaReviewerMeta,
+				promptProfile: "reviewer",
 				sandboxed: qaIsSandboxed,
 				projectId: qaGoalProjectId,
 				sessionId: qaSessionId,
@@ -6976,4 +6978,3 @@ function truncateForOutput(s: string | undefined, max = 4000): string {
 	if (!s) return "";
 	return s.length > max ? `…${s.slice(-max)}` : s;
 }
-

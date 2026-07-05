@@ -418,6 +418,66 @@ describe("prompt profiles (F2 reviewer / F22 narrow-worker)", () => {
 		console.log(`[F2] reviewer profile base-prompt savings: ${saved} tokens (coder=${coderSys.tokens}, reviewer=${reviewerSys.tokens})`);
 	});
 
+	it("SWARM-W4 verifier/reviewer-class spawns request the reviewer profile and drop Git conventions", () => {
+		const harnessSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf-8");
+		const explicitReviewerProfileSites = harnessSrc.match(/promptProfile:\s*"reviewer"/g) ?? [];
+		assert.ok(explicitReviewerProfileSites.length >= 2, "llm-review and agent-qa verifier spawns should request promptProfile:\"reviewer\"");
+
+		const swarmVerifierSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/swarm-verifier.ts"), "utf-8");
+		assert.doesNotMatch(swarmVerifierSrc, /createSession|PromptParts|assembleSystemPrompt/, "swarm-verifier.ts is deterministic shell verification; it has no reviewer-class session prompt to profile");
+
+		const coderPath = assembleSystemPrompt("swarm-verifier-coder-baseline", { cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH });
+		const reviewerPath = assembleSystemPrompt("swarm-verifier-reviewer-profile", { cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH, promptProfile: "reviewer" });
+		assert.ok(coderPath && reviewerPath);
+		const coder = fs.readFileSync(coderPath, "utf-8");
+		const reviewer = fs.readFileSync(reviewerPath, "utf-8");
+		assert.ok(coder.includes("# Git conventions"), "baseline keeps Git conventions");
+		assert.ok(!reviewer.includes("# Git conventions"), "reviewer-profile verifier prompt excludes Git conventions");
+		assert.ok(!reviewer.includes("Parallel tool calls that mutate the same target"), "reviewer-profile verifier prompt excludes mutate-same-target guidance");
+
+		const savedBytes = Buffer.byteLength(coder, "utf-8") - Buffer.byteLength(reviewer, "utf-8");
+		assert.ok(savedBytes > 2000, `expected reviewer verifier profile to save >2000 bytes, saved ${savedBytes}`);
+		console.log(`[SWARM-W4] verifier reviewer-profile byte savings: ${savedBytes} bytes`);
+	});
+
+	it("SWARM-W4 best-of-N candidate builders stay byte-identical default when narrowness cannot be proven", () => {
+		const bestOfNSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/swarm-best-of-n.ts"), "utf-8");
+		const siblingSpecStart = bestOfNSrc.indexOf("export interface BestOfNSiblingSpec");
+		const siblingSpecEnd = bestOfNSrc.indexOf("export interface BestOfNSwarmOptions");
+		assert.ok(siblingSpecStart >= 0 && siblingSpecEnd > siblingSpecStart, "BestOfNSiblingSpec source window not found");
+		const siblingSpec = bestOfNSrc.slice(siblingSpecStart, siblingSpecEnd);
+		assert.doesNotMatch(siblingSpec, /allowedTools/, "best-of-N siblings do not carry an explicit allowedTools proof, so narrow-worker must not be inferred");
+		assert.doesNotMatch(bestOfNSrc, /promptProfile:\s*"narrow-worker"|promptProfile:\s*narrow/, "best-of-N candidate builders must remain unprofiled until allowedTools proves narrowness");
+
+		const raw = fs.readFileSync(REAL_BASE_PROMPT_PATH, "utf-8").trim();
+		const base = resolveMarkdownRefs(raw, path.dirname(REAL_BASE_PROMPT_PATH));
+		const expectedWorkingDir = "# Working Directory\n\n" +
+			`Your working directory is: \`${cwdDir}\`\n\n` +
+			`Stay in this directory for all file operations and git commands. ` +
+			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
+			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
+			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
+			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
+			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
+		const expectedGoal = "# Goal\n\n**Best-of-N candidate** (Status: active)\n\nBuild the shared candidate implementation.";
+		const expectedRole = "Team lead candidate builder role prompt.";
+		const expected = [base, expectedWorkingDir, expectedGoal, expectedRole].join("\n\n---\n\n") + "\n";
+
+		const promptPath = assembleSystemPrompt("swarm-best-of-n-unprofiled-builder", {
+			cwd: cwdDir,
+			baseSystemPromptPath: REAL_BASE_PROMPT_PATH,
+			goalTitle: "Best-of-N candidate",
+			goalState: "active",
+			goalSpec: "Build the shared candidate implementation.",
+			rolePrompt: "Team lead candidate builder role prompt.",
+		});
+		assert.ok(promptPath);
+		const actual = fs.readFileSync(promptPath, "utf-8");
+		assert.equal(actual, expected, "unprofiled best-of-N builder prompt must stay byte-identical to the default prompt shape");
+		assert.ok(actual.includes("# Git conventions"));
+		assert.ok(actual.includes("Why this is a hard constraint"));
+	});
+
 	it("narrow-worker profile drops the branch-discipline rationale from Working Directory; default profile keeps it", () => {
 		const fullSections = getPromptSections({ cwd: cwdDir });
 		const narrowSections = getPromptSections({ cwd: cwdDir, promptProfile: "narrow-worker" });

@@ -66,7 +66,7 @@ import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, type PromptParts, type PromptProfile } from "./system-prompt.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -2954,6 +2954,7 @@ export class SessionManager {
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder,
+				promptProfile: (session.nonInteractive ?? persisted?.nonInteractive) ? "reviewer" : undefined,
 			};
 		}
 
@@ -5542,6 +5543,7 @@ export class SessionManager {
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
+				promptProfile: ps.nonInteractive ? "reviewer" : undefined,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
@@ -5766,7 +5768,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; promptProfile?: PromptProfile; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -5921,6 +5923,7 @@ export class SessionManager {
 				role: opts?.role,
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
+				promptProfile: opts?.promptProfile,
 				agentArgs,
 				env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 				rolePrompt: resolvedRolePrompt,
@@ -6008,6 +6011,7 @@ export class SessionManager {
 			role: opts?.role,
 			accessory: opts?.accessory,
 			nonInteractive: opts?.nonInteractive,
+			promptProfile: opts?.promptProfile,
 			agentArgs,
 			env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 			rolePrompt: resolvedRolePrompt,
