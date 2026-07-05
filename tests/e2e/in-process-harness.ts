@@ -390,7 +390,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 
 function injectHeadquartersDiscoveryProjectId(path: string, method: string): string {
 	if (method !== "GET") return path;
-	if (!/^\/api\/(tools|roles|workflows)(\?|$)/.test(path)) return path;
+	if (!/^\/api\/(tools|roles)(\?|$)/.test(path)) return path;
 	if (/[?&]projectId=/.test(path)) return path;
 	return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
 }

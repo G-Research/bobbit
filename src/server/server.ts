@@ -14026,16 +14026,12 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows — requires explicit projectId.
+	// GET /api/workflows — a missing projectId returns an empty list (there is no
+	// server-scope workflow set); a projectId returns that project's workflows.
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) {
-			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
-			return;
-		}
-		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
-		const resolved = configCascade.resolveWorkflows(effectiveConfigProjectId);
+		const resolved = configCascade.resolveWorkflows(projectId);
 		json({ workflows: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}

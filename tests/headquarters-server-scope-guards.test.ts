@@ -284,13 +284,19 @@ test("config discovery APIs require explicit projectId", async (t) => {
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
-	// Config/discovery reads also require an explicit projectId. First-party UI
+	// Tool/role discovery reads require an explicit projectId. First-party UI
 	// passes `headquarters` for server scope; missing scope must fail closed.
-	for (const pathname of ["/api/tools", "/api/roles", "/api/workflows"]) {
+	for (const pathname of ["/api/tools", "/api/roles"]) {
 		const missing = await api(baseUrl, pathname);
 		assert.equal(missing.status, 400, `${pathname} should require projectId`);
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
+
+	// /api/workflows keeps its softer contract: a missing projectId returns an
+	// empty list (there is no server-scope workflow set), not a 400.
+	const workflowsMissing = await api(baseUrl, "/api/workflows");
+	assert.equal(workflowsMissing.status, 200, JSON.stringify(workflowsMissing.body));
+	assert.deepEqual(workflowsMissing.body.workflows, []);
 
 	const mcp = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
 	assert.equal(mcp.status, 200, JSON.stringify(mcp.body));

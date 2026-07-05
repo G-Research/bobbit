@@ -50,8 +50,8 @@ async function deleteProject(id: string) {
 
 test.describe("Config Cascade API", () => {
 
-	test("GET /api/tools, /api/roles, and /api/workflows require projectId", async () => {
-		for (const pathname of ["/api/tools", "/api/roles", "/api/workflows"]) {
+	test("GET /api/tools and /api/roles require projectId", async () => {
+		for (const pathname of ["/api/tools", "/api/roles"]) {
 			const res = await rawApiFetch(pathname);
 			expect(res.status).toBe(400);
 			const body = await res.json();
