@@ -339,7 +339,9 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 
 	await page.locator(`[data-testid="market-installed-pack"][data-pack-name="${JIRA_PACK}"]`).first().locator('[data-testid="market-uninstall-pack"]').click();
 	await expect(page.getByText(/disconnects its MCP server/i)).toBeVisible({ timeout: 10_000 });
-	await page.keyboard.press("Enter");
+	// UX-03 (Fable audit): destructive confirmAction no longer binds Enter
+	// globally (focus defaults to Cancel) — confirm via the dialog's own button.
+	await page.locator('[role="dialog"]').getByRole("button", { name: "Uninstall" }).click();
 	await expect(page.locator(`[data-testid="market-installed-pack"][data-pack-name="${JIRA_PACK}"]`)).toHaveCount(0, { timeout: 15_000 });
 
 	await goToTab(page, "sources");
@@ -347,7 +349,7 @@ test("add gateway source, browse/install provider pack, toggle disable/re-enable
 	await expect(sourceRow).toBeVisible({ timeout: 15_000 });
 	await sourceRow.locator('[data-testid="market-remove-source"]').click();
 	await expect(page.getByText(/Remove this marketplace source/i)).toBeVisible({ timeout: 10_000 });
-	await page.keyboard.press("Enter");
+	await page.locator('[role="dialog"]').getByRole("button", { name: "Remove" }).click();
 	await expect.poll(() => posts.removeSource.length, { timeout: 10_000 }).toBe(1);
 	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
 	await expect(sourceRow).toHaveCount(0);

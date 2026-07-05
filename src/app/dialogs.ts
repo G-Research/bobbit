@@ -122,6 +122,13 @@ export interface ArchiveResult {
 // CONFIRM / ERROR DIALOGS
 // ============================================================================
 
+// UX-03 (Fable audit): stable selectors for the Cancel/Confirm buttons below,
+// used both to focus the safe default on open and to drive the Tab focus trap
+// — deliberately independent of DOM order (mini-lit's Dialog also renders its
+// own unlabeled close-X button into the same container).
+const CONFIRM_ACTION_CANCEL_CLASS = "confirm-action-cancel-btn";
+const CONFIRM_ACTION_CONFIRM_CLASS = "confirm-action-confirm-btn";
+
 export function confirmAction(title: string, message: string, confirmLabel = "Confirm", destructive = false, zIndex?: number): Promise<boolean> {
 	return new Promise((resolve) => {
 		// When a stacking-context owner (e.g. an expanded bg-process popover at z-50)
@@ -130,16 +137,61 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 		// and panel — above that sibling regardless of their internal z-index values.
 		const container = createDialogContainer(zIndex);
 
+		// Standard a11y contract: restore focus to whatever opened this dialog
+		// once it closes (see cleanup() below).
+		const previouslyFocused = document.activeElement as HTMLElement | null;
+
 		const cleanup = (result: boolean) => {
 			document.removeEventListener("keydown", onKeydown);
 			render(html``, container);
 			container.remove();
+			if (previouslyFocused && document.contains(previouslyFocused) && typeof previouslyFocused.focus === "function") {
+				previouslyFocused.focus();
+			}
 			resolve(result);
 		};
 
+		const getFocusable = (): HTMLElement[] =>
+			Array.from(
+				container.querySelectorAll<HTMLElement>(
+					'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+				),
+			);
+
+		// UX-03 (Fable audit): a document-level Enter used to resolve
+		// cleanup(true) unconditionally — confirming a destructive action from
+		// a stray Enter anywhere on the page, with no button ever focused. We
+		// no longer bind Enter globally at all: focus is moved into the dialog
+		// on open (below), Cancel/Confirm are real <button> elements, and the
+		// browser's native "Enter activates the focused button" behavior
+		// confirms/cancels depending on which one actually has focus. That
+		// scopes "Enter confirms" to focus-within-dialog for free, and — since
+		// destructive dialogs default focus to Cancel — a stray Enter on open
+		// now cancels instead of confirming.
 		const onKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Enter") { e.preventDefault(); cleanup(true); }
-			if (e.key === "Escape") { e.preventDefault(); cleanup(false); }
+			if (e.key === "Escape") {
+				e.preventDefault();
+				cleanup(false);
+				return;
+			}
+			// Minimal focus trap: mini-lit's Dialog has none, so Tab could walk
+			// focus out of the dialog subtree entirely (e.g. into the page
+			// behind the backdrop).
+			if (e.key === "Tab") {
+				const focusable = getFocusable();
+				if (focusable.length === 0) return;
+				const first = focusable[0];
+				const last = focusable[focusable.length - 1];
+				const active = document.activeElement as HTMLElement | null;
+				const activeInDialog = active !== null && container.contains(active);
+				if (e.shiftKey && (active === first || !activeInDialog)) {
+					e.preventDefault();
+					last.focus();
+				} else if (!e.shiftKey && (active === last || !activeInDialog)) {
+					e.preventDefault();
+					first.focus();
+				}
+			}
 		};
 		document.addEventListener("keydown", onKeydown);
 
@@ -161,12 +213,12 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 						className: "px-6 pb-4",
 						children: html`
 							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}
+								${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel", className: CONFIRM_ACTION_CANCEL_CLASS })}
 								${Button({
 									variant: destructive ? "destructive" as any : "default",
 									onClick: () => cleanup(true),
 									children: confirmLabel,
-									className: destructive ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : "",
+									className: `${CONFIRM_ACTION_CONFIRM_CLASS} ${destructive ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}`,
 								})}
 							</div>
 						`,
@@ -175,6 +227,26 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 			}),
 			container,
 		);
+
+		// Move focus into the dialog on open. Destructive dialogs default to
+		// Cancel — the safe outcome for a stray Enter/Space — non-destructive
+		// ones default to Confirm.
+		//
+		// Deliberately SYNCHRONOUS, not rAF-deferred: `render()` here is
+		// lit-html's imperative render (not a ReactiveElement's batched
+		// `requestUpdate()`), so the DOM is already committed the moment the
+		// call above returns. A deferred rAF would leave a window where the
+		// dialog is open but focus is still on whatever triggered it (e.g. the
+		// "Log out" button that's still focused per the browser's native
+		// click-focuses-the-button behavior). If the user presses Enter
+		// inside that window, the ORIGINAL trigger button — not Cancel/Confirm
+		// — is what's focused, and its own native Enter-activates-button
+		// semantics re-invoke the click handler that opened this dialog,
+		// opening a second, duplicate confirmAction on top of the first.
+		const cancelBtn = container.querySelector<HTMLElement>(`.${CONFIRM_ACTION_CANCEL_CLASS}`);
+		const confirmBtn = container.querySelector<HTMLElement>(`.${CONFIRM_ACTION_CONFIRM_CLASS}`);
+		const target = destructive ? (cancelBtn ?? confirmBtn) : (confirmBtn ?? cancelBtn);
+		target?.focus();
 	});
 }
 

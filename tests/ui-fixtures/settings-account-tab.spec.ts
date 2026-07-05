@@ -92,8 +92,16 @@ test.describe("Settings Account tab — Google OAuth row", () => {
 		}, FUTURE);
 
 		await page.locator('[data-testid="account-logout-btn-google-gemini-cli"] button').click();
-		// confirmAction dialog accepts Enter as confirm.
-		await page.keyboard.press("Enter");
+		// UX-03 (Fable audit): this is a destructive confirmAction dialog —
+		// focus defaults to Cancel on open, and Enter is no longer bound
+		// globally, so confirming requires clicking (or tabbing to) the
+		// dialog's own "Log out" button rather than a stray Enter.
+		// dispatchEvent (not .click()) — this fixture loads no CSS, so the
+		// dialog's inline `position: fixed` centering never actually applies
+		// and Playwright's actionability check sees it as out-of-viewport;
+		// mirrors the same workaround already used for this reason elsewhere
+		// (settings-admin-fixture.spec.ts's model-selector clicks).
+		await page.locator('[role="dialog"]').getByRole("button", { name: "Log out" }).dispatchEvent("click");
 
 		await expect(page.locator('[data-testid="account-status-google-gemini-cli"]')).toHaveText("Not authenticated");
 		await expect(page.locator('[data-testid="account-auth-btn-google-gemini-cli"]')).toContainText("Log in");
@@ -102,5 +110,27 @@ test.describe("Settings Account tab — Google OAuth row", () => {
 		const logoutCalls = log.filter((e: any) => e.url === "/api/oauth/logout" && e.method === "POST");
 		expect(logoutCalls).toHaveLength(1);
 		expect(logoutCalls[0].body).toEqual({ provider: "google-gemini-cli" });
+	});
+
+	test("UX-03: an unfocused Enter on the logout confirm dialog cancels instead of confirming (no accidental logout)", async ({ page }) => {
+		await page.evaluate((expires) => {
+			(window as any).__resetAccountTab({ status: { "google-gemini-cli": { authenticated: true, expires } } });
+			(window as any).__setNextFetchResponse({ ok: true, body: { authenticated: false } });
+			(window as any).__clearFetchLog();
+		}, FUTURE);
+
+		await page.locator('[data-testid="account-logout-btn-google-gemini-cli"] button').click();
+		await expect(page.locator('[role="dialog"]')).toBeVisible();
+
+		// This is the exact repro from finding UX-03: press Enter without
+		// clicking or tabbing anywhere. Destructive confirmAction dialogs now
+		// default focus to Cancel, so a stray Enter cancels — it used to
+		// confirm the destructive logout unconditionally.
+		await page.keyboard.press("Enter");
+
+		await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="account-status-google-gemini-cli"]')).toHaveText("Authenticated");
+		const log = await page.evaluate(() => (window as any).__getFetchLog());
+		expect(log.filter((e: any) => e.url === "/api/oauth/logout" && e.method === "POST")).toHaveLength(0);
 	});
 });
