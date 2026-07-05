@@ -72,21 +72,25 @@ if (proto && !proto.__bobbitDomBridge) {
 // tests that need a real frame await it.)
 // vitest's happy-dom environment defines window globals (incl.
 // requestAnimationFrame) as OWN properties on globalThis at each file's setup and
-// `delete`s them at teardown (populateGlobal). A straggler node timer firing in
-// the teardown gap therefore hits an undefined bare `requestAnimationFrame` and
-// crashes the run. We install setTimeout-backed fallbacks on globalThis's
-// PROTOTYPE (non-enumerable): during a test the per-file own property shadows
-// them; in the teardown gap the own property is gone and bare-identifier lookup
-// falls through to the prototype — so `requestAnimationFrame` is ALWAYS a
-// function. (No assertion depends on RAF timing; tests that need a real frame
-// await it.) The render callback these stragglers invoke is a no-op in tests.
+// `delete`s them at teardown (populateGlobal). A straggler node timer (e.g. the
+// app's debounced renderApp, armed by render.ts's 2500ms header-toast timer)
+// firing in the teardown gap therefore hits an undefined bare
+// `requestAnimationFrame` and crashes the run.
+//
+// We install NO-OP fallbacks on globalThis's PROTOTYPE (non-enumerable). During a
+// live test the per-file OWN property (happy-dom's real rAF) shadows these and
+// fires normally, so tests that await a frame work. The prototype fallback is
+// only ever reached in the teardown gap — and there we deliberately DO NOTHING:
+// running the stale render callback would `render()` into an already-removed
+// container / touch a torn-down `document`, producing a different run-failing
+// error. Dropping the gap-straggler frame is correct and side-effect-free.
 function ensureAnimationFrame(): void {
 	const gproto = Object.getPrototypeOf(globalThis as any);
 	if (!gproto || (gproto as any).__bobbitFrameFallback) return;
 	const def = (name: string, value: (arg: any) => any) =>
 		Object.defineProperty(gproto, name, { value, configurable: true, writable: true, enumerable: false });
-	def("requestAnimationFrame", (cb: FrameRequestCallback) => setTimeout(() => cb(Date.now()), 0) as unknown as number);
-	def("cancelAnimationFrame", (id: any) => clearTimeout(id as ReturnType<typeof setTimeout>));
+	def("requestAnimationFrame", (_cb: FrameRequestCallback) => 0);
+	def("cancelAnimationFrame", (_id: any) => undefined);
 	(gproto as any).__bobbitFrameFallback = true;
 }
 ensureAnimationFrame();
