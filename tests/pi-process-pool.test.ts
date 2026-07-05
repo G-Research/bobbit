@@ -32,19 +32,64 @@ function writeIdleCli(): { dir: string; file: string } {
 	const file = path.join(dir, "idle.mjs");
 	// Never exits on its own; RpcBridge.stop() SIGTERMs it. No RPC handshake
 	// needed for start() to resolve — it just waits ~100ms for the process to
-	// not immediately crash (see rpc-bridge.ts start()).
-	fs.writeFileSync(file, `setInterval(() => {}, 1000);\n`, "utf-8");
+	// not immediately crash (see rpc-bridge.ts start()). It DOES need to
+	// answer `get_state` over stdin/stdout with a `{type:"response",id}`
+	// envelope (rpc-bridge.ts's `processLine`) — `_fill()` now awaits one
+	// real `getState()` round trip before considering an entry warm (so a
+	// claim right after a fill doesn't still pay the graph-load cost), and
+	// `RpcBridge.sendCommand`'s default 30s timeout would otherwise make
+	// every fill in these tests hang for 30s before failing.
+	fs.writeFileSync(file, `
+process.stdin.setEncoding("utf8");
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf("\\n")) !== -1) {
+    const line = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.id) {
+        process.stdout.write(JSON.stringify({ type: "response", id: msg.id, success: true, data: {} }) + "\\n");
+      }
+    } catch {}
+  }
+});
+setInterval(() => {}, 1000);
+`, "utf-8");
 	return { dir, file };
 }
 
 function writeCrashingCli(): { dir: string; file: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-pool-crash-test-"));
 	const file = path.join(dir, "crash.mjs");
-	// Exit AFTER RpcBridge.start()'s ~100ms stabilization window so start()
-	// resolves successfully and the health-check listener gets registered —
-	// an immediate exit would instead make start() itself reject (retried,
-	// then thrown), never reaching the pool's "entry warmed" path at all.
-	fs.writeFileSync(file, `setTimeout(() => process.exit(1), 300);\n`, "utf-8");
+	// Must answer `get_state` (like the idle CLI) so `_fill()`'s awaited
+	// warm-up `getState()` call succeeds and the entry actually gets pushed
+	// into the pool — THEN exit well after that, so the crash is observed
+	// as "exited while idle IN the pool" (the health-check listener this
+	// test targets), not as a fill-time spawn failure racing the warm-up call.
+	fs.writeFileSync(file, `
+process.stdin.setEncoding("utf8");
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf("\\n")) !== -1) {
+    const line = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.id) {
+        process.stdout.write(JSON.stringify({ type: "response", id: msg.id, success: true, data: {} }) + "\\n");
+      }
+    } catch {}
+  }
+});
+setTimeout(() => process.exit(1), 500);
+`, "utf-8");
 	return { dir, file };
 }
 

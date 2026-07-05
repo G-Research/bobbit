@@ -204,6 +204,25 @@ export class PiProcessPool {
 			const rpcClient = createSessionBridge(options);
 			try {
 				await rpcClient.start();
+				// `start()` resolving only means the child process didn't
+				// immediately crash — it does NOT mean the tool/extension graph
+				// has finished loading inside it. That graph-load is exactly
+				// the dominant cost this pool exists to amortize (PR #157's
+				// finding, doc §1), and it continues ASYNCHRONOUSLY after
+				// start() resolves. A pool entry must actually PAY that cost
+				// during the background fill — not leave it to land on
+				// whichever claim happens to grab the entry first — so wait
+				// for one real `getState()` round trip (same call
+				// `persistSessionMetadata` makes on the cold path) before
+				// considering the entry warm. This matches the doc's own
+				// description of a pool entry (§3): "a RpcBridge instance
+				// that has completed start() and is sitting idle at
+				// get_state-ready." Discovered live: without this, a claim
+				// landing shortly after a fill still paid most of the cold
+				// latency, because the awaited work here just moved from
+				// "on claim" to "during background fill" without it actually
+				// being awaited anywhere.
+				await rpcClient.getState();
 			} catch (err) {
 				this.metrics.spawnFailures++;
 				console.warn(`[pi-process-pool] warm spawn failed for key=${key}: ${err instanceof Error ? err.message : err}`);
