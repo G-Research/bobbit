@@ -97,6 +97,7 @@ import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscovery
 import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
 import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
+import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1780,6 +1781,18 @@ export function createGateway(config: GatewayConfig) {
 	// See tool-approve-classifier.ts's header for the full scope/rationale —
 	// a real production classifier is a deliberately separate follow-up PR.
 	sessionManager.lifecycleHub.allowDecisionPoint(TOOL_APPROVE_POINT, TOOL_APPROVE_KIND);
+	// CLF-W2.5 — register the real, conservative rule-based tool-approve
+	// heuristic (tool-approve-heuristic.ts) ONLY when BOBBIT_CLF_TOOL_APPROVE
+	// is set at all (any value, including "observe"). Unset stays exactly
+	// CLF-W2's harness-only state above — zero classifiers registered, every
+	// consult abstains, byte-identical to before this file existed. See
+	// `isToolApproveHeuristicEnabled`'s doc comment for why this is a
+	// SEPARATE gate from `isToolApproveEnforceMode` (which only controls
+	// whether a produced `deny` auto-applies, not whether the classifier
+	// itself runs at all).
+	if (isToolApproveHeuristicEnabled()) {
+		registerToolApproveHeuristicClassifier(sessionManager.lifecycleHub);
+	}
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;

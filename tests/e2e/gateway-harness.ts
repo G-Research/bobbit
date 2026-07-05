@@ -171,7 +171,7 @@ function _pushLog(line: string): void {
 	console.error = (...a: unknown[]) => { _pushLog(fmt("error", a)); origError(...a); };
 }
 
-export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; enableDevHarnessRestart: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; enableDevHarnessRestart: boolean; enableToolApproveHeuristic: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -183,7 +183,15 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
 	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart }, use, workerInfo) => {
+	// Worker-scoped option. Default false (byte-identical: BOBBIT_CLF_TOOL_APPROVE
+	// stays unset, so server.ts never registers the CLF-W2.5 tool-approve heuristic
+	// classifier — see tool-approve-heuristic.ts's `isToolApproveHeuristicEnabled`).
+	// Opt in via `test.use({ enableToolApproveHeuristic: true })` (sets it to
+	// "observe" — never "enforce" — so the heuristic's real verdicts are recorded
+	// for the transparency panel but never change tool-grant behavior).
+	enableToolApproveHeuristic: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, enableToolApproveHeuristic }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -244,6 +252,16 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			process.env.BOBBIT_DEV_HARNESS = "1";
 		} else {
 			delete process.env.BOBBIT_DEV_HARNESS;
+		}
+		// CLF-W2.5 — read at `createGateway()` call time (not module import), so
+		// setting it here (rather than "before importing server modules" like
+		// BOBBIT_DEV_HARNESS above) is sufficient. "observe" (never "enforce")
+		// so opting in only turns on telemetry, never changes tool-grant outcomes.
+		const previousToolApproveClf = process.env.BOBBIT_CLF_TOOL_APPROVE;
+		if (enableToolApproveHeuristic) {
+			process.env.BOBBIT_CLF_TOOL_APPROVE = "observe";
+		} else {
+			delete process.env.BOBBIT_CLF_TOOL_APPROVE;
 		}
 		process.env.BOBBIT_DIR = bobbitDir;
 		process.env.BOBBIT_AGENT_DIR = agentDir;
@@ -481,6 +499,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		});
 		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
 		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
+		if (previousToolApproveClf === undefined) delete process.env.BOBBIT_CLF_TOOL_APPROVE;
+		else process.env.BOBBIT_CLF_TOOL_APPROVE = previousToolApproveClf;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {
