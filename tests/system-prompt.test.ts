@@ -22,6 +22,8 @@ const {
 	getPromptSections,
 	cleanupSessionPrompt,
 	initPromptDirs,
+	stripPromptStanzas,
+	REVIEWER_EXCLUDED_STANZAS,
 } = await import("../src/server/agent/system-prompt.ts");
 
 // Initialize prompt dirs with the test stateDir (required after parameterization)
@@ -326,6 +328,117 @@ describe("assembleSystemPrompt", () => {
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("# Working Directory"));
 		assert.ok(!content.includes("Goal"));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// F2/F22 — prompt-slimming profiles (RECONCILIATION-2026-07-05.md NEXT QUEUE
+// items 4/5). Uses the REAL shipped `defaults/system-prompt.md` (not a test
+// fixture) so the excluded-stanza list and the reported token savings track
+// the actual base prompt, not a synthetic stand-in that could drift from it.
+// ---------------------------------------------------------------------------
+const REAL_BASE_PROMPT_PATH = path.join(process.cwd(), "defaults", "system-prompt.md");
+/** Mirrors system-prompt.ts's internal estimateTokens() (~4 chars/token). */
+const estimateTokens = (s: string) => Math.ceil(s.length / 4);
+
+describe("prompt profiles (F2 reviewer / F22 narrow-worker)", () => {
+	beforeEach(setup);
+	afterEach(cleanup);
+
+	it("stripPromptStanzas removes a named H1 section (heading through the next H1)", () => {
+		const text = "# A\n\nbody A\n\n# B\n\nbody B\n\n# C\n\nbody C";
+		const out = stripPromptStanzas(text, ["B"]);
+		assert.ok(!out.includes("# B"));
+		assert.ok(!out.includes("body B"));
+		assert.ok(out.includes("# A") && out.includes("body A"));
+		assert.ok(out.includes("# C") && out.includes("body C"));
+	});
+
+	it("stripPromptStanzas is a no-op when no listed heading is present", () => {
+		const text = "# A\n\nbody A\n\n# C\n\nbody C";
+		assert.equal(stripPromptStanzas(text, ["B"]), text);
+	});
+
+	it("default (no promptProfile) system prompt is BYTE-IDENTICAL to pre-profile output", () => {
+		// Hand-rolled expectation using the SAME primitives production code used
+		// before this change (raw file + resolveMarkdownRefs + the pre-existing
+		// hardcoded Working Directory copy) — this is the explicit byte-identity
+		// pin for the unmodified (coder) path required by the PR brief.
+		const raw = fs.readFileSync(REAL_BASE_PROMPT_PATH, "utf-8").trim();
+		const base = resolveMarkdownRefs(raw, path.dirname(REAL_BASE_PROMPT_PATH));
+		const expectedWorkingDir = "# Working Directory\n\n" +
+			`Your working directory is: \`${cwdDir}\`\n\n` +
+			`Stay in this directory for all file operations and git commands. ` +
+			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
+			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
+			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
+			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
+			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
+		const expected = [base, expectedWorkingDir].join("\n\n---\n\n") + "\n";
+
+		const promptPath = assembleSystemPrompt("byte-identical-coder", {
+			cwd: cwdDir,
+			baseSystemPromptPath: REAL_BASE_PROMPT_PATH,
+		});
+		assert.ok(promptPath);
+		const actual = fs.readFileSync(promptPath, "utf-8");
+		assert.equal(actual, expected, "unprofiled (default) prompt must be byte-identical to pre-profile output");
+		// Sanity: the coder/default path still carries Git conventions in full.
+		assert.ok(actual.includes("# Git conventions"));
+		assert.ok(actual.includes("Parallel tool calls that mutate the same target"));
+	});
+
+	it("reviewer profile excludes the Git-conventions marker; coder profile still includes it", () => {
+		const coderPath = assembleSystemPrompt("profile-coder", { cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH });
+		const reviewerPath = assembleSystemPrompt("profile-reviewer", { cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH, promptProfile: "reviewer" });
+		assert.ok(coderPath && reviewerPath);
+		const coder = fs.readFileSync(coderPath, "utf-8");
+		const reviewer = fs.readFileSync(reviewerPath, "utf-8");
+
+		assert.ok(coder.includes("# Git conventions"), "coder profile keeps Git conventions");
+		assert.ok(coder.includes("Parallel tool calls that mutate the same target"), "coder profile keeps the mutate-same-target stanza");
+		assert.ok(!reviewer.includes("# Git conventions"), "reviewer profile excludes Git conventions");
+		assert.ok(!reviewer.includes("Parallel tool calls that mutate the same target"), "reviewer profile excludes the mutate-same-target stanza");
+		// Everything else in the base prompt is preserved for the reviewer too.
+		assert.ok(reviewer.includes("# Scoping searches"));
+		assert.ok(reviewer.includes("# Ownership mindset"));
+	});
+
+	it("reviewer profile measurably shrinks the base system prompt (token-count delta)", () => {
+		const coderSections = getPromptSections({ cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH });
+		const reviewerSections = getPromptSections({ cwd: cwdDir, baseSystemPromptPath: REAL_BASE_PROMPT_PATH, promptProfile: "reviewer" });
+		const coderSys = coderSections.find(s => s.label === "System Prompt")!;
+		const reviewerSys = reviewerSections.find(s => s.label === "System Prompt")!;
+		assert.ok(coderSys && reviewerSys);
+		const saved = coderSys.tokens - reviewerSys.tokens;
+		// Measured on the real shipped prompt: ~935 tokens (~19%) as of this PR.
+		// Assert a conservative floor so future edits to system-prompt.md can't
+		// silently regress the savings to near-zero without failing this test.
+		assert.ok(saved > 500, `expected the reviewer profile to save >500 tokens on the base prompt, saved ${saved}`);
+		console.log(`[F2] reviewer profile base-prompt savings: ${saved} tokens (coder=${coderSys.tokens}, reviewer=${reviewerSys.tokens})`);
+	});
+
+	it("narrow-worker profile drops the branch-discipline rationale from Working Directory; default profile keeps it", () => {
+		const fullSections = getPromptSections({ cwd: cwdDir });
+		const narrowSections = getPromptSections({ cwd: cwdDir, promptProfile: "narrow-worker" });
+		const fullWd = fullSections.find(s => s.label === "Working Directory")!;
+		const narrowWd = narrowSections.find(s => s.label === "Working Directory")!;
+		assert.ok(fullWd.content.includes("Why this is a hard constraint"));
+		assert.ok(!narrowWd.content.includes("Why this is a hard constraint"));
+		// Both keep the load-bearing "stay in this directory" instruction and path.
+		assert.ok(fullWd.content.includes(cwdDir) && narrowWd.content.includes(cwdDir));
+		assert.ok(fullWd.content.includes("Stay in this directory") && narrowWd.content.includes("Stay in this directory"));
+
+		const saved = fullWd.tokens - narrowWd.tokens;
+		assert.ok(saved > 0, `expected narrow-worker profile to shrink the Working Directory section, saved ${saved}`);
+		console.log(`[F22] narrow-worker Working-Directory savings: ${saved} tokens (full=${fullWd.tokens}, narrow=${narrowWd.tokens})`);
+	});
+
+	it("reviewer/narrow-worker excluded stanza list matches the current base prompt's headings exactly (drift guard)", () => {
+		const raw = fs.readFileSync(REAL_BASE_PROMPT_PATH, "utf-8");
+		for (const heading of REVIEWER_EXCLUDED_STANZAS) {
+			assert.ok(raw.includes(`# ${heading}\n`), `defaults/system-prompt.md must still contain "# ${heading}" — if this heading was renamed, update REVIEWER_EXCLUDED_STANZAS in system-prompt.ts`);
+		}
 	});
 });
 

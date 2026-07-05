@@ -26,6 +26,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-restore-test-"))
 process.env.BOBBIT_DIR = tmpRoot;
 
 const { assembleSystemPrompt, initPromptDirs } = await import("../src/server/agent/system-prompt.ts");
+const { isNarrowDelegateAllowedTools } = await import("../src/server/agent/session-manager.ts");
 type PersistedSession = import("../src/server/agent/session-store.ts").PersistedSession;
 
 // assembleSystemPrompt writes to <stateDir>/session-prompts — initialize it.
@@ -154,5 +155,52 @@ describe("delegate restore — source guards", () => {
 		const window = setupSrc.slice(idx, idx + 2_500);
 		assert.match(window, /instructions: plan\.instructions,/);
 		assert.match(window, /context: plan\.context,/);
+	});
+});
+
+/**
+ * F22 (RECONCILIATION-2026-07-05.md NEXT QUEUE item 5) — narrow-worker
+ * delegate profile. Narrowness criterion (see `isNarrowDelegateAllowedTools`
+ * in session-manager.ts): a delegate is PROVABLY narrow iff its spawn-time
+ * `allowedTools` is a non-empty, EXPLICIT list drawn entirely from pure
+ * file/shell primitives (read/write/edit/grep/find/ls/bash/bash_bg/
+ * read_session/activate_skill) — no team/goal/gate/review/task tool. An
+ * unrestricted or team/goal-aware delegate can't be proven narrow from spawn
+ * metadata alone, so it conservatively keeps the full prompt.
+ */
+describe("F22 — narrow-delegate criterion (isNarrowDelegateAllowedTools)", () => {
+	it("a single-file coder delegate (pure file/shell allowedTools) is narrow", () => {
+		assert.equal(isNarrowDelegateAllowedTools(["read", "edit", "write", "bash"]), true);
+		assert.equal(isNarrowDelegateAllowedTools(["read", "grep", "find", "ls"]), true);
+	});
+
+	it("an unrestricted delegate (allowedTools undefined/empty) is NOT provably narrow", () => {
+		assert.equal(isNarrowDelegateAllowedTools(undefined), false, "undefined allowedTools can't prove narrowness");
+		assert.equal(isNarrowDelegateAllowedTools([]), false, "empty allowedTools can't prove narrowness");
+	});
+
+	it("a broad/team-context delegate (any orchestration tool present) is NOT narrow", () => {
+		assert.equal(isNarrowDelegateAllowedTools(["read", "edit", "write", "bash", "task_create"]), false);
+		assert.equal(isNarrowDelegateAllowedTools(["read", "edit", "team_spawn"]), false);
+		assert.equal(isNarrowDelegateAllowedTools(["read", "edit", "gate_signal"]), false);
+	});
+});
+
+describe("F22 — buildDelegatePromptParts wires the narrow-worker profile (source guard)", () => {
+	const src = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+		"utf-8",
+	);
+
+	it("applies isNarrowDelegateAllowedTools, trims the AGENTS.md cascade to nearest-only, and sets promptProfile", () => {
+		const idx = src.indexOf("private buildDelegatePromptParts(opts: {");
+		assert.ok(idx > 0, "buildDelegatePromptParts declaration not found");
+		const window = src.slice(idx, idx + 2_000);
+
+		assert.match(window, /const narrow = isNarrowDelegateAllowedTools\(opts\.allowedTools\);/);
+		// Nearest-only cascade: readAllAgentFiles() falls back to the
+		// single-nearest-file behavior when projectConfigStore is undefined.
+		assert.match(window, /projectConfigStore: narrow \? undefined : this\.projectConfigStore,/);
+		assert.match(window, /promptProfile: narrow \? "narrow-worker" : undefined,/);
 	});
 });

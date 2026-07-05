@@ -439,6 +439,86 @@ export interface PromptParts {
 	 * provider prompt-cache hit rate — a legitimate A/B experiment variable.
 	 */
 	sectionOrder?: string[];
+	/**
+	 * F2/F22 (RECONCILIATION-2026-07-05.md NEXT QUEUE items 4/5) — optional
+	 * prompt-slimming profile. `undefined` (default) ⇒ full prompt, byte-
+	 * identical to pre-profile behavior.
+	 *  - `"reviewer"`: read-only verification sessions (llm-review/agent-qa,
+	 *    spawned with `nonInteractive: true` — see verification-reviewer-meta.ts)
+	 *    that only ever call `verification_result`. Drops
+	 *    `REVIEWER_EXCLUDED_STANZAS` (Git conventions + the mutate-same-target
+	 *    concurrency stanza) from the base system prompt — both are exclusively
+	 *    about actions these sessions structurally never take.
+	 *  - `"narrow-worker"`: a `team_delegate` child whose spawn-time
+	 *    `allowedTools` is PROVABLY restricted to pure file/shell primitives
+	 *    (see `isNarrowDelegateAllowedTools` in session-manager.ts). The
+	 *    Working Directory section drops the multi-agent branch-discipline
+	 *    rationale, since a narrow delegate has no branch of its own and never
+	 *    leaves the parent's worktree. (The AGENTS.md cascade trim to
+	 *    nearest-only is done by the caller omitting `projectConfigStore`, not
+	 *    by this flag — see `buildDelegatePromptParts`.)
+	 */
+	promptProfile?: PromptProfile;
+}
+
+/**
+ * F2/F22 prompt-slimming profile — see `PromptParts.promptProfile`.
+ */
+export type PromptProfile = "reviewer" | "narrow-worker";
+
+/**
+ * F2 — base system-prompt.md H1 stanzas that are exclusively about actions a
+ * `nonInteractive` review session never takes (it only calls
+ * `verification_result`): branch/commit/PR mechanics, and Edit/Write
+ * mutation-race guidance. Matched by exact H1 heading text (see
+ * `stripPromptStanzas`) against the LIVE `defaults/system-prompt.md` (or a
+ * user override) — if a future rewrite renames/removes one of these headings,
+ * stripping silently becomes a no-op for that stanza rather than erroring;
+ * `tests/system-prompt.test.ts` pins the savings this list is expected to buy.
+ */
+export const REVIEWER_EXCLUDED_STANZAS: readonly string[] = [
+	"Git conventions",
+	"Parallel tool calls that mutate the same target",
+];
+
+/**
+ * Remove each H1 section named in `headings` (its heading line through the
+ * line before the next H1, or end of text) from `text`. Runs of 3+ newlines
+ * left by a removed section are collapsed to a single blank line. No-op when
+ * `headings` is empty or none of the names appear.
+ */
+export function stripPromptStanzas(text: string, headings: readonly string[]): string {
+	if (headings.length === 0) return text;
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let skipping = false;
+	for (const line of lines) {
+		if (line.startsWith("# ")) {
+			skipping = headings.includes(line.slice(2).trim());
+		}
+		if (!skipping) out.push(line);
+	}
+	return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+/**
+ * F22 — Working Directory section body, shared by `_assembleSystemPrompt` and
+ * `getPromptSections` so both stay byte-identical to each other. The
+ * `"narrow-worker"` profile drops the "why this is a hard constraint"
+ * paragraph: it exists to warn about OTHER agents/branches colliding in a
+ * shared primary worktree, a scenario a provably narrow delegate (confined to
+ * its parent's worktree, no branch of its own) cannot cause.
+ */
+function workingDirectoryBody(cwd: string, profile?: PromptProfile): string {
+	const core = `Your working directory is: \`${cwd}\`\n\n` +
+		`Stay in this directory for all file operations and git commands. ` +
+		`Do not \`cd\` into other directories unless explicitly required by the task.`;
+	if (profile === "narrow-worker") return core;
+	return core + `\n\n` +
+		`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
+		`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
+		`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
+		`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
 }
 
 /**
@@ -568,7 +648,8 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	// 1. Global system prompt (resolve @refs relative to its directory)
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
+		let base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
+		if (base && parts.promptProfile === "reviewer") base = stripPromptStanzas(base, REVIEWER_EXCLUDED_STANZAS).trim();
 		if (base) sections.push({ label: "System Prompt", content: base });
 	}
 
@@ -583,16 +664,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 
 	// 2.5. Working directory instructions
 	if (parts.cwd) {
-		sections.push({ label: "Working Directory", content:
-			`# Working Directory\n\n` +
-			`Your working directory is: \`${parts.cwd}\`\n\n` +
-			`Stay in this directory for all file operations and git commands. ` +
-			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
-			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
-			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
-			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
-			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`
-		});
+		sections.push({ label: "Working Directory", content: `# Working Directory\n\n` + workingDirectoryBody(parts.cwd, parts.promptProfile) });
 	}
 
 	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching)
@@ -701,7 +773,8 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 1. Global system prompt (resolve @refs relative to its directory)
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
+		let base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
+		if (base && parts.promptProfile === "reviewer") base = stripPromptStanzas(base, REVIEWER_EXCLUDED_STANZAS).trim();
 		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
 	}
 
@@ -759,13 +832,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 2.5. Working directory (also included in the prompt file via assembleSystemPrompt;
 	// the agent CLI may additionally inject its own "Current working directory" based on --cwd)
 	if (parts.cwd) {
-		const cwdContent = `Your working directory is: \`${parts.cwd}\`\n\n` +
-			`Stay in this directory for all file operations and git commands. ` +
-			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
-			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
-			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
-			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
-			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
+		const cwdContent = workingDirectoryBody(parts.cwd, parts.promptProfile);
 		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
