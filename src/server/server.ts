@@ -7232,12 +7232,17 @@ async function handleApiRoute(
 
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		const resolvedProjectId = resolvedProject.projectId;
-		const effectiveConfigProjectId = normalizeConfigProjectId(resolvedProjectId);
-		const resolved = configCascade.resolveTools(resolvedProjectId);
+		// server == Headquarters: a missing projectId OR the Headquarters id both
+		// resolve to the server/global config scope (normalizeConfigProjectId maps
+		// them to undefined). A real projectId is validated. No cwd inference and no
+		// 400 on missing — read-only server-scope discovery stays available.
+		const rawProjectId = url.searchParams.get("projectId") || undefined;
+		if (rawProjectId && rawProjectId !== HEADQUARTERS_PROJECT_ID) {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		}
+		const effectiveConfigProjectId = normalizeConfigProjectId(rawProjectId);
+		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
 		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
 		// the renderer/action endpoints + /api/ext/contributions use) so a tool
@@ -7260,14 +7265,14 @@ async function handleApiRoute(
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: resolvedProjectId }))) {
+			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: effectiveConfigProjectId }))) {
 				if (!resolvedNames.has(t.name)) {
 					tools.push({ ...t, origin: t.origin ?? "mcp" });
 				}
 			}
 		}
-		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(resolvedProjectId)));
-		const toolDiagnostics = toolDiagnosticsForProject(resolvedProjectId);
+		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId)));
+		const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
 		attachToolDiagnostics(tools, toolDiagnostics);
 		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
 		return;
@@ -9629,10 +9634,15 @@ async function handleApiRoute(
 
 	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		const resolved = configCascade.resolveRoles(resolvedProject.projectId);
+		// server == Headquarters: missing projectId or the Headquarters id resolve to
+		// the server/global scope (normalizeConfigProjectId → undefined). Validate a
+		// real projectId; no cwd inference, no 400 on missing.
+		const rawProjectId = url.searchParams.get("projectId") || undefined;
+		if (rawProjectId && rawProjectId !== HEADQUARTERS_PROJECT_ID) {
+			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
+			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		}
+		const resolved = configCascade.resolveRoles(normalizeConfigProjectId(rawProjectId));
 		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}
