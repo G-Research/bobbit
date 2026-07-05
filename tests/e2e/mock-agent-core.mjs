@@ -2521,7 +2521,17 @@ export class MockAgentCore {
 						"Content-Type": "application/json",
 						"Content-Length": Buffer.byteLength(payload),
 					},
-					timeout: 5_000,
+					// Matches the generous bounds used by the browser-side waits that
+					// consume this response (e.g. proposal-edit-flow.spec.ts polls up
+					// to 15-20s for the resulting proposal_update to land). This is the
+					// mock agent's own loopback POST to the gateway's proposal
+					// seed/edit endpoints — under heavy full-suite load the gateway's
+					// request handler (disk I/O + side-panel workspace setup) can take
+					// longer than a tight 5s self-timeout, which would abort the
+					// request and silently resolve `null` well before the test's own
+					// (correctly generous) polling gives up. Raised to stop being the
+					// tightest bound in this flow.
+					timeout: 15_000,
 				}, (res) => {
 					let buf = "";
 					res.on("data", (chunk) => { buf += chunk.toString(); });
