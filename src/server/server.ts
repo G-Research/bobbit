@@ -12976,6 +12976,48 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/notify — enqueue a system-sourced notification into
+	// a session's prompt queue. Session-auth only (normal handleApiRoute gate;
+	// no new auth surface — unlike /prompt above, this is a client→server call,
+	// not agent→agent, so it does not require a caller session secret).
+	//
+	// Client caller: api.ts::notifyProposalDecision(), invoked by
+	// session-manager.ts after the user accepts/rejects a registered proposal
+	// (project/goal/role/tool/staff) — tells the proposing agent the outcome so
+	// it can continue (or retry) instead of silently stalling. Was a half-landed
+	// feature: the client call landed in #714 but this route never existed
+	// (W2.G(a) forensics finding) — the POST 404'd silently until now.
+	const notifyMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/notify$/);
+	if (notifyMatch && req.method === "POST") {
+		const notifySessionId = notifyMatch[1];
+		const notifyBody = await readBody(req);
+		if (typeof notifyBody?.message !== "string" || !notifyBody.message.trim()) {
+			json({ error: "message is required" }, 400);
+			return;
+		}
+		const MAX_NOTIFY_MESSAGE_LENGTH = 10_000;
+		if (notifyBody.message.length > MAX_NOTIFY_MESSAGE_LENGTH) {
+			json({ error: `message exceeds maximum length of ${MAX_NOTIFY_MESSAGE_LENGTH} characters` }, 400);
+			return;
+		}
+		const notifySession = sessionManager.getSession(notifySessionId);
+		if (!notifySession) { json({ error: "Session not found" }, 404); return; }
+		try {
+			// Mirrors the gate-reset/gate-bypass team-lead notification pattern
+			// above: live-steer a streaming session, else enqueue as a queued
+			// system-sourced prompt.
+			if (notifySession.status === "streaming") {
+				await sessionManager.deliverLiveSteer(notifySessionId, notifyBody.message, { source: "system" });
+			} else {
+				await sessionManager.enqueuePrompt(notifySessionId, notifyBody.message, { isSteered: true, source: "system" });
+			}
+			json({ ok: true });
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/wait — block until session becomes idle.
 	// Uses chunked transfer with periodic heartbeat newlines to prevent
 	// HTTP client body-timeout (undici defaults to 300s between chunks).
