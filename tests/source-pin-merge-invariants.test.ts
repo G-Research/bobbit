@@ -616,4 +616,25 @@ describe("Source pin — merge-loss invariants", () => {
 			"least-privilege (capabilityMask: { store: true }) with agents denied.",
 		);
 	});
+	it("session-setup.ts resolves and gates on resolvePreExistingTranscriptSetupMode (restored by the w2-transcript-recovery-restore fix)", () => {
+		const text = read("src/server/agent/session-setup.ts");
+		assert.ok(
+			text.includes("export function resolvePreExistingTranscriptSetupMode(")
+			&& text.includes('if (plan.bridgeOptions.claudeCodeSessionId || plan.claudeCodeSessionId) return "claude-code-resume";')
+			&& (text.match(/const preExistingMode = resolvePreExistingTranscriptSetupMode\(plan\);/g) ?? []).length === 2
+			&& (text.match(/\{ type: "switch_session"/g) ?? []).length === 2,
+			"src/server/agent/session-setup.ts must export resolvePreExistingTranscriptSetupMode()\n" +
+			"and gate both switch_session call sites (executeWorktreeAsync, spawnAgent) behind\n" +
+			"its 'switch-session' result, with an explicit 'claude-code-resume' branch that skips\n" +
+			"the Pi-only switch_session RPC. Without this a Claude Code continue/fork session\n" +
+			"silently issues a switch_session command the Claude Code runtime cannot honor. \n" +
+			"Originally added by 58f720cf; silently dropped by merge commit b687d93d (first\n" +
+			"parent 06498f81 had 1 reference, second parent 61f0e62 had 0, merge result had 0 —\n" +
+			"the same merge conflict resolution also reverted the createSessionBridge migration\n" +
+			"in this file back to `new RpcBridge`, since both hunks sit in the same region);\n" +
+			"restored by the w2-transcript-recovery-restore fix. DO NOT delete this pin — restore\n" +
+			"the dropped gating instead. Independently pinned by the behavioural tests in\n" +
+			"tests/session-setup-claude-code-preexisting.test.ts.",
+		);
+	});
 });
