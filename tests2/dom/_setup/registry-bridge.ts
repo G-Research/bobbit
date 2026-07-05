@@ -51,16 +51,21 @@ if (proto && !proto.__bobbitDomBridge) {
 // — and there we deliberately DO NOTHING: running the stale render callback would
 // render() into a removed container / torn-down document. Dropping the
 // gap-straggler frame is correct and side-effect-free.
-function ensureAnimationFrame(): void {
+function ensureGapGlobals(): void {
 	const gproto = Object.getPrototypeOf(globalThis as any);
-	if (!gproto || (gproto as any).__bobbitFrameFallback) return;
-	const def = (name: string, value: (arg: any) => any) =>
+	if (!gproto || (gproto as any).__bobbitGapGlobals) return;
+	const def = (name: string, value: any) =>
 		Object.defineProperty(gproto, name, { value, configurable: true, writable: true, enumerable: false });
+	// rAF is a populateGlobal own-property during live tests (shadows this), so the
+	// no-op is only reached in the teardown gap where it harmlessly drops a stale
+	// render frame. (document/localStorage are NOT safe to shadow this way — they
+	// leak into live tests — so api.ts poller stragglers are handled at the file
+	// level instead.)
 	def("requestAnimationFrame", (_cb: FrameRequestCallback) => 0);
 	def("cancelAnimationFrame", (_id: any) => undefined);
-	(gproto as any).__bobbitFrameFallback = true;
+	(gproto as any).__bobbitGapGlobals = true;
 }
-ensureAnimationFrame();
+ensureGapGlobals();
 
 function defineAllInto(ce: CustomElementRegistry | undefined): void {
 	if (!ce) return;
@@ -75,7 +80,7 @@ function defineAllInto(ce: CustomElementRegistry | undefined): void {
  * a top-level `beforeAll` at the top of every dom test file.
  */
 export function syncCustomElements(): void {
-	ensureAnimationFrame();
+	ensureGapGlobals();
 	defineAllInto((globalThis as any).customElements);
 	if (litCustomElements && litCustomElements !== (globalThis as any).customElements) defineAllInto(litCustomElements);
 	const dvCE = (litDocument as any)?.defaultView?.customElements;
