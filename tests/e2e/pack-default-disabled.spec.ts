@@ -46,7 +46,7 @@ function encodeStoreKey(key: string): string {
 /** Lay down a minimal server-scope market pack that ships `defaultDisabled: true`,
  *  with one tool group + one memory provider (for the configured-check). */
 function installPack(bobbitDir: string): void {
-	const root = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+	const root = path.join(bobbitDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(root, { recursive: true, force: true });
 	fs.mkdirSync(path.join(root, "tools", "g"), { recursive: true });
 	fs.mkdirSync(path.join(root, "providers"), { recursive: true });
@@ -157,7 +157,7 @@ test.describe("default-disabled pack resolution (server-side)", () => {
 	});
 
 	test.afterAll(() => {
-		fs.rmSync(path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME), { recursive: true, force: true });
+		fs.rmSync(path.join(bobbitDir, "config", "market-packs", PACK_NAME), { recursive: true, force: true });
 		seedConfig(bobbitDir, null);
 	});
 
