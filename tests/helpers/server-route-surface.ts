@@ -77,6 +77,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/review-annotations-routes.ts",
 	// STR-01 cohort 7 (session utility routes).
 	"src/server/routes/session-utility-routes.ts",
+	// STR-01 cohort 10 (staff CRUD + MCP operator/internal-MCP routes).
+	"src/server/routes/staff-mcp-operator-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

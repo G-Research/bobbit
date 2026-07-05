@@ -34,6 +34,8 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import type { ReviewAnnotationStore } from "../review-annotation-store.js";
 import type { BgProcessManager } from "../agent/bg-process-manager.js";
 import type { ToolManager } from "../agent/tool-manager.js";
+import type { ToolGroupPolicyStore } from "../agent/tool-group-policy-store.js";
+import type { Role } from "../agent/role-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -194,4 +196,9 @@ export interface CoreRouteCtx {
 	bgProcessManager: BgProcessManager;
 	noContent(): void;
 	toolManager: ToolManager;
+
+	// ── Cohort 10 (staff CRUD + MCP operator routes) additions — append-only.
+	groupPolicyStore: ToolGroupPolicyStore;
+	refreshMcpExternalTools(): void;
+	resolveRoleForProject(roleId: string, projectId?: string): Role | undefined;
 }
