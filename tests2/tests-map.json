@@ -154,7 +154,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/aigw-user-agent.test.ts"
 		},
 		{
 			"file": "tests/any-in-flight-child-excludes-paused.test.ts",
@@ -238,7 +240,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/ask-envelope.test.ts"
 		},
 		{
 			"file": "tests/ask-extension-execute.test.ts",
@@ -252,7 +256,9 @@
 			"bucket": "v2-dom",
 			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project).",
+			"migrated": true,
+			"v2Path": "tests2/dom/ask-user-choices-renderer.test.ts"
 		},
 		{
 			"file": "tests/ask-user-choices-validation.test.ts",
@@ -287,7 +293,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/backoff-delay.test.ts"
 		},
 		{
 			"file": "tests/base-ref-parse.test.ts",
@@ -308,7 +316,9 @@
 			"bucket": "v2-dom",
 			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project).",
+			"migrated": true,
+			"v2Path": "tests2/dom/bell-toggle.test.ts"
 		},
 		{
 			"file": "tests/bench-server-cpu.test.ts",
@@ -448,7 +458,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/child-ready-to-merge-helper.test.ts"
 		},
 		{
 			"file": "tests/child-team-scheduler.test.ts",
@@ -532,7 +544,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/compaction-types.test.ts"
 		},
 		{
 			"file": "tests/component-path-traversal.test.ts",
@@ -581,7 +595,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/context-blocks.test.ts"
 		},
 		{
 			"file": "tests/context-cost-stats.spec.ts",
@@ -595,7 +611,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/context-trace-store.test.ts"
 		},
 		{
 			"file": "tests/continue-archived-clone.test.ts",
@@ -700,14 +718,18 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/delegate-helper-policy-plumbing.test.ts"
 		},
 		{
 			"file": "tests/depends-on-validation.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/depends-on-validation.test.ts"
 		},
 		{
 			"file": "tests/dev-boot-timing.test.ts",
@@ -721,7 +743,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/docker-args-sanitize.test.ts"
 		},
 		{
 			"file": "tests/docker-args.test.ts",
@@ -749,7 +773,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/dynamic-context-section.test.ts"
 		},
 		{
 			"file": "tests/e2e/abort-status-e2e.spec.ts",
@@ -1582,7 +1608,9 @@
 			"bucket": "v2-integration",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier.",
+			"migrated": true,
+			"v2Path": "tests2/integration/project-delete-last.test.ts"
 		},
 		{
 			"file": "tests/e2e/project-detect-browse.spec.ts",
@@ -1610,7 +1638,9 @@
 			"bucket": "v2-integration",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier.",
+			"migrated": true,
+			"v2Path": "tests2/integration/project-story-api.test.ts"
 		},
 		{
 			"file": "tests/e2e/project-ui-api.spec.ts",
@@ -2058,7 +2088,9 @@
 			"bucket": "v2-integration",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier.",
+			"migrated": true,
+			"v2Path": "tests2/integration/tasks-api.test.ts"
 		},
 		{
 			"file": "tests/e2e/team-abort.spec.ts",
@@ -3771,7 +3803,9 @@
 			"bucket": "v2-integration",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+			"rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier.",
+			"migrated": true,
+			"v2Path": "tests2/integration/unseen-activity-api.test.ts"
 		},
 		{
 			"file": "tests/e2e/user-message-echo.spec.ts",
@@ -3862,28 +3896,36 @@
 			"bucket": "v2-dom",
 			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project).",
+			"migrated": true,
+			"v2Path": "tests2/dom/error-details.test.ts"
 		},
 		{
 			"file": "tests/error-helpers.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/error-helpers.test.ts"
 		},
 		{
 			"file": "tests/error-modal-call-sites.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/error-modal-call-sites.test.ts"
 		},
 		{
 			"file": "tests/event-buffer.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/event-buffer.test.ts"
 		},
 		{
 			"file": "tests/extension-host-action-dispatcher.test.ts",
@@ -4072,7 +4114,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/file-mentions-enumerate.test.ts"
 		},
 		{
 			"file": "tests/file-mentions-resolve.test.ts",
@@ -4093,7 +4137,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/gate-dependency-enforcement.test.ts"
 		},
 		{
 			"file": "tests/gate-diagnostics-cleanup.test.ts",
@@ -4121,28 +4167,36 @@
 			"bucket": "v2-dom",
 			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project).",
+			"migrated": true,
+			"v2Path": "tests2/dom/gate-signal-renderer.test.ts"
 		},
 		{
 			"file": "tests/gate-signal-step-enumeration.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/gate-signal-step-enumeration.test.ts"
 		},
 		{
 			"file": "tests/gate-status-renderer.spec.ts",
 			"bucket": "v2-dom",
 			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project).",
+			"migrated": true,
+			"v2Path": "tests2/dom/gate-status-renderer.test.ts"
 		},
 		{
 			"file": "tests/gate-status-summary.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/gate-status-summary.test.ts"
 		},
 		{
 			"file": "tests/gate-store-logic.test.ts",
@@ -4170,14 +4224,18 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/gate-verification-snapshot.test.ts"
 		},
 		{
 			"file": "tests/gesture-context.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/gesture-context.test.ts"
 		},
 		{
 			"file": "tests/get-image-model-for-session.test.ts",
@@ -4345,7 +4403,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/goal-metadata-second-review-fixes.test.ts"
 		},
 		{
 			"file": "tests/goal-metadata.test.ts",
@@ -4401,7 +4461,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/goal-store-metadata-migration.test.ts"
 		},
 		{
 			"file": "tests/goal-subtree.test.ts",
@@ -4583,7 +4645,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/inbox-store.test.ts"
 		},
 		{
 			"file": "tests/index-html-meta.test.ts",
@@ -4618,7 +4682,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/is-setup-complete.test.ts"
 		},
 		{
 			"file": "tests/lazy-renderer-placeholder.spec.ts",
@@ -5234,7 +5300,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/output-path-containment.test.ts"
 		},
 		{
 			"file": "tests/pack-contributions.test.ts",
@@ -5388,7 +5456,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/plan-mutation-store.test.ts"
 		},
 		{
 			"file": "tests/plan-mutation.test.ts",
@@ -5850,7 +5920,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/propose-project-validation.test.ts"
 		},
 		{
 			"file": "tests/provider-bridge-extension.test.ts",
@@ -6396,7 +6468,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/scaffold-agent-gitignore.test.ts"
 		},
 		{
 			"file": "tests/scroll-anchor-shrink.spec.ts",
@@ -7222,14 +7296,18 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/system-prompt-resolver.test.ts"
 		},
 		{
 			"file": "tests/system-prompt-skills-budget.test.ts",
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/system-prompt-skills-budget.test.ts"
 		},
 		{
 			"file": "tests/system-prompt.test.ts",
@@ -7383,7 +7461,9 @@
 			"bucket": "v2-core",
 			"method": "codemod",
 			"replacement": [],
-			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+			"rationale": "node:test logic suite — codemod to vitest (node env, pool=forks).",
+			"migrated": true,
+			"v2Path": "tests2/core/token-dir.test.ts"
 		},
 		{
 			"file": "tests/tool-activation-contract.test.ts",

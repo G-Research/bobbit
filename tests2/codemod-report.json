@@ -1,27 +1,28 @@
 {
   "generatedBy": "scripts/testing-v2/codemod.mjs",
-  "generatedAt": "2026-07-05T12:40:31.218Z",
+  "generatedAt": "2026-07-05T13:18:46.333Z",
   "argv": [
-    "tests/context-trace-store.test.ts",
-    "tests/plan-mutation-store.test.ts",
-    "tests/goal-store-metadata-migration.test.ts",
-    "tests/inbox-store.test.ts"
+    "tests/aigw-user-agent.test.ts",
+    "tests/error-modal-call-sites.test.ts",
+    "tests/gesture-context.test.ts",
+    "tests/child-ready-to-merge-helper.test.ts",
+    "tests/delegate-helper-policy-plumbing.test.ts"
   ],
   "dryRun": false,
   "methods": [
     "codemod"
   ],
   "counts": {
-    "total": 4,
-    "clean": 4,
+    "total": 5,
+    "clean": 5,
     "needsWithEnv": 0,
     "needsManual": 0,
-    "written": 4
+    "written": 5
   },
   "files": [
     {
-      "file": "tests/context-trace-store.test.ts",
-      "target": "tests2/core/context-trace-store.test.ts",
+      "file": "tests/aigw-user-agent.test.ts",
+      "target": "tests2/core/aigw-user-agent.test.ts",
       "method": "codemod",
       "bucket": "v2-core",
       "classification": "clean",
@@ -33,36 +34,45 @@
       "written": true
     },
     {
-      "file": "tests/goal-store-metadata-migration.test.ts",
-      "target": "tests2/core/goal-store-metadata-migration.test.ts",
+      "file": "tests/child-ready-to-merge-helper.test.ts",
+      "target": "tests2/core/child-ready-to-merge-helper.test.ts",
       "method": "codemod",
       "bucket": "v2-core",
       "classification": "clean",
       "reasons": [],
       "transforms": [
         "node:test→vitest imports",
-        "hook/mock call sites",
         "relative import paths"
       ],
       "written": true
     },
     {
-      "file": "tests/inbox-store.test.ts",
-      "target": "tests2/core/inbox-store.test.ts",
+      "file": "tests/delegate-helper-policy-plumbing.test.ts",
+      "target": "tests2/core/delegate-helper-policy-plumbing.test.ts",
       "method": "codemod",
       "bucket": "v2-core",
       "classification": "clean",
       "reasons": [],
       "transforms": [
-        "node:test→vitest imports",
-        "hook/mock call sites",
-        "relative import paths"
+        "node:test→vitest imports"
       ],
       "written": true
     },
     {
-      "file": "tests/plan-mutation-store.test.ts",
-      "target": "tests2/core/plan-mutation-store.test.ts",
+      "file": "tests/error-modal-call-sites.test.ts",
+      "target": "tests2/core/error-modal-call-sites.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/gesture-context.test.ts",
+      "target": "tests2/core/gesture-context.test.ts",
       "method": "codemod",
       "bucket": "v2-core",
       "classification": "clean",
