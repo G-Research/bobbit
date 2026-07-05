@@ -34,7 +34,6 @@ import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
-import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -86,6 +85,8 @@ import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
 import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
 // STR-01 cohort 7: background-process, draft, abort, and prompt-section routes.
 import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
+// STR-01 cohort 8: maintenance and search-admin routes.
+import { registerMaintenanceRoutes } from "./routes/maintenance-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3333,6 +3334,7 @@ registerServerProjectConfigRoutes(coreRouteTable);
 registerWorkflowsRoutes(coreRouteTable);
 registerReviewAnnotationRoutes(coreRouteTable);
 registerSessionUtilityRoutes(coreRouteTable);
+registerMaintenanceRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3578,7 +3580,8 @@ async function handleApiRoute(
 	// workflows family (src/server/routes/workflows-routes.ts) and the
 	// review-annotation family (src/server/routes/review-annotations-routes.ts);
 	// cohort 7, session utility routes
-	// (src/server/routes/session-utility-routes.ts).
+	// (src/server/routes/session-utility-routes.ts); cohort 8, maintenance and
+	// search-admin routes (src/server/routes/maintenance-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -13827,330 +13830,6 @@ async function handleApiRoute(
 			return;
 		}
 		json({ ok: true });
-		return;
-	}
-
-	// ─── Maintenance endpoints ──────────────────────────────────────────
-	// These replace the old automatic cleanup-on-startup behavior.
-	// Users can preview orphaned resources and choose to clean them up.
-	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
-
-	// GET /api/maintenance/worktrees
-	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
-		const include = url.searchParams.get("include");
-		if (include && include !== "all" && include !== "actionable" && include !== "troubleshooting") {
-			json({ error: "include must be all, actionable, or troubleshooting" }, 400);
-			return;
-		}
-		json(await worktreeInventory().scan({ include: (include as any) || "all" }));
-		return;
-	}
-
-	// GET /api/maintenance/archived-session-worktrees
-	if (url.pathname === "/api/maintenance/archived-session-worktrees" && req.method === "GET") {
-		const includeAlreadyCleaned = url.searchParams.get("includeAlreadyCleaned") === "1";
-		json(await worktreeInventory().legacyArchivedSessionWorktrees(includeAlreadyCleaned));
-		return;
-	}
-
-	// POST /api/maintenance/cleanup-archived-session-worktrees
-	if (url.pathname === "/api/maintenance/cleanup-archived-session-worktrees" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || Array.isArray(body)) {
-			json({ error: "Request body must be an object" }, 400);
-			return;
-		}
-		const rec = body as Record<string, unknown>;
-		const mode = rec.mode;
-		const hasSessionIds = Object.prototype.hasOwnProperty.call(body, "sessionIds");
-		const hasWorktrees = Object.prototype.hasOwnProperty.call(body, "worktrees");
-		const hasCategories = Object.prototype.hasOwnProperty.call(body, "categories");
-		const hasPresetId = Object.prototype.hasOwnProperty.call(body, "presetId");
-		const hasProjectId = Object.prototype.hasOwnProperty.call(body, "projectId");
-		const hasRepoPath = Object.prototype.hasOwnProperty.call(body, "repoPath");
-		if (mode !== "all" && mode !== "selected" && mode !== "category" && mode !== "preset") { json({ error: "Invalid cleanup mode" }, 400); return; }
-		if (mode === "all" && (hasSessionIds || hasWorktrees || hasCategories || hasPresetId || hasProjectId || hasRepoPath)) { json({ error: "mode=all does not accept selectors" }, 400); return; }
-		if (mode === "selected") {
-			if (hasCategories || hasPresetId) { json({ error: "mode=selected accepts sessionIds or worktrees selectors only" }, 400); return; }
-			if (hasSessionIds && hasWorktrees) { json({ error: "mode=selected accepts either sessionIds or worktrees, not both" }, 400); return; }
-			if (hasSessionIds && (!Array.isArray(rec.sessionIds) || rec.sessionIds.some((id: unknown) => typeof id !== "string"))) { json({ error: "sessionIds must be an array of strings" }, 400); return; }
-			if (hasWorktrees && (!Array.isArray(rec.worktrees) || rec.worktrees.some((wt: unknown) => {
-				if (!wt || typeof wt !== "object" || Array.isArray(wt)) return true;
-				const selector = wt as Record<string, unknown>;
-				return typeof selector.sessionId !== "string" || (selector.repo !== undefined && typeof selector.repo !== "string") || (selector.path !== undefined && typeof selector.path !== "string") || (selector.key !== undefined && typeof selector.key !== "string");
-			}))) { json({ error: "worktrees must be an array of selector objects with string fields" }, 400); return; }
-		}
-		if (mode === "category") {
-			const validCategories = new Set(["archived-session", "goal-session", "team-session", "delegate-session", "child-session", "single-repo", "multi-repo"]);
-			if (hasSessionIds || hasWorktrees || hasPresetId) { json({ error: "mode=category accepts categories with optional projectId or repoPath only" }, 400); return; }
-			if (!Array.isArray(rec.categories) || rec.categories.some((category: unknown) => typeof category !== "string" || !validCategories.has(category as string))) { json({ error: "categories must be an array of supported category strings" }, 400); return; }
-			if (rec.projectId !== undefined && typeof rec.projectId !== "string") { json({ error: "projectId must be a string" }, 400); return; }
-			if (rec.repoPath !== undefined && typeof rec.repoPath !== "string") { json({ error: "repoPath must be a string" }, 400); return; }
-		}
-		if (mode === "preset") {
-			if (hasSessionIds || hasWorktrees || hasCategories || hasProjectId || hasRepoPath) { json({ error: "mode=preset accepts presetId only" }, 400); return; }
-			if (typeof rec.presetId !== "string") { json({ error: "presetId must be a string" }, 400); return; }
-		}
-		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
-		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
-		return;
-	}
-
-	// GET /api/maintenance/orphaned-worktrees
-	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
-		json(await worktreeInventory().legacyOrphanedWorktrees());
-		return;
-	}
-
-	// POST /api/maintenance/cleanup-worktrees
-	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
-		const body = await readBody(req);
-		const contentLengthHeader = Array.isArray(req.headers["content-length"]) ? req.headers["content-length"][0] : req.headers["content-length"];
-		const hasRequestBody = contentLengthHeader !== undefined
-			? Number(contentLengthHeader) > 0
-			: req.headers["transfer-encoding"] !== undefined;
-		const isPlainObjectBody = body !== null && typeof body === "object" && !Array.isArray(body);
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "mode")) {
-			const mode = (body as any).mode;
-			if (mode !== "all-safe" && mode !== "selected") {
-				json({ error: "mode must be all-safe or selected" }, 400);
-				return;
-			}
-			if (mode === "all-safe") {
-				if (Object.prototype.hasOwnProperty.call(body, "itemIds") || Object.prototype.hasOwnProperty.call(body, "worktrees")) {
-					json({ error: "mode=all-safe does not accept selectors" }, 400);
-					return;
-				}
-			} else if (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string")) {
-				json({ error: "itemIds must be an array of strings" }, 400);
-				return;
-			}
-			json(await worktreeInventory().cleanup(body as any));
-			return;
-		}
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
-			json({ error: "mode is required when itemIds is provided" }, 400);
-			return;
-		}
-		if ((body === null && hasRequestBody) || (body !== null && !isPlainObjectBody)) {
-			json({ error: "cleanup-worktrees body must be an object" }, 400);
-			return;
-		}
-		const legacyBodyKeys = isPlainObjectBody ? Object.keys(body as Record<string, unknown>) : [];
-		if (legacyBodyKeys.some(key => key !== "worktrees")) {
-			json({ error: "legacy cleanup-worktrees body accepts worktrees only" }, 400);
-			return;
-		}
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
-			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
-			return;
-		}
-		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: isPlainObjectBody ? (body as any).worktrees : undefined });
-		json({ cleaned: result.counts.cleaned });
-		return;
-	}
-
-	// GET /api/maintenance/orphaned-sessions
-	if (url.pathname === "/api/maintenance/orphaned-sessions" && req.method === "GET") {
-		const sessions = await sessionManager.listOrphanedNonInteractiveSessions();
-		json({ sessions });
-		return;
-	}
-
-	// POST /api/maintenance/cleanup-sessions
-	if (url.pathname === "/api/maintenance/cleanup-sessions" && req.method === "POST") {
-		const body = await readBody(req);
-		const orphans = await sessionManager.listOrphanedNonInteractiveSessions();
-		const orphanIds = new Set(orphans.map(o => o.id));
-		const idsToTerminate = (body?.sessionIds && Array.isArray(body.sessionIds))
-			? (body.sessionIds as string[]).filter(id => orphanIds.has(id))
-			: orphans.map(o => o.id);
-		const terminated = await sessionManager.terminateOrphanedSessions(idsToTerminate);
-		json({ terminated });
-		return;
-	}
-
-	// GET /api/maintenance/expired-archives
-	if (url.pathname === "/api/maintenance/expired-archives" && req.method === "GET") {
-		const stats = await sessionManager.getExpiredArchiveStats();
-		json(stats);
-		return;
-	}
-
-	// POST /api/maintenance/purge-archives
-	if (url.pathname === "/api/maintenance/purge-archives" && req.method === "POST") {
-		await sessionManager.purgeExpiredArchives();
-		const stats = await sessionManager.getExpiredArchiveStats();
-		json({ purged: true, remaining: stats });
-		return;
-	}
-
-	// ─── Search admin endpoints (design §9, §11) ─────────────────────
-
-	function resolveSearchProject(pid: string | undefined | null) {
-		if (!pid) return null;
-		const ctx = projectContextManager.getOrCreate(pid);
-		return ctx;
-	}
-
-	function searchUnavailableResponse(state: string) {
-		const reasonMap: Record<string, string> = {
-			"disabled": "disabled",
-			"closed": "closed",
-			"initializing": "initializing",
-		};
-		const reason = reasonMap[state] ?? state;
-		return { error: "search-unavailable", reason, state };
-	}
-
-	// POST /api/search/rebuild
-	if (url.pathname === "/api/search/rebuild" && req.method === "POST") {
-		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
-		if (!projectId || typeof projectId !== "string") {
-			json({ error: "Missing projectId" }, 400);
-			return;
-		}
-		const ctx = resolveSearchProject(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		await ctx.searchIndex.whenReady();
-		const state = ctx.searchIndex.getState();
-		if (state !== "ready") {
-			json(searchUnavailableResponse(state), 503);
-			return;
-		}
-		// Kick off in background — client observes progress over WS.
-		ctx.searchIndex
-			.rebuildFromStores(ctx.goalStore, ctx.sessionStore, undefined, ctx.staffStore)
-			.catch((err) => console.error("[search] rebuild failed:", err));
-		json({ ok: true }, 202);
-		return;
-	}
-
-	// GET /api/search/stats?projectId=...
-	if (url.pathname === "/api/search/stats" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
-		const ctx = resolveSearchProject(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		await ctx.searchIndex.whenReady();
-		const stats = await ctx.searchIndex.getStats();
-		json(stats);
-		return;
-	}
-
-	// POST /api/search/compact
-	if (url.pathname === "/api/search/compact" && req.method === "POST") {
-		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
-		if (!projectId || typeof projectId !== "string") {
-			json({ error: "Missing projectId" }, 400);
-			return;
-		}
-		const ctx = resolveSearchProject(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		await ctx.searchIndex.whenReady();
-		const state = ctx.searchIndex.getState();
-		if (state !== "ready") {
-			json(searchUnavailableResponse(state), 503);
-			return;
-		}
-		try {
-			await ctx.searchIndex.compact();
-			json({ ok: true });
-		} catch (err) {
-			json({ error: `Compact failed: ${(err as Error).message}` }, 500);
-		}
-		return;
-	}
-
-	// GET /api/maintenance/orphaned-index-rows?projectId=...
-	if (url.pathname === "/api/maintenance/orphaned-index-rows" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
-		const ctx = resolveSearchProject(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
-		try {
-			const rows = store.list({ limit: 100000 });
-			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					const goalId = id.replace(/^goal:/, "");
-					isOrphan = !ctx.goalStore.get(goalId);
-				} else if (sourceId === "sessions") {
-					const sessionId = id.replace(/^session:/, "");
-					isOrphan = !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					const staffId = id.replace(/^staff:/, "");
-					isOrphan = !ctx.staffStore.get(staffId);
-				}
-				if (isOrphan) {
-					orphans.push({
-						id,
-						source_id: sourceId,
-						parent_id: row.parent_id != null ? String(row.parent_id) : null,
-					});
-				}
-			}
-			json({ count: orphans.length, sample: orphans.slice(0, 100) });
-		} catch (err) {
-			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
-		}
-		return;
-	}
-
-	// POST /api/maintenance/cleanup-index-rows
-	if (url.pathname === "/api/maintenance/cleanup-index-rows" && req.method === "POST") {
-		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
-		if (!projectId || typeof projectId !== "string") {
-			json({ error: "Missing projectId" }, 400);
-			return;
-		}
-		const ctx = resolveSearchProject(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
-		try {
-			const rows = store.list({ limit: 100000 });
-			const toDelete: string[] = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					isOrphan = !ctx.goalStore.get(id.replace(/^goal:/, ""));
-				} else if (sourceId === "sessions") {
-					isOrphan = !ctx.sessionStore.get(id.replace(/^session:/, ""));
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					isOrphan = !ctx.staffStore.get(id.replace(/^staff:/, ""));
-				}
-				if (isOrphan) toDelete.push(id);
-			}
-			if (toDelete.length) await store.deleteByIds(toDelete);
-			json({ deleted: toDelete.length });
-		} catch (err) {
-			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
-		}
 		return;
 	}
 
