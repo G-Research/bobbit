@@ -2,6 +2,11 @@ import type { IRpcBridge, RpcBridgeOptions, RpcEventListener } from "./rpc-bridg
 import { RpcBridge } from "./rpc-bridge.js";
 import type { ClaudeCodeConfig, ClaudeCodePermissionMode } from "./claude-code-config.js";
 import type { SessionRuntime } from "./session-store.js";
+// SPIKE (Wave-5 in-process bridge): dependency-free eligibility check only —
+// see in-process-bridge-eligibility.ts for why this must not import the pi
+// SDK. Does not affect createSessionBridge's behavior when
+// BOBBIT_INPROC_BRIDGE is unset (the default).
+import { isInProcessBridgeEligible } from "./in-process-bridge-eligibility.js";
 
 export interface ClaudeCodeBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-code";
@@ -96,7 +101,70 @@ export function createSessionBridge(options: SessionBridgeOptions): IRpcBridge {
 	if (hydrated.runtime === "claude-code") {
 		return new LazyClaudeCodeBridge(hydrated as ClaudeCodeBridgeOptions);
 	}
+	// SPIKE (Wave-5 in-process bridge, docs/design/in-process-bridge-spike.md):
+	// `isInProcessBridgeEligible` checks `BOBBIT_INPROC_BRIDGE` FIRST and
+	// short-circuits before looking at any other option, so this branch is a
+	// true no-op — and this function byte-identical to before the spike —
+	// whenever the flag is unset (the default). The check itself is a plain
+	// import with zero pi-SDK dependency (in-process-bridge-eligibility.ts);
+	// only `LazyInProcessBridge.load()` below dynamically imports the pi SDK,
+	// and only once an eligible session actually starts.
+	if (isInProcessBridgeEligible(hydrated)) {
+		return new LazyInProcessBridge(hydrated);
+	}
 	return new RpcBridge(hydrated);
+}
+
+class LazyInProcessBridge implements IRpcBridge {
+	private bridge?: IRpcBridge;
+	private bridgePromise?: Promise<IRpcBridge>;
+	private listeners = new Set<RpcEventListener>();
+	private bridgeUnsubscribers = new Map<RpcEventListener, () => void>();
+
+	constructor(private readonly options: RpcBridgeOptions) {}
+
+	get running(): boolean {
+		return this.bridge?.running ?? false;
+	}
+
+	onEvent(listener: RpcEventListener): () => void {
+		this.listeners.add(listener);
+		if (this.bridge) this.bridgeUnsubscribers.set(listener, this.bridge.onEvent(listener));
+		return () => {
+			this.listeners.delete(listener);
+			this.bridgeUnsubscribers.get(listener)?.();
+			this.bridgeUnsubscribers.delete(listener);
+		};
+	}
+
+	async start(): Promise<void> { return (await this.load()).start(); }
+	async stop(): Promise<void> { return this.bridge ? this.bridge.stop() : undefined; }
+	async prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any> { return (await this.load()).prompt(text, images, timeoutMs); }
+	async promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any> { return (await this.load()).promptWhenReady(text, images, opts); }
+	async steer(text: string): Promise<any> { return (await this.load()).steer(text); }
+	async abort(): Promise<any> { return this.bridge ? this.bridge.abort() : { success: true }; }
+	async getState(): Promise<any> { return this.bridge ? this.bridge.getState() : { success: true, data: { status: "starting" } }; }
+	async getMessages(): Promise<any> { return this.bridge ? this.bridge.getMessages() : { success: true, data: [] }; }
+	async setModel(provider: string, modelId: string): Promise<any> { return (await this.load()).setModel(provider, modelId); }
+	async setThinkingLevel(level: string): Promise<any> { return (await this.load()).setThinkingLevel(level); }
+	async compact(timeoutMs?: number): Promise<any> { return (await this.load()).compact(timeoutMs); }
+	async waitForReady(overallTimeoutMs?: number): Promise<void> { return (await this.load()).waitForReady(overallTimeoutMs); }
+	async sendCommand(command: Record<string, any>, timeoutMs?: number): Promise<any> { return (await this.load()).sendCommand(command, timeoutMs); }
+
+	private async load(): Promise<IRpcBridge> {
+		if (this.bridge) return this.bridge;
+		if (!this.bridgePromise) {
+			this.bridgePromise = import("./in-process-bridge.js").then((mod) => {
+				const bridge = new mod.InProcessBridge(this.options) as IRpcBridge;
+				for (const listener of this.listeners) {
+					this.bridgeUnsubscribers.set(listener, bridge.onEvent(listener));
+				}
+				this.bridge = bridge;
+				return bridge;
+			});
+		}
+		return this.bridgePromise;
+	}
 }
 
 class LazyClaudeCodeBridge implements IRpcBridge {
