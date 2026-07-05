@@ -102,6 +102,8 @@ import { registerDirectoryBrowserRoutes } from "./routes/directory-browser-route
 import { registerSkillsRoutes } from "./routes/skills-routes.js";
 // STR-01 cohort 15: model/provider settings routes.
 import { registerModelProviderRoutes } from "./routes/model-provider-routes.js";
+// STR-01 cohort 16a: cost endpoints.
+import { registerCostRoutes } from "./routes/cost-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3436,6 +3438,7 @@ registerRolesRoutes(coreRouteTable);
 registerDirectoryBrowserRoutes(coreRouteTable);
 registerSkillsRoutes(coreRouteTable);
 registerModelProviderRoutes(coreRouteTable);
+registerCostRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -3743,13 +3746,15 @@ async function handleApiRoute(
 				groupPolicyStore, refreshMcpExternalTools, resolveRoleForProject,
 				// Cohort 12 (preferences routes) additions — append-only.
 				broadcastPreferencesChanged, claudeCodeConfirmationBinding, firstHeader, getSafePreferences, isHumanOperatorRequest,
-				// STR-05 roles route-hoist additions — append-only.
-				clampRoleThinking, resolveRequiredConfigProjectScope, roleManager, serverRoleStore, writeConfigProjectScopeError,
-				// Cohort 14 (directory browser routes) additions — append-only.
-				defaultCwd: config.defaultCwd,
-				// Cohort 15 (model/provider routes) additions — append-only.
-				sandboxScope,
-			};
+					// STR-05 roles route-hoist additions — append-only.
+					clampRoleThinking, resolveRequiredConfigProjectScope, roleManager, serverRoleStore, writeConfigProjectScopeError,
+					// Cohort 14 (directory browser routes) additions — append-only.
+					defaultCwd: config.defaultCwd,
+					// Cohort 15 (model/provider routes) additions — append-only.
+					sandboxScope,
+					// Cohort 16a (cost routes) additions — append-only.
+					getGoalAcrossProjects, getTaskManagerForTask,
+				};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
 		}
@@ -11452,160 +11457,8 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Cost endpoints ─────────────────────────────────────────────
-
-	// GET /api/sessions/:id/cost/breakdown — cost breakdown including delegates
-	const sessionCostBreakdownMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost\/breakdown$/);
-	if (sessionCostBreakdownMatch && req.method === "GET") {
-		const sessionId = sessionCostBreakdownMatch[1];
-		const live = sessionManager.getSession(sessionId);
-		const sessionForCost = live ?? sessionManager.getPersistedSession(sessionId);
-		if (!sessionForCost?.projectId) {
-			json({ error: "Session not found or has no project" }, 404);
-			return;
-		}
-		const costTracker = sessionManager.getCostTracker(sessionForCost.projectId);
-		const allCosts = costTracker.getAllCosts();
-		const sessionCost = allCosts.get(sessionId);
-		if (!sessionCost) {
-			json({ error: "No cost data" }, 404);
-			return;
-		}
-
-		// Find delegate sessions
-		const delegates: any[] = [];
-		const allSessions = [...sessionManager.listSessions(), ...sessionManager.listArchivedSessions()];
-		for (const s of allSessions) {
-			if ((s as any).delegateOf === sessionId) {
-				const dCost = allCosts.get(s.id);
-				if (dCost && dCost.totalCost > 0) {
-					delegates.push({
-						sessionId: s.id,
-						title: (s as any).title || s.id.slice(0, 8),
-						...dCost,
-					});
-				}
-			}
-		}
-		delegates.sort((a, b) => b.totalCost - a.totalCost);
-
-		json({
-			session: { sessionId, ...sessionCost },
-			delegates,
-		});
-		return;
-	}
-
-	// GET /api/sessions/:id/cost — cost for a single session
-	const sessionCostMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost$/);
-	if (sessionCostMatch && req.method === "GET") {
-		const id = sessionCostMatch[1];
-		const liveSession = sessionManager.getSession(id);
-		const sessionForCost = liveSession ?? sessionManager.getPersistedSession(id);
-		if (!sessionForCost?.projectId) {
-			json({ error: "Session not found or has no project" }, 404);
-			return;
-		}
-		const cost = sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
-		if (!cost) {
-			json({ error: "No cost data for this session" }, 404);
-			return;
-		}
-		json(cost);
-		return;
-	}
-
-	// GET /api/goals/:goalId/cost/breakdown — per-session cost breakdown for a goal
-	const goalCostBreakdownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost\/breakdown$/);
-	if (goalCostBreakdownMatch && req.method === "GET") {
-		const goalId = goalCostBreakdownMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) {
-			json({ error: "Goal not found" }, 404);
-			return;
-		}
-		if (!goal.projectId) {
-			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null }, sessions: [] });
-			return;
-		}
-		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const costTracker = sessionManager.getCostTracker(goal.projectId);
-		const allCosts = costTracker.getAllCosts();
-
-		// Build per-session breakdown with metadata
-		const sessions: any[] = [];
-		for (const sid of sessionIds) {
-			const cost = allCosts.get(sid);
-			if (!cost || cost.totalCost === 0) continue;
-
-			// Get session metadata from live sessions or store
-			const live = sessionManager.listSessions().find(s => s.id === sid);
-			const archived = !live ? sessionManager.listArchivedSessions().find(s => s.id === sid) : null;
-			const meta = live || archived;
-
-			sessions.push({
-				sessionId: sid,
-				title: (meta as any)?.title || sid.slice(0, 8),
-				role: (meta as any)?.role || null,
-				delegateOf: (meta as any)?.delegateOf || null,
-				assistantType: (meta as any)?.assistantType || null,
-				taskId: (meta as any)?.taskId || null,
-				...cost,
-			});
-		}
-
-		// Sort by cost descending
-		sessions.sort((a, b) => b.totalCost - a.totalCost);
-
-		// Compute aggregate
-		const aggregate = costTracker.getGoalCost(goalId, sessionIds);
-
-		json({ aggregate, sessions });
-		return;
-	}
-
-	// GET /api/goals/:goalId/cost — aggregate cost across all sessions linked to a goal
-	const goalCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost$/);
-	if (goalCostMatch && req.method === "GET") {
-		const goalId = goalCostMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) {
-			json({ error: "Goal not found" }, 404);
-			return;
-		}
-		if (!goal.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
-			return;
-		}
-		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
-		json(cost);
-		return;
-	}
-
-	// GET /api/tasks/:id/cost — cost for the session(s) assigned to a task
-	const taskCostMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cost$/);
-	if (taskCostMatch && req.method === "GET") {
-		const taskId = taskCostMatch[1];
-		const task = getTaskManagerForTask(taskId).getTask(taskId);
-		if (!task) {
-			json({ error: "Task not found" }, 404);
-			return;
-		}
-		if (!task.assignedSessionId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
-			return;
-		}
-		const taskSessionLive = sessionManager.getSession(task.assignedSessionId);
-		const taskSession = taskSessionLive ?? sessionManager.getPersistedSession(task.assignedSessionId);
-		if (!taskSession?.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
-			return;
-		}
-		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
-		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
-		return;
-	}
+		// Cost endpoints moved to the core route registry (STR-01 cohort 16a) —
+		// see src/server/routes/cost-routes.ts and docs/design/route-registry.md.
 
 	// ── Preview mount endpoints ──────────────────────────────────────
 	const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
