@@ -45,6 +45,32 @@ describe("in-process bridge eligibility (spike, pure logic)", () => {
 		process.env.BOBBIT_INPROC_BRIDGE = "true";
 		assert.equal(eligibility.isInProcessBridgeEligible({ readOnly: true }), false);
 	});
+
+	// ELIGIBILITY-SIGNAL (eligibility-signal lane, TRACKER item / sizing
+	// results): `readOnly` is now ORed with `isReadOnlyToolPolicy(allowedTools)`
+	// so a session can qualify from its RESOLVED tool allowlist alone, without
+	// a caller ever setting the explicit flag. New pins only — every assertion
+	// above (pre-existing, flag-only options with no `allowedTools`) is
+	// unaffected: `isReadOnlyToolPolicy(undefined)` is `false`, so the OR is a
+	// no-op wherever `allowedTools` isn't threaded through.
+	it("derives eligibility from a read-only resolved allowlist even when the flag is never set on the session", () => {
+		process.env.BOBBIT_INPROC_BRIDGE = "1";
+		assert.equal(eligibility.isInProcessBridgeEligible({ allowedTools: ["read", "grep", "find", "ls"] }), true);
+		assert.equal(eligibility.isInProcessBridgeEligible({ allowedTools: ["read", "grep", "bash"] }), false);
+	});
+
+	it("derived and explicit flag are safe in both directions (OR, never AND)", () => {
+		process.env.BOBBIT_INPROC_BRIDGE = "1";
+		// derived=false (bash present) + flag=true -> still eligible (flag wins).
+		assert.equal(eligibility.isInProcessBridgeEligible({ readOnly: true, allowedTools: ["read", "bash"] }), true);
+		// derived=true (no mutating tool) + flag=false/unset -> still eligible.
+		assert.equal(eligibility.isInProcessBridgeEligible({ readOnly: false, allowedTools: ["read", "grep"] }), true);
+	});
+
+	it("a resolved allowlist containing an MCP tool never derives eligible (fail closed)", () => {
+		process.env.BOBBIT_INPROC_BRIDGE = "1";
+		assert.equal(eligibility.isInProcessBridgeEligible({ allowedTools: ["read", "mcp__github__create_pr"] }), false);
+	});
 });
 
 describe("createSessionBridge routing (spike, pinned)", () => {
