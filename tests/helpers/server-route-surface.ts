@@ -42,6 +42,8 @@ export const DELEGATE_ROUTE_MODULE_PATHS = [
 	"src/server/side-panel-workspace-routes.ts",
 	"src/server/agent/nested-goal-routes.ts",
 	"src/server/pr-walkthrough/routes.ts",
+	// SWARM-W1: the fixed best-of-N REST surface (create/status/verify/confirm).
+	"src/server/agent/swarm-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

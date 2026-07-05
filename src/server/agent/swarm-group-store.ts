@@ -64,6 +64,39 @@ export interface SwarmGroupRecord {
 	 */
 	allFailed: boolean;
 	updatedAt: number;
+	/**
+	 * SWARM-W1 carry-forward fix (SWARM-W0's tracker note: "expected-sibling
+	 * set must be persisted at group creation — capture-time scan can fire
+	 * the barrier early"). When set, this is the AUTHORITATIVE expected-set,
+	 * fixed at `createGroup()` time (before any sibling can go terminal) —
+	 * `recordArtifact` ignores its own `expectedSiblingIds` parameter once
+	 * this is present, so a barrier can never fire against a set that is
+	 * still growing (e.g. a sibling created after another already
+	 * terminated, or a sibling reparented/archived mid-run would otherwise
+	 * silently shrink a live `goalStore` scan). Absent for groups that never
+	 * went through `createGroup` (legacy/test callers) — those fall back to
+	 * the first `recordArtifact` call's parameter, exactly as before.
+	 */
+	expectedSiblingIds?: string[];
+	/** SWARM-W1: opaque per-group config (token/wall-clock budgets, verify command) the governor/verifier read. Not interpreted by this store. */
+	config?: Record<string, unknown>;
+	/**
+	 * SWARM-W1: the last deterministic-verifier run over this group, if any.
+	 * Persisted (not just held in memory) so a page reload after triggering
+	 * `/verify` still shows the pick + scores — the REST layer's
+	 * confirmation TOKEN itself is never persisted here (stays in the
+	 * in-memory `operator-confirmation.ts` store, one-shot by design); only
+	 * the human-readable outcome is durable.
+	 */
+	lastVerify?: {
+		outcome: string;
+		winnerGoalId?: string;
+		scores: Array<{ goalId: string; passed: boolean; score: number; exitCode: number | null; timedOut: boolean }>;
+		verifiedAt: number;
+	};
+	/** SWARM-W1: set once a human has confirmed a winner and it has been actually integrated (real git merge, bypassing the swarm-suppression). Never set for losers. */
+	integratedGoalId?: string;
+	integratedAt?: number;
 }
 
 export class SwarmGroupStore {
@@ -107,11 +140,47 @@ export class SwarmGroupStore {
 	}
 
 	/**
+	 * SWARM-W1: create a swarm group's record UP FRONT, at fan-out time —
+	 * BEFORE any sibling goal can possibly go terminal. Persists
+	 * `expectedSiblingIds` as the group's permanent, authoritative expected
+	 * set (see the field doc on {@link SwarmGroupRecord}). Idempotent: a
+	 * second call for the same `swarmGroup` id is a no-op (returns the
+	 * existing record unchanged) rather than resetting a group that may
+	 * already have captured artifacts — callers that need to change the
+	 * expected set must not reuse an id.
+	 */
+	createGroup(
+		swarmGroup: string,
+		expectedSiblingIds: readonly string[],
+		rootGoalId?: string,
+		config?: Record<string, unknown>,
+	): SwarmGroupRecord {
+		const existing = this.groups.get(swarmGroup);
+		if (existing) return existing;
+		const record: SwarmGroupRecord = {
+			swarmGroup,
+			rootGoalId,
+			artifacts: [],
+			barrierFired: false,
+			allFailed: false,
+			updatedAt: Date.now(),
+			expectedSiblingIds: [...expectedSiblingIds],
+			config,
+		};
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/**
 	 * Record (or update, idempotently by `goalId`) a sibling's terminal
-	 * artifact and recompute the barrier. `expectedSiblingIds` is the FULL set
-	 * of goal ids that belong to this swarm group at call time (the caller
-	 * enumerates via `goalStore` — this store has no goal-graph knowledge of
-	 * its own). The barrier fires once every expected id has an artifact.
+	 * artifact and recompute the barrier. `expectedSiblingIds` is used ONLY
+	 * as a fallback for a group that was never `createGroup`-ed (legacy /
+	 * direct-`recordArtifact` callers, incl. this file's own unit tests): a
+	 * group with a persisted `expectedSiblingIds` (set by `createGroup`)
+	 * ALWAYS wins over whatever the caller passes here — see the SWARM-W1
+	 * carry-forward fix note on {@link SwarmGroupRecord.expectedSiblingIds}.
+	 * The barrier fires once every expected id has an artifact.
 	 */
 	recordArtifact(
 		swarmGroup: string,
@@ -123,7 +192,11 @@ export class SwarmGroupStore {
 		const artifacts = existing ? existing.artifacts.filter(a => a.goalId !== artifact.goalId) : [];
 		artifacts.push(artifact);
 
-		const expected = new Set(expectedSiblingIds);
+		// Authoritative expected set: the persisted one (from createGroup),
+		// falling back to the caller-supplied scan only when no group record
+		// (or no persisted expected set on one) exists yet.
+		const authoritativeExpected = existing?.expectedSiblingIds ?? expectedSiblingIds;
+		const expected = new Set(authoritativeExpected);
 		const captured = new Set(artifacts.map(a => a.goalId));
 		const barrierFired = expected.size > 0 && [...expected].every(id => captured.has(id));
 		const allFailed = barrierFired && artifacts.every(a => a.status !== "done");
@@ -135,7 +208,32 @@ export class SwarmGroupStore {
 			barrierFired,
 			allFailed,
 			updatedAt: Date.now(),
+			expectedSiblingIds: existing?.expectedSiblingIds,
+			config: existing?.config,
+			lastVerify: existing?.lastVerify,
+			integratedGoalId: existing?.integratedGoalId,
+			integratedAt: existing?.integratedAt,
 		};
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W1: persist a deterministic-verifier run's outcome so it survives reload. No-op (returns undefined) if the group doesn't exist. */
+	recordVerifyResult(swarmGroup: string, result: NonNullable<SwarmGroupRecord["lastVerify"]>): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing) return undefined;
+		const record: SwarmGroupRecord = { ...existing, lastVerify: result, updatedAt: Date.now() };
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W1: mark a group's winner as integrated (real merge performed, human-confirmed). No-op (returns undefined) if the group doesn't exist. */
+	recordIntegration(swarmGroup: string, winnerGoalId: string): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing) return undefined;
+		const record: SwarmGroupRecord = { ...existing, integratedGoalId: winnerGoalId, integratedAt: Date.now(), updatedAt: Date.now() };
 		this.groups.set(swarmGroup, record);
 		this.save();
 		return record;

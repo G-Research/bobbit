@@ -423,6 +423,66 @@
 	font-family: var(--font-mono, monospace);
 }
 
+/* ── SWARM GOVERNOR STRIP (SWARM-W1) — only rendered when the goal has swarmGroup-tagged children ── */
+.swarm-governor-strip-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+.swarm-governor-strip {
+	background: var(--secondary);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 10px 14px;
+	font-size: 12px;
+}
+.swarm-governor-strip-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+.swarm-governor-badge {
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--primary);
+}
+.swarm-governor-count,
+.swarm-governor-budget,
+.swarm-governor-waiting {
+	color: var(--text-tertiary);
+}
+.swarm-governor-escalate {
+	color: var(--destructive, #e5484d);
+	font-weight: 600;
+}
+.swarm-governor-integrated {
+	color: var(--success, #30a46c);
+	font-weight: 600;
+}
+.swarm-governor-scores {
+	margin-top: 4px;
+	color: var(--text-tertiary);
+}
+.swarm-governor-btn {
+	font-size: 12px;
+	padding: 4px 10px;
+	border-radius: var(--radius);
+	border: 1px solid var(--border);
+	background: var(--background);
+	cursor: pointer;
+}
+.swarm-governor-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+.swarm-governor-btn-primary {
+	background: var(--primary);
+	color: var(--primary-foreground, #fff);
+	border-color: var(--primary);
+}
+
 /* ── AGENT GRID ── */
 .agent-grid {
 	display: grid;

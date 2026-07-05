@@ -45,6 +45,7 @@ import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
+import { tryHandleSwarmRoute } from "./agent/swarm-routes.js";
 import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -5793,6 +5794,23 @@ async function handleApiRoute(
 		jsonError,
 		broadcastToAll,
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+	})) return;
+
+	// ── SWARM-W1 endpoints ────────────────────────────────────────
+	// REST surface for the fixed best-of-N swarm pattern. Implementation in
+	// `swarm-routes.ts`. See docs/design/swarm-orchestration-w1.md.
+	if (await tryHandleSwarmRoute(req, url, {
+		projectContextManager,
+		verificationHarness,
+		teamManager,
+		sessionManager,
+		cookieStore: cookieStore!,
+		getGoalAcrossProjects,
+		getGoalManagerForGoal,
+		readBody,
+		json,
+		jsonError,
+		broadcastToAll,
 	})) return;
 
 	// GET /api/goals/:goalId/descendants — live + archived descendants for the Plan tab.

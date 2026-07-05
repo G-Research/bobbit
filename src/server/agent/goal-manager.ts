@@ -780,7 +780,7 @@ export class GoalManager {
 	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold;
 	 * mismatch throws PARENT_MISMATCH (prevents cross-tree merges).
 	 */
-	async mergeChild(parentGoalId: string, childGoalId: string): Promise<MergeChildOutcome> {
+	async mergeChild(parentGoalId: string, childGoalId: string, opts?: { forceIntegrateSwarmWinner?: boolean }): Promise<MergeChildOutcome> {
 		const parent = this.store.get(parentGoalId);
 		const child = this.store.get(childGoalId);
 		if (!parent) {
@@ -807,7 +807,16 @@ export class GoalManager {
 		// so a swarm sibling that hasn't set up a worktree yet never throws
 		// GOAL_GIT_UNAVAILABLE. Non-swarm children (swarmGroup undefined) fall
 		// through to the unchanged merge path below — zero behavior change.
-		if (child.swarmGroup) {
+		//
+		// SWARM-W1: the ONE escape hatch is `opts.forceIntegrateSwarmWinner`,
+		// set ONLY by the swarm confirm route (`swarm-routes.ts`) AFTER a
+		// human has consumed a one-shot operator-confirmation token bound to
+		// this exact (swarmGroup, childGoalId) pick — see
+		// docs/design/swarm-orchestration-w1.md. Every other caller (and the
+		// default, opts omitted) still gets the unconditional skip above —
+		// zero behavior change for the existing SWARM-W0 auto-merge-suppression
+		// contract and its pinning tests.
+		if (child.swarmGroup && !opts?.forceIntegrateSwarmWinner) {
 			return {
 				merged: false,
 				alreadyMerged: false,
