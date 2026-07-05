@@ -35,6 +35,7 @@ toolPolicies:
   "Children": never
   "File System": never
   "Gates": never
+  "Harness": never
   "HTML": never
   "Hindsight": never
   "Images": never

@@ -24,7 +24,14 @@ function loadBobbitPackageVersion(): string {
 	throw new Error(`Failed to locate Bobbit package.json for AI Gateway User-Agent. Tried: ${candidates.join(", ")}`);
 }
 
-const bobbitPackageVersion = loadBobbitPackageVersion();
+/**
+ * The running gateway's own `package.json` version. Exported (in addition to
+ * being folded into `BOBBIT_AIGW_USER_AGENT` below) so other call sites that
+ * need the raw version string — e.g. the `orient` tool's self-description
+ * payload (Finding W2.15) — read it from this single already-resolved
+ * constant instead of re-implementing the package.json lookup.
+ */
+export const bobbitPackageVersion = loadBobbitPackageVersion();
 
 export const BOBBIT_AIGW_USER_AGENT = `Bobbit/${bobbitPackageVersion}`;
 
