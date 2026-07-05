@@ -64,6 +64,9 @@ import { componentToEditState, buildSavePayload, type ComponentEditState } from 
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
+import { CustomProviderDialog } from "../ui/dialogs/CustomProviderDialog.js";
+import "../ui/components/CustomProviderCard.js";
+import type { CustomProvider, CustomProviderType } from "../ui/storage/stores/custom-providers-store.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
 
 type SettingsTab = SettingsTabId;
@@ -1489,6 +1492,139 @@ let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
 
+// ── Custom Providers (Ollama/llama.cpp/vLLM/LM Studio + manual remote APIs
+// like NVIDIA NIM) — see docs/design/ for the click path. Loaded lazily like
+// the rest of this tab's state (`_customProvidersLoaded` guard). ──
+let customProviders: CustomProvider[] = [];
+let _customProvidersLoaded = false;
+let customProviderStatus: Map<string, { modelCount: number; status: "connected" | "disconnected" | "checking" }> = new Map();
+
+function isAutoDiscoveryProviderType(type: string): boolean {
+	return type === "ollama" || type === "llama.cpp" || type === "vllm" || type === "lmstudio";
+}
+
+function loadCustomProvidersState(): void {
+	if (_customProvidersLoaded) return;
+	_customProvidersLoaded = true;
+	void refreshCustomProviders();
+}
+
+async function refreshCustomProviders(): Promise<void> {
+	try {
+		const res = await gatewayFetch("/api/custom-providers");
+		if (res.ok) {
+			customProviders = await res.json();
+		}
+	} catch (error) {
+		console.error("Failed to load custom providers:", error);
+	}
+	renderApp();
+	for (const provider of customProviders) {
+		if (isAutoDiscoveryProviderType(provider.type)) void checkCustomProviderStatus(provider);
+	}
+}
+
+async function checkCustomProviderStatus(provider: CustomProvider): Promise<void> {
+	customProviderStatus.set(provider.id, { modelCount: 0, status: "checking" });
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/models");
+		if (res.ok) {
+			const models = await res.json();
+			const providerModels = (Array.isArray(models) ? models : []).filter((m: any) => m.provider === provider.name);
+			customProviderStatus.set(provider.id, { modelCount: providerModels.length, status: "connected" });
+		} else {
+			customProviderStatus.set(provider.id, { modelCount: 0, status: "disconnected" });
+		}
+	} catch {
+		customProviderStatus.set(provider.id, { modelCount: 0, status: "disconnected" });
+	}
+	renderApp();
+}
+
+async function addCustomProvider(type: CustomProviderType): Promise<void> {
+	await CustomProviderDialog.open(undefined, type, () => {
+		void refreshCustomProviders();
+	});
+}
+
+async function editCustomProvider(provider: CustomProvider): Promise<void> {
+	await CustomProviderDialog.open(provider, undefined, () => {
+		void refreshCustomProviders();
+	});
+}
+
+async function deleteCustomProvider(provider: CustomProvider): Promise<void> {
+	if (!confirm("Are you sure you want to delete this provider?")) return;
+	try {
+		const res = await gatewayFetch(`/api/custom-providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
+		if (!res.ok) throw new Error("Failed to delete provider");
+		await refreshCustomProviders();
+	} catch (error) {
+		console.error("Failed to delete custom provider:", error);
+	}
+}
+
+function renderCustomProvidersSection() {
+	loadCustomProvidersState();
+
+	return html`
+		<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="custom-providers-section">
+			<div class="flex items-center justify-between">
+				<div>
+					<h3 class="text-sm font-semibold text-foreground">Custom Providers</h3>
+					<p class="text-sm text-muted-foreground">
+						Local servers (Ollama, LM Studio, vLLM, llama.cpp) or a manually-configured OpenAI-compatible
+						remote API (e.g. NVIDIA NIM, OpenRouter, Together).
+					</p>
+				</div>
+				${Select({
+					placeholder: "Add Provider",
+					options: [
+						{ value: "ollama", label: "Ollama" },
+						{ value: "llama.cpp", label: "llama.cpp" },
+						{ value: "vllm", label: "vLLM" },
+						{ value: "lmstudio", label: "LM Studio" },
+						{ value: "openai-completions", label: "OpenAI Completions Compatible" },
+						{ value: "openai-responses", label: "OpenAI Responses Compatible" },
+						{ value: "anthropic-messages", label: "Anthropic Messages Compatible" },
+						{ value: "openai-images", label: "OpenAI Images Compatible" },
+						{ value: "gemini-images", label: "Gemini Images Compatible" },
+						{ value: "google-imagen", label: "Google Imagen Compatible" },
+					],
+					onChange: (value: string) => void addCustomProvider(value as CustomProviderType),
+					variant: "outline",
+					size: "sm",
+				})}
+			</div>
+			${
+				customProviders.length === 0
+					? html`
+						<div class="text-sm text-muted-foreground text-center py-8" data-testid="custom-providers-empty">
+							No custom providers configured. Click 'Add Provider' to get started.
+						</div>
+					`
+					: html`
+						<div class="flex flex-col gap-4" data-testid="custom-providers-list">
+							${customProviders.map(
+								(provider) => html`
+									<custom-provider-card
+										.provider=${provider}
+										.isAutoDiscovery=${isAutoDiscoveryProviderType(provider.type)}
+										.status=${customProviderStatus.get(provider.id)}
+										.onRefresh=${(p: CustomProvider) => checkCustomProviderStatus(p)}
+										.onEdit=${(p: CustomProvider) => editCustomProvider(p)}
+										.onDelete=${(p: CustomProvider) => deleteCustomProvider(p)}
+									></custom-provider-card>
+								`,
+							)}
+						</div>
+					`
+			}
+		</div>
+	`;
+}
+
 type ClaudeCodePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
 type ClaudeCodeStatus = {
 	available?: boolean;
@@ -2641,6 +2777,8 @@ export function renderModelsTab() {
 					`)}
 				</div>
 			</div>
+
+			${renderCustomProvidersSection()}
 		</div>
 	`;
 }
