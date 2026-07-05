@@ -30,6 +30,10 @@ export const DECISION_POINTS = [
 	// CLF-W4 — session spawn, where the model/thinking-tier for a new session
 	// is resolved (see model-tier-classifier.ts's header for the full design).
 	"session-spawn",
+	// CLF-W5 — gate verification, where a signal's diff shape (changed-file
+	// count/path-classes/high-risk surfaces) is known before its verify[]
+	// steps run (see gate-risk-classifier.ts's header for the full design).
+	"gate-verify",
 ] as const;
 
 export type DecisionPoint = (typeof DECISION_POINTS)[number];

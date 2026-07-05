@@ -116,6 +116,7 @@ import { registerThinkingRouterClassifier } from "./agent/thinking-router-classi
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
 import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
 import { registerModelTierClassifier } from "./agent/model-tier-classifier.js";
+import { registerGateRiskClassifier } from "./agent/gate-risk-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1898,6 +1899,14 @@ export function createGateway(config: GatewayConfig) {
 	// all this wave (see model-tier-classifier.ts's header for why), so there
 	// is nothing to gate behind a flag. Pure telemetry, zero behavior change.
 	registerModelTierClassifier(sessionManager.lifecycleHub);
+	// CLF-W5 — gate-risk classifier: registered unconditionally, same pattern
+	// as CLF-W4's model-tier classifier above — no apply/enforce mode this
+	// wave either (see gate-risk-classifier.ts's header for why). Pure
+	// telemetry, zero behavior change; the classifier's proposed
+	// low/medium/high label is the evidence VER-05's solo-fast auto-selection
+	// question needs (RECONCILIATION-2026-07-05.md's dark-flags lane), never
+	// applied by this wave.
+	registerGateRiskClassifier(sessionManager.lifecycleHub);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;

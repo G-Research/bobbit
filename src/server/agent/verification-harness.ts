@@ -194,6 +194,7 @@ import {
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
 } from "../gate-diagnostics.js";
+import { GATE_RISK_POINT, GATE_RISK_KIND, gatherGateRiskChangedFiles } from "./gate-risk-classifier.js";
 
 /**
  * Clamp a thinking-level value against the resolved reviewer/QA model. When
@@ -3418,6 +3419,36 @@ export class VerificationHarness {
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
 			};
+
+			// CLF-W5 — gate-risk classifier, OBSERVE-ONLY (see
+			// gate-risk-classifier.ts's header for the full design). Consulted
+			// here, right after `baseBranch` is resolved, so the changed-file
+			// diff it gathers uses the SAME `origin/<baseBranch>...HEAD` refs this
+			// verification run itself just resolved — never a second, possibly
+			// inconsistent, notion of "the diff". Pure telemetry: the result is
+			// NEVER read back to skip/select a workflow, gate, or step — VER-05's
+			// solo-fast auto-selection stays a human/agent choice until a future
+			// apply-mode wave consumes this classifier's accumulated
+			// would-have-chosen labels. Non-fatal by construction:
+			// `this.sessionManager` can be undefined in standalone/test
+			// construction of `VerificationHarness`, the (point,kind) pair may be
+			// unregistered (most unit-test `LifecycleHub` fixtures never wire
+			// this pair), and a git failure inside `gatherGateRiskChangedFiles`
+			// already resolves to `undefined` (abstain) rather than throwing —
+			// none of that may ever slow or block gate verification.
+			try {
+				const lifecycleHub = this.sessionManager?.lifecycleHub;
+				if (lifecycleHub) {
+					const changedFiles = await gatherGateRiskChangedFiles(cwd, baseBranch);
+					await lifecycleHub.dispatchDecision(GATE_RISK_POINT, GATE_RISK_KIND, {
+						sessionId: signal.sessionId,
+						goalId: signal.goalId,
+						cwd,
+					}, { changedFiles });
+				}
+			} catch (err) {
+				console.warn(`[verification] gate-risk dispatchDecision failed for signal ${signal.id} (non-fatal, observe-only): ${err instanceof Error ? err.message : String(err)}`);
+			}
 
 			// Project config — resolved via {{project.key}}
 			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
