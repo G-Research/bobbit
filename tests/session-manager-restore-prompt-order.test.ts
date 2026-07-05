@@ -89,16 +89,16 @@ describe("promptSectionOrderForGoal — effective-goal resolution (restore/respa
 
 describe("restoreSession — source guard: prompt assemblies honor metadata section order", () => {
 	const src = fs.readFileSync(
-		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+		path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 		"utf-8",
 	);
-	const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
+	const idx = src.indexOf("async restoreSession(ps: PersistedSession)");
 	const window = src.slice(idx, idx + 30_000);
 
 	it("derives the effective goal id (goalId ?? teamGoalId) and resolves the order once", () => {
 		assert.ok(idx > 0, "restoreSession declaration not found");
 		assert.match(window, /const restoreEffectiveGoalId = ps\.goalId \?\? ps\.teamGoalId;/);
-		assert.match(window, /const restoreSectionOrder = this\.promptSectionOrderForGoal\(restoreEffectiveGoalId, ps\.projectId\);/);
+		assert.match(window, /const restoreSectionOrder = this\.deps\.host\.promptSectionOrderForGoal\(restoreEffectiveGoalId, ps\.projectId\);/);
 	});
 
 	it("passes sectionOrder to all three restore prompt assemblies (assistant, delegate, normal)", () => {
