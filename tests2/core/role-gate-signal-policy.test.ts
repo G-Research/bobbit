@@ -17,7 +17,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const ROLES_DIR = path.resolve(import.meta.dirname, "..", "defaults", "roles");
+const ROLES_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults", "roles");
 
 const CONTRIBUTOR_ROLES = [
 	"coder",

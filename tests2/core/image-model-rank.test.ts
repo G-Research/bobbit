@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE = path.resolve(__dirname, "..", "src/ui/dialogs/ImageModelSelector.ts");
+const SOURCE = path.resolve(__dirname, "..", "..", "src/ui/dialogs/ImageModelSelector.ts");
 
 const { getAvailableImageModels } = await import("../../src/server/agent/image-generation.js");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.js");

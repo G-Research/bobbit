@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-const AGENTS_MD = path.resolve(import.meta.dirname, "..", "AGENTS.md");
+const AGENTS_MD = path.resolve(import.meta.dirname, "..", "..", "AGENTS.md");
 const MAX_BYTES = 6 * 1024;
 
 describe("AGENTS.md byte budget", () => {

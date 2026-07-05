@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const html = readFileSync(resolve(here, "..", "index.html"), "utf8");
+const html = readFileSync(resolve(here, "..", "..", "index.html"), "utf8");
 
 describe("index.html meta tags (iOS PWA)", () => {
 	it("viewport meta includes viewport-fit=cover", () => {

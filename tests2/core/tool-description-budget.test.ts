@@ -31,7 +31,7 @@ import { mkdtempSync } from "node:fs";
 import { buildMetaToolDescription } from "../../src/server/mcp/mcp-meta.ts";
 import type { McpToolDef } from "../../src/server/mcp/mcp-types.ts";
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "..");
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 const EXTENSION_FILES = [
 	"agent",

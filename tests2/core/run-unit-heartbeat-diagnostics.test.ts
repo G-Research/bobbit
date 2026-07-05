@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
 
-const { readHeartbeatDiagnostics } = await import(new URL("../scripts/lib/unit-heartbeat.mjs", import.meta.url).href);
+const { readHeartbeatDiagnostics } = await import(new URL("../../scripts/lib/unit-heartbeat.mjs", import.meta.url).href);
 
 const tmpDirs: string[] = [];
 afterAll(() => {

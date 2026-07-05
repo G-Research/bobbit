@@ -6,7 +6,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const apiSource = readFileSync(new URL("../src/app/api.ts", import.meta.url), "utf8");
+const apiSource = readFileSync(new URL("../../src/app/api.ts", import.meta.url), "utf8");
 
 function section(start: string, end: string): string {
 	const startIndex = apiSource.indexOf(start);

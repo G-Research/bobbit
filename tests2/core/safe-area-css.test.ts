@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = resolve(here, "..");
+const root = resolve(here, "..", "..");
 const css = readFileSync(resolve(root, "src", "ui", "app.css"), "utf8");
 const indexHtml = readFileSync(resolve(root, "index.html"), "utf8");
 

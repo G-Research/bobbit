@@ -13,7 +13,7 @@ import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "../../src/serv
 import { applyModelString, type ReviewModelRpc } from "../../src/server/agent/review-model-override.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 

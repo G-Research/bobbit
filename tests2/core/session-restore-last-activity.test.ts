@@ -46,7 +46,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SOURCE = fs.readFileSync(SOURCE_PATH, "utf-8");
 

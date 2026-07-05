@@ -57,7 +57,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SRC = fs.readFileSync(
-	path.resolve(import.meta.dirname, "..", "src/server/agent/verification-harness.ts"),
+	path.resolve(import.meta.dirname, "..", "..", "src/server/agent/verification-harness.ts"),
 	"utf8",
 );
 

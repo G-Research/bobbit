@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.js");

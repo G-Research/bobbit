@@ -19,14 +19,12 @@ import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 
-const SEED_SCRIPT = path.resolve(
-	import.meta.dirname,
-	"..",
+const SEED_SCRIPT = path.resolve(import.meta.dirname, "..", "..",
 	"scripts",
 	"qa-seed",
 	"seed.mjs",
 );
-const PROJECT_CONFIG = path.resolve(import.meta.dirname, "..", ".bobbit", "config", "project.yaml");
+const PROJECT_CONFIG = path.resolve(import.meta.dirname, "..", "..", ".bobbit", "config", "project.yaml");
 const SAFE_BRANCH_REFSPEC = "{{branch}}:refs/heads/{{branch}}";
 const BARE_BRANCH_PUSH = /git push origin \{\{branch\}\}(?!:)/;
 

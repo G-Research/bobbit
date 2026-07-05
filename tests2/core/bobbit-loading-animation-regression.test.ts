@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import assert from "node:assert/strict";
 
-const renderSource = readFileSync(new URL("../src/app/render.ts", import.meta.url), "utf8");
-const chatPanelSource = readFileSync(new URL("../src/ui/ChatPanel.ts", import.meta.url), "utf8");
+const renderSource = readFileSync(new URL("../../src/app/render.ts", import.meta.url), "utf8");
+const chatPanelSource = readFileSync(new URL("../../src/ui/ChatPanel.ts", import.meta.url), "utf8");
 
 test("main content loader uses the Bobbit mascot animation, not a generic spinner", () => {
 	assert.match(

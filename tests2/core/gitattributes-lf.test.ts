@@ -20,7 +20,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const gitattributesPath = path.resolve(__dirname, "..", ".gitattributes");
+const gitattributesPath = path.resolve(__dirname, "..", "..", ".gitattributes");
 
 describe("gitattributes-lf-policy", () => {
 	const content = fs.readFileSync(gitattributesPath, "utf8");

@@ -82,7 +82,7 @@ const captured: Captured = { tools: new Map(), shutdownHandlers: [] };
 
 // Dynamically import the extension (tsx handles the TS-by-URL import).
 const extensionUrl = new URL(
-	"../defaults/tools/browser/extension.ts",
+	"../../defaults/tools/browser/extension.ts",
 	import.meta.url,
 ).href;
 

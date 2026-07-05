@@ -20,7 +20,7 @@ import path from "node:path";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-const SERVER_DIR = path.resolve(import.meta.dirname, "..", "src", "server");
+const SERVER_DIR = path.resolve(import.meta.dirname, "..", "..", "src", "server");
 
 /** Recursively collect *.ts files (excluding *.d.ts). */
 function collectTsFiles(dir: string, out: string[] = []): string[] {

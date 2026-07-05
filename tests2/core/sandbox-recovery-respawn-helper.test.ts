@@ -36,9 +36,7 @@ import { fileURLToPath } from "node:url";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { broadcastStatus } from "../../src/server/agent/session-status.ts";
 
-const SESSION_MANAGER_PATH = path.resolve(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
+const SESSION_MANAGER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..",
 	"src",
 	"server",
 	"agent",

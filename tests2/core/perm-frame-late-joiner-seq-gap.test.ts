@@ -49,9 +49,7 @@ import { fileURLToPath } from "node:url";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 
-const SRC_DIR = path.resolve(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
+const SRC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..",
 	"src",
 	"server",
 );

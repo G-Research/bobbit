@@ -33,7 +33,7 @@ const { resolveGrantPolicy, computeEffectiveAllowedTools, computeToolPolicies } 
 const { generateToolGuardExtension } = await import("../../src/server/agent/tool-guard-extension.ts");
 import type { GrantPolicy, GroupPolicyProvider } from "../../src/server/agent/tool-activation.ts";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+const ROOT = path.resolve(import.meta.dirname, "..", "..");
 const DEFAULTS_DIR = path.join(ROOT, "defaults");
 const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
 const GENERAL_ROLE_FILE = path.join(DEFAULTS_DIR, "roles", "general.yaml");

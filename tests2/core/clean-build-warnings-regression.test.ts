@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectPrimaryBranch } from "../../src/server/skills/git.ts";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const sourceRoots = [path.join(repoRoot, "src", "app"), path.join(repoRoot, "src", "ui")];
 const ineffectiveDynamicImportTargets = new Set([
 	"side-panel-workspace",

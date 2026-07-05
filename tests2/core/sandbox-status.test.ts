@@ -14,7 +14,7 @@ describe("sandbox Docker context resolution", () => {
 		const projectDir = mkdtempSync(join(tmpdir(), "bobbit-sandbox-project-without-docker-"));
 		try {
 			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, ".."));
+			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
@@ -27,7 +27,7 @@ describe("sandbox Docker context resolution", () => {
 			writeFileSync(join(projectDir, "docker", "Dockerfile"), "FROM scratch\n", "utf-8");
 
 			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, ".."));
+			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}

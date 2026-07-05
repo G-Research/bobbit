@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const packRoot = path.join(repoRoot, "market-packs", "pr-walkthrough");
 const packSrc = path.join(packRoot, "src");
 const sharedRoot = path.join(repoRoot, "src", "shared");

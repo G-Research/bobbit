@@ -82,7 +82,7 @@ describe("sidebar-font-scale: numeric pixel bounds", () => {
 
 describe("sidebar-font-scale source", () => {
 	it("src/app/sidebar.ts has no element carrying two `style=` attributes (regression: Add Project button)", () => {
-		const path = fileURLToPath(new URL("../src/app/sidebar.ts", import.meta.url));
+		const path = fileURLToPath(new URL("../../src/app/sidebar.ts", import.meta.url));
 		const src = readFileSync(path, "utf8");
 		// Two `style="..."` separated only by whitespace on the same element.
 		// We allow `"..." style=` (close-quote + space + new attr) but flag it

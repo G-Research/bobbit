@@ -225,7 +225,7 @@ describe("goal/session branch push safety regressions", () => {
 	});
 
 	it("server branch publish helper uses shell-free git argv refspecs", () => {
-		const source = fs.readFileSync(new URL("../src/server/server.ts", import.meta.url), "utf-8");
+		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.match(source, /runner\.execFile\("git", args, \{ cwd, encoding: "utf-8", timeout \}\)/);
 		assert.match(source, /push: \["push", "origin", `HEAD:refs\/heads\/\$\{branch\}`\]/);
 		assert.match(source, /fetchRemoteTracking: \["fetch", "origin", `refs\/heads\/\$\{branch\}:refs\/remotes\/origin\/\$\{branch\}`\]/);

@@ -62,7 +62,7 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.deepEqual(buildGhPrMergeArgs(branch, "squash", true), ["pr", "merge", branch, "--squash", "--admin"]);
 		assert.deepEqual(buildGhPrMergeArgs(undefined, "merge", false), ["pr", "merge", "--merge"]);
 
-		const source = fs.readFileSync(new URL("../src/server/server.ts", import.meta.url), "utf-8");
+		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.ok(!source.includes("execAsync(`gh pr merge"));
 	});
 

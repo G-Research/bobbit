@@ -26,7 +26,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
-const DIST_DIR = new URL("../dist/ui", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const DIST_DIR = new URL("../../dist/ui", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const ASSETS_DIR = join(DIST_DIR, "assets");
 const MANIFEST_PATH = join(DIST_DIR, ".vite", "manifest.json");
 

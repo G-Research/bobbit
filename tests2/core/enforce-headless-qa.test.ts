@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(__dirname, "..", "..");
 
 test("`.claude/.mcp.json` passes --headless and --isolated to @playwright/mcp", () => {
   const p = path.join(repoRoot, ".claude", ".mcp.json");

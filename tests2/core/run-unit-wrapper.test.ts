@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-const src = readFileSync(new URL("../scripts/run-unit.mjs", import.meta.url), "utf8");
+const src = readFileSync(new URL("../../scripts/run-unit.mjs", import.meta.url), "utf8");
 
 test("run-unit runner has its own timeout below the gate watchdog", () => {
 	assert.match(src, /BOBBIT_UNIT_RUNNER_TIMEOUT_MS/, "runner timeout env override is documented in the script");

@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const SRC_ROOT = path.resolve(__dirname, "..", "src");
+const SRC_ROOT = path.resolve(__dirname, "..", "..", "src");
 
 // Files that legitimately implement / declare the legacy plumbing. Every
 // other source file passing `setupCommand` to createWorktree* or calling

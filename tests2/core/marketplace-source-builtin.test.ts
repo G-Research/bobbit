@@ -30,7 +30,7 @@ const { builtinFirstPartyPackEntries } = await import("../../src/server/agent/bu
 const { PackContributionRegistry } = await import("../../src/server/extension-host/pack-contribution-registry.ts");
 const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const REPO_MARKET_PACKS = path.join(REPO_ROOT, "market-packs");
 
 let TMP: string;
