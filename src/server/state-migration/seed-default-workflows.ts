@@ -28,6 +28,8 @@ export interface SeededVerifyStep {
 	optional?: boolean;
 	label?: string;
 	description?: string;
+	/** See `VerifyStep.docGate` in `workflow-store.ts` — VER-06 doc-gate diff filter marker. */
+	docGate?: boolean;
 	subgoal?: {
 		planId: string;
 		title: string;
@@ -344,7 +346,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Documentation",
 				depends_on: ["implementation"],
 				verify: [
-					{ name: "Documentation coverage", type: "llm-review", prompt: DOC_PROMPT },
+					{ name: "Documentation coverage", type: "llm-review", docGate: true, prompt: DOC_PROMPT },
 				],
 			},
 			readyToMergeGate(),
@@ -398,7 +400,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Documentation",
 				depends_on: ["implementation"],
 				verify: [
-					{ name: "Documentation coverage", type: "llm-review", prompt: DOC_PROMPT },
+					{ name: "Documentation coverage", type: "llm-review", docGate: true, prompt: DOC_PROMPT },
 				],
 			},
 			readyToMergeGate(),
@@ -458,7 +460,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Documentation",
 				depends_on: ["implementation"],
 				verify: [
-					{ name: "Documentation coverage", type: "llm-review", prompt: DOC_PROMPT },
+					{ name: "Documentation coverage", type: "llm-review", docGate: true, prompt: DOC_PROMPT },
 				],
 			},
 			readyToMergeGate(),

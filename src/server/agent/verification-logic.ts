@@ -524,6 +524,87 @@ export function readyToMergeUnresolvedBuiltinFailure(gateId: string, resolvedCmd
 }
 
 // ---------------------------------------------------------------------------
+// Documentation gate diff-based skip filter (VER-06 / W3.4)
+//
+// The documentation gate (`llm-review` step marked `docGate: true` in
+// seed-default-workflows.ts) always spawned a full-diff frontier review, even
+// for changes that provably cannot need a doc update — e.g. a test-only diff.
+// This is a cheap, DETERMINISTIC pre-filter (no LLM judgment) that skips the
+// review ONLY when every changed path matches a test/fixture pattern. It is
+// deliberately narrow and fails toward reviewing:
+//   - Any diff touching a non-test/fixture path (this includes ALL of src/,
+//     defaults/, market-packs/, and docs/*.md) still gets the full review.
+//   - A docs-only diff is NOT skipped — the doc gate's own job is to review
+//     doc placement/quality/AGENTS.md discipline (DOC_PROMPT checks 3 & 4),
+//     so a change that touches only docs is exactly the case the gate exists
+//     for and must still run.
+//   - An empty diff (nothing changed vs. base) is skipped — there is no
+//     surface, documented or not, for a reviewer to inspect.
+// ---------------------------------------------------------------------------
+
+/**
+ * Path patterns that can ONLY contain test/fixture material in this repo
+ * (see AGENTS.md "Tests" section and `tests/fixtures`, `tests/contract/fixtures`).
+ * Intentionally narrow — do not extend to cover "safe-looking" paths like
+ * lockfiles or CI config; the finding scopes the deterministic skip to
+ * test-only/fixture-only diffs specifically.
+ */
+const TEST_OR_FIXTURE_PATH_PATTERNS: RegExp[] = [
+	/(^|\/)tests\//,        // tests/, tests/e2e/, tests/e2e/ui/, tests/manual-integration/, tests/fixtures/, ...
+	/(^|\/)__tests__\//,
+	/(^|\/)__fixtures__\//,
+	/(^|\/)fixtures\//,     // e.g. a component-local fixtures/ dir outside tests/
+	/\.(test|spec)\.[cm]?[jt]sx?$/, // *.test.ts, *.spec.tsx, *.test.mjs, ...
+];
+
+/** True when `path` matches one of the test/fixture-only patterns above. */
+export function isTestOrFixtureOnlyPath(path: string): boolean {
+	return TEST_OR_FIXTURE_PATH_PATTERNS.some((re) => re.test(path));
+}
+
+export interface DocGateSkipDecision {
+	/** Whether the doc-gate `llm-review` step should be auto-skipped. */
+	skip: boolean;
+	/** Human-readable rule name, logged for auditability either way. */
+	rule: string;
+}
+
+/**
+ * Decide whether the documentation gate's `llm-review` step can be
+ * deterministically skipped, given the list of paths changed in the diff
+ * being reviewed (already pathspec-filtered the same way DOC_PROMPT views the
+ * diff, e.g. excluding package-lock.json).
+ *
+ * Skips only when every changed path is provably test/fixture-only, or the
+ * diff is empty. Anything else — including docs-only diffs — runs the full
+ * review (fail toward reviewing).
+ */
+export function evaluateDocGateSkip(changedPaths: string[]): DocGateSkipDecision {
+	if (changedPaths.length === 0) {
+		return { skip: true, rule: "empty-diff — no changed paths vs. base branch" };
+	}
+	const nonTestFixturePaths = changedPaths.filter((p) => !isTestOrFixtureOnlyPath(p));
+	if (nonTestFixturePaths.length === 0) {
+		return { skip: true, rule: "test-fixture-only — every changed path matches a test/fixture pattern" };
+	}
+	return {
+		skip: false,
+		rule: `review-required — ${nonTestFixturePaths.length} changed path(s) outside test/fixture patterns (e.g. "${nonTestFixturePaths[0]}")`,
+	};
+}
+
+/**
+ * Feature flag for the doc-gate diff filter. Default ON: the skip rule is
+ * narrow (test/fixture-only or empty diff), fails toward reviewing on any
+ * ambiguity, and the finding assessed this as low-risk/high-confidence. Set
+ * `BOBBIT_DOC_GATE_FILTER=off` to force every documentation gate back to an
+ * unconditional full review (e.g. while validating the rule on a new repo).
+ */
+export function isDocGateFilterEnabled(): boolean {
+	return process.env.BOBBIT_DOC_GATE_FILTER !== "off";
+}
+
+// ---------------------------------------------------------------------------
 // Error pattern matching (expect: failure)
 // ---------------------------------------------------------------------------
 

@@ -2016,6 +2016,13 @@ export interface VerifyStep {
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */
 	command?: string;
+	/**
+	 * Marks the built-in documentation-gate `llm-review` step for the
+	 * deterministic diff-based skip filter (VER-06 / W3.4). Not a general
+	 * user-facing toggle — read-only in the workflow editor, preserved
+	 * through edits via object spread.
+	 */
+	docGate?: boolean;
 }
 
 export interface WorkflowGate {

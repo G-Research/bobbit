@@ -219,4 +219,60 @@ describe("InlineWorkflowStore — round-trip", () => {
 		assert.equal(step.label, "Approve design");
 		assert.equal(step.optionalLabel, undefined);
 	});
+
+	// VER-06 / W3.4 — docGate must survive the normalize/serialize round-trip
+	// or the deterministic doc-gate skip filter silently stops applying to a
+	// custom/project-authored workflow after its first save.
+	it("saved docGate round-trips through put/getAll", () => {
+		writeProjectYaml(projectFor([]));
+		const store = makeStore();
+
+		store.put({
+			id: "wf",
+			name: "Test workflow",
+			description: "",
+			gates: [{
+				id: "documentation",
+				name: "Documentation",
+				dependsOn: ["implementation"],
+				verify: [{
+					name: "Documentation coverage",
+					type: "llm-review",
+					prompt: "review docs",
+					docGate: true,
+				}],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const reloaded = makeStore().getAll();
+		const step = reloaded[0].gates[0].verify![0];
+		assert.equal(step.docGate, true);
+
+		const raw = fs.readFileSync(path.join(configDir, "project.yaml"), "utf-8");
+		assert.match(raw, /docGate: true/);
+	});
+
+	it("docGate defaults to unset (falsy) when absent from saved YAML", () => {
+		writeProjectYaml(projectFor([]));
+		const store = makeStore();
+
+		store.put({
+			id: "wf",
+			name: "Test workflow",
+			description: "",
+			gates: [{
+				id: "g",
+				name: "Gate",
+				dependsOn: [],
+				verify: [{ name: "Code review", type: "llm-review", prompt: "review" }],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const step = makeStore().getAll()[0].gates[0].verify![0];
+		assert.ok(!step.docGate);
+	});
 });

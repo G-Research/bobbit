@@ -71,6 +71,16 @@ export interface VerifyStep {
 	command?: string;
 	/** Subgoal step descriptor (only when type === "subgoal"). */
 	subgoal?: VerifyStepSubgoal;
+	/**
+	 * Marks an `llm-review` step as eligible for the deterministic diff-based
+	 * skip filter (VER-06 / W3.4). ONLY set on the documentation-coverage
+	 * step — see `evaluateDocGateSkip` in `verification-logic.ts` for the
+	 * skip rule and `BOBBIT_DOC_GATE_FILTER` for the feature flag. Any other
+	 * `llm-review` step MUST NOT set this — it is not a general-purpose
+	 * "skip this review" escape hatch, only the narrow doc-gate case the
+	 * finding scoped.
+	 */
+	docGate?: boolean;
 }
 
 export interface WorkflowGate {
@@ -156,6 +166,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 	if (typeof r.description === "string") step.description = r.description;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
+	if (r.docGate === true) step.docGate = true;
 	// Subgoal payload — only round-tripped when the field is a structured
 	// object. Older stored data without the `subgoal` field is silently
 	// tolerated; non-subgoal step types may legitimately leave this unset.
@@ -371,6 +382,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
+	if (s.docGate) out.docGate = true;
 	if (s.subgoal) {
 		const sg: Record<string, unknown> = {
 			planId: s.subgoal.planId,
