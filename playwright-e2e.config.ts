@@ -1,6 +1,9 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+// @ts-ignore — plain-JS module with JSDoc types; this config file is loaded by
+// Playwright's transform, not by either tsconfig's `npm run check` project.
+import { computeAdaptiveConcurrency } from "./scripts/lib/adaptive-concurrency.mjs";
 
 /**
  * E2E test config: split into API (in-process) and browser (process-spawned) projects.
@@ -96,11 +99,29 @@ export default {
 	// individual projects — the browser project needs fewer workers than
 	// the API project because each Chromium instance is CPU-heavy.
 	//
-	// Lowered from 6 to 4: empirically, 6 workers triggered FS-contention
-	// flakes (POST /api/sessions → 500 under worktree setup races) without
-	// providing a meaningful wall-clock win once browser project is capped
-	// at 3 anyway.
-	workers: 4,
+	// History: lowered from 6 to a fixed 4 when 6 workers triggered
+	// FS-contention flakes (POST /api/sessions → 500 under worktree setup
+	// races). Re-validated 2026-07-05 (D6 flake-infra lane): two full
+	// `scripts/test-mutex.sh npm run test:e2e` runs at workers=6 — on a box
+	// carrying loadavg ~12–18 of unrelated lane work, i.e. a HARSHER
+	// FS/CPU-contention environment than the original quiet-box baseline —
+	// produced ZERO new failures vs the 4-worker baseline (the only failures
+	// were the pre-existing HQ-Split fixture-rot set owned by another lane,
+	// and the flaky-retried count stayed within the baseline's range). The
+	// historical FS-contention cluster did not reproduce; the per-project
+	// caps below (api 2 / browser 3 / realpush 1) are what actually bound
+	// the hot contention paths, and 6 simply lets those caps run
+	// concurrently instead of starving one project.
+	//
+	// Policy: adaptive — base 6 when the box is idle, scaled down by 1-min
+	// loadavg via computeAdaptiveConcurrency (same formula as the unit
+	// phase, scripts/lib/adaptive-concurrency.mjs; floors at 2, never 1).
+	// BOBBIT_E2E_WORKERS always wins as an explicit override.
+	workers: (() => {
+		const override = Number.parseInt(process.env.BOBBIT_E2E_WORKERS ?? "", 10);
+		if (Number.isFinite(override) && override > 0) return override;
+		return computeAdaptiveConcurrency({ base: 6, cores: cpus().length, load1: loadavg()[0] });
+	})(),
 	// `line` reporter streams one line per test completion to stdout, with
 	// no batching — unlike `list` which redraws in place and buffers heavily
 	// when stdout is not a TTY (the verification-harness tailer sees nothing
