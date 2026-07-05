@@ -1866,6 +1866,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			serverProjectConfigStore: this.projectConfigStore ?? null,
 			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
@@ -2776,8 +2777,9 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		if (!parts.serverConfigStore) parts.serverConfigStore = this.projectConfigStore;
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		// Skills catalog — progressive disclosure (level 1) for autonomous activation.
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
@@ -2800,6 +2802,13 @@ export class SessionManager {
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts);
 		return assembleSystemPrompt(sessionId, parts);
+	}
+
+	private projectConfigStoreForPrompt(projectId?: string): import("./project-config-store.js").ProjectConfigStore | undefined {
+		if (projectId && this.projectContextManager) {
+			return this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore;
+		}
+		return this.projectConfigStore;
 	}
 
 	/**
@@ -2897,6 +2906,7 @@ export class SessionManager {
 			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
 			allowedTools: opts.allowedTools,
 			projectConfigStore: narrow ? undefined : this.projectConfigStore,
+			serverConfigStore: this.projectConfigStore,
 			sectionOrder: opts.sectionOrder,
 			promptProfile: narrow ? "narrow-worker" : undefined,
 		};
@@ -2913,6 +2923,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const ownerProjectId = session.projectId ?? persisted?.projectId;
+		const ownerProjectConfigStore = this.projectConfigStoreForPrompt(ownerProjectId);
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -2928,9 +2940,11 @@ export class SessionManager {
 				allowedTools: session.allowedTools ?? persisted.allowedTools,
 				sectionOrder,
 			});
+			parts.projectConfigStore = isNarrowDelegateAllowedTools(parts.allowedTools) ? undefined : ownerProjectConfigStore;
+			parts.serverConfigStore = this.projectConfigStore;
 			parts.dynamicContext = session.promptParts?.dynamicContext;
 			if (this.toolManager && !parts.toolDocs) {
-				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 			}
 			if (!parts.skillsCatalog) {
 				parts.skillsCatalog = this.computeSkillsCatalog(
@@ -2984,7 +2998,8 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 			};
 		} else {
@@ -3013,14 +3028,15 @@ export class SessionManager {
 				rolePrompt,
 				roleName,
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 				promptProfile: (session.nonInteractive ?? persisted?.nonInteractive) ? "reviewer" : undefined,
 			};
 		}
 
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(
@@ -5685,6 +5701,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 
+			const restoreProjectConfigStore = this.projectConfigStoreForPrompt(ps.projectId);
 			const promptPath = this.assemblePrompt(ps.id, {
 				// Restore/respawn path: keep the global base prompt so it reaches
 				// restored assistant sessions.
@@ -5694,7 +5711,8 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: restoreProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -5702,7 +5720,7 @@ export class SessionManager {
 			// Delegate restore: rebuild the system prompt from durable instructions +
 			// context — the delegate's equivalent of a worker task spec. Use the Task
 			// fields so restored delegates and prompt-section reconstruction agree.
-			const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
+			const delegateParts = this.buildDelegatePromptParts({
 				cwd: ps.cwd,
 				// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
 				// delegates whose cwd is container-internal.
@@ -5711,7 +5729,12 @@ export class SessionManager {
 				context: ps.context,
 				allowedTools: restoredAllowedNames,
 				sectionOrder: restoreSectionOrder,
-			}));
+			});
+			delegateParts.projectConfigStore = isNarrowDelegateAllowedTools(delegateParts.allowedTools)
+				? undefined
+				: this.projectConfigStoreForPrompt(ps.projectId);
+			delegateParts.serverConfigStore = this.projectConfigStore;
+			const promptPath = this.assemblePrompt(ps.id, delegateParts);
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
@@ -5738,7 +5761,8 @@ export class SessionManager {
 				rolePrompt,
 				roleName,
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: this.projectConfigStoreForPrompt(ps.projectId),
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
 				promptProfile: ps.nonInteractive ? "reviewer" : undefined,
 			});
@@ -7735,7 +7759,8 @@ export class SessionManager {
 			rolePrompt,
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
-			projectConfigStore: this.projectConfigStore,
+			projectConfigStore: this.projectConfigStoreForPrompt(session.projectId),
+			serverConfigStore: this.projectConfigStore,
 		});
 
 		// Respawn with new system prompt

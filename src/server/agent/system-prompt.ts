@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
+import { resolveScalarConfig, type ScalarConfigSource } from "./config-resolver.js";
 import { resolveToolsMdMode, type ToolsMdMode } from "./tool-manager.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
@@ -127,6 +128,8 @@ export interface AgentsMdBudget {
 
 /** ~4 chars/token for Claude models — matches `estimateTokens()` below (kept in sync intentionally). */
 export const AGENTS_MD_BUDGET_CHARS_PER_TOKEN = 4;
+export const AGENTS_MD_BUDGET_CONFIG_KEY = "agents_md_budget";
+const AGENTS_MD_BUDGET_DEFAULT = "";
 /** Guardrails on the `BOBBIT_AGENTSMD_BUDGET` env var / override — avoids a typo'd value silently disabling or effectively no-op'ing the cap. */
 export const AGENTS_MD_BUDGET_MIN_TOKENS = 500;
 export const AGENTS_MD_BUDGET_MAX_TOKENS = 500_000;
@@ -139,11 +142,19 @@ export function createAgentsMdBudget(tokens: number): AgentsMdBudget {
  * Resolve the effective AGENTS.md cascade budget (in tokens), or `undefined`
  * when the cap is OFF (today's uncapped behavior). `overrideTokens` (e.g. a
  * per-goal/session preference) wins when provided; otherwise falls back to
- * the `BOBBIT_AGENTSMD_BUDGET` env var. Absent/invalid/non-positive on both
- * ⇒ disabled. Valid values are clamped to `[AGENTS_MD_BUDGET_MIN_TOKENS, AGENTS_MD_BUDGET_MAX_TOKENS]`.
+ * `BOBBIT_AGENTSMD_BUDGET` (highest-precedence external override), then the
+ * scalar config cascade key `agents_md_budget`. Absent/invalid/non-positive
+ * values ⇒ disabled. Valid values are clamped to
+ * `[AGENTS_MD_BUDGET_MIN_TOKENS, AGENTS_MD_BUDGET_MAX_TOKENS]`.
  */
-export function resolveAgentsMdBudgetTokens(overrideTokens?: number): number | undefined {
-	const raw = overrideTokens !== undefined ? overrideTokens : parseAgentsMdBudgetEnv();
+export function resolveAgentsMdBudgetTokens(
+	overrideTokens?: number,
+	config?: { projectConfigStore?: ScalarConfigSource; serverConfigStore?: ScalarConfigSource },
+): number | undefined {
+	const env = readAgentsMdBudgetEnv();
+	const raw = overrideTokens !== undefined
+		? overrideTokens
+		: (env.present ? env.value : parseAgentsMdBudgetConfig(config));
 	if (raw === undefined || !Number.isFinite(raw) || raw <= 0) return undefined;
 	const floored = Math.floor(raw);
 	if (floored < AGENTS_MD_BUDGET_MIN_TOKENS) return AGENTS_MD_BUDGET_MIN_TOKENS;
@@ -151,10 +162,26 @@ export function resolveAgentsMdBudgetTokens(overrideTokens?: number): number | u
 	return floored;
 }
 
-function parseAgentsMdBudgetEnv(): number | undefined {
+function readAgentsMdBudgetEnv(): { present: boolean; value?: number } {
+	if (!Object.prototype.hasOwnProperty.call(process.env, "BOBBIT_AGENTSMD_BUDGET")) return { present: false };
 	const v = process.env.BOBBIT_AGENTSMD_BUDGET;
-	if (!v) return undefined;
+	if (!v) return { present: true };
 	const n = Number(v);
+	return Number.isFinite(n) ? { present: true, value: n } : { present: true };
+}
+
+function parseAgentsMdBudgetConfig(config?: { projectConfigStore?: ScalarConfigSource; serverConfigStore?: ScalarConfigSource }): number | undefined {
+	const projectConfig = config?.projectConfigStore ?? { get: () => undefined };
+	const serverConfig = config?.serverConfigStore ?? { get: () => undefined };
+	const resolved = resolveScalarConfig(
+		AGENTS_MD_BUDGET_CONFIG_KEY,
+		projectConfig,
+		serverConfig,
+		null,
+		{ [AGENTS_MD_BUDGET_CONFIG_KEY]: AGENTS_MD_BUDGET_DEFAULT },
+	).value;
+	if (!resolved) return undefined;
+	const n = Number(resolved);
 	return Number.isFinite(n) ? n : undefined;
 }
 
@@ -276,8 +303,8 @@ export function readAgentsMd(cwd: string, budget?: AgentsMdBudget): string {
  * Falls back to readAgentsMd() if no projectConfigStore is provided.
  *
  * `budgetTokens` (F19) optionally caps the cascade — see
- * `resolveAgentsMdBudgetTokens()`/`BOBBIT_AGENTSMD_BUDGET`. `undefined`
- * (default) is uncapped and byte-identical to pre-F19 behavior. The FIRST
+ * `resolveAgentsMdBudgetTokens()`/`BOBBIT_AGENTSMD_BUDGET`/`agents_md_budget`.
+ * `undefined` (default) is uncapped and byte-identical to pre-F19 behavior. The FIRST
  * discovered agents entry (the nearest/most-specific — normally the
  * project's own root AGENTS.md/CLAUDE.md) is always kept whole; only its
  * `@ref` expansions are budgeted. Any additional agents-type entries are
@@ -416,9 +443,12 @@ export interface PromptParts {
 	workflowContext?: string;
 	/** Project config store for multi-file agent discovery */
 	projectConfigStore?: ProjectConfigReader;
+	/** Server/HQ config store for scalar config fallback keys used during prompt assembly. */
+	serverConfigStore?: ScalarConfigSource;
 	/** Optional override for the AGENTS.md cascade token budget (F19). When
-	 *  undefined, falls back to the `BOBBIT_AGENTSMD_BUDGET` env var; when
-	 *  neither is set, the cascade is uncapped (today's behavior). See
+	 *  undefined, falls back to `BOBBIT_AGENTSMD_BUDGET`, then the scalar
+	 *  `agents_md_budget` config key; when none are set, the cascade is
+	 *  uncapped (today's behavior). See
 	 *  `resolveAgentsMdBudgetTokens()`. */
 	agentsMdBudgetTokens?: number;
 	/** Skills available for autonomous activation via the `activate_skill` tool.
@@ -612,12 +642,12 @@ export interface PromptSection {
 	tokens: number;
 	/** True when this section's content was capped by the AGENTS.md cascade
 	 *  budget (F19) — recorded so the persisted `-prompt.json` breakdown can
-	 *  A/B measure the effect of `BOBBIT_AGENTSMD_BUDGET`. Absent/false when
+	 *  A/B measure the effect of the AGENTS.md budget setting. Absent/false when
 	 *  the budget is off or this section wasn't affected. */
 	truncated?: boolean;
 	/** F22: the `# Tools` markdown rendering mode (`"full"` | `"index"`) in
 	 *  effect for this section — only set on the "Tools" section — so the
-	 *  persisted `-prompt.json` breakdown can A/B measure `BOBBIT_TOOLS_MD`.
+	 *  persisted `-prompt.json` breakdown can A/B measure the tools-md setting.
 	 *  See `resolveToolsMdMode()` in tool-manager.ts. */
 	toolsMdMode?: ToolsMdMode;
 }
@@ -656,7 +686,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
 	// agents cwd is a container-internal path the host can't read.
 	const filesRoot = parts.projectRoot || parts.cwd;
-	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens);
+	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens, parts);
 	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore, agentsMdBudgetTokens);
 	if (agentsMd.trim()) {
 		sections.push({ label: "Project AGENTS.md", content: "# Project AGENTS.md\n\n" + agentsMd.trim() });
@@ -783,7 +813,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// shows exactly what the assembled prompt actually contains, including
 	// any truncation markers.
 	const viewerRoot = parts.projectRoot || parts.cwd;
-	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens);
+	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens, parts);
 	const agentsMdBudget = agentsMdBudgetTokens !== undefined ? createAgentsMdBudget(agentsMdBudgetTokens) : undefined;
 	if (parts.projectConfigStore) {
 		const dirs = getAllConfigDirectories(viewerRoot, parts.projectConfigStore);
@@ -838,7 +868,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 
 	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse)
 	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()), toolsMdMode: resolveToolsMdMode() });
+		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()), toolsMdMode: resolveToolsMdMode(undefined, parts) });
 	}
 
 	// 4. Available Skills (stable prefix)
