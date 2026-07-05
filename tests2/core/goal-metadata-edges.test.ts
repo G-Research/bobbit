@@ -7,6 +7,11 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
+// Re-assert the worker .js->.ts resolver at RUN time (see lifecycle-hub.test.ts):
+// a sibling file's env-guard restore can strip NODE_OPTIONS between collect and
+// run under isolate:false, breaking the ModuleHost worker's confinement-loader
+// resolution. beforeAll re-adds it right before this file's tests (idempotent).
+beforeAll(() => { enableTsWorkerResolver(); });
 
 /**
  * Focused unit tests for the goal-metadata ACTIVATION EDGES owned by the
@@ -21,12 +26,11 @@ enableTsWorkerResolver();
  *      `dispatch`, `hasProvidersForHooks`, and `dispatchGoalProvisioned`;
  *      absent resolver ⇒ no filtering.
  */
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, beforeAll, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 
 import {
 	computeToolActivationArgs,

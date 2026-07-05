@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -35,6 +35,20 @@ const bobbitDirModule = await import("../../src/server/bobbit-dir.ts");
 bobbitDirModule.setProjectRoot(projectRoot);
 const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { formatAgentTimestamp, slugifyCwd } = await import("../../src/server/agent/agent-session-path.ts");
+
+// Re-assert the temp HOME/agent-dir env at RUN time. This env is set at module
+// (collect) time; under pool:"forks"+isolate:false a sibling file's env-guard
+// afterAll can restore HOME/USERPROFILE between collect and run, so os.homedir()
+// (used by legacyAgentDirs) would point back at the real home and legacy
+// ~/.bobbit / ~/.pi recovery would miss. Also clear any bled-in agent-dir
+// runtime singleton so trustedAgentSessionsRoots recomputes from this env.
+beforeAll(() => {
+	process.env.BOBBIT_AGENT_DIR = activeAgentDir;
+	process.env.BOBBIT_DIR = path.join(tmpRoot, ".bobbit");
+	process.env.HOME = tmpHome;
+	process.env.USERPROFILE = tmpHome;
+	(bobbitDirModule as { resetAgentDirStateForTests?: () => void }).resetAgentDirStateForTests?.();
+});
 
 const managers: any[] = [];
 

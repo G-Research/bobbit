@@ -6,8 +6,15 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
+// Re-assert the worker .js->.ts resolver at RUN time (not just collect time):
+// under pool:"forks"+isolate:false another file's env-guard restore can strip the
+// NODE_OPTIONS --import flag between this file's module load and its tests, which
+// would make the ModuleHost worker fail to resolve confinement-loader.js. beforeAll
+// runs immediately before this file's tests (no cross-file hook interleaving), so
+// the flag is guaranteed present when the worker spawns. Idempotent + additive.
+beforeAll(() => { enableTsWorkerResolver(); });
 
-import { describe, it } from "vitest";
+import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
