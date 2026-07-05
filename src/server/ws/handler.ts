@@ -14,7 +14,7 @@ import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
-import { inferMeta } from "../agent/aigw-manager.js";
+import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
@@ -65,7 +65,9 @@ function stampSnapshotOrder(data: unknown): unknown {
 	}
 	return data;
 }
-// patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
+// patchModelContextWindow removed — live model-state frames now resolve context
+// windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
+// cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
 
 /**
  * Merge persisted skill-expansion sidecar entries into a list of agent
@@ -88,13 +90,14 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 	const persisted = sessionManager.getPersistedSession(sessionId);
 	const data: Record<string, unknown> = {};
 	if (persisted?.modelProvider && persisted?.modelId) {
-		const meta = inferMeta(persisted.modelId);
+		const meta = resolveModelStateMeta(persisted.modelProvider, persisted.modelId);
 		data.model = {
 			provider: persisted.modelProvider,
 			id: persisted.modelId,
 			contextWindow: meta.contextWindow,
 			maxTokens: meta.maxTokens,
 			reasoning: meta.reasoning,
+			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		};
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
@@ -141,13 +144,14 @@ function buildArchivedStateData(
 		statusVersion: 0,
 	};
 	if (archived.modelProvider && archived.modelId) {
-		const meta = inferMeta(archived.modelId);
+		const meta = resolveModelStateMeta(archived.modelProvider, archived.modelId);
 		data.model = {
 			provider: archived.modelProvider,
 			id: archived.modelId,
 			contextWindow: meta.contextWindow,
 			maxTokens: meta.maxTokens,
 			reasoning: meta.reasoning,
+			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		};
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);

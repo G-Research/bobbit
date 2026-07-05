@@ -40,7 +40,7 @@ test.describe("Sidebar session actions", () => {
 		await expect(renameBtn).toBeVisible({ timeout: 5_000 });
 		await renameBtn.click();
 
-		await expect(page.getByText("Edit Session").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Modify Session").first()).toBeVisible({ timeout: 5_000 });
 		const titleInput = page.locator("input[placeholder='Session title…']").first();
 		await expect(titleInput).toBeVisible({ timeout: 5_000 });
 		await titleInput.fill("Renamed Session E2E");

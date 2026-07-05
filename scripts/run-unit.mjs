@@ -18,11 +18,12 @@
  * expands them — never the shell (Windows command-line-length limit).
  */
 import { spawn, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
+import { readHeartbeatDiagnostics } from "./lib/unit-heartbeat.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -84,17 +85,26 @@ const npx = isWin ? "npx.cmd" : "npx";
 // Live server secrets (token / TLS / sandbox-agent auth) resolve to an OS
 // user-level directory via serverSecretsDir(). Pin BOBBIT_SECRETS_DIR to an
 // isolated temp dir for the whole unit phase so no test can ever write real
-// admin secrets into the developer's home dir. Individual tests that need a
-// pristine secrets dir override this per-test.
+// admin secrets into the developer's home dir.
 const unitSecretsDir = process.env.BOBBIT_SECRETS_DIR
 	|| join(realpathSync(tmpdir()), `bobbit-unit-secrets-${process.pid}`);
 mkdirSync(unitSecretsDir, { recursive: true });
+
+// Live heartbeat sink for the node-logic runner. The hung-test reporter (paired
+// with the normal tap reporter) writes the set of test files still in flight to
+// this file so the wrapper's timeout path can NAME the hung file(s) — the
+// backstop for `--test-timeout` when a leaked/detached child survives per-test
+// timeouts and pins the runner outside any single test.
+const heartbeatDir = mkdtempSync(join(realpathSync(tmpdir()), "bobbit-unit-hb-"));
+const nodeHeartbeatFile = join(heartbeatDir, "node-heartbeat.json");
 const testEnv = {
 	...process.env,
 	NODE_ENV: "test",
 	BOBBIT_TEST_NO_EXTERNAL: process.env.BOBBIT_TEST_NO_EXTERNAL || "1",
 	BOBBIT_TEST_NO_REMOTE: process.env.BOBBIT_TEST_NO_REMOTE || "1",
 	BOBBIT_SECRETS_DIR: unitSecretsDir,
+	// Consumed by tests/helpers/hung-test-reporter.mjs (node runner only).
+	BOBBIT_UNIT_NODE_HEARTBEAT_FILE: nodeHeartbeatFile,
 };
 
 // The two runners are BOTH CPU-bound and each parallelises internally. Running
@@ -128,6 +138,15 @@ const exitCloseGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_
 // stress runs or temporary CI tuning.
 const runnerTimeoutMs = Math.max(60_000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_TIMEOUT_MS || "1050000", 10) || 1_050_000);
 const runnerKillGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_RUNNER_KILL_GRACE_MS || "10000", 10) || 10_000);
+// Per-test timeout for the node-logic runner. This is the PRIMARY hung-test
+// guard: node fails an individual test/hook that exceeds it and names the test
+// + file + line, so a single hang no longer silently pins the whole runner
+// until the 1050s wrapper timeout. It is NOT the overall budget increase the
+// task forbids — it bounds each test, not the phase. The default 120s is far
+// above any real unit test (the entire node suite finishes in ~90-210s wall)
+// yet fails a hang with named diagnostics with ~15min of gate headroom left.
+// BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS overrides it for local stress runs.
+const nodeTestTimeoutMs = Math.max(10_000, Number.parseInt(process.env.BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS || "120000", 10) || 120_000);
 
 function appendTail(tail, chunk) {
 	for (const line of String(chunk).split(/\r?\n/)) {
@@ -137,7 +156,7 @@ function appendTail(tail, chunk) {
 	}
 }
 
-function run(label, args) {
+function run(label, args, opts = {}) {
 	return new Promise((res) => {
 		const start = Date.now();
 		const tail = [];
@@ -189,6 +208,12 @@ function run(label, args) {
 			const warning = `[run-unit] ${label} timed out after ${runnerTimeoutMs}ms; terminating the runner so the unit phase reports diagnostics before the outer gate timeout.`;
 			console.error(`\n${warning}`);
 			appendTail(tail, warning);
+			if (opts.heartbeatFile) {
+				for (const line of readHeartbeatDiagnostics(opts.heartbeatFile)) {
+					console.error(line);
+					appendTail(tail, line);
+				}
+			}
 			terminateTimedOutRunner();
 			runnerKillGraceTimer = setTimeout(() => {
 				if (settled) return;
@@ -249,33 +274,42 @@ function run(label, args) {
 // it generously: the slowest real node-logic test is ~1s, so 120s never flakes a
 // legitimate test even under heavy gate contention, but converts an infinite
 // hang into a named `test timed out` failure that points straight at the culprit.
-const nodePerTestTimeoutMs = Math.max(
-	10_000,
-	Number.parseInt(process.env.BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS || "120000", 10) || 120_000,
-);
 const nodeArgs = [
 	"tsx",
 	"--import", "./tests/helpers/css-stub-loader.mjs",
 	"--test",
 	"--test-force-exit",
-	`--test-timeout=${nodePerTestTimeoutMs}`,
+	`--test-timeout=${nodeTestTimeoutMs}`,
 	`--test-concurrency=${nodeConcurrency}`,
+	// Keep the normal tap output on stdout (node's default when piped) AND
+	// attach the hung-test heartbeat reporter. Explicitly naming tap is required:
+	// specifying any --test-reporter disables node's implicit default reporter, so
+	// human output would otherwise disappear.
+	"--test-reporter=tap",
+	"--test-reporter-destination=stdout",
+	"--test-reporter=./tests/helpers/hung-test-reporter.mjs",
+	// The heartbeat reporter yields nothing (its real output is the JSON heartbeat
+	// written via BOBBIT_UNIT_NODE_HEARTBEAT_FILE), so routing it to the stderr
+	// keyword adds no output while avoiding a filesystem-path CLI arg that could
+	// contain spaces under `shell: true` on Windows.
+	"--test-reporter-destination=stderr",
 	...NODE_UNIT_GLOBS,
 ];
 const browserArgs = ["playwright", "test", "--config", "tests/playwright.config.ts", "--workers", browserWorkers];
 
-console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency}, browser --workers=${browserWorkers}`);
+console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency} --test-timeout=${nodeTestTimeoutMs}ms, browser --workers=${browserWorkers}`);
 
 const overallStart = Date.now();
 const restoreGeneratedArtifacts = snapshotGeneratedArtifacts();
 let results;
 try {
 	results = await Promise.all([
-		run("node-logic", nodeArgs),
+		run("node-logic", nodeArgs, { heartbeatFile: nodeHeartbeatFile }),
 		run("browser-fixtures", browserArgs),
 	]);
 } finally {
 	restoreGeneratedArtifacts();
+	try { rmSync(heartbeatDir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 const totalSecs = ((Date.now() - overallStart) / 1000).toFixed(1);
 const failed = results.filter((r) => r.code !== 0);

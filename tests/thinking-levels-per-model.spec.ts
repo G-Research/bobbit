@@ -52,6 +52,16 @@ test.describe("Per-model thinking-level selector", () => {
 		expect(supported).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
 	});
 
+	test("Claude Fable 5 (off:null map) omits off and offers minimal..xhigh", async ({ page }) => {
+		// off:null = forced adaptive thinking → "off" must be dropped; the selector
+		// offers minimal/low/medium/high/xhigh only (mirrors pi-ai). This is the
+		// UI-rendering half of the Fable fix; the WS frame is covered by the e2e spec.
+		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-fable-5|1|off=null;xhigh=xhigh"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+		expect(supported).not.toContain("off");
+	});
+
 	test("Opus 4.5 omits xhigh option", async ({ page }) => {
 		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-5-20250920|1"));
 		const supported = await page.evaluate(() => (window as any).getSupported());

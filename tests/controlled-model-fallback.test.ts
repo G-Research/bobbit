@@ -87,6 +87,13 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const broadcast = (clients: Set<any>, message: any) => {
 		for (const client of clients) client.messages.push(message);
 	};
+	// Stub for the module-level helper `tryAutoSelectModel` uses to build the
+	// `state` broadcast payload from the registry-backed resolver
+	// (`resolveModelStateMeta`). The eval scope has no model-registry cache, so
+	// mirror only the shape the assertions read (`data.model.{provider,id}`).
+	const buildModelStateData = (provider: string, id: string) => ({
+		model: { provider, id, reasoning: false },
+	});
 
 	// eslint-disable-next-line no-new-func
 	return new Function(
@@ -99,6 +106,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"sanitizeModelErrorText",
 		"sanitizeModelErrorForLog",
 		"broadcast",
+		"buildModelStateData",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
 		applyModelString,
@@ -110,6 +118,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		sanitizeModelErrorText,
 		sanitizeModelErrorForLog,
 		broadcast,
+		buildModelStateData,
 	);
 }
 

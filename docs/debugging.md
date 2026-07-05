@@ -2,6 +2,14 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Unit `node-logic` runner timed out with no assertion failure
+
+- **Symptom**: the `unit:` gate fails with `[run-unit] node-logic timed out after 1050000ms`; `browser-fixtures` passed; no test reported an assertion failure. The retained tail shows whatever printed last, not the culprit file.
+- **Cause**: a single test/hook (or a leaked handle) never settles, so node's run never completes and `--test-force-exit` never fires; the wrapper then kills the runner at its own timeout without naming the offending file.
+- **Fix**: `scripts/run-unit.mjs` passes `--test-timeout` (default 120s; `BOBBIT_UNIT_NODE_TEST_TIMEOUT_MS`) so a hung test/hook fails fast and node names it + file + line, well before the wrapper/gate timeout; and it pairs the `tap` reporter with `tests/helpers/hung-test-reporter.mjs`, whose on-disk heartbeat lets the wrapper's timeout path print `HUNG FILE: <path>` for files still in flight (the leaked-handle backstop). Diagnostics rendering is `scripts/lib/unit-heartbeat.mjs`.
+- **First look**: the failure tail now contains either `test timed out after <n>ms` (with `test at <file>:<line>`) or `[run-unit] HUNG FILE: <path>`. Do not just raise the timeout — read the named file/test.
+- **Pinning tests**: `tests/run-unit-wrapper.test.ts`, `tests/hung-test-reporter.test.ts`, `tests/run-unit-heartbeat-diagnostics.test.ts`, `tests/run-unit-hung-test-integration.test.ts`.
+
 ## Verification step stuck in `running`
 
 - **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
@@ -182,7 +190,7 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 After a server restart, the context bar may show wrong info (e.g. 200k instead of 1M) or nothing at all. This happens because the agent process's `getState()` RPC may fail or return incomplete data before the process is fully ready.
 
-- **Server-side fallback**: `sendFallbackModelState()` in `handler.ts` reads persisted `modelProvider`/`modelId` from the session store and calls `inferMeta()` to attach the correct `contextWindow`. This runs when `getState()` fails, is skipped (dormant/preparing sessions), or returns data without model metadata.
+- **Server-side fallback**: `sendFallbackModelState()` in `handler.ts` reads persisted `modelProvider`/`modelId` from the session store and calls `resolveModelStateMeta()` (registry cache → pi-ai catalog → `inferMeta`) to attach the correct `contextWindow` / `reasoning` / `thinkingLevelMap`. This runs when `getState()` fails, is skipped (dormant/preparing sessions), or returns data without model metadata. Deriving the frame from `inferMeta` alone was the cause of the 200k-instead-of-1M symptom and the missing thinking selector for models like Claude Fable 5 — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful).
 - **Client-side retry**: `remote-agent.ts` retries `get_state` after 3s on reconnect if `contextWindow` is still 0.
 - **Default contextWindow is 0**: Before the server provides real data, `contextWindow` starts at 0 (not 200k), so the context bar shows nothing rather than a misleading value.
 - If context bar still shows wrong info after restart, check that `modelProvider` and `modelId` are persisted in `<project-root>/.bobbit/state/sessions.json` for the affected session.

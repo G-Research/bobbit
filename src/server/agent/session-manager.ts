@@ -68,9 +68,9 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { modelRecencyRank } from "./model-registry.js";
+import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -782,6 +782,28 @@ const _warnedClients = new WeakSet<WebSocket>();
  * Decision logic lives in `src/server/ws-overflow-guard.ts` for testability.
  */
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
+
+/**
+ * Build the `state.model` payload for a live model-state broadcast. Routes
+ * through `resolveModelStateMeta` (registry cache → pi-ai catalog → inferMeta)
+ * so the frame carries the SAME contextWindow / maxTokens / reasoning /
+ * thinkingLevelMap the ModelSelector dropdown shows. The client full-replaces
+ * `state.model`, so every field must be present. `thinkingLevelMap` is omitted
+ * when upstream metadata doesn't provide it.
+ */
+function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
+	const meta = resolveModelStateMeta(provider, id);
+	return {
+		model: {
+			provider,
+			id,
+			contextWindow: meta.contextWindow,
+			maxTokens: meta.maxTokens,
+			reasoning: meta.reasoning,
+			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+		},
+	};
+}
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
@@ -6429,10 +6451,7 @@ export class SessionManager {
 					const provider = pinnedModel.slice(0, slash);
 					const modelId = pinnedModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					broadcast(session.clients, {
-						type: "state",
-						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-					});
+					broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Verified spawn-pinned model "${pinnedModel}" for session ${session.id}`);
 					return;
 				} catch (err) {
@@ -6464,10 +6483,7 @@ export class SessionManager {
 						const provider = fallbackSessionModel.slice(0, slash);
 						const modelId = fallbackSessionModel.slice(slash + 1);
 						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-						broadcast(session.clients, {
-							type: "state",
-							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-						});
+						broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
 						return;
 					} catch (fallbackErr) {
@@ -6505,10 +6521,7 @@ export class SessionManager {
 					const provider = roleModel.slice(0, slash);
 					const modelId = roleModel.slice(slash + 1);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					broadcast(session.clients, {
-						type: "state",
-						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-					});
+					broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 					console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
 					return;
 				} catch (err) {
@@ -6541,10 +6554,7 @@ export class SessionManager {
 						const provider = fallbackSessionModel.slice(0, slash);
 						const modelId = fallbackSessionModel.slice(slash + 1);
 						this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-						broadcast(session.clients, {
-							type: "state",
-							data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-						});
+						broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
 						return;
 					} catch (fallbackErr) {
@@ -6589,10 +6599,7 @@ export class SessionManager {
 				this._writeModelNameFile(session.id, sessionModelPref);
 				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
 				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
-				broadcast(session.clients, {
-					type: "state",
-					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-				});
+				broadcast(session.clients, { type: "state", data: buildModelStateData(provider, modelId) });
 				return;
 			} catch (err) {
 				console.error(`[session-manager] default.sessionModel "${safeSessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model: ${sanitizeModelErrorForLog(err)}`);
@@ -6629,10 +6636,7 @@ export class SessionManager {
 			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
 
-			broadcast(session.clients, {
-				type: "state",
-				data: { model: { provider: "aigw", id: modelToUse.id, reasoning: inferMeta(modelToUse.id).reasoning } },
-			});
+			broadcast(session.clients, { type: "state", data: buildModelStateData("aigw", modelToUse.id) });
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
 		}

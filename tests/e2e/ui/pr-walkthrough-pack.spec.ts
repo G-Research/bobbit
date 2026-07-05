@@ -119,7 +119,12 @@ function setupOutsideRepo(): void {
 	outsideHeadSha = gitIn(outsideRepoDir, ["rev-parse", "HEAD"]);
 }
 
-const HUNK_HEADER = "@@ -2,3 +2,3 @@ export class SyncWorker {";
+// The REAL unified-diff hunk header git emits for setupSessionGitRepo's single
+// 5-line file (one changed line inside 3 lines of context ⇒ the whole file is one
+// hunk). It MUST match git's actual output: the strict placement resolver fails
+// closed with PRW_HUNK_REF_UNRESOLVED on a stale/hand-written header, so a wrong
+// header here would leave the pane stuck on the pending "PR Walkthrough" title.
+const HUNK_HEADER = "@@ -1,5 +1,5 @@";
 
 /** The RAW production walkthrough YAML the reviewer's submit_pr_walkthrough_yaml
  *  would emit (the rich `pr` + `walkthrough.{…}` schema). The pack's publish route
@@ -168,7 +173,7 @@ function submitYaml(): string {
 					alternatives_considered: [{ option: "Fixed delay", pros: ["simple"], cons: ["slow recovery"] }],
 					tradeoffs: ["More latency on persistent failure."],
 					suggested_reviewer_concerns: ["Confirm the cap is sensible."],
-					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, why_relevant: "introduces the retry wrapper" }],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, placement: "secondary", primary_card_id: "significant-sync-worker", why_relevant: "introduces the retry wrapper" }],
 				},
 			],
 			review_chunks: [
@@ -179,7 +184,7 @@ function submitYaml(): string {
 					reviewer_goal: "Verify the retry wrapper is correct.",
 					explanation: "Wrap the fetch in a retry loop with capped exponential delay.",
 					files: [SYNC_FILE],
-					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line_range: "3", why_relevant: "the retry call" }],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line_range: "3", placement: "primary", why_relevant: "the retry call" }],
 					suggested_concerns: [
 						{
 							severity: "non_blocking",
@@ -718,11 +723,11 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
 
-		// Pending: exact copy "PR Walkthrough: In Progress" + the spinner.
+		// Pending: exact copy "PR Walkthrough: In Progress" + the centred progress bar.
 		const pending = page.locator('[data-testid="prw-pending"]').first();
 		await expect(pending).toBeVisible({ timeout: 15_000 });
 		await expect(pending).toContainText("PR Walkthrough: In Progress");
-		await expect(page.locator('[data-testid="prw-spinner"]').first()).toBeVisible();
+		await expect(pending.locator('[data-testid="prw-pending-overlay"] .progress-track').first()).toBeVisible();
 		// The manual Run/Load buttons are GONE.
 		await expect(page.locator('[data-testid="prw-run"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);

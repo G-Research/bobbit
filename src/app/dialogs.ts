@@ -1065,7 +1065,29 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	// Load roles for the picker
 	if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
 
+	// Guard against text-selection drags: if the mouse-down starts inside the
+	// modal (e.g. selecting the title text) and the mouse-up lands on the
+	// backdrop, the resulting click targets the backdrop and would otherwise
+	// close the dialog. Only a genuine mouse-down on the backdrop should close.
+	let mouseDownInsideModal = false;
+	const onDocMouseDown = (e: MouseEvent) => {
+		const backdrop = container.querySelector(".z-40");
+		mouseDownInsideModal = !!backdrop && e.target !== backdrop;
+	};
+	const onDocClickCapture = (e: MouseEvent) => {
+		const backdrop = container.querySelector(".z-40");
+		if (mouseDownInsideModal && backdrop && e.target === backdrop) {
+			// Swallow the backdrop click so Dialog's onClose doesn't fire.
+			e.stopPropagation();
+		}
+		mouseDownInsideModal = false;
+	};
+	document.addEventListener("mousedown", onDocMouseDown, true);
+	document.addEventListener("click", onDocClickCapture, true);
+
 	const cleanup = () => {
+		document.removeEventListener("mousedown", onDocMouseDown, true);
+		document.removeEventListener("click", onDocClickCapture, true);
 		titleChangeUnsub?.();
 		titleChangeUnsub = null;
 		render(html``, container);
@@ -1205,7 +1227,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 				children: html`
 					${DialogContent({
 						children: html`
-							${DialogHeader({ title: "Edit Session" })}
+							${DialogHeader({ title: "Modify Session" })}
 							<div class="mt-4 flex flex-col gap-4">
 								<!-- Title -->
 								<div>

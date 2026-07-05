@@ -29,10 +29,36 @@ export interface PrWalkthroughDiffLine {
 	kind: PrWalkthroughDiffLineKind;
 }
 
+export type PrWalkthroughHunkPlacementKind = "primary" | "secondary" | "skip" | "completion_sweep";
+
+export type HunkPrimaryCoverageState = "primary-reviewed" | "skipped" | "completion-sweep-remaining" | "unread";
+
+export interface PrWalkthroughHunkPlacement {
+	hunkId: string;
+	blockId: string;
+	filePath: string;
+	hunkHeader: string;
+	placement: PrWalkthroughHunkPlacementKind;
+	defaultExpanded: boolean;
+	primaryCardId?: string;
+	primaryCardTitle?: string;
+	whyRelevant?: string;
+	skipReason?: string;
+	readReceiptIds?: string[];
+}
+
 export interface PrWalkthroughHunk {
 	id: string;
 	header: string;
 	lines: PrWalkthroughDiffLine[];
+	/** Hunk-level PRW review-flow metadata; absent on legacy payloads. */
+	placement?: PrWalkthroughHunkPlacementKind;
+	defaultExpanded?: boolean;
+	primaryCardId?: string;
+	primaryCardTitle?: string;
+	whyRelevant?: string;
+	skipReason?: string;
+	readReceiptIds?: string[];
 }
 
 export interface PrWalkthroughDiffBlock {
@@ -44,6 +70,8 @@ export interface PrWalkthroughDiffBlock {
 	isGenerated?: boolean;
 	isTruncated?: boolean;
 	hunks: PrWalkthroughHunk[];
+	/** Hunk placements represented by this hunk-sliced block. */
+	hunkPlacements?: PrWalkthroughHunkPlacement[];
 	externalUrl?: string;
 	blobUrl?: string;
 	rawUrl?: string;
@@ -56,6 +84,75 @@ export interface PrWalkthroughSuggestedComment {
 	diffBlockId: string;
 	lineId: string;
 	body: string;
+}
+
+export type PrWalkthroughNarrativeCommentSeverity = "blocking" | "non_blocking" | "question" | "nit";
+export type PrWalkthroughNarrativeCommentIntent = "inline" | "summary";
+
+export type PrWalkthroughNarrativeBlock =
+	| { type: "text"; id: string; body: string }
+	| { type: "diff"; id: string; hunkIds: string[] }
+	| { type: "note"; id: string; body: string; anchor?: { hunkId?: string; lineId?: string } }
+	| { type: "suggested_comment"; id: string; severity: PrWalkthroughNarrativeCommentSeverity; intent: PrWalkthroughNarrativeCommentIntent; body: string; anchor?: { hunkId?: string; lineId?: string } }
+	| { type: "checklist"; id: string; items: string[] };
+
+export interface PrWalkthroughHunkCoverageRecord {
+	hunkId: string;
+	filePath: string;
+	hunkHeader: string;
+	primaryState: HunkPrimaryCoverageState;
+	/** Back-compat alias for consumers that previously read a single coverage state. */
+	state?: HunkPrimaryCoverageState;
+	primaryCardId?: string;
+	secondaryCardIds: string[];
+	repeatedReferenceCount: number;
+	skippedReason?: string;
+	readReceiptIds: string[];
+	generated: boolean;
+	binary: boolean;
+	truncated: boolean;
+	changedLines?: number;
+	fileCategory?: string;
+}
+
+export interface PrWalkthroughCoverageSummary {
+	totalHunks: number;
+	primaryReviewed: number;
+	unread: number;
+	skipped: number;
+	completionSweepRemaining: number;
+	repeatedSecondaryReferences: number;
+	uniqueSecondaryHunks: number;
+	records?: PrWalkthroughHunkCoverageRecord[];
+	majorRemaining?: Array<{ hunkId: string; filePath: string; hunkHeader: string; changedLines: number; fileCategory?: string }>;
+}
+
+export interface PrWalkthroughCardCoverageSummary {
+	totalHunks: number;
+	primaryReviewed: number;
+	unread: number;
+	skipped: number;
+	completionSweepRemaining: number;
+	repeatedSecondaryReferences: number;
+	hunkIds: string[];
+}
+
+export interface PrWalkthroughReadReceipt {
+	schemaVersion: 1;
+	id: string;
+	jobId?: string;
+	sessionId?: string;
+	readAt?: number;
+	format?: "compact" | "legacy" | "json";
+	mode?: "manifest" | "files" | "file" | "summary";
+	path?: string;
+	fileIndex?: number;
+	hunkOffset?: number;
+	hunkLimit?: number;
+	hunkIds: string[];
+	returnedBytes?: number;
+	readWindow?: unknown;
+	truncated: boolean;
 }
 
 export type PrWalkthroughOrientationConcernSeverity = "blocking" | "non_blocking" | "question" | "nit";
@@ -116,6 +213,12 @@ export interface PrWalkthroughCard {
 	navLabel?: string;
 	/** Orientation guided-step "beats"; only set on the orientation card. */
 	sections?: PrWalkthroughCardSection[];
+	/** Ordered V2 review narrative; absent on legacy payloads. */
+	narrative?: PrWalkthroughNarrativeBlock[];
+	/** Hunk-level primary/secondary/skip/completion-sweep metadata for this card. */
+	hunkPlacements?: PrWalkthroughHunkPlacement[];
+	/** Derived hunk coverage scoped to this card. */
+	coverage?: PrWalkthroughCardCoverageSummary;
 }
 
 export interface PrWalkthroughComment {
