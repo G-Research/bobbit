@@ -176,6 +176,7 @@ import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { SwarmGovernor } from "./swarm-governor.js";
+import type { TurnBudgetGovernor } from "./session-manager-consumer-types.js";
 import { verifyBestOfNGroup } from "./swarm-verifier.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
@@ -1512,6 +1513,25 @@ export class VerificationHarness {
 	 * `session-manager.ts`'s `trackCostFromEvent` call site.
 	 */
 	readonly swarmGovernor = new SwarmGovernor();
+
+	/**
+	 * S3 (extension-seam audit, P1) — the narrow `TurnBudgetGovernor` seam
+	 * `SessionManager.trackCostFromEvent`'s hot path calls through, instead of
+	 * reaching `swarmGovernor.checkTokenBudget`/`hardKillSwarmNode` directly.
+	 * Adapts this harness's own `swarmGovernor` + `hardKillSwarmNode` to the
+	 * interface; this is the sole production implementation. `hardKill` always
+	 * stamps `killReason: "governor-budget"` — the wall-clock straggler path
+	 * (`swarm-best-of-n.ts`'s `registerNode` `onStraggler` callback) hard-kills
+	 * via `hardKillSwarmNode` directly with `"governor-wallclock"`, unrelated
+	 * to this seam. Built once here (not per message) so the hot path's
+	 * `this._verificationHarness?.turnBudgetGovernor` is a plain property read
+	 * — zero added allocations per message, same cost as the pre-seam
+	 * `.swarmGovernor` property read it replaces.
+	 */
+	readonly turnBudgetGovernor: TurnBudgetGovernor = {
+		check: (goalId, totalTokens) => this.swarmGovernor.checkTokenBudget(goalId, totalTokens),
+		hardKill: (goalId, reason) => this.hardKillSwarmNode(goalId, reason, { killReason: "governor-budget" }),
+	};
 
 	/**
 	 * SWARM-W1 — hard-kill a swarm sibling that breached its token-budget
