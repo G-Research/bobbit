@@ -960,6 +960,31 @@ function stringifyPersistedToolResultContent(content: unknown): string {
 	try { return JSON.stringify(content); } catch { return String(content); }
 }
 
+/**
+ * F22 (RECONCILIATION-2026-07-05.md NEXT QUEUE item 5) — tool names that are
+ * safe within a "narrow worker" delegate's scope: pure file/shell primitives
+ * with no team/goal/gate/review/task orchestration surface. Used by
+ * `isNarrowDelegateAllowedTools` to decide whether a delegate's spawn-time
+ * `allowedTools` PROVES the spawn is bounded to a single coding task, as
+ * opposed to one that still needs team/goal awareness.
+ */
+const NARROW_WORKER_TOOLS: ReadonlySet<string> = new Set([
+	"read", "write", "edit", "grep", "find", "ls", "bash", "bash_bg", "read_session", "activate_skill",
+]);
+
+/**
+ * F22 narrowness criterion: a delegate is PROVABLY narrow iff it was spawned
+ * with a non-empty, explicit `allowedTools` allow-list drawn entirely from
+ * `NARROW_WORKER_TOOLS`. `undefined`/empty `allowedTools` (unrestricted, or
+ * inheriting the parent's full surface) is conservatively NOT narrow — the
+ * spawn metadata can't prove the child is scoped to a bounded coding task, so
+ * it keeps the full prompt (see `buildDelegatePromptParts`).
+ */
+export function isNarrowDelegateAllowedTools(allowedTools?: string[]): boolean {
+	if (!allowedTools || allowedTools.length === 0) return false;
+	return allowedTools.every(t => NARROW_WORKER_TOOLS.has(t.toLowerCase()));
+}
+
 type IdleWaiter = {
 	resolve: () => void;
 	reject: (error: Error) => void;
@@ -2779,6 +2804,16 @@ export class SessionManager {
 		allowedTools?: string[];
 		sectionOrder?: string[];
 	}): PromptParts {
+		// F22: a PROVABLY narrow delegate (allowedTools restricted entirely to
+		// file/shell primitives — see isNarrowDelegateAllowedTools) gets the
+		// "narrow-worker" profile: the nearest AGENTS.md only (no ancestor
+		// config-dir cascade — achieved by omitting projectConfigStore below,
+		// which falls back to readAgentsMd()'s single-nearest-file behavior)
+		// and no branch-discipline rationale in the Working Directory section
+		// (handled inside assembleSystemPrompt via promptProfile). Unrestricted
+		// allowedTools (undefined/empty) cannot prove narrowness, so it keeps
+		// the full cascade + full prompt — conservative by construction.
+		const narrow = isNarrowDelegateAllowedTools(opts.allowedTools);
 		return {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: opts.cwd,
@@ -2790,8 +2825,9 @@ export class SessionManager {
 			taskTitle: "Delegate Task",
 			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
 			allowedTools: opts.allowedTools,
-			projectConfigStore: this.projectConfigStore,
+			projectConfigStore: narrow ? undefined : this.projectConfigStore,
 			sectionOrder: opts.sectionOrder,
+			promptProfile: narrow ? "narrow-worker" : undefined,
 		};
 	}
 

@@ -900,6 +900,14 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			nestingContext,
 			sectionOrder,
+			// F2: read-only verification reviewer/agent-qa sessions are spawned
+			// with nonInteractive:true (see verification-reviewer-meta.ts) and
+			// never accept user input or make commits — drop the Git-conventions
+			// and mutate-same-target stanzas from the base system prompt. Any
+			// other nonInteractive session shape would get the same treatment,
+			// but today the only callers stamping nonInteractive are the
+			// verification harness's llm-review/agent-qa spawns.
+			promptProfile: plan.nonInteractive ? "reviewer" : undefined,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
