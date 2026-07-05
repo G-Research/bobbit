@@ -49,6 +49,28 @@ describe("project-assistant prompts", () => {
 		}
 	});
 
+	it("both prompts instruct the assistant to declare cacheInputGlobs on build/typecheck/unit steps (F4 default-workflow activation)", () => {
+		for (const p of [PROJECT_ASSISTANT_PROMPT, PROJECT_ASSISTANT_SCAFFOLDING_PROMPT]) {
+			assert.ok(p.includes("cacheInputGlobs"),
+				"prompt must mention cacheInputGlobs so ordinary projects opt into VER-01's content-keyed gate cache");
+			assert.ok(p.includes("Over-broad is safe, under-broad is never acceptable"),
+				"prompt must carry VER-01's conservative safety framing verbatim");
+			assert.ok(p.includes("Never copy Bobbit's own"),
+				"prompt must warn against copy-pasting Bobbit's own JS/TS-specific globs onto an arbitrary project");
+			assert.ok(/leave .cacheInputGlobs. off/.test(p),
+				"prompt must instruct the assistant to omit the field entirely (safe sha-exact fallback) when unsure, rather than guess");
+		}
+	});
+
+	it("both prompts call out step types that must NOT declare cacheInputGlobs", () => {
+		for (const p of [PROJECT_ASSISTANT_PROMPT, PROJECT_ASSISTANT_SCAFFOLDING_PROMPT]) {
+			assert.ok(p.includes("E2E/browser-driven tests"),
+				"prompt must exclude E2E/browser steps — live process state isn't a static file diff");
+			assert.ok(/ready-to-merge\s*\/\s*PR-raising steps/.test(p),
+				"prompt must exclude ready-to-merge/PR steps — live remote git/GitHub state");
+		}
+	});
+
 	it("PROJECT_ASSISTANT_PROMPT explains edit mode for already-registered projects", () => {
 		// New first-message router branch: when opened against a registered
 		// project, the assistant reads the existing project.yaml and re-proposes

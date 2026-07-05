@@ -80,22 +80,39 @@ Wall-clock and cost deltas are already observable via existing gate logs and
 
 | Step (implementation gate) | Type | Key kind (content mode) | Why |
 |---|---|---|---|
-| Build | command | sha-exact (no `cacheInputGlobs` shipped by default) | Generic across arbitrary managed projects — the harness has no sound default file-layout assumption (no `src/`, `tests/` guarantee). Opt-in per-project by adding `cacheInputGlobs` to the workflow's `Build` step. |
-| Type check passes | command | sha-exact by default | Same reasoning as Build. |
-| Unit tests | command | sha-exact by default | Same reasoning as Build. |
-| E2E tests | command | sha-exact by default | Same reasoning as Build — also the step type most exposed to live server/DB state, which is exactly the "can't be soundly determined from a file diff" case flagged in the design constraints even where globs are declared. |
+| Build | command | content, `cacheInputGlobs: ["**"]` shipped by default (F4/VER-01 default-workflow activation) | Generic across arbitrary managed projects — the harness has no sound default *source-tree* assumption (no `src/`, `tests/` guarantee), so it can't key on a language-specific subpath. It CAN soundly key on the step's own component root: paths are already resolved relative to the step's `cwd` (`componentRoot()`), so `["**"]` reuses the step only when nothing tracked under that component changed — sound for any language/layout, see `seed-default-workflows.ts`'s `COMPONENT_SCOPED_CACHE_GLOBS`. |
+| Type check passes | command | content, `["**"]` by default | Same reasoning as Build. |
+| Unit tests | command | content, `["**"]` by default | Same reasoning as Build. |
+| E2E tests | command | sha-exact by default | Not given `cacheInputGlobs` — the step type most exposed to live server/DB state, which is exactly the "can't be soundly determined from a file diff" case flagged in the design constraints even where globs are declared (nondeterminism isn't a file-content property `["**"]` or any glob can bound). |
 | Gap analysis / Code quality / Bug hunt / Risk (llm-review) | llm-review | sha-exact always | LLM reviews read the full diff, not a fixed file set; there is no static glob that soundly captures "what this reviewer's verdict depends on". Kept conservative per the design constraint's explicit carve-out. |
 | human-signoff | human-signoff | never reusable, any mode | Pre-existing invariant (Bug-1 defense-in-depth) — a prior approval is not consent for a re-signal. Unconditionally excluded before any glob/SHA check runs. |
 | subgoal | subgoal | sha-exact always | Orchestration step, not file-scoped; out of scope for this change. |
 
-**`seed-default-workflows.ts` itself still ships zero `cacheInputGlobs`.**
-That file is the legacy-migration fallback template used to seed workflows
-for *arbitrary* managed projects (`migrate-project-yaml.ts`) — it has no
-sound default file-layout assumption (no guaranteed `src/`, `tests/`
-convention), so hardcoding one there would be wrong for a project whose
-codebase doesn't share Bobbit's own layout. Real adoption is a per-project,
-per-workflow-step declaration in that project's own `project.yaml` — see the
-next section for Bobbit's own adoption.
+**F4/VER-01 default-workflow activation.** `seed-default-workflows.ts` (the
+legacy-migration fallback template used to seed workflows for *arbitrary*
+managed projects, `migrate-project-yaml.ts` — also the template `server.ts`
+auto-seeds from on a brand-new project's first goal when its workflow store
+is empty) now declares `cacheInputGlobs: ["**"]` on every workflow's Build /
+Type check / Unit tests command steps (`COMPONENT_SCOPED_CACHE_GLOBS`), and
+`per-component-workflows.ts`'s `buildAllComponentsWorkflow` fan-out does the
+same for its per-component Build/Type check/Unit tests steps. Bobbit-specific
+globs like `src/**`/`tsconfig*.json` are still NOT hardcoded here — the
+harness has no sound default source-tree assumption, and a language-specific
+glob would be UNDER-broad (never acceptable) for a non-matching project's
+real layout. `["**"]` sidesteps that entirely: `gitListTrackedPaths` /
+`gitDiffIsClean` (verification-harness.ts) already run at the step's resolved
+`cwd` (`componentRoot()` — that component's `<repo>/<relativePath>`, or the
+whole repo for single-repo/single-component projects), so `["**"]` matches
+every tracked path under that cwd — the step is reused only when *nothing* in
+its own component changed, regardless of language or layout. This is a no-op
+for single-component projects (cwd is the whole repo, and a Ralph-loop
+iteration always changes something) but a real hit-rate win for
+multi-component projects: a fix scoped to one component no longer busts a
+sibling component's cached results. Pinned by
+`tests/seed-default-workflows-cache-globs.test.ts` (static shape +
+functional hit/miss via the real git-backed deps, mirroring
+`tests/gate-cache-globs-adoption.test.ts`'s approach for this repo's own
+per-project-layout globs below).
 
 ## W3.1b — adoption in Bobbit's own `project.yaml`
 
@@ -134,11 +151,12 @@ Pinned end-to-end (static glob values + real git-backed hit/miss behavior) by
 3. Compare, via the `[verification][gate-cache]` log line: hit rate by
    `keyKind`, and gate wall-clock (existing gate logs) / cost
    (`cost-tracker.ts`) before vs after.
-4. If content mode's hit rate and safety hold up over real Ralph-loop
-   traffic, consider flipping the default and/or shipping real
-   `cacheInputGlobs` in `seed-default-workflows.ts` for the command steps
-   whose inputs a majority of managed projects can soundly declare (e.g. via
-   a project-level convention already captured in `project.yaml`).
+4. Done (F4/VER-01 default-workflow activation): `seed-default-workflows.ts`
+   ships `cacheInputGlobs: ["**"]` on every workflow's Build/Type
+   check/Unit tests steps — see the per-step key table above for why `["**"]`
+   (component-root-scoped, not a language-specific subpath) is the sound
+   generic choice. If content mode's hit rate and safety hold up over real
+   Ralph-loop traffic, consider flipping the default away from `sha`.
 
 ## Where the code lives
 

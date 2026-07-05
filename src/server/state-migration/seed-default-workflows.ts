@@ -28,6 +28,8 @@ export interface SeededVerifyStep {
 	optional?: boolean;
 	label?: string;
 	description?: string;
+	/** See `VerifyStep.cacheInputGlobs` in `workflow-store.ts` — VER-01 content-keyed gate cache. */
+	cacheInputGlobs?: string[];
 	/** See `VerifyStep.docGate` in `workflow-store.ts` — VER-06 doc-gate diff filter marker. */
 	docGate?: boolean;
 	subgoal?: {
@@ -61,6 +63,36 @@ export interface SeededWorkflow {
 
 /** Ralph-loop description applied to canonical implementation gates. */
 export const RALPH_LOOP_DESCRIPTION = "Ralph loop: implement the design, then run the verification suite. Failures circle the agent back to fix-and-retry until the gate passes.";
+
+/**
+ * F4/VER-01 default-workflow activation (docs/design/gate-step-cache.md).
+ *
+ * This template seeds workflows for *arbitrary* managed projects (any
+ * language/layout — `Component.commands` are opaque shell strings), so it
+ * cannot assume a source-tree convention like this repo's own dogfooded
+ * `.bobbit/config/project.yaml` does (`src/**`, `tsconfig*.json`, etc. —
+ * see `tests/gate-cache-globs-adoption.test.ts`). Declaring those
+ * Bobbit-specific globs here would be UNDER-broad for any other project's
+ * layout — a change to that project's real source (e.g. `main.py`,
+ * `pkg/foo.go`) would silently miss the glob and let `BOBBIT_GATE_CACHE=content`
+ * reuse a stale pass, which the design doc calls out as never acceptable.
+ *
+ * `["**"]` is the one glob that's sound for every layout: paths reported by
+ * `gitListTrackedPaths`/`gitDiffIsClean` (verification-harness.ts) are
+ * already scoped to the step's resolved `cwd` (`componentRoot()` —
+ * `<repo>/<relativePath>` for that component, collapsing to the whole repo
+ * for single-repo/single-component projects). `["**"]` matches every
+ * tracked path under that cwd, so a step is only reused when literally
+ * nothing in its own component changed — an unconditionally sufficient
+ * (maximally conservative, never under-broad) precondition regardless of
+ * what language or file layout the component uses. It's a no-op for
+ * single-component projects (their cwd is the whole repo, and a Ralph-loop
+ * iteration always changes something), but a real win for multi-component
+ * projects (`buildAllComponentsWorkflow` / `docs/design/multi-repo-components.md`):
+ * a fix scoped to one component no longer busts a sibling component's
+ * cached Build/Type check/Unit tests results.
+ */
+export const COMPONENT_SCOPED_CACHE_GLOBS = ["**"];
 
 /** Standard "Ready to Merge" verification gate — identical across all four flows. */
 export function readyToMergeGate(): SeededGate {
@@ -353,9 +385,9 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
-					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600, cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
@@ -395,9 +427,9 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
-					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600, cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
@@ -466,10 +498,10 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["reproducing-test"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
-					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600, cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Type check", type: "command", phase: 1, component: c, command: "check", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "Repro test passes (bug fixed)", type: "command", phase: 1, run: "{{reproducing-test.meta.test_command}}", expect: "success" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
@@ -498,9 +530,9 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Implementation",
 				description: "Ralph loop (minimal): build, test, review.",
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
-					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600, cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
@@ -542,9 +574,9 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Implementation",
 				description: "Solo-fast Ralph loop (minimal): build, typecheck, unit, one consolidated review.",
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
-					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600, cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit", cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS },
 					{ name: "Solo review", type: "llm-review", role: "reviewer", phase: 2, prompt: SOLO_FAST_REVIEW_PROMPT },
 				],
 			},

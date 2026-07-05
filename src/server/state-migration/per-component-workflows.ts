@@ -23,6 +23,7 @@ import {
 	BUG_HUNT_PROMPT,
 	DOC_PROMPT,
 	RALPH_LOOP_DESCRIPTION,
+	COMPONENT_SCOPED_CACHE_GLOBS,
 	type SeededWorkflow,
 	type SeededVerifyStep,
 } from "./seed-default-workflows.js";
@@ -76,6 +77,7 @@ export function buildAllComponentsWorkflow(components: Component[]): SeededWorkf
 				component: c.name,
 				command: "build",
 				timeout: 600,
+				cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS,
 			});
 		}
 	}
@@ -87,6 +89,7 @@ export function buildAllComponentsWorkflow(components: Component[]): SeededWorkf
 				phase: 1,
 				component: c.name,
 				command: "check",
+				cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS,
 			});
 		}
 		if (c.commands?.unit) {
@@ -96,6 +99,7 @@ export function buildAllComponentsWorkflow(components: Component[]): SeededWorkf
 				phase: 1,
 				component: c.name,
 				command: "unit",
+				cacheInputGlobs: COMPONENT_SCOPED_CACHE_GLOBS,
 			});
 		}
 		if (c.commands?.e2e) {

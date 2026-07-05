@@ -122,6 +122,38 @@ all include both **design-time gap analysis** AND **post-implementation gap anal
 those two checks keep the loop honest about what the goal actually asked for.
 Quick-fix skips both for speed.
 
+### Declare \`cacheInputGlobs\` on build/typecheck/unit-test steps
+
+A Ralph loop re-signals the gate on every fix commit — without \`cacheInputGlobs\`
+(see the authoring reference below and \`docs/design/gate-step-cache.md\`, VER-01),
+every \`command\` step re-runs from scratch on every re-signal even when a fix
+touched only one file. Use the project's REAL layout — what you found by exploring
+an existing directory, or what you are scaffolding for a brand-new one — not a
+guessed convention, to declare \`cacheInputGlobs\` on the Build / Type check /
+Unit tests steps you author:
+
+- List every directory and config file that step's actual command reads, based on
+  what you confirmed exists (or are creating) for this specific project (e.g. a
+  Node project with \`src/\` + \`tsconfig.json\` + \`package.json\` → those exact
+  paths; a Python project with \`app/\` + \`pyproject.toml\` → those instead; a
+  Cargo crate → \`src/**\` + \`Cargo.toml\` + \`Cargo.lock\`). Never copy Bobbit's own
+  \`src/**\`/\`tsconfig.json\` globs onto a project that doesn't actually have that
+  layout.
+- **Over-broad is safe, under-broad is never acceptable.** Including a directory
+  you're not 100% sure the step reads only costs a few extra cache misses. Omitting
+  one it truly does read means a real code change can be silently skipped as
+  "unchanged" — a wrong PASS on stale output. If you are not confident you've found
+  every real input for a step, leave \`cacheInputGlobs\` off that step entirely
+  (it falls back to today's exact-commit behavior, which is always safe, just
+  slower) rather than guess.
+- Do **not** declare \`cacheInputGlobs\` on steps whose real inputs aren't a static
+  file set: E2E/browser-driven tests (live server/process state), \`llm-review\` /
+  \`agent-qa\` steps (read the full diff, not a fixed file list), the ready-to-merge
+  / PR-raising steps (live remote git/GitHub state), or any step whose command is a
+  per-goal dynamic value rather than a fixed script.
+- This only takes effect under the project's own opt-in \`BOBBIT_GATE_CACHE=content\`
+  setting — declaring the globs is free and safe either way.
+
 ### Always end coding workflows with a "Raise PR" / ready-to-merge gate
 
 For any workflow whose purpose is to land code changes (feature, bugfix, refactor,
