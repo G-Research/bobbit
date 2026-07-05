@@ -52,8 +52,15 @@ test("run-unit timeout diagnostics name the in-flight/hung test file", () => {
 });
 
 test("run-unit preserves concurrent runners, artifact snapshot/restore and heartbeat cleanup", () => {
-	assert.match(src, /Promise\.all\(\[\s*\n\s*run\("node-logic"/, "node + browser runners still run concurrently");
-	assert.match(src, /run\("browser-fixtures", browserArgs\)/, "the browser fixtures runner is unchanged");
+	// Both runners must launch inside the SAME Promise.all so they run
+	// concurrently. TEST-01 path filtering wraps each in a conditional spread
+	// (`...(nodeArgs === null ? [] : [run(...)])`), so pin the invariant — both
+	// run() calls inside one Promise.all block — not the exact call layout.
+	const promiseAllStart = src.indexOf("results = await Promise.all([");
+	assert.ok(promiseAllStart > 0, "runners are launched via a single Promise.all");
+	const promiseAllBlock = src.slice(promiseAllStart, src.indexOf("]);", promiseAllStart));
+	assert.ok(promiseAllBlock.includes('run("node-logic"'), "node + browser runners still run concurrently");
+	assert.ok(promiseAllBlock.includes('run("browser-fixtures", browserArgs)'), "the browser fixtures runner is unchanged");
 	assert.match(src, /restoreGeneratedArtifacts\(\)/, "generated artifacts are still restored in the finally block");
 	assert.match(src, /rmSync\(heartbeatDir, \{ recursive: true, force: true \}\)/, "the heartbeat temp dir is cleaned up");
 	// Heartbeat setup must precede testEnv so the env var is not read in its TDZ.

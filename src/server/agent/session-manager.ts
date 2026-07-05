@@ -10023,11 +10023,18 @@ export class SessionManager {
 		// project/cwd via ensureMcpManagerForContext). Left connected, their real
 		// stdio child processes / HTTP sockets outlive the gateway process on a
 		// graceful shutdown. disconnectServer() swallows per-server errors, so
-		// this is best-effort and never blocks the rest of shutdown().
+		// this is best-effort and never blocks the rest of shutdown(). The
+		// typeof guard tolerates test doubles injected as `mcpManager` (e.g.
+		// tests/headquarters-server-scope-guards.test.ts stubs a plain object
+		// to observe scope-resolution calls) — a double without disconnectAll
+		// has no real child processes to reap.
 		const mcpManagers = [...this.scopedMcpManagers.values(), ...(this.mcpManager ? [this.mcpManager] : [])];
-		await Promise.all(mcpManagers.map((mgr) => mgr.disconnectAll().catch((err) => {
-			console.error("[mcp] Failed to disconnect MCP manager during shutdown:", (err as Error).message);
-		})));
+		await Promise.all(mcpManagers.map(async (mgr) => {
+			if (typeof mgr?.disconnectAll !== "function") return;
+			await mgr.disconnectAll().catch((err: unknown) => {
+				console.error("[mcp] Failed to disconnect MCP manager during shutdown:", (err as Error).message);
+			});
+		}));
 		this.scopedMcpManagers.clear();
 		this.mcpManager = null;
 	}

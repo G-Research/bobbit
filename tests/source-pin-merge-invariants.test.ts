@@ -572,8 +572,13 @@ describe("Source pin — merge-loss invariants", () => {
 			[
 				"const withRoleResolution = (",
 				"modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),",
-				"json({ roles: resolved.map(r => withRoleResolution(r as any, projectId)) });",
-				"json(withRoleResolution(found as any, qProjectId));",
+				// Post-HQ-split (upstream #932) both GET routes resolve an explicit
+				// project scope first (resolveRequiredConfigProjectScope) and pass its
+				// normalized `effectiveConfigProjectId` — the pinned text follows the
+				// exact call sites but the invariant is unchanged: withRoleResolution(),
+				// not plain withOrigin(), on both /api/roles list and detail responses.
+				"json({ roles: resolved.map(r => withRoleResolution(r as any, effectiveConfigProjectId)) });",
+				"json(withRoleResolution(found as any, effectiveConfigProjectId));",
 			],
 			"src/server/server.ts must serialize /api/roles (list) and /api/roles/:name (detail)\n" +
 			"responses through withRoleResolution(), not the plain withOrigin() helper, so each role\n" +
