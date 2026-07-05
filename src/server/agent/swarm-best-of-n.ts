@@ -20,6 +20,17 @@
  * `N > cap`, `ChildTeamScheduler.requestStart` parks the excess siblings
  * capacity-blocked (FIFO queue) and starts them as permits free from
  * terminating siblings — see `tests/swarm-w1-scheduler-deadlock.test.ts`.
+ *
+ * SWARM-W3 (design/swarm-orchestration.md, the scheduler-hook gap flagged by
+ * docs/design/swarm-orchestration-w2.md): the hard governor is armed via
+ * `requestChildStart`'s `onStart` hook, which fires exactly when a sibling's
+ * team ACTUALLY starts — not at this module's `requestChildStart` call site.
+ * For a sibling with a free permit that's effectively the same moment; for a
+ * capacity-blocked sibling it is however much later the FIFO queue drains to
+ * it. This is deliberate: arming the straggler wall-clock deadline any
+ * earlier would start a capacity-blocked sibling's countdown before its team
+ * ever runs — see `swarm-orchestration-w3.md` and
+ * `tests/swarm-w3-scheduler-hook.test.ts`.
  */
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -138,21 +149,35 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 		verifyCommand,
 	});
 
-	// Arm the hard governor for each sibling BEFORE requesting its start, then
-	// route the start through the SAME per-root scheduler every other
+	// Route the start through the SAME per-root scheduler every other
 	// child-spawn path uses (`requestChildStart`) — never a bespoke start
 	// path, and never a "join" entity that would itself hold a permit.
+	//
+	// SWARM-W3 (design/swarm-orchestration.md; the scheduler-hook gap
+	// flagged by docs/design/swarm-orchestration-w2.md): the hard governor is
+	// armed via the scheduler's `onStart` hook, which fires exactly when the
+	// sibling's team ACTUALLY starts — immediately for a sibling that gets a
+	// free permit now, or later once a capacity-blocked sibling is dequeued
+	// from the FIFO. Arming eagerly here (before `requestChildStart`, as W1/W2
+	// did) started a capacity-blocked sibling's straggler wall-clock deadline
+	// at goal-creation time instead of team-start time — under `fanOut > cap`
+	// with a long queue, a sibling could be straggler-killed before it ever
+	// got to run. Deferring to actual start closes that gap; token-budget
+	// enforcement is unaffected (there is no session/turn to check budget
+	// against until the team is running anyway).
 	const capacityBlocked: string[] = [];
 	for (const goalId of siblingGoalIds) {
-		deps.harness.swarmGovernor.registerNode(
-			goalId,
-			{ tokenBudget: tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMs: wallClockMsPerNode },
-			(reason) => {
-				deps.harness.hardKillSwarmNode(goalId, reason)
-					.catch((err) => console.warn(`[swarm-best-of-n] straggler hard-kill failed for ${goalId} (non-fatal):`, err));
-			},
-		);
-		const outcome = deps.harness.requestChildStart(goalId);
+		const armGovernor = () => {
+			deps.harness.swarmGovernor.registerNode(
+				goalId,
+				{ tokenBudget: tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMs: wallClockMsPerNode },
+				(reason) => {
+					deps.harness.hardKillSwarmNode(goalId, reason)
+						.catch((err) => console.warn(`[swarm-best-of-n] straggler hard-kill failed for ${goalId} (non-fatal):`, err));
+				},
+			);
+		};
+		const outcome = deps.harness.requestChildStart(goalId, armGovernor);
 		if (outcome === "capacity-blocked") {
 			capacityBlocked.push(goalId);
 			try {

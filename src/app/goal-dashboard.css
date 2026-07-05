@@ -483,6 +483,48 @@
 	border-color: var(--primary);
 }
 
+/* ── SWARM GOVERNOR SIBLING ROWS (SWARM-W3 transparency) — per-candidate state/verdict, under the aggregate strip ── */
+.swarm-governor-siblings {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--border);
+}
+.swarm-governor-sibling {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	font-size: 12px;
+}
+.swarm-governor-sibling-title {
+	color: var(--text-secondary, var(--foreground));
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 220px;
+}
+.swarm-governor-sibling-state {
+	color: var(--text-tertiary);
+	text-transform: capitalize;
+}
+.swarm-governor-sibling-state-done {
+	color: var(--success, #30a46c);
+}
+.swarm-governor-sibling-state-failed,
+.swarm-governor-sibling-state-killed {
+	color: var(--destructive, #e5484d);
+}
+.swarm-governor-sibling-score {
+	color: var(--text-tertiary);
+}
+.swarm-governor-sibling-winner {
+	color: var(--success, #30a46c);
+	font-weight: 600;
+}
+
 /* ── AGENT GRID ── */
 .agent-grid {
 	display: grid;
