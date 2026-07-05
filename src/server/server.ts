@@ -37,6 +37,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
+import type { AuthenticatedWS } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
@@ -465,8 +466,8 @@ function attachResponseByteCounter(res: http.ServerResponse): () => number {
 	return () => bytes;
 }
 
-function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
-	if (!ws?.isViewer) return false;
+function viewerSubscribedToGoal(ws: AuthenticatedWS, goalId: string): boolean {
+	if (!ws.isViewer) return false;
 	const goalIds = ws.viewerGoalIds;
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
@@ -2694,15 +2695,16 @@ export function createGateway(config: GatewayConfig) {
 	function broadcastToGoal(goalId: string, event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
-			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
-				const sid = (ws as any).sessionId as string | undefined;
+			for (const client of wss.clients) {
+				const ws = client as AuthenticatedWS;
+				if (!ws.authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				const sid = ws.sessionId;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
 					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
 					continue;
 				}
-				if (viewerSubscribedToGoal(ws as any, goalId)) ws.send(data);
+				if (viewerSubscribedToGoal(ws, goalId)) ws.send(data);
 			}
 			return;
 		}
@@ -2722,10 +2724,11 @@ export function createGateway(config: GatewayConfig) {
 		let skippedUnknownSession = 0;
 		let skippedUnscoped = 0;
 		let skippedViewerUnsubscribed = 0;
-		for (const ws of wss.clients) {
+		for (const client of wss.clients) {
+			const ws = client as AuthenticatedWS;
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
-			const sid = (ws as any).sessionId as string | undefined;
+			if (!ws.authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			const sid = ws.sessionId;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
 				if (session?.teamGoalId === goalId || session?.goalId === goalId) {
@@ -2740,8 +2743,8 @@ export function createGateway(config: GatewayConfig) {
 				else skippedNonGoalSession++;
 				continue;
 			}
-			if ((ws as any).isViewer) {
-				if (viewerSubscribedToGoal(ws as any, goalId)) {
+			if (ws.isViewer) {
+				if (viewerSubscribedToGoal(ws, goalId)) {
 					ws.send(data);
 					recipients++;
 					viewer++;
@@ -2777,8 +2780,9 @@ export function createGateway(config: GatewayConfig) {
 	function broadcastToAll(event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
-			for (const ws of wss.clients) {
-				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+			for (const client of wss.clients) {
+				const ws = client as AuthenticatedWS;
+				if (ws.authenticated && ws.readyState === 1 /* OPEN */) {
 					ws.send(data);
 				}
 			}
@@ -2792,9 +2796,10 @@ export function createGateway(config: GatewayConfig) {
 		let scanned = 0;
 		let recipients = 0;
 		let skipped = 0;
-		for (const ws of wss.clients) {
+		for (const client of wss.clients) {
+			const ws = client as AuthenticatedWS;
 			scanned++;
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+			if (ws.authenticated && ws.readyState === 1 /* OPEN */) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -2820,9 +2825,10 @@ export function createGateway(config: GatewayConfig) {
 	function broadcastToProject(projectId: string, event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
-			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
-				const sid = (ws as any).sessionId as string | undefined;
+			for (const client of wss.clients) {
+				const ws = client as AuthenticatedWS;
+				if (!ws.authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				const sid = ws.sessionId;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
 					if (!session) continue;
@@ -2840,10 +2846,11 @@ export function createGateway(config: GatewayConfig) {
 		let scanned = 0;
 		let recipients = 0;
 		let skipped = 0;
-		for (const ws of wss.clients) {
+		for (const client of wss.clients) {
+			const ws = client as AuthenticatedWS;
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
-			const sid = (ws as any).sessionId as string | undefined;
+			if (!ws.authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			const sid = ws.sessionId;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
 				if (!session) { skipped++; continue; }
@@ -2944,7 +2951,7 @@ export function createGateway(config: GatewayConfig) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of session.clients) {
-				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+				if (ws.readyState === 1 /* OPEN */) ws.send(data);
 			}
 			return;
 		}
@@ -2958,7 +2965,7 @@ export function createGateway(config: GatewayConfig) {
 		let skipped = 0;
 		for (const ws of session.clients) {
 			scanned++;
-			if ((ws as any).readyState === 1 /* OPEN */) {
+			if (ws.readyState === 1 /* OPEN */) {
 				ws.send(data);
 				recipients++;
 			} else {
