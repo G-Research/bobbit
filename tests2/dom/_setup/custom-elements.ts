@@ -54,9 +54,18 @@ if (proto && !proto.__bobbitDomBridge) {
 	const origDefine: (tag: string, cls: CE, opts?: ElementDefinitionOptions) => void = proto.define;
 	proto.define = function patchedDefine(tag: string, cls: CE, opts?: ElementDefinitionOptions) {
 		if (!recorded.has(tag)) recorded.set(tag, cls);
+		let result: any;
 		// Guard: happy-dom throws if a tag is defined twice in the same registry.
-		if (!this.get(tag)) return origDefine.call(this, tag, cls, opts);
-		return undefined;
+		if (!this.get(tag)) result = origDefine.call(this, tag, cls, opts);
+		// Immediately mirror into lit-html's PINNED registry so elements defined
+		// LATE (lazy dynamic imports fired mid-test, after this file's beforeAll
+		// sync) still upgrade when lit parses their templates in the pinned window.
+		// Without this, e.g. a lazily-loaded <markdown-block> renders as a generic
+		// element and throws "createRenderRoot is not a function" on connect.
+		if (litCustomElements && litCustomElements !== this && !litCustomElements.get(tag)) {
+			origDefine.call(litCustomElements, tag, cls, opts);
+		}
+		return result;
 	};
 	proto.__bobbitDomBridge = true;
 }
