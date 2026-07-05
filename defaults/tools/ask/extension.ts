@@ -8,7 +8,7 @@
  * The user's answers arrive later as a separate user message whose text is the
  * envelope:
  *
- *     [ask_user_choices_response tool_use_id=<id>]
+ *     [ask_user_choices_response tool_use_id=TOOL_USE_ID]
  *     {"answers":[{"question":"...","selected":"...","other_text":null}, ...]}
  *
  * See src/shared/ask-envelope.ts for the canonical format. The envelope is
@@ -40,7 +40,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Post 1–5 multiple-choice questions to the user. Non-blocking; ends your turn.",
 		promptSnippet: [
 			"Post multiple-choice questions to the user. The tool returns immediately and ends your turn.",
-			"Answers arrive later as a user message prefixed with `[ask_user_choices_response tool_use_id=<id>]`",
+			"Answers arrive later as a user message prefixed with `[ask_user_choices_response tool_use_id=TOOL_USE_ID]`",
 			"followed by a JSON body `{\"answers\":[...]}`. Match tool_use_id to your tool call.",
 		].join(" "),
 		parameters: Type.Object({
