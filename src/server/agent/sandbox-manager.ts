@@ -8,6 +8,7 @@
 
 import { ProjectSandbox } from "./project-sandbox.js";
 import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
+import type { Clock, CommandRunner } from "../gateway-deps.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,8 @@ export interface SandboxManagerOptions {
 	 * just coordinates lifecycle.
 	 */
 	bootstrap?: SandboxBootstrap;
+	commandRunner?: CommandRunner;
+	clock?: Clock;
 }
 
 // ── SandboxManager ─────────────────────────────────────────────────────────
@@ -53,9 +56,11 @@ export class SandboxManager {
 	 */
 	private _ensureInFlight = new Map<string, Promise<void>>();
 	private _bootstrap: SandboxBootstrap | null;
+	private readonly deps: { commandRunner?: CommandRunner; clock?: Clock };
 
 	constructor(opts: SandboxManagerOptions = {}) {
 		this._bootstrap = opts.bootstrap ?? null;
+		this.deps = { commandRunner: opts.commandRunner, clock: opts.clock };
 	}
 
 	/** Set or replace the bootstrap function post-construction. */
@@ -135,7 +140,7 @@ export class SandboxManager {
 			this.sandboxes.delete(projectId);
 		}
 
-		const sandbox = new ProjectSandbox(opts);
+		const sandbox = new ProjectSandbox(opts, this.deps);
 		this.sandboxes.set(projectId, sandbox);
 
 		try {

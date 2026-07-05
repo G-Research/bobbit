@@ -31,6 +31,7 @@ export interface GatewayDeps {
 	commandRunner?: CommandRunner;
 	fetchImpl?: typeof fetch;
 	agentBridgeFactory?: RpcBridgeFactory;
+	fsImpl?: FsLike;
 }
 
 export interface ResolvedGatewayDeps {
@@ -38,6 +39,7 @@ export interface ResolvedGatewayDeps {
 	commandRunner: CommandRunner;
 	fetchImpl: typeof fetch;
 	agentBridgeFactory: RpcBridgeFactory;
+	fsImpl: FsLike;
 }
 
 export interface FsLike extends Pick<typeof fs,
@@ -95,5 +97,6 @@ export function resolveGatewayDeps(deps: GatewayDeps = {}): ResolvedGatewayDeps 
 		commandRunner: deps.commandRunner ?? realCommandRunner,
 		fetchImpl: deps.fetchImpl ?? realFetch,
 		agentBridgeFactory: deps.agentBridgeFactory ?? defaultRpcBridgeFactory,
+		fsImpl: deps.fsImpl ?? realFs,
 	};
 }

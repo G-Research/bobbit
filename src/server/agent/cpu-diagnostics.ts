@@ -347,9 +347,9 @@ export function cpuDiagnosticsEnabled(): boolean {
 	return ENABLED;
 }
 
-export function getCpuDiagnostics(): CpuDiagnostics {
+export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {
 	if (!ENABLED) return disabledDiagnostics;
-	if (!singleton) singleton = new EnabledCpuDiagnostics();
+	if (!singleton) singleton = new EnabledCpuDiagnostics(clock);
 	return singleton;
 }
 
