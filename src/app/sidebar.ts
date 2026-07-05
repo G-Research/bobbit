@@ -2039,7 +2039,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 								@click=${() => { setStaffSectionExpanded(project.id, !_collapsedStaffExp); renderApp(); }}
 							>
 								<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_collapsedStaffExp ? "▾" : "▸"}</span></span>
-								<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">STAFF</span>
+								<span class="font-extrabold tracking-wider text-muted-foreground sidebar-collapsed-label" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">STF</span>
 							</button>
 							${_collapsedStaffExp ? staffRows.map(s => renderCollapsedSession(s)) : ""}
 						` : ""}
