@@ -17,6 +17,7 @@ import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, n
 import { invalidateClaudeCodeStatusCache } from "../agent/claude-code-status.js";
 import { invalidateModelCache } from "../agent/model-registry.js";
 import { normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
+import { guardPackAttributedPreferenceWrite } from "../extension-host/settings-section-preferences.js";
 import type { CoreRouteCtx } from "./core-route-ctx.js";
 import type { RouteTable } from "./route-table.js";
 
@@ -59,10 +60,34 @@ async function handlePreferencesPut(ctx: CoreRouteCtx): Promise<void> {
 		req, json, readBody, firstHeader, isHumanOperatorRequest,
 		claudeCodeConfirmationBinding, preferencesStore, getSafePreferences,
 		broadcastPreferencesChanged, broadcastToAll, listProjectsForApi,
+		packContributionRegistry,
 	} = ctx;
 	const body = await readBody(req);
 	if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 	const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
+	// ── Pack-attributed write gate (S5 settings-section contribution kind,
+	//    docs/design/pack-settings-contribution.md §4.3 — FULL-TIER reviewed, see
+	//    settings-section-preferences.ts's header comment for the full threat
+	//    model). `x-bobbit-settings-section-token` is sent ONLY by a pack
+	//    settings-section's `SettingsHostApi.preferences.set()` — the sole
+	//    sanctioned write path a settings section has. When present, BOTH the
+	//    gated-key hard-block AND the pack's own live allowlist are enforced
+	//    BEFORE anything below (including the operator-confirmation branch) ever
+	//    considers honoring the write, so a pack settings-section can never
+	//    reach a Claude-Code-runtime or agent-dir key regardless of what its
+	//    manifest declares. A normal (non-pack) admin request carries no such
+	//    header and is completely unaffected.
+	const packSectionToken = firstHeader("x-bobbit-settings-section-token");
+	if (packSectionToken) {
+		const guard = guardPackAttributedPreferenceWrite({
+			token: packSectionToken,
+			patchKeys: Object.keys(body),
+			contributions: packContributionRegistry,
+			projectId: undefined,
+			isBlockedKey: (key) => blockedAgentDirKeys.includes(key) || isClaudeCodePreferenceKey(key),
+		});
+		if (!guard.ok) { json({ error: guard.error }, guard.status); return; }
+	}
 	const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
 	if (blockedKey) {
 		json({

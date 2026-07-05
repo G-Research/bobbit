@@ -2674,6 +2674,17 @@ export interface PackPanelWire {
 	title?: string;
 }
 
+/** One pack-contributed Settings-page section (docs/design/
+ *  pack-settings-contribution.md §4.2). `preferenceKeys` is deliberately NOT
+ *  part of this wire shape — the client never needs (and must never trust) the
+ *  write allowlist; the server re-resolves it live at write time. */
+export interface PackSettingsSectionWire {
+	id: string;
+	title?: string;
+	tab: string;
+	order: number;
+}
+
 /** One pack-contributed entrypoint. `listName` is the `contents.entrypoints[]`
  *  basename — the SINGLE activation toggle key mapping onto both the launcher id
  *  and (for `kind:"route"`) the deep-link routeId. */
@@ -2693,6 +2704,9 @@ export interface PackContributionsWire {
 	packId: string;
 	packName: string;
 	panels: PackPanelWire[];
+	/** Additive per docs/marketplace.md's forward-compat convention (mirrors how
+	 *  `panels[]` was added). Absent on an older server; treat as empty. */
+	settingsSections?: PackSettingsSectionWire[];
 	entrypoints: PackEntrypointWire[];
 	/** Pack-local channel names only; module/handler paths stay server-side. */
 	channelNames?: string[];

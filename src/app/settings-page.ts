@@ -68,6 +68,7 @@ import { CustomProviderDialog } from "../ui/dialogs/CustomProviderDialog.js";
 import "../ui/components/CustomProviderCard.js";
 import type { CustomProvider, CustomProviderType } from "../ui/storage/stores/custom-providers-store.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
+import { renderPackSettingsSections } from "./pack-settings-sections.js";
 
 type SettingsTab = SettingsTabId;
 const DEFAULT_TAB: SettingsTab = "shortcuts";
@@ -156,53 +157,15 @@ let settingsSkillsCatalogBudget: number | null = null;
 const SKILLS_CATALOG_BUDGET_DEFAULT_BYTES = 16384;
 const SKILLS_CATALOG_BUDGET_MIN_BYTES = 1024;
 const SKILLS_CATALOG_BUDGET_MAX_BYTES = 131072;
-// Extra trusted GitHub hosts for PR walkthroughs. Persisted under the `githubTrustedHosts`
-// preferences key; github.com and its API/raw hosts are always trusted by the server baseline.
-let settingsGithubTrustedHosts: string[] = [];
-let settingsGithubTrustedHostInput = "";
+// NOTE: the "Trusted GitHub hosts" widget (state/validator/handlers/render) that
+// used to live here has moved to a pack-owned Settings section
+// (market-packs/pr-walkthrough/settings/trusted-hosts.yaml +
+// src/app/pack-settings-sections.ts), docs/design/pack-settings-contribution.md
+// §4.5. The duplicated `normalizeTrustedHost` validator that used to live here
+// (kept as a hand-copy to avoid pulling pr-walkthrough into this chunk) is GONE
+// — the pack module imports `src/shared/pr-walkthrough/url-safety.ts` directly
+// now that the widget is no longer part of the settings chunk.
 let customisePromptStatus = "";
-
-// Always-trusted baseline hosts (mirror of DEFAULT_TRUSTED_HOSTS in
-// src/shared/pr-walkthrough/url-safety.ts). Kept as a local copy — NOT imported —
-// to preserve UI chunk independence (pr-walkthrough has a circular-chunk hazard).
-const GITHUB_DEFAULT_TRUSTED_HOSTS = new Set([
-	"github.com",
-	"www.github.com",
-	"api.github.com",
-	"raw.githubusercontent.com",
-	"gist.githubusercontent.com",
-]);
-
-/**
- * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
- * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
- * rules MUST match the shared normalizer exactly so the UI never optimistically shows entries the
- * server would silently drop. Baseline DEFAULT hosts are filtered out (the managed list holds only
- * EXTRA hosts; baseline hosts are always trusted server-side regardless of this list).
- */
-function normalizeTrustedHost(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	let candidate = value.trim();
-	if (!candidate) return undefined;
-	if (candidate.includes("://")) {
-		try {
-			candidate = new URL(candidate).hostname;
-		} catch {
-			return undefined;
-		}
-	}
-	candidate = candidate.trim().toLowerCase().replace(/\.$/, "");
-	if (!candidate) return undefined;
-	// Reject anything that is not a bare hostname (paths, whitespace, creds, ports).
-	if (/[\s/@:]/.test(candidate) || candidate.includes("://")) return undefined;
-	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
-	// Require EVERY label to be a valid DNS label: non-empty, <=63 chars, and no
-	// leading/trailing hyphen. Rejects ".example.com", "example..com", "-x.com", "bad-.example", etc.
-	if (!candidate.split(".").every((label) => label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"))) return undefined;
-	// Managed list holds only EXTRA hosts; baseline hosts are always trusted server-side.
-	if (GITHUB_DEFAULT_TRUSTED_HOSTS.has(candidate)) return undefined;
-	return candidate;
-}
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -2837,9 +2800,6 @@ function loadGeneralSettings() {
 					settingsMaxNestingDepth = (typeof rawDepth === "number" && Number.isFinite(rawDepth)) ? rawDepth : null;
 					const raw = prefs.skillsCatalogBudget;
 					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
-					settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
-						? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
-						: [];
 					renderApp();
 				}
 			} catch {}
@@ -2903,44 +2863,6 @@ async function resetSkillsCatalogBudget(): Promise<void> {
 	} catch {}
 }
 
-async function persistGithubTrustedHosts(): Promise<void> {
-	try {
-		await gatewayFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ githubTrustedHosts: settingsGithubTrustedHosts }),
-		});
-		// The server normalize-and-stores (lossy); the GET readback is authoritative.
-		// Re-fetch so the UI never shows an entry the server silently dropped.
-		const res = await gatewayFetch("/api/preferences");
-		if (res.ok) {
-			const prefs = await res.json();
-			settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
-				? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
-				: [];
-			renderApp();
-		}
-	} catch {}
-}
-
-async function addTrustedHost(): Promise<void> {
-	const normalized = normalizeTrustedHost(settingsGithubTrustedHostInput);
-	if (!normalized || settingsGithubTrustedHosts.includes(normalized)) {
-		// Invalid or duplicate — clear the input and re-render without persisting.
-		settingsGithubTrustedHostInput = "";
-		renderApp();
-		return;
-	}
-	settingsGithubTrustedHosts = [...settingsGithubTrustedHosts, normalized];
-	settingsGithubTrustedHostInput = "";
-	renderApp();
-	await persistGithubTrustedHosts();
-}
-
-async function removeTrustedHost(host: string): Promise<void> {
-	settingsGithubTrustedHosts = settingsGithubTrustedHosts.filter((h) => h !== host);
-	renderApp();
-	await persistGithubTrustedHosts();
-}
 
 async function togglePlayFinishSound(): Promise<void> {
 	// Route through the shared helper so the dataset, persistence, and the
@@ -3308,43 +3230,6 @@ function renderGeneralTab() {
 						?disabled=${settingsSkillsCatalogBudget === null}
 						@click=${resetSkillsCatalogBudget}
 					>Reset to default</button>
-				</div>
-			</div>
-			<div class="flex flex-col gap-1.5">
-				<span class="text-sm font-medium text-foreground">Trusted GitHub hosts</span>
-				<p class="text-xs text-muted-foreground">
-					PR walkthroughs fetch repository and pull-request data (metadata and diffs) from these hosts.
-					github.com and its API/raw hosts are always trusted. Only add hosts you trust.
-				</p>
-				<div class="flex flex-col gap-1.5" data-testid="github-trusted-hosts-list">
-					${settingsGithubTrustedHosts.length === 0 ? html`
-						<p class="text-xs text-muted-foreground italic">No additional hosts trusted.</p>
-					` : settingsGithubTrustedHosts.map((host) => html`
-						<div class="flex items-center gap-2" data-testid="github-trusted-host-row" data-host=${host}>
-							<code class="text-sm text-foreground flex-1 truncate">${host}</code>
-							<button
-								class="text-xs text-muted-foreground hover:text-destructive underline"
-								data-testid="github-trusted-host-remove"
-								@click=${() => removeTrustedHost(host)}
-							>Remove</button>
-						</div>
-					`)}
-				</div>
-				<div class="flex items-center gap-2">
-					<input
-						type="text"
-						placeholder="ghe.example.com"
-						data-testid="github-trusted-host-input"
-						class="flex-1 px-2 py-1 rounded border border-input bg-background text-sm"
-						.value=${live(settingsGithubTrustedHostInput)}
-						@input=${(e: Event) => { settingsGithubTrustedHostInput = (e.target as HTMLInputElement).value; }}
-						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void addTrustedHost(); } }}
-					/>
-					<button
-						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
-						data-testid="github-trusted-host-add"
-						@click=${() => void addTrustedHost()}
-					>Add</button>
 				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
@@ -6232,7 +6117,7 @@ export function renderSettingsPage() {
 					` : isHeadquartersScope && currentTab === "workflows" ? html`
 						${renderProjectScopeWorkflowsTab(HEADQUARTERS_PROJECT_ID)}
 					` : html`
-						${currentTab === "general" ? renderGeneralTab() : ""}
+						${currentTab === "general" ? html`${renderGeneralTab()}${renderPackSettingsSections("system", "general")}` : ""}
 						${currentTab === "models" ? renderModelsTab() : ""}
 						${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
 						${currentTab === "palette" ? renderPaletteTab() : ""}
