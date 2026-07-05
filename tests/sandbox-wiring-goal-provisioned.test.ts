@@ -31,21 +31,31 @@ import { SessionManager } from "../src/server/agent/session-manager.js";
 import { LifecycleHub } from "../src/server/agent/lifecycle-hub.js";
 import { ModuleHost } from "../src/server/extension-host/module-host-worker.js";
 import { ContextTraceStore } from "../src/server/agent/context-trace-store.js";
+import { loadOrCreateToken } from "../src/server/auth/token.js";
 import type { ProviderContribution } from "../src/server/agent/pack-contributions.js";
 import type { PackContributionRegistry } from "../src/server/extension-host/pack-contribution-registry.js";
 import { makeTmpDir } from "./helpers/tmp.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
+const GATEWAY_URL = "https://127.0.0.1:3001";
+
+function writeIsolatedGatewayCredentials(stateRoot: string): void {
+	const stateDir = path.join(stateRoot, "state");
+	const secretsDir = path.join(stateRoot, ".secrets");
+	process.env.BOBBIT_SECRETS_DIR = secretsDir;
+	fs.mkdirSync(stateDir, { recursive: true });
+	fs.mkdirSync(secretsDir, { recursive: true });
+	fs.writeFileSync(path.join(stateDir, "gateway-url"), `${GATEWAY_URL}\n`);
+	loadOrCreateToken();
+}
 
 describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates", () => {
 	function setup(opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof mock.fn>; createSpy: ReturnType<typeof mock.fn> } {
 		const stateRoot = makeTmpDir("sandbox-wiring-");
 		const prevBobbitDir = process.env.BOBBIT_DIR;
+		const prevSecretsDir = process.env.BOBBIT_SECRETS_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
-		const stateDir = path.join(stateRoot, "state");
-		fs.mkdirSync(stateDir, { recursive: true });
-		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		fs.writeFileSync(path.join(stateDir, "token"), "admin-token\n");
+		writeIsolatedGatewayCredentials(stateRoot);
 
 		const sm: any = new SessionManager();
 		// Sandbox config = docker so applySandboxWiring proceeds.
@@ -76,6 +86,9 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		const restoreEnv = () => {
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
+			if (prevSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+			else process.env.BOBBIT_SECRETS_DIR = prevSecretsDir;
+			fs.rmSync(stateRoot, { recursive: true, force: true });
 		};
 		return { sm, restoreEnv, dispatchSpy, createSpy };
 	}
@@ -177,11 +190,9 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 	it("writes the marker file into the HOST worktree, never the container path", async () => {
 		const stateRoot = makeTmpDir("sandbox-wiring-fs-");
 		const prevBobbitDir = process.env.BOBBIT_DIR;
+		const prevSecretsDir = process.env.BOBBIT_SECRETS_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
-		const stateDir = path.join(stateRoot, "state");
-		fs.mkdirSync(stateDir, { recursive: true });
-		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		fs.writeFileSync(path.join(stateDir, "token"), "admin-token\n");
+		writeIsolatedGatewayCredentials(stateRoot);
 
 		// Real host worktree directory the agent's session was created with.
 		const hostWorktree = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-wt-")));
@@ -244,6 +255,8 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 			moduleHost.dispose();
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
+			if (prevSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+			else process.env.BOBBIT_SECRETS_DIR = prevSecretsDir;
 			fs.rmSync(hostWorktree, { recursive: true, force: true });
 			fs.rmSync(providerTmp, { recursive: true, force: true });
 			fs.rmSync(stateRoot, { recursive: true, force: true });

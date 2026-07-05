@@ -25,15 +25,6 @@ export function projectDisplayName(project?: ProjectIdentity | null): string {
 	return isHeadquartersProject(project) ? HEADQUARTERS_PROJECT_NAME : (project?.name || "Project");
 }
 
-export function sortProjectsWithHeadquartersFirst<T extends ProjectIdentity>(projects: readonly T[]): T[] {
-	return [...projects].sort((a, b) => {
-		const ah = isHeadquartersProject(a);
-		const bh = isHeadquartersProject(b);
-		if (ah === bh) return 0;
-		return ah ? -1 : 1;
-	});
-}
-
 export function projectIconComponent(project?: ProjectIdentity | string | null): typeof FolderOpen {
 	return isHeadquartersProject(project) ? TowerControl : FolderOpen;
 }

@@ -41,7 +41,8 @@ export const DECISION_POINTS = [
 	// (the route-registry-derived interception-point generalization) — flag
 	// this point for STR-01 to later subsume, same discipline as this file's
 	// own header. See swarm-topology-classifier.ts's header for the full
-	// design/scope of this wave (harness only — zero classifiers registered).
+	// design/scope of the observe-only built-in classifier now registered
+	// there.
 	"goal-create",
 ] as const;
 

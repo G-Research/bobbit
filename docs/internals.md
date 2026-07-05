@@ -2303,6 +2303,8 @@ Set `tools_md: "index"` in `project.yaml`, or set `BOBBIT_TOOLS_MD=index` as the
 
 Opt-in Docker isolation for agent sessions. Set `sandbox: "docker"` in `project.yaml`. Each project gets one long-lived Docker container - agents work inside it using standard git worktrees, the same isolation model as non-sandbox mode.
 
+For the non-sandboxed mode's known fencing gaps (report-only input to the separate robust-sandboxing workstream), see [design/sandboxing-input-findings.md](design/sandboxing-input-findings.md).
+
 ### Architecture
 
 ```
