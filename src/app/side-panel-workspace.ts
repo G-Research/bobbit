@@ -17,10 +17,11 @@ import {
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import type { ProposalType } from "./proposal-registry.js";
 
 export type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
 export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "pack";
-export type SidePanelProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type SidePanelProposalType = ProposalType;
 
 export interface SidePanelWorkspaceTab {
 	id: string;

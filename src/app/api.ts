@@ -2833,6 +2833,44 @@ export async function createRole(role: {
 	}
 }
 
+export interface CreatedSkill {
+	name: string;
+	description: string;
+	filePath: string;
+}
+
+/** Accept a propose_skill proposal — writes skills/<name>/SKILL.md into the
+ *  target scope's user-pack dir (F26). See POST /api/skills in server.ts. */
+export async function createSkill(skill: {
+	name: string;
+	description: string;
+	content: string;
+	argumentHint?: string;
+	tools?: string;
+	projectId?: string;
+}): Promise<CreatedSkill | null> {
+	try {
+		const body: Record<string, unknown> = {
+			name: skill.name,
+			description: skill.description,
+			content: skill.content,
+		};
+		if (skill.argumentHint !== undefined && skill.argumentHint !== "") body.argumentHint = skill.argumentHint;
+		if (skill.tools !== undefined && skill.tools !== "") body.tools = skill.tools;
+		if (skill.projectId !== undefined && skill.projectId !== "") body.projectId = skill.projectId;
+		const res = await gatewayFetch("/api/skills", {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+		return await res.json();
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create skill", message, { code, stack });
+		return null;
+	}
+}
+
 export async function fetchRoleDetail(name: string, projectId?: string): Promise<RoleData | null> {
 	try {
 		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
@@ -3048,11 +3086,11 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
  * `summary` should be a one-line human-readable identifier of what was
  * accepted (e.g. role name, project name, goal title) so the agent can
  * mention it back specifically. The message wording is normalised here
- * so all five accept paths produce identical UX.
+ * so every accept path produces identical UX.
  */
 export async function notifyProposalDecision(
 	sessionId: string,
-	type: "goal" | "project" | "role" | "tool" | "staff",
+	type: "goal" | "project" | "role" | "tool" | "staff" | "workflow" | "skill",
 	decision: "accepted" | "rejected",
 	summary: string,
 ): Promise<void> {

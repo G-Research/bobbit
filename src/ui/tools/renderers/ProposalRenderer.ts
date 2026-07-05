@@ -29,6 +29,8 @@ const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField:
 	propose_tool: { label: "Tool Proposal", type: "tool", titleField: "tool", previewField: "content" },
 	propose_staff: { label: "Staff Proposal", type: "staff", titleField: "name", previewField: "prompt" },
 	propose_project: { label: "Project Proposal", type: "project", titleField: "name", previewField: "root_path" },
+	propose_workflow: { label: "Workflow Proposal", type: "workflow", titleField: "name", previewField: "description" },
+	propose_skill: { label: "Skill Proposal", type: "skill", titleField: "name", previewField: "content" },
 };
 
 function truncate(s: string, max = 150): string {

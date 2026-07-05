@@ -18,9 +18,9 @@ import { proposalPanelTabId } from "./panel-workspace.js";
 // the state object via a getter that's threaded through at call time. See
 // `getStateForFirstEmit` below.
 
-export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "role" | "tool" | "staff" | "workflow" | "skill";
 
-export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff"];
+export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff", "workflow", "skill"];
 
 function assistantProposalTypeFromState(stateLike: any): ProposalType | null {
 	const raw = typeof stateLike?.assistantType === "string" ? stateLike.assistantType : "";
@@ -146,6 +146,8 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 	role: "Role Proposal",
 	tool: "Tool Proposal",
 	staff: "Staff Proposal",
+	workflow: "Workflow Proposal",
+	skill: "Skill Proposal",
 };
 
 function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
@@ -248,6 +250,16 @@ function toolValidate(fields: Record<string, unknown>): string[] {
 	return requireKeys(fields, ["tool", "action", "content"]);
 }
 
+function workflowValidate(fields: Record<string, unknown>): string[] {
+	const errs = requireKeys(fields, ["id", "name"]);
+	if (!Array.isArray(fields.gates)) errs.push("gates must be an array");
+	return errs;
+}
+
+function skillValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["name", "description", "content"]);
+}
+
 async function todoAccept(_slot: ProposalSlot): Promise<void> {
 	throw new Error("Slice E: per-type accept handlers retained at original sites");
 }
@@ -279,6 +291,8 @@ export const PROPOSAL_TYPE_REGISTRY: Record<ProposalType, ProposalTypePlugin> = 
 	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("role"), validate: roleValidate }),
 	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("tool"), validate: toolValidate }),
 	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("staff"), validate: staffValidate }),
+	workflow: makePlugin("workflow", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("workflow"), validate: workflowValidate }),
+	skill: makePlugin("skill", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("skill"), validate: skillValidate }),
 };
 
 export function isProposalType(s: unknown): s is ProposalType {

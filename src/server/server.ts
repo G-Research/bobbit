@@ -37,6 +37,7 @@ import { readToken, validateToken } from "./auth/token.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { writeSkillFile } from "./skills/skill-write.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -7898,6 +7899,37 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/skills (scope-aware: body.projectId → write into that project's
+	// user-pack dir; Headquarters/omitted aliases server scope). F26 — the
+	// propose_skill half; this is the only skill-creation write path today,
+	// the Skills page (skills-page.ts) is read-only. Writes
+	// <scope>/skills/:name/SKILL.md via skill-write.ts.
+	if (url.pathname === "/api/skills" && req.method === "POST") {
+		const body = await readBody(req);
+		try {
+			const resolvedScope = resolveRequiredConfigProjectScope(body?.projectId, { aliasSystem: true });
+			if (!resolvedScope.ok) { writeConfigProjectScopeError(resolvedScope); return; }
+			const configDir = resolvedScope.effectiveProjectId
+				? (resolvedScope.context?.configDir ?? bobbitConfigDir())
+				: bobbitConfigDir();
+			const allowedTools = typeof body?.tools === "string"
+				? body.tools.split(",").map((t: string) => t.trim()).filter(Boolean)
+				: undefined;
+			const { filePath } = await writeSkillFile(configDir, {
+				name: body?.name,
+				description: body?.description,
+				content: body?.content,
+				argumentHint: typeof body?.argumentHint === "string" ? body.argumentHint : undefined,
+				allowedTools,
+			});
+			invalidateSlashSkillsCache();
+			json({ name: body?.name, description: body?.description, filePath }, 201);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
 	// POST /api/roles/:name/customize — copy resolved role to a target scope
 	const roleCustomizeMatch = url.pathname.match(/^\/api\/roles\/([^/]+)\/customize$/);
 	if (roleCustomizeMatch && req.method === "POST") {
@@ -11097,7 +11129,10 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
-			if (proposalType === "goal" || proposalType === "staff") {
+			// Workflows are project-scoped only (no Headquarters/system-scope
+			// workflow store — see workflows-routes.ts), so a workflow proposal
+			// needs the same resolvable-project guard as goal/staff.
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "workflow") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
 				if (!sessionProjectId) {

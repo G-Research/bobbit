@@ -111,6 +111,8 @@ const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	role: "Role",
 	tool: "Tool",
 	staff: "Staff",
+	workflow: "Workflow",
+	skill: "Skill",
 };
 
 const PREVIEW_ENTRY_ID_RE = /^preview:entry:([^:]+)(?::v:(\d+))?$/;

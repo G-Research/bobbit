@@ -21,7 +21,7 @@ const WORKFLOW_CSS = path.resolve("src/app/workflow-page.css");
 const ROLE_CSS = path.resolve("src/app/role-manager.css");
 const TOOL_CSS = path.resolve("src/app/tool-manager.css");
 
-type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+type ProposalType = "goal" | "project" | "role" | "tool" | "staff" | "workflow" | "skill";
 
 type ProposalExpectation = {
 	type: ProposalType;
@@ -38,6 +38,8 @@ const PROPOSAL_EXPECTATIONS: ProposalExpectation[] = [
 	{ type: "role", label: "Role", panel: "role-proposal", editedFieldKey: "label", editedFieldValueAfter: "parity-role-edited", preservedFieldKey: "name" },
 	{ type: "tool", label: "Tool", panel: "tool-proposal", editedFieldKey: "content", editedFieldValueAfter: "parity-tool-edited content", preservedFieldKey: "tool" },
 	{ type: "staff", label: "Staff", panel: "staff-proposal", editedFieldKey: "description", editedFieldValueAfter: "parity-staff-edited", preservedFieldKey: "name" },
+	{ type: "workflow", label: "Workflow", panel: "workflow-proposal", editedFieldKey: "name", editedFieldValueAfter: "Parity Workflow — edited", preservedFieldKey: "id" },
+	{ type: "skill", label: "Skill", panel: "skill-proposal", editedFieldKey: "description", editedFieldValueAfter: "parity-skill-edited", preservedFieldKey: "name" },
 ];
 
 test.beforeAll(() => {
