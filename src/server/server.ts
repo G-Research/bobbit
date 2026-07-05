@@ -7232,16 +7232,20 @@ async function handleApiRoute(
 
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
-		// server == Headquarters: a missing projectId OR the Headquarters id both
-		// resolve to the server/global config scope (normalizeConfigProjectId maps
-		// them to undefined). A real projectId is validated. No cwd inference and no
-		// 400 on missing — read-only server-scope discovery stays available.
-		const rawProjectId = url.searchParams.get("projectId") || undefined;
-		if (rawProjectId && rawProjectId !== HEADQUARTERS_PROJECT_ID) {
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		}
-		const effectiveConfigProjectId = normalizeConfigProjectId(rawProjectId);
+		// Require an explicit projectId (400 on missing), matching the other
+		// config/discovery routes; first-party UI passes `headquarters` for the
+		// server scope. `headquarters` resolves to the server/global cascade via
+		// normalizeConfigProjectId (→ undefined) — use that normalized id for ALL
+		// downstream config/toolManager/marketplace lookups so the synthetic HQ id
+		// never leaks into project-context calls.
+		// Config-cascade read: a missing projectId defaults to the server/global
+		// (Headquarters) scope — server == Headquarters — which is an explicit
+		// default, not cwd inference. `headquarters` also normalizes to the server
+		// cascade (→ undefined). Use the normalized id for ALL downstream
+		// config/toolManager/marketplace lookups so the synthetic HQ id never leaks
+		// into project-context calls. (First-party UI passes an explicit projectId.)
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
 		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
 		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
@@ -9634,15 +9638,12 @@ async function handleApiRoute(
 
 	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
-		// server == Headquarters: missing projectId or the Headquarters id resolve to
-		// the server/global scope (normalizeConfigProjectId → undefined). Validate a
-		// real projectId; no cwd inference, no 400 on missing.
-		const rawProjectId = url.searchParams.get("projectId") || undefined;
-		if (rawProjectId && rawProjectId !== HEADQUARTERS_PROJECT_ID) {
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		}
-		const resolved = configCascade.resolveRoles(normalizeConfigProjectId(rawProjectId));
+		// Require an explicit projectId (400 on missing); `headquarters` resolves to
+		// the server/global scope via normalizeConfigProjectId (→ undefined).
+		// Config-cascade read: missing projectId defaults to the server (Headquarters)
+		// scope; `headquarters` also normalizes to the server cascade (→ undefined).
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = configCascade.resolveRoles(normalizeConfigProjectId(projectId));
 		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}

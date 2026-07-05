@@ -277,10 +277,20 @@ test("config discovery APIs require explicit projectId", async (t) => {
 	const serverRoot = tmpDir("bobbit-config-api-project-required-");
 	const { baseUrl } = await startGateway(t, serverRoot);
 
-	for (const pathname of ["/api/mcp-servers", "/api/tools", "/api/roles", "/api/sandbox-status", "/api/sandbox-image/build"]) {
+	// Project-runtime routes require an explicit projectId (400 on missing).
+	for (const pathname of ["/api/mcp-servers", "/api/sandbox-status", "/api/sandbox-image/build"]) {
 		const missing = await api(baseUrl, pathname, undefined, pathname.endsWith("/build") ? "POST" : "GET");
 		assert.equal(missing.status, 400, `${pathname} should require projectId`);
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
+	}
+
+	// Config-cascade reads (tools/roles) default a missing projectId to the
+	// server (Headquarters) scope — server == Headquarters — rather than 400.
+	// First-party UI still passes an explicit projectId; this is the boring
+	// server-scope default, not cwd inference.
+	for (const pathname of ["/api/tools", "/api/roles"]) {
+		const missing = await api(baseUrl, pathname);
+		assert.equal(missing.status, 200, `${pathname} missing projectId should default to server scope: ${JSON.stringify(missing.body)}`);
 	}
 
 	const mcp = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
