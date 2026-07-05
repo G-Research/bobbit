@@ -55,6 +55,14 @@ test.describe("Search Index maintenance panel fixture", () => {
 		await setupSearch(page);
 
 		await page.getByRole("button", { name: "Rebuild Index" }).click();
+		// UX audit finding 1: rebuildSearchIndex() now opens the app's hardened
+		// confirmAction dialog instead of native confirm() — the fixture's
+		// `window.confirm = () => true` stub no longer applies here. DOM-dispatched
+		// click: this fixture lacks the app's overlay CSS, so the dialog renders
+		// in-flow below a long page and Playwright's viewport actionability check
+		// times out (see settings-admin-fixture.spec.ts for the same pattern).
+		await expect(page.locator(".confirm-action-confirm-btn")).toBeVisible({ timeout: 5_000 });
+		await page.locator(".confirm-action-confirm-btn").evaluate((el) => (el as HTMLElement).click());
 		await expect.poll(async () =>
 			(await searchFetchLog(page)).some(e => e.url === "/api/search/rebuild" && e.method === "POST"),
 		).toBe(true);

@@ -9,6 +9,14 @@ export class CustomProviderCard extends LitElement {
 	@property({ type: Object }) provider!: CustomProvider;
 	@property({ type: Boolean }) isAutoDiscovery = false;
 	@property({ type: Object }) status?: { modelCount: number; status: "connected" | "disconnected" | "checking" };
+	// UX audit finding 5: in-flight state for the delete button so a
+	// double-click can't double-fire the DELETE request (copies
+	// `checkCustomProviderStatus`'s per-provider "checking" tracking).
+	@property({ type: Boolean }) isDeleting = false;
+	// UX audit finding 2: surfaces a failed delete inline instead of leaving
+	// the card looking untouched (GoalStatusWidget's `_confirmCompletionError`
+	// idiom).
+	@property() deleteError?: string;
 	@property() onRefresh?: (provider: CustomProvider) => void;
 	@property() onEdit?: (provider: CustomProvider) => void;
 	@property() onDelete?: (provider: CustomProvider) => void;
@@ -88,12 +96,17 @@ export class CustomProviderCard extends LitElement {
 										onClick: () => this.onDelete?.(this.provider),
 										variant: "ghost",
 										size: "sm",
+										disabled: this.isDeleting,
+										loading: this.isDeleting,
 										children: i18n("Delete"),
 									})
 								: ""
 						}
 					</div>
 				</div>
+				${this.deleteError ? html`
+					<div class="text-xs text-destructive" data-testid="custom-provider-delete-error" aria-live="assertive">${this.deleteError}</div>
+				` : ""}
 			</div>
 		`;
 	}
