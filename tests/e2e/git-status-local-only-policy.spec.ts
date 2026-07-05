@@ -13,7 +13,7 @@ import { apiFetch, defaultProjectId, deleteSession } from "./e2e-setup.js";
 let serverModule: any;
 
 test.beforeAll(async () => {
-	serverModule = await import("../../dist/server/server.js");
+	serverModule = await import("../../dist/server/skills/git-gh.js");
 	expect(typeof serverModule.__setGitStatusFake).toBe("function");
 	expect(typeof serverModule.__clearGitStatusFake).toBe("function");
 	expect(typeof serverModule.invalidateGitStatusCache).toBe("function");

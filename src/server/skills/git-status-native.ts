@@ -20,7 +20,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
-import type { GitStatusResult } from "../server.js";
+import type { GitStatusResult } from "./git-gh.js";
 import { parseBaseRef } from "./git.js";
 
 const execFileAsync = promisify(execFileCb);

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { isIgnorableRemoteBranchDeleteError, isMissingRemoteRefDeleteError } from "../src/server/server.ts";
+import { isIgnorableRemoteBranchDeleteError, isMissingRemoteRefDeleteError } from "../src/server/skills/git-gh.ts";
 
 describe("quiet archive remote branch cleanup", () => {
 	it("classifies missing remote-ref delete errors from stderr, message, and strings", () => {

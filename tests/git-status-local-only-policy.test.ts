@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { sessionGitStatusAutoPublishDecision } from "../src/server/server.ts";
+import { sessionGitStatusAutoPublishDecision } from "../src/server/skills/git-gh.ts";
 
 function status(overrides: Record<string, unknown> = {}) {
 	return {

@@ -4,7 +4,7 @@ import {
 	__resolveSessionGitStatusPublicationForTests,
 	__resolveSessionGitStatusPublicationPolicyForTests,
 	type GitStatusResult,
-} from "../src/server/server.ts";
+} from "../src/server/skills/git-gh.ts";
 
 function gitStatus(overrides: Partial<GitStatusResult> = {}): GitStatusResult {
 	return {
