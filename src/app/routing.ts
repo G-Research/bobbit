@@ -64,7 +64,17 @@ export function getRouteFromHash(): AppRoute {
 	if (sessionMatch) {
 		return { view: "session", sessionId: sessionMatch[1] };
 	}
-	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)(?:\?(.*))?$/i);
+	// Charset matches the session/role/tool/workflow id patterns below
+	// ([a-zA-Z0-9_-]+), not a hex-only UUID charset. Production goal ids are
+	// always crypto.randomUUID() (a strict subset of this), but a hex-only
+	// class is an unnecessary, inconsistent restriction: it silently
+	// (no console error) fails to match any id containing letters outside
+	// a-f — e.g. scripts/qa-seed/seed.mjs's human-readable fixture id
+	// "qa-seed-goal-0001-...-000000000001" — and getRouteFromHash() then
+	// falls through to the generic `{ view: "landing" }` default below,
+	// which is exactly what made a direct #/goal/:id navigation render the
+	// generic empty state silently (QA-SPOT 2026-07-05 FINDING 2, part B).
+	const goalMatch = hash.match(/^#\/goal\/([a-zA-Z0-9_-]+)(?:\?(.*))?$/i);
 	if (goalMatch) {
 		const params = goalMatch[2] ? new URLSearchParams(goalMatch[2]) : null;
 		const tab = params?.get("tab") || undefined;
