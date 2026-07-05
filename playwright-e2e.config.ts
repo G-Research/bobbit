@@ -143,6 +143,9 @@ export default {
 				"**/port-auto-increment*",
 				// Owned by the api-realpush project (different env).
 				"**/goal-archive-branch-cleanup*",
+				// Exclude stray worktrees (full repo copies under .claude/worktrees/) to prevent
+				// pollution with duplicate tests that fail due to missing dist/.
+				"**/.claude/worktrees/**",
 			],
 			// In-process API workers still boot a full gateway and shell out to git in
 			// several specs. On Windows, 4 concurrent gateways under verification load
@@ -157,6 +160,9 @@ export default {
 			name: "api-realpush",
 			testDir: "./tests/e2e",
 			testMatch: ["**/goal-archive-branch-cleanup.spec.ts"],
+			// Exclude stray worktrees (full repo copies under .claude/worktrees/) to prevent
+			// pollution with duplicate tests that fail due to missing dist/.
+			testIgnore: ["**/.claude/worktrees/**"],
 			workers: 1,
 			fullyParallel: false,
 		},
@@ -171,6 +177,9 @@ export default {
 				"**/per-project-config-dirs*.spec.ts",
 				"**/port-auto-increment*.spec.ts",
 			],
+			// Exclude stray worktrees (full repo copies under .claude/worktrees/) to prevent
+			// pollution with duplicate tests that fail due to missing dist/.
+			testIgnore: ["**/.claude/worktrees/**"],
 			workers: 3,
 			// Serialise browser specs within the project. Each browser worker
 			// is gateway + Chromium + UI static serve — even at workers=3, cross-
