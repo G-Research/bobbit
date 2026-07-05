@@ -3,9 +3,8 @@
  *
  * Single source of truth for both `MessageList.ts` (the actual `repeat()`
  * key) and `message-reducer.ts`'s `keyFor` export (test-pinned reducer
- * helper) — see UX-02
- * (`~/Documents/dev/bobbit-fable-refactor/FINDINGS.md`,
- * `design/raciness-and-testing-rethink.md` §A1).
+ * helper) — finding UX-02 (stable row keys; see
+ * docs/design/raciness-and-testing-rethink.md §A1 if present in-tree).
  *
  * pi persists user/aborted/errored rows WITHOUT an id
  * (`pi-agent-core/dist/agent.js:259`), and the reducer's snapshot path never
