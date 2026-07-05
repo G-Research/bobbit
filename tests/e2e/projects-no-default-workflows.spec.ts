@@ -117,11 +117,10 @@ test.describe("No default workflow scaffold", () => {
 		expect(wf["quick-fix"]).toBeUndefined();
 	});
 
-	test("Case C — goal-creation in a zero-workflows project auto-seeds default workflows", async () => {
-		// Auto-seeding always persists to disk (7b75dca4): when a goal is first
-		// created in a project with no workflows, the server seeds the canonical
-		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
-		// Pinned by goal-creation-auto-seed.spec.ts and this test.
+	test("Case C — goal-creation in a zero-workflows project returns a clean error", async () => {
+		// A zero-workflows project stays zero-workflows. Goal creation must fail
+		// with a validation error instead of silently scaffolding defaults or
+		// assigning a magic workflow id.
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
@@ -137,20 +136,28 @@ test.describe("No default workflow scaffold", () => {
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
 
+		const title = `goal-${Date.now()}`;
 		const goalRes = await fetch(`${base()}/api/goals`, {
 			method: "POST",
 			headers: headers(),
 			body: JSON.stringify({
-				title: `goal-${Date.now()}`,
+				title,
 				cwd: root,
 				projectId: project.id,
 				team: false,
 				autoStartTeam: false,
-				workflowId: "feature", // workflowId triggers auto-seeding on empty project
 			}),
 		});
-		// Goal creation should succeed and project.yaml should now have workflows.
-		expect([200, 201]).toContain(goalRes.status);
-		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
+		expect(goalRes.status).toBe(400);
+		const errorBody = await goalRes.json();
+		expect(errorBody.code).toBe("NO_WORKFLOWS");
+		expect(errorBody.error).toMatch(/no workflows configured/i);
+		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
+
+		const listRes = await fetch(`${base()}/api/goals?projectId=${encodeURIComponent(project.id)}`, { headers: headers() });
+		expect(listRes.status).toBe(200);
+		const listBody = await listRes.json();
+		const goals = listBody.goals || listBody;
+		expect((goals as any[]).some(goal => goal.title === title)).toBe(false);
 	});
 });

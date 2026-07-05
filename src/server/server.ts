@@ -46,7 +46,6 @@ import { reArmSwarmGovernorsOnBoot } from "./agent/swarm-restart-resume.js";
 import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
-import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
@@ -5243,7 +5242,9 @@ async function handleApiRoute(
 			: undefined;
 		let cwd = explicitCwd || config.defaultCwd;
 		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
+		const workflowId = typeof body?.workflowId === "string" && body.workflowId.trim().length > 0
+			? body.workflowId.trim()
+			: undefined;
 		if (!title || typeof title !== "string") {
 			json({ error: "Missing title" }, 400);
 			return;
@@ -5397,13 +5398,20 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
+			// Cascade: body.workflow (inline snapshot) -> explicit workflowId lookup -> first store workflow.
 			let resolvedWorkflow: Workflow | undefined;
-			let resolvedWorkflowId = workflowId;
+			let resolvedWorkflowId: string | undefined = workflowId;
 			const inlineWorkflow = body?.workflow;
 			if (inlineWorkflow && typeof inlineWorkflow === "object") {
 				resolvedWorkflow = inlineWorkflow as Workflow;
-				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
+				const inlineWorkflowId = (inlineWorkflow as { id?: string }).id;
+				resolvedWorkflowId = (typeof inlineWorkflowId === "string" && inlineWorkflowId.trim().length > 0)
+					? inlineWorkflowId.trim()
+					: workflowId;
+				if (!resolvedWorkflowId) {
+					json({ error: "Inline workflow must include an id or workflowId", code: "WORKFLOW_ID_REQUIRED" }, 400);
+					return;
+				}
 			} else {
 				// Layer 1: cascade lookup (only when workflowId given).
 				if (workflowId) {
@@ -5414,30 +5422,29 @@ async function handleApiRoute(
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					}
 				}
-				// Layer 2: store is empty → auto-seed defaults.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const projName = resolved.project.name || "project";
-					const seeds = buildDefaultWorkflows(projName);
-					seeds.parent = buildParentWorkflow();
-					for (const wf of Object.values(seeds)) {
-						targetCtx.workflowStore.put(wf as unknown as Workflow);
-					}
-					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					if (workflowId) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					} else {
-						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						resolvedWorkflowId = resolvedWorkflow?.id || "general";
-					}
+				const storedWorkflows = targetCtx.workflowStore.getAll();
+				// Layer 2: no explicit id -> first workflow in store order.
+				if (!workflowId && !resolvedWorkflow) {
+					resolvedWorkflow = storedWorkflows[0];
+					resolvedWorkflowId = resolvedWorkflow?.id;
 				}
-				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
-				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
-					const available = targetCtx.workflowStore.getAll().map(w => w.id);
-					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
-						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
-						code: "WORKFLOW_NOT_FOUND",
-						workflowId,
-						available,
+				if (!resolvedWorkflow || !resolvedWorkflowId) {
+					if (workflowId) {
+						const available = storedWorkflows.map(w => w.id);
+						jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
+							error: available.length > 0
+								? `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`
+								: "This project has no workflows configured. Run project setup or generate workflows from Settings -> project tab.",
+							code: available.length > 0 ? "WORKFLOW_NOT_FOUND" : "NO_WORKFLOWS",
+							workflowId,
+							available,
+						});
+						return;
+					}
+					jsonError(400, new Error("This project has no workflows configured. Run project setup or generate workflows from Settings -> project tab."), {
+						error: "This project has no workflows configured. Run project setup or generate workflows from Settings -> project tab.",
+						code: "NO_WORKFLOWS",
+						available: [],
 					});
 					return;
 				}

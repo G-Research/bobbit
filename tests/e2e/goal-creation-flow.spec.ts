@@ -1,5 +1,8 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { readE2EToken, base, apiFetch, nonGitCwd, registerProject, deleteGoal } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the goal creation flow — verifying:
@@ -70,6 +73,75 @@ test.describe("Goal creation flow", () => {
 		expect(getRes.ok).toBe(true);
 		const fetched = await getRes.json();
 		expect(fetched.id).toBe(goal.id);
+	});
+
+	test("POST /api/goals without workflowId resolves to the first workflow in store order", async () => {
+		const workflowsRes = await apiFetch("/api/workflows");
+		expect(workflowsRes.status).toBe(200);
+		const workflowsBody = await workflowsRes.json();
+		const workflows = workflowsBody.workflows || workflowsBody;
+		expect(Array.isArray(workflows)).toBe(true);
+		expect(workflows.length).toBeGreaterThan(0);
+		const firstWorkflowId = workflows[0].id;
+
+		let goalId: string | undefined;
+		try {
+			const goalRes = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `No workflowId fallback ${Date.now()}`,
+					cwd: nonGitCwd(),
+					spec: "Create a goal without an explicit workflow id and use the first configured workflow.",
+					autoStartTeam: false,
+					worktree: false,
+				}),
+			});
+			expect(goalRes.status).toBe(201);
+			const goal = await goalRes.json();
+			goalId = goal.id;
+			expect(goal.workflowId).toBe(firstWorkflowId);
+			expect(goal.workflow?.id).toBe(firstWorkflowId);
+		} finally {
+			if (goalId) await deleteGoal(goalId);
+		}
+	});
+
+	test("POST /api/goals without workflowId rejects an empty workflow store without creating a goal", async () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-empty-workflows-goal-")));
+		const title = `Empty workflow store goal ${Date.now()}`;
+		const project = await registerProject({
+			name: `empty-workflows-goal-${Date.now()}`,
+			rootPath: root,
+			components: [{ name: "empty-workflows-goal", repo: "." }],
+			seedWorkflows: false,
+		});
+
+		try {
+			const goalRes = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title,
+					cwd: root,
+					projectId: project.id,
+					spec: "This goal should not be created because the project has no workflows configured.",
+					autoStartTeam: false,
+					worktree: false,
+				}),
+			});
+			expect(goalRes.status).toBe(400);
+			const body = await goalRes.json();
+			expect(body.code).toBe("NO_WORKFLOWS");
+			expect(body.error).toMatch(/no workflows configured/i);
+
+			const listRes = await apiFetch(`/api/goals?projectId=${encodeURIComponent(project.id)}`);
+			expect(listRes.status).toBe(200);
+			const listBody = await listRes.json();
+			const goals = listBody.goals || listBody;
+			expect((goals as any[]).some(goal => goal.title === title)).toBe(false);
+		} finally {
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 });
