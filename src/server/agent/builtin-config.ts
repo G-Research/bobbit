@@ -161,16 +161,7 @@ export class BuiltinConfigProvider {
 
 	constructor(builtinsDir?: string) {
 		// Default: dist/server/agent/ → ../defaults → dist/server/defaults/
-		if (builtinsDir) {
-			this.builtinsDir = builtinsDir;
-		} else {
-			const distDefaults = path.join(__dirname, "..", "defaults");
-			// Source/test run (src/server/agent/): dist defaults are absent, fall
-			// back to the repo-root defaults/ tree.
-			this.builtinsDir = fs.existsSync(distDefaults)
-				? distDefaults
-				: path.join(__dirname, "..", "..", "..", "defaults");
-		}
+		this.builtinsDir = builtinsDir ?? path.join(__dirname, "..", "defaults");
 	}
 
 	/** Absolute path to the builtin `defaults/` tree (the builtin pack root). */
