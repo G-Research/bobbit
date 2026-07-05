@@ -368,4 +368,46 @@ describe("Source pin — merge-loss invariants", () => {
 			"pin — restore the dropped filtering logic instead.",
 		);
 	});
+
+	it("config-cascade.ts exposes resolveRoleModelResolution + RoleModelResolution (restored by the w2-role-model-resolution-restore fix)", () => {
+		const text = read("src/server/agent/config-cascade.ts");
+		assert.ok(
+			text.includes("resolveRoleModelResolution(roleName: string, projectId?: string): RoleModelResolution {")
+			&& text.includes("export interface RoleModelResolution {")
+			&& text.includes("export type RoleFieldSourceKind = \"role\" | \"inherited-role\" | \"default\";"),
+			"src/server/agent/config-cascade.ts must expose ConfigCascade.resolveRoleModelResolution()\n" +
+			"plus the RoleFieldSourceKind/RoleFieldSource/RoleModelResolution types. Without this the\n" +
+			"Roles UI cannot render source badges (Project/Server/Built-in/pack name) or gate inline\n" +
+			"edit affordances for a role's model/thinkingLevel fields. Originally added by 1fe14164\n" +
+			"(\"Add role model/thinking source metadata to /api/roles\") with fixes c68ce4b6, d9325dc6,\n" +
+			"c1581647; silently dropped by merge commit b687d93d (first parent had it, merge result\n" +
+			"did not — same merge that dropped getRawPack, activeWhenConfig, and the goalCompletedDispatcher\n" +
+			"wiring above); restored by the w2-role-model-resolution-restore fix. DO NOT delete this pin —\n" +
+			"restore the dropped types/method instead. Independently pinned by the 6\n" +
+			"resolveRoleModelResolution tests in tests/config-cascade.test.ts.",
+		);
+	});
+
+	it("server.ts wires modelResolution into the /api/roles GET routes (restored by the w2-role-model-resolution-restore fix)", () => {
+		const text = read("src/server/server.ts");
+		assertTextInOrder(
+			text,
+			[
+				"const withRoleResolution = (",
+				"modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),",
+				"json({ roles: resolved.map(r => withRoleResolution(r as any, projectId)) });",
+				"json(withRoleResolution(found as any, qProjectId));",
+			],
+			"src/server/server.ts must serialize /api/roles (list) and /api/roles/:name (detail)\n" +
+			"responses through withRoleResolution(), not the plain withOrigin() helper, so each role\n" +
+			"carries a `modelResolution` field (model/thinkingLevel source hierarchy + editability).\n" +
+			"Without this wiring the Roles UI has no way to render accurate source badges or decide\n" +
+			"whether the inline model/thinking controls are editable at the current scope — it silently\n" +
+			"falls back to guessing from the plain model/thinkingLevel strings. Originally added by\n" +
+			"1fe14164, silently dropped by merge commit b687d93d alongside the config-cascade.ts\n" +
+			"types/method (same merge, same hunk-loss pattern as getRawPack/activeWhenConfig above);\n" +
+			"restored by the w2-role-model-resolution-restore fix. DO NOT delete this pin — restore\n" +
+			"the dropped wiring instead.",
+		);
+	});
 });
