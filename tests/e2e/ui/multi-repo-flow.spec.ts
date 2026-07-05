@@ -118,8 +118,11 @@ test.describe("multi-repo flow (UI)", () => {
 			expect(reloadedValue).toBe("echo edited");
 
 			// Delete the data-only component, save, and verify the structured API data.
-			page.once("dialog", d => d.accept());
+			// UX audit finding 1: the delete-component confirm() call now opens the
+			// app's hardened confirmAction dialog instead of a native confirm() —
+			// no page.on("dialog") handler needed (or possible) anymore.
 			await page.locator('[data-component-name="shared"] [data-testid="delete-component"]').click();
+			await page.locator(".confirm-action-confirm-btn").click();
 			await expect(page.locator('[data-testid="component-card"]')).toHaveCount(2);
 			await page.locator('[data-testid="save-components"]').click();
 			await expect(page.locator('[data-testid="save-status"]')).toHaveText("Saved.", { timeout: 10_000 });

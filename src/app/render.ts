@@ -41,7 +41,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
 // fires the same shared `import("./dialogs.js")` on first use; the
 // chunk is shared across all UI surfaces that open dialogs.
-import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
+import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog, confirmAction } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
@@ -2326,7 +2326,7 @@ export function doRenderApp(): void {
 		return getDocumentAnnotationCount(sessionId, title);
 	};
 
-	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
+	const closeUnifiedPanelTab = async (tab: UnifiedPanelTab, event?: Event): Promise<void> => {
 		event?.preventDefault();
 		event?.stopPropagation();
 		if ((tab as any).kind === "chat") return;
@@ -2368,7 +2368,17 @@ export function doRenderApp(): void {
 				const sid = activeSessionId() || "";
 				if (event?.type !== "review-close-tab") {
 					const count = reviewPaneUnsentCountForDocument(sid, key);
-					if (count > 0 && !confirm(`Close "${title || key}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
+					if (count > 0) {
+						// UX audit finding 1: native confirm() -> hardened confirmAction
+						// (unsent-comment data loss on close — safe-default-Cancel matters here).
+						const confirmed = await confirmAction(
+							`Close "${title || key}"?`,
+							`${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`,
+							"Close",
+							true,
+						);
+						if (!confirmed) return;
+					}
 				}
 				if (state.reviewActiveTab === key) {
 					const nextReview = nextCandidate?.kind === "review" ? reviewDocumentKeyFromPanelTab(nextCandidate) : "";
