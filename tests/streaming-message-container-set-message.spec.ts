@@ -154,6 +154,92 @@ test.describe("StreamingMessageContainer.setMessage — sticky _immediateUpdate 
 		).toBeNull();
 	});
 
+	test("UX-05: archived flipping true in the SAME update as isStreaming going false strands the stale _message", async ({ page }) => {
+		// Reproduces the realistic trigger for UX-05 (tracker W2.14): a session
+		// mid-turn gets backgrounded (user switches away — the SESSION CACHE in
+		// session-manager.ts keeps its ChatPanel/AgentInterface/RemoteAgent alive
+		// off-screen, so nothing clears the container while it's not the active
+		// view) and is then archived/terminated by another actor (another tab, a
+		// goal-cascade reap, a scheduled purge) while backgrounded. The
+		// backgrounded RemoteAgent's own `session_status` handler updates
+		// `_state.status` immediately (remote-agent.ts's session_status case is
+		// the sole writer), but nothing re-renders the inactive AgentInterface at
+		// that moment (its onStatusChange callback in session-manager.ts guards
+		// the readOnly write on `activeSessionId() === sessionId`, which is false
+		// while backgrounded) — so the container's own `isStreaming`/`archived`
+		// properties stay stale.
+		//
+		// When the user later re-selects that session from the sidebar/archived
+		// list, connectToSession's fast-path cache-hit branch
+		// (session-manager.ts ~1313-1332) reuses the SAME cached AgentInterface
+		// and sets `ai.readOnly = true` in one property write. That single write
+		// triggers one Lit re-render of AgentInterface, whose template
+		// re-evaluates BOTH `.isStreaming=${state.isStreaming}` (now false, per
+		// the status update received while backgrounded) and
+		// `.archived=${this.readOnly && ...}` (now true) in the same pass — so
+		// both properties land on the child in the same synchronous burst, and
+		// Lit's own child-update batches them into one `updated()` call.
+		//
+		// StreamingMessageContainer.ts:94 early-returns on `archived` before the
+		// `!isStreaming && _message !== null` defensive clear at :116-118, so the
+		// stale in-flight assistant message is never dropped and keeps rendering
+		// on top of the (now read-only) archived transcript.
+		const result = await page.evaluate(async () => {
+			const host = document.getElementById("host")!;
+			const el: any = document.createElement("streaming-message-container");
+			el.isStreaming = true;
+			host.appendChild(el);
+			await new Promise((r) => requestAnimationFrame(() => r(null)));
+			await el.updateComplete;
+
+			// Simulate the last `message_update` the container saw before the
+			// session was backgrounded and then archived out from under it.
+			el.setMessage(
+				{
+					role: "assistant",
+					id: "msg-stranded",
+					content: [{ type: "text", text: "partial reply before archive" }],
+				},
+				true,
+			);
+			await el.updateComplete;
+			const beforeId = el._message?.id ?? null;
+			const beforeHtml = el.innerHTML as string;
+
+			// The reconnect/re-view re-render: AgentInterface's single template
+			// pass feeds both new property values to the child in one
+			// synchronous burst — exactly what a real parent re-render does.
+			el.isStreaming = false;
+			el.archived = true;
+			await el.updateComplete;
+			// The defensive clear calls setMessage(null, true) *inside* updated(),
+			// which schedules its own follow-up requestUpdate(). Wait for that
+			// nested render to settle too before inspecting the DOM.
+			await el.updateComplete;
+			await new Promise((r) => requestAnimationFrame(() => r(null)));
+
+			return {
+				beforeId,
+				beforeHasAssistantMessage: beforeHtml.includes("<assistant-message"),
+				afterMessage: el._message,
+				afterHasAssistantMessage: (el.innerHTML as string).includes("<assistant-message"),
+			};
+		});
+
+		expect(result.beforeId, "setup precondition: container holds the partial").toBe("msg-stranded");
+		expect(result.beforeHasAssistantMessage, "setup precondition: the partial renders").toBe(true);
+		expect(
+			result.afterMessage,
+			"archived flipping true in the same update as isStreaming->false must not " +
+				"skip the defensive clear — otherwise the stale assistant card is " +
+				"stranded on top of the now read-only archived transcript",
+		).toBeNull();
+		expect(
+			result.afterHasAssistantMessage,
+			"the stranded card must not still be in the DOM after the archived transition",
+		).toBe(false);
+	});
+
 	test("a SECOND batched setMessage after the dropped one DOES land (proves only the first delta is lost)", async ({ page }) => {
 		// This second test pins down the bug's signature: it's specifically
 		// the FIRST delta after an immediate-clear that is dropped, because
