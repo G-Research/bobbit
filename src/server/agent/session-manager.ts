@@ -732,6 +732,19 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/**
+	 * PERF-06: memoized `rpcClient.getMessages()` + hydrate + normalize — the
+	 * expensive agent-round-trip part of a `get_messages` snapshot — keyed by
+	 * `eventBuffer.lastSeq` at capture time. See
+	 * `SessionManager.getMessagesSnapshotBase()` for the invalidation
+	 * argument: every event that can change what `getMessages()` returns is
+	 * pushed through `emitSessionEvent` (bumping `lastSeq`) before it can
+	 * reach here, so a same-seq cache hit is guaranteed byte-identical to a
+	 * fresh RPC. Deliberately does NOT cover the live-state splice/merge
+	 * steps (in-flight message/steers, compaction/skill sidecars) — those
+	 * are recomputed fresh on every call regardless of cache hit/miss.
+	 */
+	messagesSnapshotCache?: { seq: number; promise: Promise<{ success: boolean; data?: unknown; error?: string }> };
 }
 
 // `spliceInFlightMessage` lives in its own module so unit tests can import
@@ -6277,6 +6290,64 @@ export class SessionManager {
 		if (Array.isArray(liveData)) return messages;
 		if (liveData && typeof liveData === "object") return { ...(liveData as Record<string, unknown>), messages };
 		return { messages };
+	}
+
+	/**
+	 * PERF-06: memoized base snapshot for `get_messages` (on-attach, live
+	 * `get_messages`, and post-`restart_agent`). Wraps the expensive part of
+	 * the pipeline — `rpcClient.getMessages()` (agent-process RPC round-trip
+	 * + full-transcript JSON parse) followed by `hydrateClaudeCodeSnapshotMessages`
+	 * and `normalizeToolResultErrorSnapshot` — and caches the result on the
+	 * session, keyed by `session.eventBuffer.lastSeq`.
+	 *
+	 * Soundness of the cache key: `emitSessionEvent` is the single emit path
+	 * for every live agent event (see its doc comment) and always calls
+	 * `session.eventBuffer.push(...)`, bumping `lastSeq`. Every call site
+	 * invokes `handleAgentLifecycle(session, event)` — which synchronously
+	 * persists new Claude Code transcript rows via
+	 * `persistClaudeCodeMessageToTranscript` (a synchronous `fs.appendFileSync`)
+	 * — strictly before `emitSessionEvent`. So by the time `lastSeq` advances,
+	 * both the agent's own live transcript (what `rpcClient.getMessages()`
+	 * returns) AND the persisted-file fallback that
+	 * `hydrateClaudeCodeSnapshotMessages` reads have already reflected the
+	 * change. A cache hit at an unchanged `lastSeq` is therefore guaranteed
+	 * byte-identical to a fresh fetch. Restarts always replace `SessionInfo`
+	 * with a brand-new object (fresh `messagesSnapshotCache: undefined`), so
+	 * there is no cross-restart collision even though the reseeded
+	 * `EventBuffer` can briefly reuse the pre-restart `lastSeq` value.
+	 *
+	 * Deliberately NOT covered by this cache — callers must still apply these
+	 * fresh on every call, cache hit or miss, because they read session-mutable
+	 * state that can change independently of `lastSeq` (e.g. a steer dispatched
+	 * before the agent has emitted any event yet, or a compaction-sidecar
+	 * fallback write on RPC rejection with no preceding event):
+	 *   - `spliceInFlightMessage` / `spliceInFlightSteers`
+	 *   - `mergeCompactionSidecarIntoMessages` / `mergeSkillSidecarIntoMessages`
+	 *   - `truncateLargeToolContentInMessages` / `stampSnapshotOrder`
+	 *
+	 * Concurrent callers at the same `lastSeq` share one in-flight promise, so
+	 * N tabs opening/reconnecting at once trigger exactly one RPC round-trip.
+	 */
+	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
+		const seq = session.eventBuffer.lastSeq;
+		const cached = session.messagesSnapshotCache;
+		if (cached && cached.seq === seq) return cached.promise;
+		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
+			const msgsResp = await session.rpcClient.getMessages();
+			if (!msgsResp?.success) return msgsResp;
+			const hydrated = await this.hydrateClaudeCodeSnapshotMessages(session.id, msgsResp.data);
+			const raw = normalizeToolResultErrorSnapshot(hydrated as any);
+			return { ...msgsResp, data: raw };
+		})();
+		session.messagesSnapshotCache = { seq, promise };
+		// Never let a failed fetch poison the cache for the next attempt at the
+		// same seq (e.g. a transient RPC timeout) — only successful bases are
+		// worth reusing.
+		promise.then(
+			(r) => { if (!r?.success && session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
+			() => { if (session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
+		);
+		return promise;
 	}
 
 	/**
