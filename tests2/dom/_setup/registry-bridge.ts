@@ -56,12 +56,18 @@ function ensureGapGlobals(): void {
 	if (!gproto || (gproto as any).__bobbitGapGlobals) return;
 	const def = (name: string, value: any) =>
 		Object.defineProperty(gproto, name, { value, configurable: true, writable: true, enumerable: false });
-	// rAF is a populateGlobal own-property during live tests (shadows this), so the
-	// no-op is only reached in the teardown gap where it harmlessly drops a stale
-	// render frame. (document/localStorage are NOT safe to shadow this way — they
-	// leak into live tests — so api.ts poller stragglers are handled at the file
-	// level instead.)
-	def("requestAnimationFrame", (_cb: FrameRequestCallback) => 0);
+	// rAF is a populateGlobal own-property during live tests (shadows this), so this
+	// fallback is only reached in the teardown gap. We still RUN the callback (in a
+	// try/catch) rather than dropping it: the app's renderApp() closure sets the
+	// module-global `_renderScheduled = true` BEFORE calling requestAnimationFrame,
+	// and only the callback resets it. A dropped frame would leave `_renderScheduled`
+	// stuck true (shared across files under isolate:false), so a later file's
+	// renderApp() early-returns and its debounce assertions flake. Running the
+	// callback resets the flag; the subsequent render-into-torn-down-container throw
+	// is swallowed harmlessly. (document/localStorage are NOT safe to shadow on the
+	// prototype — they leak into live tests — so api.ts poller stragglers are stopped
+	// at the file level instead.)
+	def("requestAnimationFrame", (cb: FrameRequestCallback) => { try { cb(Date.now()); } catch { /* stale gap render */ } return 0; });
 	def("cancelAnimationFrame", (_id: any) => undefined);
 	(gproto as any).__bobbitGapGlobals = true;
 }
