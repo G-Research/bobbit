@@ -342,6 +342,20 @@ export class ProjectContextManager {
     return gen;
   }
 
+  /**
+   * Sum of all task store generations — any single project's task
+   * (re)assignment is detected. Used by `SessionManager.resolveTaskIdForSession`
+   * to invalidate its sessionId→taskId cache (PERF-05) without re-scanning
+   * every project's tasks on every call.
+   */
+  getTaskGeneration(): number {
+    let gen = 0;
+    for (const ctx of this.contexts.values()) {
+      gen += ctx.taskStore.getGeneration();
+    }
+    return gen;
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   /** Close all contexts on shutdown. Awaits every context's async close so
