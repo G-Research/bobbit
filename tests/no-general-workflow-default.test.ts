@@ -17,7 +17,7 @@ const SCAN_DIRS = [
 	join(ROOT, "src", "server", "agent"),
 	join(ROOT, "src", "app"),
 ];
-const GOAL_AUTO_SEED_ROUTE_FILES = [
+const GOAL_WORKFLOW_ROUTE_FILES = [
 	join(ROOT, "src", "server", "server.ts"),
 ];
 
@@ -139,28 +139,26 @@ describe("no 'general' as workflow default in source", () => {
 		assertNoWorkflowDefaultOffenders(workflowDefaultOffenders(hits));
 	});
 
-	it("goal auto-seed route scan file list resolves and still contains the auto-seed path", () => {
-		for (const file of GOAL_AUTO_SEED_ROUTE_FILES) {
+	it("goal workflow route scan file list resolves and still contains the POST /api/goals path", () => {
+		for (const file of GOAL_WORKFLOW_ROUTE_FILES) {
 			assert.equal(existsSync(file), true, `Expected explicit scan file to exist: ${relPath(file)}`);
 			assert.equal(statSync(file).isFile(), true, `Expected explicit scan path to be a file: ${relPath(file)}`);
 		}
-		const routeFilesWithSeedLogic = GOAL_AUTO_SEED_ROUTE_FILES
+		const routeFilesWithGoalCreateRoute = GOAL_WORKFLOW_ROUTE_FILES
 			.filter(file => {
 				const src = readFileSync(file, "utf8");
-				return src.includes("buildDefaultWorkflows") && src.includes("targetCtx.workflowStore.put");
+				return src.includes('url.pathname === "/api/goals"') && src.includes('req.method === "POST"');
 			})
 			.map(relPath);
 		assert.deepEqual(
-			routeFilesWithSeedLogic,
+			routeFilesWithGoalCreateRoute,
 			["src/server/server.ts"],
-			"Update GOAL_AUTO_SEED_ROUTE_FILES when the POST /api/goals auto-seed route moves.",
+			"Update GOAL_WORKFLOW_ROUTE_FILES when the POST /api/goals route moves.",
 		);
 	});
 
-	it("no POST /api/goals auto-seed route defaults to workflow 'general'", {
-		todo: "Current src/server/server.ts POST /api/goals path defaults/falls back to workflow 'general'; see PR finding.",
-	}, () => {
-		const hits = findGeneralHitsInFiles(GOAL_AUTO_SEED_ROUTE_FILES);
+	it("no POST /api/goals route defaults to workflow 'general'", () => {
+		const hits = findGeneralHitsInFiles(GOAL_WORKFLOW_ROUTE_FILES);
 		assertNoWorkflowDefaultOffenders(workflowDefaultOffenders(hits));
 	});
 });
