@@ -1156,8 +1156,14 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	} as any;
 	persistOnce(preSpawnSession, plan, ctx.store);
 
-	// Step 8: spawn agent
-	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
+	// Step 8: spawn agent. Label includes the session class (sizing work for
+	// docs/design/in-process-bridge-spike.md "Instrument first" — splits the
+	// BOBBIT_E2E_PROFILE spawn-timing table by class so it answers "does the
+	// ~400-700ms split by class" without a separate pass). Zero behavior
+	// change: profileAsync/recordElapsed are no-ops unless BOBBIT_E2E_PROFILE=1
+	// (see profiling.ts), and the class check is a cheap boolean read.
+	const spawnClass = spawnSessionClass(plan);
+	const session = await profileAsync(`executePlan.spawnAgent.${spawnClass}`, () => spawnAgent(plan, ctx));
 
 	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
@@ -1166,7 +1172,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// awaited before the session is returned/live so explicit failures cannot
 	// continue on provider/runtime defaults.
 	try {
-		await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
+		await profileAsync(`executePlan.postSpawn.${spawnClass}`, () => postSpawn(session, plan, ctx));
 	} catch (err) {
 		const setupError = err instanceof Error ? err : new Error(String(err));
 		handleSetupFailure(session, plan, setupError, ctx);
@@ -1395,7 +1401,11 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
 
-	// Create real bridge (replacing placeholder)
+	// Create real bridge (replacing placeholder). __worktreeSpawnAgentT0 spans
+	// bridge creation through the pre-postSpawn persist below, mirroring
+	// executePlan()'s `executePlan.spawnAgent.<class>` window for this sibling
+	// path — see docs/design/in-process-bridge-spike.md "Instrument first".
+	const __worktreeSpawnAgentT0 = performance.now();
 	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
@@ -1439,11 +1449,18 @@ export async function executeWorktreeAsync(
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);
 
-	// Start agent with retry
+	// Start agent with retry. Labeled by session class (same sizing
+	// instrumentation as the executePlan() spawnAgent() path above — this is
+	// the worktree-pool sibling of that path, used by default (non-bypass)
+	// session creation) — see docs/design/in-process-bridge-spike.md
+	// "Instrument first".
+	const __worktreeSpawnClass = spawnSessionClass(plan);
+	const __worktreeSpawnT0 = performance.now();
 	await withRetry(
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
+	recordElapsed(`spawnAgent.rpcStart.${__worktreeSpawnClass}`, performance.now() - __worktreeSpawnT0);
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	const preExistingMode = resolvePreExistingTranscriptSetupMode(plan);
@@ -1521,20 +1538,45 @@ export async function executeWorktreeAsync(
 	// recorded above; avoid get_state rewriting their runtime metadata. See
 	// tests/manual-integration/restart-minimal.spec.ts.
 	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
+		// Sizing note (docs/design/in-process-bridge-spike.md "Instrument
+		// first"): this is the first real `getState()` RPC round trip after
+		// spawn (full tool/extension graph loaded, unlike the spike's isolated
+		// `--no-builtin-tools` bench) — measure it separately from
+		// `spawnAgent.rpcStart` since it dominates real spawn-to-idle latency.
+		const __t = performance.now();
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
+		recordElapsed(`persistSessionMetadata.${__worktreeSpawnClass}`, performance.now() - __t);
 	}
+
+	recordElapsed(`executeWorktreeAsync.spawnAgent.${__worktreeSpawnClass}`, performance.now() - __worktreeSpawnAgentT0);
 
 	// Enforce explicit model selection before marking the session idle/live. This
 	// prevents a failed selected model from silently continuing on provider or
 	// runtime defaults. Thinking-level application remains non-fatal below.
-	await postSpawn(session, plan, ctx);
+	await profileAsync(`executeWorktreeAsync.postSpawn.${__worktreeSpawnClass}`, () => postSpawn(session, plan, ctx));
 
 	// Notify connected clients that the session is ready (single writer + version bump).
 	broadcastStatus(session, "idle");
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
+
+/**
+ * Classify a session for spawn-timing sizing (BOBBIT_E2E_PROFILE label
+ * suffix only — never affects routing/eligibility). Mirrors, but does not
+ * reuse, `isInProcessBridgeEligible`'s three-way distinction so this stays
+ * import-free of the bridge-eligibility module: "sandboxed" (Docker
+ * containment; always out-of-process), "readOnly" (no bash/edit/write —
+ * the in-process-bridge-eligible class when un-sandboxed), "exec"
+ * (code-executing, un-sandboxed — e.g. host-level agents). See
+ * docs/design/in-process-bridge-spike.md "Instrument first".
+ */
+function spawnSessionClass(plan: SessionSetupPlan): "sandboxed" | "readOnly" | "exec" {
+	if (plan.sandboxed || plan.bridgeOptions?.containerId) return "sandboxed";
+	if (plan.readOnly) return "readOnly";
+	return "exec";
+}
 
 /**
  * Create RpcBridge, subscribe events, start the agent process.
@@ -1623,7 +1665,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
-	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
+	recordElapsed(`spawnAgent.rpcStart.${spawnSessionClass(plan)}`, performance.now() - __t);
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
@@ -1668,8 +1710,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// are already recorded; avoid get_state rewriting their runtime metadata. See
 	// worktree path for the full rationale.
 	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
+		// Sizing note (docs/design/in-process-bridge-spike.md "Instrument
+		// first") — see the matching comment in executeWorktreeAsync().
+		const __t = performance.now();
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
+		recordElapsed(`persistSessionMetadata.${spawnSessionClass(plan)}`, performance.now() - __t);
 	}
 
 	return session;
