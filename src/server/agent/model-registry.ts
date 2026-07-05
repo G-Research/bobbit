@@ -71,7 +71,17 @@ export interface CustomProviderConfig {
 	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-completions" | "openai-images" | "gemini-images" | "google-imagen";
 	baseUrl: string;
 	apiKey?: string;
-	models?: Array<{ id: string; name: string }>;
+	// `contextWindow`/`maxTokens` are OPTIONAL per-model overrides. Manual/
+	// openai-completions providers (e.g. NVIDIA NIM) have no discovery source
+	// for these numbers — NIM's /v1/models omits `context_length` entirely —
+	// so discoverFromSingleConfig falls back to a conservative 8192/4096.
+	// Without an override, a real 128k+-context model like z-ai/glm-5.2 gets
+	// treated as an 8k model and Bobbit auto-compacts nearly every turn. Unset
+	// (undefined) preserves that fallback; a positive number overrides it.
+	// Threaded through to `~/.bobbit/agent/models.json` by
+	// syncCustomProviderModelsJson so the spawned session runtime sees the
+	// same numbers as the browser picker.
+	models?: Array<{ id: string; name: string; contextWindow?: number; maxTokens?: number }>;
 }
 
 /**
@@ -703,8 +713,14 @@ async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<A
 				provider: config.name || config.id,
 				api: "openai-completions" as const,
 				baseUrl: `${config.baseUrl}/v1`,
-				contextWindow: 8192,
-				maxTokens: 4096,
+				// Per-model override (Settings UI "Context window" / "Max output
+				// tokens" fields) wins when set to a positive number; otherwise
+				// fall back to the conservative default. See the CustomProviderConfig
+				// doc comment — most manual-provider APIs (e.g. NVIDIA NIM) don't
+				// report context length via /v1/models, so this is often the only
+				// way to get an accurate context window for these models.
+				contextWindow: typeof m.contextWindow === "number" && m.contextWindow > 0 ? m.contextWindow : 8192,
+				maxTokens: typeof m.maxTokens === "number" && m.maxTokens > 0 ? m.maxTokens : 4096,
 				reasoning: false,
 				input: ["text"] as ("text" | "image")[],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -787,32 +803,67 @@ async function discoverLMStudioModelsServer(config: CustomProviderConfig): Promi
 	}
 }
 
+/**
+ * Core OpenAI-compat `/v1/models` fetch — THROWS on any failure (unreachable,
+ * timeout, non-2xx/auth error, malformed body). Two callers want opposite
+ * failure behavior from the same request:
+ *   - Best-effort production discovery (`discoverOpenAICompatModelsServer`
+ *     below) swallows failures: a transiently-down local llama.cpp/vLLM
+ *     server shouldn't crash the whole model-registry assembly.
+ *   - Test-Connection (`probeOpenAICompatModels`, used by the
+ *     POST /api/custom-providers/test route for manual/openai-completions
+ *     providers) needs the opposite — the whole point of the button is to
+ *     tell the user WHY it failed (auth vs unreachable vs malformed),
+ *     which requires the error to actually propagate.
+ */
+async function fetchOpenAICompatModels(config: CustomProviderConfig): Promise<ApiModel[]> {
+	const data = await httpGetJson(`${config.baseUrl.replace(/\/+$/, "")}/v1/models`, config.apiKey, 5000);
+	if (!data?.data || !Array.isArray(data.data)) {
+		throw new Error("Unexpected response from /v1/models (missing a data[] array)");
+	}
+
+	return data.data.map((m: any) => {
+		const contextWindow = m.context_length || m.max_model_len || 8192;
+		const maxTokens = m.max_tokens || Math.min(contextWindow, 4096);
+		return {
+			id: m.id,
+			name: m.id,
+			provider: config.name || config.id,
+			api: "openai-completions",
+			baseUrl: `${config.baseUrl}/v1`,
+			contextWindow,
+			maxTokens,
+			reasoning: false,
+			input: ["text"] as ("text" | "image")[],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			authenticated: true,
+		};
+	});
+}
+
 async function discoverOpenAICompatModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
 	try {
-		const data = await httpGetJson(`${config.baseUrl}/v1/models`, config.apiKey, 5000);
-		if (!data?.data || !Array.isArray(data.data)) return [];
-
-		return data.data.map((m: any) => {
-			const contextWindow = m.context_length || m.max_model_len || 8192;
-			const maxTokens = m.max_tokens || Math.min(contextWindow, 4096);
-			return {
-				id: m.id,
-				name: m.id,
-				provider: config.name || config.id,
-				api: "openai-completions",
-				baseUrl: `${config.baseUrl}/v1`,
-				contextWindow,
-				maxTokens,
-				reasoning: false,
-				input: ["text"] as ("text" | "image")[],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				authenticated: true,
-			};
-		});
+		return await fetchOpenAICompatModels(config);
 	} catch (err) {
 		console.error(`[model-registry] OpenAI-compat discovery failed for ${config.baseUrl}:`, err);
 		return [];
 	}
+}
+
+/**
+ * Test-Connection probe for manual/openai-completions custom providers (e.g.
+ * NVIDIA NIM, OpenRouter, Together). Unlike `discoverFromSingleConfig` (which,
+ * for these two types, just echoes the user's manually-typed model list — it
+ * has no remote catalog to probe), this ACTUALLY calls the remote
+ * `/v1/models` endpoint with the configured key, so "Test Connection"
+ * validates reachability and authentication honestly instead of always
+ * reporting the static list back. Throws on failure — see
+ * `fetchOpenAICompatModels` doc comment — so the /test route can surface a
+ * distinct auth-vs-unreachable-vs-malformed message instead of a silent
+ * "0 models" that looks identical to "connected, nothing configured yet".
+ */
+export async function probeOpenAICompatModels(config: CustomProviderConfig): Promise<ApiModel[]> {
+	return fetchOpenAICompatModels(config);
 }
 
 // ── HTTP helper ────────────────────────────────────────────────────
