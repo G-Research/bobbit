@@ -26,10 +26,17 @@ const DEFAULT_IMAGE_MODELS = [
 	{ id: "imagen-4.0-fast-generate-001", name: "Imagen 4 Fast", provider: "google", api: "google-imagen", authenticated: true },
 ];
 
+// Shape mirrors `ApiModel` (src/server/agent/model-registry.ts) — the real
+// GET /api/models response. `input`/`cost`/`contextWindow`/`maxTokens` are
+// required fields the ModelSelector list row unconditionally reads
+// (src/ui/dialogs/ModelSelector.ts renders `model.input.includes(...)`,
+// `model.contextWindow`, `model.maxTokens`, `formatModelCost(model.cost)` for
+// every row); omitting them crashes the picker as soon as it finishes
+// loading, wedging it at "Loading models…" (uncaught render exception).
 const DEFAULT_MODELS = [
-	{ id: "claude-opus-4-1", provider: "anthropic", reasoning: true },
-	{ id: "claude-sonnet", provider: "anthropic", reasoning: true },
-	{ id: "gpt-4o", provider: "openai", reasoning: false },
+	{ id: "claude-opus-4-1", provider: "anthropic", reasoning: true, input: ["text", "image"], cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 }, contextWindow: 200_000, maxTokens: 32_000, authenticated: true },
+	{ id: "claude-sonnet", provider: "anthropic", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 200_000, maxTokens: 64_000, authenticated: true },
+	{ id: "gpt-4o", provider: "openai", reasoning: false, input: ["text", "image"], cost: { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384, authenticated: true },
 ];
 
 const DEFAULT_CLAUDE_CODE_STATUS = {

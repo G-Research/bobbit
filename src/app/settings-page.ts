@@ -1521,11 +1521,15 @@ type ModelTestResult = { ok: boolean; latencyMs?: number; error?: string; at: nu
 let modelTestResults: Record<string, ModelTestResult> = {};
 let modelTestInFlight: Record<string, boolean> = {};
 const MODEL_TEST_TTL_MS = 30_000;
+// Review Default Allowlist — see docs/design/per-role-model-overrides.md §8.1 / §9.1:
+// "architect, code-reviewer, reviewer, security-reviewer, spec-auditor, and
+// qa-tester display the review-model default." Keep in sync with that doc.
 const REVIEW_DEFAULT_ROLE_NAMES = new Set([
+	"architect",
 	"code-reviewer",
+	"reviewer",
 	"security-reviewer",
 	"spec-auditor",
-	"test-engineer",
 	"qa-tester",
 ]);
 
