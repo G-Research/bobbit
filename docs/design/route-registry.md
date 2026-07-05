@@ -32,7 +32,18 @@ protocol future cohorts should follow, and what's left after cohort 1.
   (`src/server/routes/project-config-server-routes.ts`), plus the
   qa-testing-config one-liner above. See
   [Cohort 4](#cohort-4-pack-runtimes--server-scope-project-config) below.
-- Everything else in `handleApiRoute` (~375 remaining routes) is unchanged,
+- **Cohort 6: workflows + review-annotations** — `GET`/`POST`
+  `/api/workflows`, `POST /api/workflows/:id/customize`,
+  `DELETE /api/workflows/:id/override`, `GET`/`PUT`/`DELETE`
+  `/api/workflows/:id` (`src/server/routes/workflows-routes.ts`); and
+  `POST /api/sessions/:id/review/annotations/bulk`,
+  `GET`/`POST`/`DELETE /api/sessions/:id/review/annotations`,
+  `DELETE /api/sessions/:id/review/annotations/:annotationId`,
+  `GET`/`PUT /api/sessions/:id/review/submitted`
+  (`src/server/routes/review-annotations-routes.ts`) — see
+  [Cohort 6: workflows + review-annotations](#cohort-6-workflows--review-annotations)
+  below.
+- Everything else in `handleApiRoute` (~361 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -440,6 +451,86 @@ Parity evidence: `tests/e2e/pack-runtimes-api.spec.ts`,
 `tests/e2e/headquarters-api.spec.ts` and the four sandbox API specs (the
 `/api/project-config` writers) — 107 tests — pass unchanged.
 
+## Cohort 6: workflows + review-annotations
+
+Two new modules, registered after cohort 4's in `server.ts`:
+
+### `src/server/routes/workflows-routes.ts`
+
+The workflows family, moved verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/workflows` |
+| POST | `/api/workflows` |
+| POST | `/api/workflows/:id/customize` |
+| DELETE | `/api/workflows/:id/override` |
+| GET | `/api/workflows/:id` |
+| PUT | `/api/workflows/:id` |
+| DELETE | `/api/workflows/:id` |
+
+No new `CoreRouteCtx` fields needed — `configCascade` and
+`projectContextManager` were already threaded through by cohort 1/2.
+
+### `src/server/routes/review-annotations-routes.ts`
+
+The review-annotation family, moved verbatim:
+
+| Method | Path |
+|---|---|
+| POST | `/api/sessions/:id/review/annotations/bulk` |
+| GET | `/api/sessions/:id/review/annotations` |
+| POST | `/api/sessions/:id/review/annotations` |
+| DELETE | `/api/sessions/:id/review/annotations` |
+| DELETE | `/api/sessions/:id/review/annotations/:annotationId` |
+| GET | `/api/sessions/:id/review/submitted` |
+| PUT | `/api/sessions/:id/review/submitted` |
+
+The legacy code matched this family with `startsWith`/`endsWith`/`includes`
+plus manual `pathname.split("/")` indexing rather than the capture-group
+regexes cohorts 1-5 dealt with, and its single DELETE block branched at
+runtime (`parts.length >= 7 && parts[6]`) to distinguish "delete one
+annotation" from "clear all/by docTitle". That single block is now two
+`RouteTable` registrations (`.../annotations` and
+`.../annotations/:annotationId`) — `RouteTable`'s regex is anchored
+(`^...$`) so the two path shapes (different segment counts) never collide,
+reproducing the runtime branch exactly for every shape exercised by
+`tests/e2e/review-annotations-api.spec.ts`. One `CoreRouteCtx` field added
+(append-only, cohort-6 block): `reviewAnnotationStore`, optional exactly as
+`handleApiRoute`'s own param is.
+
+**Fall-through parity: no shim needed for either module** (cohort 5's shape,
+not cohort 2/4's). Every legacy block in both families gated on the path
+AND the method in the SAME `if` condition, with no shared pre-branch
+resolution step (unlike project-config's path-first project lookup) — a
+method mismatch never entered any block, falling straight through to the
+same generic terminal 404 any unmatched path would hit. `RouteTable`'s
+`:param`/exact entries are method-scoped the same way, so leaving other
+methods unregistered on these path shapes reproduces that fall-through
+exactly.
+
+**Known non-bit-for-bit edge case (untested, documented in the module
+header):** the legacy DELETE block matched via
+`url.pathname.includes("/review/annotations")` (not `endsWith`), so a
+DELETE with a trailing slash or extra segments past the annotation id fell
+into the same block with different `parts[]` indexing than the two shapes
+above. No test exercises this; both migrated shapes are pinned by
+`tests/e2e/review-annotations-api.spec.ts`.
+
+Parity evidence: `tests/e2e/review-annotations-api.spec.ts` (all cases) and
+`tests/e2e/ui/mobile-review-commenting.spec.ts` pass unchanged for the
+review-annotation family. For workflows:
+`tests/e2e/workflows-api.spec.ts`, `tests/e2e/workflows-project-scope.spec.ts`,
+`tests/e2e/goal-workflow-api.spec.ts`,
+`tests/e2e/projects-no-default-workflows.spec.ts`,
+`tests/e2e/inline-workflow-goal-flow.spec.ts`,
+`tests/e2e/proposal-goal-workflow-validation.spec.ts`, and the browser specs
+`tests/e2e/ui/workflow-page-scope.spec.ts`,
+`tests/e2e/ui/workflow-editor.spec.ts`,
+`tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts`,
+`tests/e2e/ui/goal-empty-workflows-banner.spec.ts`,
+`tests/e2e/ui/goal-proposal-workflow-tab.spec.ts` all pass unchanged.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -463,13 +554,18 @@ Parity evidence: `tests/e2e/pack-runtimes-api.spec.ts`,
   Method attribution for registry routes is exact (read directly from the
   `register()` call's first argument) rather than the legacy extractor's
   best-effort statement-window heuristic.
-  - `tests/prompt-api-drift.test.ts` carries its own separate inline copy of
-    the extractor (pre-existing, documented in that file) and was NOT
-    extended — none of cohort 1's routes are referenced by any prompt
-    template, so it stays green unchanged. A future cohort whose routes ARE
-    prompt-advertised will need to either extend that inline copy too or
-    (better, pre-existing TODO in that file) refactor it to import the
-    shared `server-route-surface.ts` helper.
+  - `tests/prompt-api-drift.test.ts` carried its own separate inline copy of
+    the extractor through cohorts 1-5 (none of their routes were referenced
+    by any prompt template, so it stayed green unchanged). Cohort 6's
+    `GET /api/workflows` IS referenced by `defaults/system-prompt.md`, so
+    its inline copy going stale would have been a real, user-visible false
+    negative (a live route silently reported as missing) rather than a
+    theoretical gap — cohort 6 paid down the deferred refactor and now
+    imports `getServerRoutes()`/`concretize()`/`isRouted()` directly from
+    `server-route-surface.ts`, same as `orient-api-route-families.test.ts`
+    and `client-api-orphan-pinning.test.ts`. No future cohort needs to touch
+    this file for path drift — only if it adds a NEW prompt-advertised
+    template file to `PROMPT_FILES`.
 - Existing `tests/e2e/*.spec.ts` project-CRUD/base-ref specs run unchanged
   against the migrated routes (parity evidence — see PR description).
 
@@ -507,16 +603,20 @@ Parity evidence: `tests/e2e/pack-runtimes-api.spec.ts`,
 6. Run `npm run check`, `npm run test:unit`, `npm run test:e2e` (API phase).
    No new failures against the current baseline.
 7. If the cohort's routes are advertised in any `defaults/*.md`/`*.yaml`
-   prompt template, also update `tests/prompt-api-drift.test.ts`'s scan list
-   (or do the shared-extractor refactor it's already been deferring).
+   prompt template, run `tests/prompt-api-drift.test.ts` (it imports the
+   shared, registry-aware `server-route-surface.ts` extractor as of cohort
+   6, so newly-migrated registry routes are already visible to it — no
+   per-cohort update needed unless a NEW prompt file is added to
+   `PROMPT_FILES`).
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~375 routes, including the largest/highest-traffic families
+- The other ~361 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
-  trio were migrated in cohort 4, and the staff-inbox family in cohort 5
-  (both above). Cohort 2 migrated marketplace using the `/*`
+  trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
+  the workflows + review-annotation families in cohort 6 (all above).
+  Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see
   [Cohort 2: marketplace](#cohort-2-marketplace) above); a future cohort

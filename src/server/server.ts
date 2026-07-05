@@ -80,6 +80,10 @@ import { registerStaffInboxRoutes } from "./routes/staff-inbox-routes.js";
 // STR-01 cohort 4: /api/pack-runtimes* and the server-scope /api/project-config trio.
 import { registerPackRuntimesRoutes } from "./routes/pack-runtimes-routes.js";
 import { registerServerProjectConfigRoutes } from "./routes/project-config-server-routes.js";
+// STR-01 cohort 6: the workflows family (/api/workflows*) and the
+// review-annotation family (/api/sessions/:id/review/*).
+import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
+import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -595,7 +599,7 @@ import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
-import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
+import { ReviewAnnotationStore } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
@@ -3283,6 +3287,8 @@ registerMarketplaceRoutes(coreRouteTable);
 registerStaffInboxRoutes(coreRouteTable);
 registerPackRuntimesRoutes(coreRouteTable);
 registerServerProjectConfigRoutes(coreRouteTable);
+registerWorkflowsRoutes(coreRouteTable);
+registerReviewAnnotationRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3524,7 +3530,9 @@ async function handleApiRoute(
 	// family (src/server/routes/staff-inbox-routes.ts); cohort 4, the
 	// /api/pack-runtimes* family (src/server/routes/pack-runtimes-routes.ts)
 	// and the server-scope /api/project-config trio
-	// (src/server/routes/project-config-server-routes.ts).
+	// (src/server/routes/project-config-server-routes.ts); cohort 6, the
+	// workflows family (src/server/routes/workflows-routes.ts) and the
+	// review-annotation family (src/server/routes/review-annotations-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3549,6 +3557,9 @@ async function handleApiRoute(
 				staffManager, inboxManager,
 				// Cohort 4 (pack-runtimes) additions — append-only, see core-route-ctx.ts.
 				packContributionRegistry, readBodyText,
+				// Cohort 6 (workflows + review-annotations) additions — append-only,
+				// see core-route-ctx.ts. Workflows needed no new fields.
+				reviewAnnotationStore,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -12494,130 +12505,6 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Workflow endpoints ──────────────────────────────────────────
-
-	// GET /api/workflows — a missing projectId returns an empty list (there is no
-	// server-scope workflow set); a projectId returns that project's workflows.
-	const workflowsMatch = url.pathname === "/api/workflows";
-	if (workflowsMatch && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveWorkflows(projectId);
-		json({ workflows: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
-		return;
-	}
-
-	// POST /api/workflows — requires projectId.
-	if (workflowsMatch && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const targetProjectId = body?.projectId;
-		if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
-		try {
-			const ctx = projectContextManager.getOrCreate(targetProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const now = Date.now();
-			const workflow = {
-				id: body.id as string,
-				name: (body.name as string) ?? body.id,
-				description: (body.description as string) ?? "",
-				gates: body.gates || [],
-				createdAt: now,
-				updatedAt: now,
-			};
-			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-			ctx.workflowStore.put(workflow);
-			json(workflow, 201);
-		} catch (err: any) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/workflows/:id/customize — copy resolved workflow into a project.
-	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
-	if (workflowCustomizeMatch && req.method === "POST") {
-		const id = decodeURIComponent(workflowCustomizeMatch[1]);
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "projectId required" }, 400); return; }
-
-		const resolved = configCascade.resolveWorkflows(projectId);
-		const source = resolved.find(r => r.item.id === id);
-		if (!source) { json({ error: "Workflow not found" }, 404); return; }
-
-		const ctx = projectContextManager.getOrCreate(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-
-		const now = Date.now();
-		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		ctx.workflowStore.put(copy);
-		json(copy, 201);
-		return;
-	}
-
-	// DELETE /api/workflows/:id/override — remove project-level override.
-	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
-	if (workflowOverrideMatch && req.method === "DELETE") {
-		const id = decodeURIComponent(workflowOverrideMatch[1]);
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "projectId required" }, 400); return; }
-
-		const ctx = projectContextManager.getOrCreate(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-
-		ctx.workflowStore.remove(id);
-		json({ ok: true });
-		return;
-	}
-
-	// GET /api/workflows/:id
-	const workflowMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
-	if (workflowMatch && req.method === "GET") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
-		const resolved = configCascade.resolveWorkflows(qProjectId);
-		const found = resolved.find(r => r.item.id === id);
-		if (!found) { json({ error: "Workflow not found" }, 404); return; }
-		json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-		return;
-	}
-
-	// PUT /api/workflows/:id — requires projectId.
-	if (workflowMatch && req.method === "PUT") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
-		const ctx = projectContextManager.getOrCreate(qProjectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const existing = ctx.workflowStore.get(id);
-		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-		const updated = {
-			...existing,
-			name: body.name ?? existing.name,
-			description: body.description ?? existing.description,
-			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-			id,
-			updatedAt: Date.now(),
-		};
-		ctx.workflowStore.put(updated);
-		json(updated);
-		return;
-	}
-
-	// DELETE /api/workflows/:id — requires projectId.
-	if (workflowMatch && req.method === "DELETE") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
-		const ctx = projectContextManager.getOrCreate(qProjectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		ctx.workflowStore.remove(id);
-		json({ ok: true });
-		return;
-	}
-
 	// ── Cost endpoints ─────────────────────────────────────────────
 
 	// GET /api/sessions/:id/cost/breakdown — cost breakdown including delegates
@@ -13371,111 +13258,6 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		sessionManager.deleteDraft(id, type);
-		json({ ok: true });
-		return;
-	}
-
-	// ── Review annotation endpoints ────────────────────────────────
-
-	// POST /api/sessions/:id/review/annotations/bulk — bulk save all annotations + submitted flag (used by sendBeacon on page unload)
-	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations/bulk")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Invalid body" }, 400); return; }
-		const annotations: Record<string, ReviewAnnotation[]> = {};
-		if (body.annotations && typeof body.annotations === "object") {
-			for (const [docTitle, anns] of Object.entries(body.annotations)) {
-				if (Array.isArray(anns)) {
-					annotations[docTitle] = anns as ReviewAnnotation[];
-				}
-			}
-		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
-		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
-		json({ ok: true });
-		return;
-	}
-
-	// GET /api/sessions/:id/review/annotations
-	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const data = reviewAnnotationStore.getAll(sessionId);
-		json(data);
-		return;
-	}
-
-	// POST /api/sessions/:id/review/annotations
-	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		if (!body?.docTitle || !body?.annotation) {
-			json({ error: "docTitle and annotation required" }, 400);
-			return;
-		}
-		reviewAnnotationStore.addAnnotation(sessionId, body.docTitle, body.annotation);
-		json({ ok: true });
-		return;
-	}
-
-	// DELETE /api/sessions/:id/review/annotations[/:annotationId]
-	if (req.method === "DELETE" && url.pathname.startsWith("/api/sessions/") && url.pathname.includes("/review/annotations")) {
-		const parts = url.pathname.split("/");
-		const sessionId = parts[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		if (parts.length >= 7 && parts[6]) {
-			// DELETE /api/sessions/:id/review/annotations/:annotationId
-			const annotationId = decodeURIComponent(parts[6]);
-			const docTitle = url.searchParams.get("docTitle");
-			if (!docTitle) { json({ error: "docTitle query parameter is required" }, 400); return; }
-			reviewAnnotationStore.removeAnnotation(sessionId, docTitle, annotationId);
-			json({ ok: true });
-		} else {
-			// DELETE /api/sessions/:id/review/annotations — clear all or by docTitle
-			const body = await readBody(req);
-			const docTitle = body?.docTitle;
-			if (docTitle) {
-				reviewAnnotationStore.clearAnnotations(sessionId, docTitle);
-			} else {
-				reviewAnnotationStore.clearAll(sessionId);
-			}
-			json({ ok: true });
-		}
-		return;
-	}
-
-	// GET /api/sessions/:id/review/submitted
-	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
-		return;
-	}
-
-	// PUT /api/sessions/:id/review/submitted
-	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
 	}
