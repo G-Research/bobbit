@@ -468,4 +468,56 @@ describe("Source pin — merge-loss invariants", () => {
 			"tests/marketplace-runtime-consent.spec.ts.",
 		);
 	});
+
+	it("server.ts exports resolveManagedRuntimeContext + PackRuntimeSupervisorLike (restored by the w2-managed-runtime-context-restore fix, Finding W2.K)", () => {
+		const text = read("src/server/server.ts");
+		assertTextInOrder(
+			text,
+			[
+				"export interface PackRuntimeSupervisorLike {",
+				"export async function resolveManagedRuntimeContext(",
+			],
+			"src/server/server.ts must export both `PackRuntimeSupervisorLike` and\n" +
+			"`resolveManagedRuntimeContext()` — the SINGLE source of truth shared by the\n" +
+			"LifecycleHub provider-hook path (`runtimeResolver`) and the pack-ROUTE dispatch\n" +
+			"path (`/api/ext/route/:name` and the sessionless `/api/ext/pack-route/:packId/\n" +
+			":routeName`), so a managed provider and its sibling routes always agree on the\n" +
+			"runtime linkage (`{ baseUrl, headers, status }`) they receive. Without it every\n" +
+			"managed-mode pack route (Hindsight status/recall/retain/reflect/banks) sees\n" +
+			"ctx.runtime undefined and stays dormant, unable to reach a running managed\n" +
+			"runtime. Originally added by be12d016 (\"fix(ext-host): inject managed runtime\n" +
+			"context into pack route calls\"); silently dropped end-to-end by merge commit\n" +
+			"b687d93d (b687d93d^1 has both symbols, b687d93d has neither); restored\n" +
+			"alongside the rest of the /api/pack-runtimes REST family by the\n" +
+			"w2-pack-runtimes-restore fix (PR #25), which this w2-managed-runtime-context-\n" +
+			"restore fix (Finding W2.K) confirmed and wired the remaining worker-boundary\n" +
+			"delta on top of (see the module-host-worker.ts pin below). DO NOT delete this\n" +
+			"pin — restore the dropped symbols instead. Independently pinned end-to-end by\n" +
+			"tests/server-managed-runtime-context.test.ts (10 assertions).",
+		);
+	});
+
+	it("module-host-worker.ts forwards ctx.runtime across the route worker boundary (restored by the w2-managed-runtime-context-restore fix, Finding W2.K)", () => {
+		const text = read("src/server/extension-host/module-host-worker.ts");
+		assert.ok(
+			/runtime:\s*\(req\.ctx as \{ runtime\?: unknown \} \| undefined\)\?\.runtime,/.test(text),
+			"src/server/extension-host/module-host-worker.ts::ModuleHost must serialize\n" +
+			"`req.ctx.runtime` onto the route worker's `serCtx` alongside sessionId/tool/\n" +
+			"projectId/workingDir. Without this line the managed-runtime linkage that\n" +
+			"resolveManagedRuntimeContext() resolves in server.ts for a routed pack (e.g.\n" +
+			"Hindsight status/recall) never crosses the MessagePort into the confined route\n" +
+			"module — module-host-bootstrap.ts's `...(msg.ctx.runtime ? { runtime:\n" +
+			"msg.ctx.runtime } : {})` reconstruction receives ctx.runtime === undefined even\n" +
+			"though the host resolved a live runtime, so every managed-mode route silently\n" +
+			"stays dormant. Originally added by be12d016; silently dropped end-to-end by\n" +
+			"merge commit b687d93d; the w2-pack-runtimes-restore fix (PR #25) restored\n" +
+			"resolveManagedRuntimeContext() and both server.ts call sites but missed this\n" +
+			"worker-boundary forwarding line, since server-managed-runtime-context.test.ts\n" +
+			"exercises the resolver in isolation and cannot see across the worker boundary.\n" +
+			"Restored by the w2-managed-runtime-context-restore fix (Finding W2.K). DO NOT\n" +
+			"delete this pin — restore the dropped forwarding instead. Independently pinned\n" +
+			"end-to-end by the \"forwards ctx.runtime to the route handler across the worker\n" +
+			"boundary\" test in tests/extension-host-route-dispatcher.test.ts.",
+		);
+	});
 });
