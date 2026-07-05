@@ -12,9 +12,20 @@ protocol future cohorts should follow, and what's left after cohort 1.
 
 ## Status
 
-- **Cohort 1 (this change): `/api/projects*`** — 14 routes migrated. See
+- **Cohort 1: `/api/projects*` CRUD** — 14 routes migrated
+  (`src/server/routes/projects-routes.ts`). See
   [Cohort list](#cohort-1-projects) below.
-- Everything else in `handleApiRoute` (~410 remaining routes) is unchanged,
+- **Cohort 2: `/api/projects/:id/config(...)`** — the per-project config
+  family (`src/server/routes/project-config-routes.ts`). See
+  [Cohort 2](#cohort-2-per-project-config) below.
+- Everything else in `handleApiRoute` is unchanged, still in the legacy
+  if/else chain (the marketplace family is being migrated in a parallel
+  cohort branch).
+- **Cohort 1: `/api/projects*`** — 14 routes migrated. See
+  [Cohort list](#cohort-1-projects) below.
+- **Cohort 2: `/api/marketplace/*` + `GET /api/packs/conflicts`** — see
+  [Cohort 2: marketplace](#cohort-2-marketplace) below.
+- Everything else in `handleApiRoute` (~390 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -178,18 +189,121 @@ status codes; same error shapes):
 | POST | `/api/projects/:id/promote` |
 | GET | `/api/projects/:id/base-ref/detect` |
 
-**Deliberately NOT migrated** (still in the legacy chain), even though
-lexically adjacent to the family above in `server.ts`:
+**Deliberately NOT migrated in cohort 1** (still in the legacy chain), even
+though lexically adjacent to the family above in `server.ts`:
 
 - `GET`/`PUT` `/api/projects/:id/config`, `/config/defaults`, `/config/resolved`
   — its own, much larger review unit (base_ref validation, secrets
   redaction, legacy-key migration — hundreds of lines of branching logic);
-  migrating it belongs in its own cohort/PR.
+  **migrated as cohort 2, below**.
 - `POST /api/create-directory`, `GET /api/browse-directory` — lexically
   interleaved with the projects family but not part of it (generic
   filesystem helpers).
 - `GET /api/projects/:id/qa-testing-config` — unrelated feature, happens to
   share the `/api/projects/:id/...` path shape.
+
+## Cohort 2: per-project config
+
+`src/server/routes/project-config-routes.ts`. The four real routes, moved
+verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/projects/:id/config` |
+| PUT | `/api/projects/:id/config` |
+| GET | `/api/projects/:id/config/defaults` |
+| GET | `/api/projects/:id/config/resolved` |
+
+Two cohort-2 wrinkles worth knowing for future cohorts:
+
+- **Legacy fall-through parity shims.** The legacy block matched the PATH
+  first (`if (projectConfigMatch)`), resolved the project context (404
+  `"Project not found"` when missing) and only then branched on
+  method/suffix — an unhandled combination (e.g. `DELETE .../config`,
+  `PUT .../config/defaults`) fell out of the block and continued down the
+  whole remaining legacy chain to its terminal 404 `"Not found"`. A
+  method-keyed registry can't "fall through after matching", so those
+  method/path combinations are registered explicitly against a shim that
+  reproduces the exact terminal behavior. Pinned by
+  `tests/project-config-route-parity.test.ts` (every representable method
+  on every family pattern must be registered). When migrating a future
+  path-first/method-inside legacy block, audit its unhandled-method
+  fall-through the same way — and write the shims as LITERAL
+  `register("METHOD", ...)` calls (not a loop) so the route-surface
+  extractor sees them.
+- **Helper disposition.** The five sandbox-secret helpers
+  (`redactSandboxSecrets`, `redactSandboxSecretsResolved`,
+  `mergeSecretsIntoTokens`, `mergeSandboxTokensStructured`,
+  `mergeSandboxSecrets`) had their only call sites in this family and moved
+  with it. `LEGACY_QA_TOP_LEVEL_KEYS` is also used by the not-yet-migrated
+  `PUT /api/project-config` legacy route, so it stays defined once in
+  `server.ts` and flows through the new `ctx.legacyQaTopLevelKeys`; the
+  server-scope store flows through `ctx.serverProjectConfigStore`. New ctx
+  fields are **append-only** (each cohort appends its block at the end of
+  the interface/literal) so parallel cohort branches merge without
+  conflicts.
+
+Still not migrated from this region: `GET /api/projects/:id/qa-testing-config`
+(unrelated feature) and the server-level `/api/project-config` trio (its PUT
+is lexically adjacent to the marketplace block being migrated in a parallel
+cohort; deferred to stay conflict-free).
+## Cohort 2: marketplace
+
+`src/server/routes/marketplace-routes.ts`. Unlike cohort 1 (14 small,
+independent handlers), this family was already behind ONE wrapping
+`if (url.pathname.startsWith("/api/marketplace/") || url.pathname === "/api/packs/conflicts")`
+guard in the legacy chain, with ~15 route-local closures (`parseScope`,
+`resolveScopeTarget`, `buildActivationCatalogue`, `resolvePackRuntimeContext`,
+etc.) shared across its ~12 nested exact-match sub-routes, and a shared
+trailing `{ error: "not found" }` 404 for any `/api/marketplace/*` path
+matching none of them. Splitting that into ~12 independent `table.register()`
+handlers would mean threading the same ~15 closures through every one of
+them (or duplicating them) — worse than registering the whole guard as a
+`/*` prefix (this is the cohort the `/*` prefix kind was built for — see
+[Precedence is explicit](#precedence-is-explicit-not-source-order) above)
+with ONE handler that preserves every nested exact `if (url.pathname === ...)`
+check, and the shared 404 fallback, byte-for-byte the same as the block it
+replaces:
+
+```ts
+table.register("GET", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("POST", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("PUT", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("DELETE", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("PATCH", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("GET", "/api/packs/conflicts", handleMarketplaceRequest);
+```
+
+(`/api/packs/conflicts` is a distinct literal path lexically interleaved with
+the marketplace family in the legacy code — same "marketplace not available"
+500 guard, same closure scope — so it shares the handler via its own exact
+registration.)
+
+Free variables that used to be `handleApiRoute`'s own params/closures (`json`,
+`sessionManager`, `marketplaceInstaller`, `configCascade`, `projectConfigStore`,
+...) are destructured from `ctx` under IDENTICAL names, so the ~990-line body
+needed ZERO further edits beyond that destructure and the import list.
+`CoreRouteCtx` grew by ~20 fields (append-only, after cohort 1's fields) —
+every one of them a function or singleton this family shares with
+not-yet-migrated legacy code elsewhere in `server.ts` (`/api/pack-runtimes/*`,
+`/api/slash-skills*`, the roles/tools cascade). `PackRuntimeSupervisorLike` is
+a structural copy of the same-named interface in `server.ts` (it lives there,
+not in a leaf module, so importing it would recreate the cycle this file
+exists to avoid) — a pure type, kept in sync by TS itself: any divergence is a
+compile error at the `coreCtx` construction site, not silent drift.
+
+Same auth (handled upstream of `handleApiRoute`, untouched), same validation,
+same status codes, same error shapes, including the shared 404. Parity
+evidence: all 57 API E2E specs across `market-pack-roles-api.spec.ts`,
+`marketplace-mcp.spec.ts`, `marketplace-pi-extension.spec.ts`,
+`marketplace-provider-activation.spec.ts`,
+`marketplace-runtime-activation.spec.ts`, `pack-default-disabled.spec.ts`,
+`pack-runtimes-start-config.spec.ts` pass unchanged; so do the browser E2E
+specs (`market-activation`, `marketplace-conflicts`, `marketplace-mcp`,
+`marketplace`, `hindsight-marketplace`, `hindsight-pack`, `hindsight-wizard`,
+`artifacts-pack`) except one pre-existing flake
+(`marketplace.spec.ts`'s "Sources menu filters..." package-count assertion,
+confirmed to fail identically on the unmigrated baseline).
 
 ## Pins
 
@@ -205,8 +319,9 @@ lexically adjacent to the family above in `server.ts`:
   (PR #23) and `tests/orient-api-route-families.test.ts` now also
   understands the registry idiom: `extractRegistryRoutes()` scans
   `table.register("METHOD", "pattern", ...)` calls in every path listed in
-  the new `REGISTRY_ROUTE_MODULE_PATHS` (currently just
-  `projects-routes.ts`), compiling `:param` segments to a `[^/]+` regex and
+  the new `REGISTRY_ROUTE_MODULE_PATHS` (`projects-routes.ts` and, as of
+  cohort 2, `marketplace-routes.ts`), compiling `:param` segments to a
+  `[^/]+` regex and
   `/*` suffixes to a prefix match — mirroring `route-table.ts`'s own
   semantics exactly — and merges the result into `getServerRoutes()`. Add a
   future cohort's route module path to this list; no other change needed.
@@ -242,6 +357,13 @@ lexically adjacent to the family above in `server.ts`:
      through (do not duplicate, do not import back from `server.ts`).
    - Anything used ONLY by the routes being migrated → move it into the new
      route file outright.
+   - If the family is already behind ONE wrapping `startsWith(...)` guard
+     with many closures shared across its nested exact matches (cohort 2's
+     shape — see [Cohort 2: marketplace](#cohort-2-marketplace)), don't
+     force-split it into one `table.register()` per nested route: register
+     the whole guard as a `/*` prefix (one registration per HTTP method the
+     family actually uses) with a single handler that preserves the nested
+     `if`s and the shared trailing 404 verbatim.
 4. Delete the corresponding `if` blocks from the legacy chain in the SAME
    commit. Add `registerXxxRoutes(coreRouteTable)` next to the existing
    registration call(s) in `server.ts`.
@@ -255,12 +377,16 @@ lexically adjacent to the family above in `server.ts`:
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~410 routes, including the largest/highest-traffic families
-  (sessions, goals inline in `server.ts`, marketplace, tools/roles/skills
-  customization, MCP). Marketplace in particular needs the `/*` prefix kind
-  `RouteTable` already supports (built and unit-tested in cohort 1, but
-  unused until a cohort needs it) since its routes are behind one wrapping
-  `startsWith("/api/marketplace/")` guard with nested exact matches.
+- The other ~390 routes, including the largest/highest-traffic families
+  (sessions, goals inline in `server.ts`, tools/roles/skills customization,
+  MCP, `/api/pack-runtimes/*`). Cohort 2 migrated marketplace using the `/*`
+  prefix kind `RouteTable` already supports (built and unit-tested in cohort
+  1, unused until cohort 2 needed it for exactly this shape — see
+  [Cohort 2: marketplace](#cohort-2-marketplace) above); a future cohort
+  behind a similar single wrapping `startsWith(...)` guard with shared
+  closures across its nested exact matches should follow the same pattern
+  (one prefix registration + one handler preserving the nested `if`s)
+  rather than force-splitting into many small `table.register()` calls.
 - `GET`/`PUT` `/api/projects/:id/config(...)` — the large sibling deliberately
   left out of cohort 1 (see above).
 - Session/steer/WS hot paths — intentionally deferred to a later, more

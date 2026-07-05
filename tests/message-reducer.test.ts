@@ -1213,8 +1213,39 @@ describe("message-reducer", () => {
 			_insertionTick: 2,
 		};
 		assert.strictEqual(keyFor(m1), "m1");
-		assert.strictEqual(keyFor(m2), "synth:synthetic:2:2");
+		assert.strictEqual(keyFor(m2), "synth:synthetic:2:nna6la");
 		assert.strictEqual(keyFor(m1, "group"), "group:m1");
+	});
+
+	// UX-02 regression [design/raciness-and-testing-rethink.md §A1,
+	// FINDINGS.md UX-02]: the snapshot path re-stamps EVERY row's
+	// `_insertionTick` with a single fresh `nextTick` on every resync
+	// (`stamp()` above), even when a row's position and content are
+	// unchanged. The old `keyFor` fallback (`synth:${origin}:${order}:${tick}`)
+	// therefore changed on every reconnect/tab-refocus for every id-less row —
+	// tearing down and recreating their DOM (focus loss, scroll jumps, flash).
+	// Pin: two id-less rows with identical role/content/order but DIFFERENT
+	// `_insertionTick` (simulating the same row re-stamped by two separate
+	// snapshots) MUST produce the same key.
+	it("keyFor: id-less row key is stable across a re-stamped _insertionTick (UX-02)", () => {
+		const base: OrderedMessage = {
+			role: "user",
+			content: "hello there",
+			_order: 5,
+			_origin: "server",
+			_insertionTick: 1,
+		};
+		const reStamped: OrderedMessage = { ...base, _insertionTick: 2 };
+		assert.strictEqual(
+			keyFor(base),
+			keyFor(reStamped),
+			"re-stamping _insertionTick alone must not change the render key",
+		);
+
+		// Sanity: different content at the same position DOES get a different
+		// key (the hash still distinguishes rows), so this isn't a no-op key.
+		const differentContent: OrderedMessage = { ...base, content: "goodbye" };
+		assert.notStrictEqual(keyFor(base), keyFor(differentContent));
 	});
 
 	it("error message appended at highestSeq+0.5", () => {

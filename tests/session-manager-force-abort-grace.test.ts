@@ -32,6 +32,27 @@ afterEach(() => {
 	}
 });
 
+/**
+ * forceAbort's respawn path unconditionally calls ensureMcpManagerForContext()
+ * (session-manager.ts, force-kill branch) to rebuild tool-activation args after
+ * killing the wedged bridge. That builds a REAL McpManager and connects it —
+ * discovering and connecting to whatever MCP servers happen to be configured
+ * in the ambient ~/.claude.json / ~/.claude/.mcp.json / ~/.bobbit/.mcp.json on
+ * the machine running the test (real stdio child processes, real HTTP
+ * sockets — entirely unrelated to this test's fixtures). Nothing tears those
+ * connections down afterward, so the real handles they open keep this file's
+ * event loop alive well past every `it()` block completing: the file "hangs"
+ * (or, under `--test-force-exit`, the leaked connect/spawn latency can blow
+ * past timing assertions like S8's `elapsed < 5000`) even though every
+ * subtest itself reports green. Stub the MCP manager lookup to a no-op so
+ * forceAbort's respawn path never reaches out to real ambient infrastructure.
+ * buildToolActivationArgs() already tolerates a null MCP manager (mcpManager
+ * ? ... : undefined), so this is a pure test seam with no product change.
+ */
+function stubMcp(manager: any): void {
+	manager.ensureMcpManagerForContext = async () => null;
+}
+
 describe("SessionManager.forceAbort grace race (S8)", () => {
 	it("force-kills within the grace period when abort() hangs and no agent_end arrives", async () => {
 		// Respawn must not spawn a real process — a throwing factory is caught by
@@ -41,6 +62,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		const manager: any = new SessionManager();
 		manager._testStore = { update: mock.fn(() => {}), get: mock.fn(() => undefined) };
 		managers.push(manager);
+		stubMcp(manager);
 
 		const stop = mock.fn(async () => {});
 		const abortStarted = mock.fn();
@@ -107,6 +129,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			return { args: [], env: {} };
 		};
 		managers.push(manager);
+		stubMcp(manager);
 
 		const session: any = {
 			id: "s-restricted",
@@ -165,6 +188,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		const manager: any = new SessionManager();
 		manager._testStore = { update: mock.fn(() => {}), get: mock.fn(() => undefined) };
 		managers.push(manager);
+		stubMcp(manager);
 
 		const cancel = mock.fn();
 		const session: any = {

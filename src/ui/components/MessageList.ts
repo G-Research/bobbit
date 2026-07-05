@@ -24,6 +24,7 @@ import {
 	isPerfFlagEnabled,
 	PERF_FLAG_DEFER_OFFSCREEN_RENDER,
 } from "../../app/perf-flags.js";
+import { computeMessageRenderKey } from "../../app/message-render-key.js";
 
 /** Number of items at the bottom of the transcript that render eagerly
  *  even when the defer-offscreen perf flag is on. The transcript auto-scrolls
@@ -83,13 +84,11 @@ function isLiveCompactionSummary(msg: any): boolean {
 	return !!(block && block.type === "toolCall" && block.name === COMPACTION_TOOL_NAME);
 }
 
-/** Build a stable render key for a message — id-based with a synthetic
- *  fallback that includes reducer metadata when available. */
+/** Build a stable render key for a message. See `message-render-key.ts` for
+ *  why the id-less fallback must be content-derived, never keyed on the
+ *  mutable `_insertionTick` reducer metadata (UX-02). */
 function keyFor(msg: any, group?: string): string {
-	const id = typeof msg.id === "string" && msg.id.length > 0
-		? msg.id
-		: `synth:${msg._origin ?? "unknown"}:${msg._order ?? 0}:${msg._insertionTick ?? 0}`;
-	return group ? `${group}:${id}` : id;
+	return computeMessageRenderKey(msg, group);
 }
 
 /** Tool names eligible for cross-message grouping */

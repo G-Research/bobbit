@@ -15,6 +15,8 @@
  * - Server snapshot is authoritative for any id it contains.
  */
 
+import { computeMessageRenderKey } from "./message-render-key.js";
+
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
 export interface OrderedMessage {
@@ -1055,10 +1057,9 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 	}
 }
 
-/** Render-key helper. Stable across reorders thanks to (origin, order, tick). */
+/** Render-key helper. Delegates to the shared `computeMessageRenderKey` — see
+ *  `message-render-key.ts` (UX-02) for why the id-less fallback must be
+ *  content-derived, not keyed on the mutable `_insertionTick`. */
 export function keyFor(m: OrderedMessage, group?: string): string {
-	const id = typeof m.id === "string" && m.id.length > 0
-		? m.id
-		: `synth:${m._origin}:${m._order}:${m._insertionTick}`;
-	return group ? `${group}:${id}` : id;
+	return computeMessageRenderKey(m, group);
 }

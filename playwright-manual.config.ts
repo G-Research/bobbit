@@ -35,6 +35,9 @@ export default defineConfig({
 		{
 			name: "manual-integration",
 			testDir: "./tests/manual-integration",
+			// Exclude stray worktrees (full repo copies under .claude/worktrees/) to prevent
+			// pollution with duplicate tests that fail due to missing dist/.
+			testIgnore: ["**/.claude/worktrees/**"],
 		},
 	],
 });

@@ -9923,6 +9923,19 @@ export class SessionManager {
 		} catch (err) {
 			console.error("[search] Failed to close search index:", err);
 		}
+
+		// Disconnect any MCP servers this manager connected (default + scoped —
+		// forceAbort respawn and restore paths lazily create scoped managers per
+		// project/cwd via ensureMcpManagerForContext). Left connected, their real
+		// stdio child processes / HTTP sockets outlive the gateway process on a
+		// graceful shutdown. disconnectServer() swallows per-server errors, so
+		// this is best-effort and never blocks the rest of shutdown().
+		const mcpManagers = [...this.scopedMcpManagers.values(), ...(this.mcpManager ? [this.mcpManager] : [])];
+		await Promise.all(mcpManagers.map((mgr) => mgr.disconnectAll().catch((err) => {
+			console.error("[mcp] Failed to disconnect MCP manager during shutdown:", (err as Error).message);
+		})));
+		this.scopedMcpManagers.clear();
+		this.mcpManager = null;
 	}
 }
 

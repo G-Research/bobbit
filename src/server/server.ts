@@ -40,12 +40,13 @@ import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } 
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { tryHandleSwarmRoute } from "./agent/swarm-routes.js";
+import { reArmSwarmGovernorsOnBoot } from "./agent/swarm-restart-resume.js";
 import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -70,6 +71,9 @@ import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatche
 import { RouteTable } from "./routes/route-table.js";
 import type { CoreRouteCtx } from "./routes/core-route-ctx.js";
 import { registerProjectRoutes } from "./routes/projects-routes.js";
+// STR-01 cohort 2: the per-project config family (/api/projects/:id/config*).
+import { registerProjectConfigRoutes } from "./routes/project-config-routes.js";
+import { registerMarketplaceRoutes } from "./routes/marketplace-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -88,7 +92,6 @@ import {
 	PackRuntimeNotFoundError,
 	PackRuntimeBadRequestError,
 	PackRuntimeDockerUnavailableError,
-	readRuntimeStartPolicy,
 	type PackRuntimeStatus,
 	type PackRuntimeCapabilitySummary,
 } from "./runtimes/index.js";
@@ -619,17 +622,16 @@ import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
-import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
-import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
+import { MarketplaceSourceStore } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { seedBuiltinPackDefaults } from "./agent/builtin-pack-defaults.js";
-import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
-import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
+import { MarketplaceInstaller, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
+import type { MarketplaceMcpResolver, McpReloadResult, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -2576,6 +2578,21 @@ export function createGateway(config: GatewayConfig) {
 		}
 	});
 
+	// SWARM-W2 (design/swarm-orchestration.md §11 Wave 2 "restart-resume"):
+	// the SwarmGovernor above is a fresh, empty, in-memory instance every
+	// boot — re-arm it now for any swarm-sibling goal that was still
+	// in-flight (expected but not yet terminal) when the gateway last
+	// stopped, so token-budget/straggler enforcement resumes rather than
+	// silently lapsing for the rest of that sibling's life. Best-effort,
+	// synchronous, cheap (bounded by live swarm-group count) — every store
+	// it reads was already loaded from disk by `projectContextManager.initAll()`
+	// earlier in boot.
+	try {
+		reArmSwarmGovernorsOnBoot(projectContextManager, verificationHarness);
+	} catch (err) {
+		console.warn("[swarm-restart-resume] boot re-arm sweep failed (non-fatal):", err);
+	}
+
 	const isLocalhostServer = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 	server.on("upgrade", (req, socket, head) => {
@@ -2611,6 +2628,16 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/**
+		 * @internal Exposed for in-process E2E tests to drive the SWARM-W2
+		 * restart-resume boot sweep (`reArmSwarmGovernorsOnBoot`) directly — an
+		 * in-process gateway can't literally kill+restart its own Node process,
+		 * so the restart-resume E2E re-invokes the exact same boot-time
+		 * function against this live `verificationHarness`/`projectContextManager`
+		 * pair to simulate "gateway restarted" deterministically (see
+		 * tests/e2e/api-swarm-restart-resume.spec.ts).
+		 */
+		verificationHarness,
 		/** @internal Exposed for in-process E2E tests to seed/read preferences directly (see tests/e2e/in-process-harness.ts GatewayInfo.preferencesStore). */
 		preferencesStore,
 		get extensionChannels() { return extensionChannelServices; },
@@ -3133,123 +3160,11 @@ export function createGateway(config: GatewayConfig) {
 
 // isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
 
-/** Redact token values in sandbox config for API responses. Never send real secrets to the browser.
- *  `sandbox_tokens` is a structured array (post-native-YAML); other fields stay flat strings. */
-function redactSandboxSecrets(config: Record<string, unknown>): Record<string, unknown> {
-	const result: Record<string, unknown> = { ...config };
-	if (Array.isArray(result.sandbox_tokens)) {
-		result.sandbox_tokens = (result.sandbox_tokens as Array<any>).map((e: any) => ({
-			...e,
-			value: e.value ? "__REDACTED__" : "",
-		}));
-	}
-	if (typeof result.sandbox_credentials === "string" && result.sandbox_credentials) {
-		try {
-			const obj = JSON.parse(result.sandbox_credentials);
-			if (typeof obj === "object" && obj !== null) {
-				const redacted: Record<string, string> = {};
-				for (const [k, v] of Object.entries(obj)) {
-					redacted[k] = v ? "__REDACTED__" : "";
-				}
-				result.sandbox_credentials = JSON.stringify(redacted);
-			}
-		} catch { /* leave as-is */ }
-	}
-	return result;
-}
-
-/** Redact token values in resolved config (with source annotations).
- *  `sandbox_tokens.value` is now a structured array; sandbox_credentials remains a JSON string. */
-function redactSandboxSecretsResolved(config: Record<string, { value: unknown; source: string }>): Record<string, { value: unknown; source: string }> {
-	const result = { ...config };
-	if (result.sandbox_tokens && Array.isArray(result.sandbox_tokens.value)) {
-		result.sandbox_tokens = {
-			...result.sandbox_tokens,
-			value: (result.sandbox_tokens.value as Array<any>).map((e: any) => ({
-				...e,
-				value: e.value ? "__REDACTED__" : "",
-			})),
-		};
-	}
-	for (const key of ["sandbox_credentials"] as const) {
-		if (!result[key]) continue;
-		const entry = { ...result[key] };
-		if (key === "sandbox_credentials" && typeof entry.value === "string" && entry.value) {
-			try {
-				const obj = JSON.parse(entry.value);
-				if (typeof obj === "object" && obj !== null) {
-					const redacted: Record<string, string> = {};
-					for (const [k, v] of Object.entries(obj)) {
-						redacted[k] = v ? "__REDACTED__" : "";
-					}
-					entry.value = JSON.stringify(redacted);
-					result[key] = entry;
-				}
-			} catch { /* leave as-is */ }
-		}
-	}
-	return result;
-}
-
-/** Merge secrets into sandbox_tokens for GET responses (adds value from SecretsStore).
- *  Operates on a config object whose `sandbox_tokens` is the structured array (or absent). */
-function mergeSecretsIntoTokens(config: Record<string, unknown>, secretsStore: import("./agent/secrets-store.js").SecretsStore): void {
-	const tokens = config.sandbox_tokens;
-	if (!Array.isArray(tokens)) return;
-	const secrets = secretsStore.getAll();
-	config.sandbox_tokens = (tokens as Array<any>).map((e: any) => ({
-		...e,
-		value: secrets[e.key] || e.value || "",
-	}));
-}
-
-/** Strip redacted sentinel from incoming structured sandbox_tokens, persisting real values
- *  to the SecretsStore. Returns the structured array suitable for setSandboxTokens(). */
-function mergeSandboxTokensStructured(
-	incoming: Array<{ key: string; enabled?: boolean; value?: string }>,
-	secretsStore?: import("./agent/secrets-store.js").SecretsStore | null,
-): Array<{ key: string; enabled: boolean }> {
-	if (secretsStore) {
-		const updates: Record<string, string> = {};
-		for (const e of incoming) {
-			if (!e || typeof e.key !== "string") continue;
-			if (e.value === "__REDACTED__") {
-				// Keep existing
-			} else if (e.value) {
-				updates[e.key] = e.value;
-			} else {
-				updates[e.key] = "";
-			}
-		}
-		secretsStore.update(updates);
-	}
-	return incoming
-		.filter(e => e && typeof e.key === "string")
-		.map(e => ({ key: e.key, enabled: e.enabled !== false }));
-}
-
-/** Merge redacted sentinel values with existing stored values before saving. */
-function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
-	// sandbox_tokens is now handled via mergeSandboxTokensStructured at the
-	// migrated-fields layer in the PUT handler. This helper only handles the
-	// remaining legacy flat sandbox_credentials key.
-	void configStore;
-	void secretsStore;
-	if (updates.sandbox_credentials) {
-		try {
-			const incoming = JSON.parse(updates.sandbox_credentials) as Record<string, string>;
-			const existingRaw = configStore.get("sandbox_credentials") || "";
-			let existingObj: Record<string, string> = {};
-			try { existingObj = existingRaw ? JSON.parse(existingRaw) : {}; } catch { /* ignore */ }
-			for (const [k, v] of Object.entries(incoming)) {
-				if (v === "__REDACTED__") {
-					incoming[k] = existingObj[k] || "";
-				}
-			}
-			updates.sandbox_credentials = JSON.stringify(incoming);
-		} catch { /* leave as-is */ }
-	}
-}
+// The sandbox-secret redaction/merge helpers (redactSandboxSecrets,
+// redactSandboxSecretsResolved, mergeSecretsIntoTokens,
+// mergeSandboxTokensStructured, mergeSandboxSecrets) moved to
+// src/server/routes/project-config-routes.ts (STR-01 cohort 2) — their only
+// callers, the /api/projects/:id/config* handlers, moved with them.
 
 function parseGateInspectIntegerParam(params: URLSearchParams, name: string): number | undefined {
 	const raw = params.get(name);
@@ -3309,7 +3224,11 @@ function normalizePostedSessionModel(raw: unknown): string | undefined {
 // created in this process (relevant for e2e tests, which may construct
 // multiple gateways in one process).
 const coreRouteTable = new RouteTable<CoreRouteCtx>();
+// One line per migrated cohort — parallel cohort branches APPEND below the
+// existing lines (never reorder) so they merge without conflicts.
 registerProjectRoutes(coreRouteTable);
+registerProjectConfigRoutes(coreRouteTable);
+registerMarketplaceRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3540,9 +3459,12 @@ async function handleApiRoute(
 	// Consulted BEFORE the legacy if/else chain below. A match here handles
 	// the request and returns; no match falls through unchanged (this is
 	// how routes are migrated one cohort at a time — see
-	// docs/design/route-registry.md). Cohort 1 (this table's only
-	// registrant so far): the /api/projects* CRUD + preflight/detect/scan/
-	// promote/base-ref-detect family (src/server/routes/projects-routes.ts).
+	// docs/design/route-registry.md). Registrants so far: cohort 1, the
+	// /api/projects* CRUD + preflight/detect/scan/promote/base-ref-detect
+	// family (src/server/routes/projects-routes.ts); cohort 2, the per-project
+	// config family (src/server/routes/project-config-routes.ts); cohort 3,
+	// the /api/marketplace/* + GET /api/packs/conflicts family
+	// (src/server/routes/marketplace-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3551,6 +3473,18 @@ async function handleApiRoute(
 				sessionManager, projectRegistry, projectContextManager, broadcastToAll,
 				isHeadquartersOwnedPath, listProjectsForApi, writeSpecialProjectMutationError, headquartersProject,
 				wireGoalManagerResolvers, validateComponentsConfig, isValidBaseRefBranchGrammar, detectedRefExistsInAllComponents,
+				// Cohort 2 (project-config) — append-only, like the ctx interface.
+				legacyQaTopLevelKeys: LEGACY_QA_TOP_LEVEL_KEYS,
+				serverProjectConfigStore: projectConfigStore,
+				// Cohort 3 (marketplace) additions — append-only, see core-route-ctx.ts.
+				marketplaceInstaller, marketplaceSourceStore, packRuntimeSupervisor, configCascade, projectConfigStore,
+				invalidateResolverCaches, reloadMcpAfterMarketplaceMutation,
+				resolveProjectConfigStore, resolveSkillDiscoveryCwd, skillMarketContext,
+				safeString, readYamlMapping, readConcretePackToolsFromGroups,
+				getDefaultDisabledInfo, readForceEnabledPacks, writeForceEnabledPacks,
+				loadPiExtensionContributionsFromRuntime, piExtensionDiagnostic, normalisePiExtensionCatalogueRefs,
+				activationMcpContributionId, operationMetadataForMcpContribution,
+				resolveRuntimeStartPlan, providerCarriesDeploymentMode,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -4132,396 +4066,13 @@ async function handleApiRoute(
 	// GET/PUT/DELETE /api/projects/:id, POST /api/projects/:id/promote,
 	// GET /api/projects/:id/base-ref/detect moved to the core route registry
 	// (STR-01 cohort 1) — see src/server/routes/projects-routes.ts and
-	// docs/design/route-registry.md. GET/PUT /api/projects/:id/config(/...)
-	// below is NOT migrated (separate, much larger review unit).
+	// docs/design/route-registry.md.
 
-	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
-	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
-	if (projectConfigMatch) {
-		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
-
-		if (req.method === "GET" && !suffix) {
-			const flat = ctx.projectConfigStore.getAll();
-			// Upgrade migrated keys to native structured form for the wire response.
-			const config: Record<string, unknown> = { ...flat };
-			config.config_directories = ctx.projectConfigStore.getConfigDirectories();
-			config.sandbox_tokens = ctx.projectConfigStore.getSandboxTokens();
-			// Defence in depth: legacy top-level qa_* keys must never appear on
-			// the wire. Migration removes them on boot; strip again here in case
-			// a stale on-disk value slipped through.
-			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete config[k];
-			mergeSecretsIntoTokens(config, ctx.secretsStore);
-			json(redactSandboxSecrets(config));
-			return;
-		}
-		if (req.method === "GET" && suffix === "defaults") {
-			json(ctx.projectConfigStore.getDefaults());
-			return;
-		}
-		if (req.method === "GET" && suffix === "resolved") {
-			const defaults = ctx.projectConfigStore.getDefaults();
-			const result: Record<string, { value: unknown; source: string }> = {};
-			// Include all default keys
-			for (const key of Object.keys(defaults)) {
-				result[key] = resolveScalarConfig(key, ctx.projectConfigStore, projectConfigStore, null, defaults);
-			}
-			// Also include custom keys from the project's own config that aren't in defaults
-			const rawConfig = ctx.projectConfigStore.getAll();
-			for (const key of Object.keys(rawConfig)) {
-				if (!(key in result)) {
-					result[key] = { value: rawConfig[key], source: "project" };
-				}
-			}
-			// Include custom keys from the server-level config that aren't already covered
-			const serverRaw = projectConfigStore.getAll();
-			for (const key of Object.keys(serverRaw)) {
-				if (!(key in result)) {
-					result[key] = { value: serverRaw[key], source: "server" };
-				}
-			}
-			// Override migrated fields with structured values (resolveScalarConfig returns flat strings).
-			const migratedSource = (key: string): string => {
-				return (rawConfig[key] !== undefined && rawConfig[key] !== "") ? "project"
-					: (serverRaw[key] !== undefined && serverRaw[key] !== "") ? "server"
-					: "default";
-			};
-			result.config_directories = { value: ctx.projectConfigStore.getConfigDirectories(), source: migratedSource("config_directories") };
-			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
-			// Defence in depth: strip legacy top-level qa_* keys.
-			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete result[k];
-			// Merge secrets into sandbox_tokens (structured) for the resolved response.
-			if (Array.isArray(result.sandbox_tokens.value)) {
-				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
-				mergeSecretsIntoTokens(tempConfig, ctx.secretsStore);
-				result.sandbox_tokens = { value: tempConfig.sandbox_tokens, source: result.sandbox_tokens.source };
-			}
-			json(redactSandboxSecretsResolved(result));
-			return;
-		}
-		if (req.method === "PUT" && !suffix) {
-			const body = await readBody(req);
-			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-
-			// Reject legacy top-level qa_* keys — they have moved into
-			// `components[<name>].config`. Done before any other parsing so the
-			// error is fast and unambiguous.
-			for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
-				if (key in (body as Record<string, unknown>)) {
-					json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
-					return;
-				}
-			}
-
-			// Validate components[].config eagerly (mirrors propose_project tool).
-			{
-				const err = validateComponentsConfig((body as Record<string, unknown>).components);
-				if (err) { json({ error: err }, 400); return; }
-			}
-
-			// `base_ref` validation — runs only when the field is present in the PUT body.
-			// On any failure we return HTTP 400 with `{ field: "base_ref", error, details? }`
-			// so the Settings UI can render the error inline. Non-fatal warnings (component
-			// paths that aren't git repos) bubble up via `baseRefWarnings` and are attached
-			// to the success response below. See docs/design/base-ref.md.
-			const baseRefWarnings: string[] = [];
-			if ("base_ref" in (body as Record<string, unknown>)) {
-				const rawBaseRef = (body as Record<string, unknown>).base_ref;
-				const baseRefValue = typeof rawBaseRef === "string" ? rawBaseRef.trim() : "";
-				if (baseRefValue) {
-					// 1. SHA shape (7-40 hex chars). Reject before grammar — a 40-char hex
-					//    string is grammatically valid but is rejected for clarity.
-					if (/^[0-9a-f]{7,40}$/i.test(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a commit SHA. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 2. Invalid branch grammar.
-					if (!isValidBaseRefBranchGrammar(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a valid branch name. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 3. Non-origin remote prefix. Anything matching `<prefix>/<rest>` where
-					//    `<prefix>` is not `origin` is rejected. Local refs (no slash, or
-					//    `feature/foo`) are still accepted — the prefix gate only fires when
-					//    the first segment looks like a remote name and isn't `origin`.
-					//    We treat the first slash-segment as a remote prefix only when the
-					//    full value is exactly `<prefix>/<rest>` AND `<rest>` looks like a
-					//    branch (rather than e.g. `feature/foo` which has no remote prefix at all).
-					//    Practically: if the value starts with anything other than `origin/`
-					//    AND the first segment is a known-remote-shaped token, reject.
-					//    We use a simple heuristic: if it doesn't start with `origin/` and
-					//    its first segment contains no special chars and a slash exists,
-					//    treat it as a remote prefix. The error message names the value
-					//    so users can correct it.
-					//
-					// To avoid false positives on local refs like `feature/foo`, we only
-					// reject values whose first segment matches the set of typical
-					// remote names (upstream/fork/etc.). Today's design says: anything
-					// with a remote-style prefix other than `origin/` is rejected, but
-					// distinguishing local `feature/foo` from remote `upstream/foo`
-					// requires git knowledge we don't have at validate time. The design
-					// doc's error inventory specifically calls out `upstream/main` as the
-					// example to reject — so we use a conservative allowlist: anything
-					// matching a known remote-name pattern that isn't `origin` is rejected.
-					// Known remote-shaped tokens: upstream, fork, mirror, github, gitlab,
-					// bitbucket. Everything else flows through (local branches with slashes).
-					const firstSegment = baseRefValue.split("/")[0];
-					const KNOWN_NON_ORIGIN_REMOTES = new Set(["upstream", "fork", "mirror", "github", "gitlab", "bitbucket", "remote"]);
-					if (baseRefValue.includes("/") && firstSegment !== "origin" && KNOWN_NON_ORIGIN_REMOTES.has(firstSegment)) {
-						json({ field: "base_ref", error: `base_ref only supports the 'origin' remote today. Got: ${baseRefValue}. If you need a different primary remote, configure it as 'origin' in your local clone.` }, 400);
-						return;
-					}
-					// 4. Sandbox + local — when the project runs in a docker sandbox, only
-					//    remote refs work because the container has separate ref visibility
-					//    from the host.
-					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
-					if (sandboxResolved === "docker" && !baseRefValue.startsWith("origin/")) {
-						json({ field: "base_ref", error: `base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 5. Multi-repo ref existence — `git rev-parse --verify` against every
-					//    component repo. Also detect tags up-front: a value that resolves
-					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
-					const componentsForCheck = ctx.projectConfigStore.getComponents();
-					const componentsToCheck = componentsForCheck.length > 0
-						? componentsForCheck
-						: [{ name: ctx.project.name || "default", repo: "." }];
-					const failures: Array<{ component: string; message: string }> = [];
-					let checkedRepoCount = 0;
-					let tagDetected = false;
-					for (const c of componentsToCheck) {
-						const repoPath = path.join(ctx.project.rootPath, c.repo);
-						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
-						if (!gitRepoCheck) {
-							baseRefWarnings.push(`base_ref validation skipped for component '${c.name}': not a git repo at ${repoPath}`);
-							continue;
-						}
-						checkedRepoCount++;
-						// Tag check first — if the value resolves as a tag in any component
-						// repo, fail with the tag-specific message rather than the generic
-						// "not present" error.
-						try {
-							await execFileAsync("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
-							tagDetected = true;
-							break;
-						} catch {
-							// Not a tag in this repo — continue with branch-ref check below.
-						}
-						try {
-							await execFileAsync("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
-						} catch {
-							failures.push({
-								component: c.name,
-								message: `ref not found. Try: cd ${c.repo} && git fetch origin`,
-							});
-						}
-					}
-					if (tagDetected) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					if (failures.length > 0) {
-						json({
-							field: "base_ref",
-							error: `base_ref '${baseRefValue}' is not present in ${failures.length} of ${checkedRepoCount} component repos`,
-							details: failures,
-						}, 400);
-						return;
-					}
-				}
-			}
-
-			// Extract structured fields (components / workflows) before flat-key validation.
-			let components = (body as Record<string, unknown>).components;
-			const workflows = (body as Record<string, unknown>).workflows;
-			delete (body as Record<string, unknown>).components;
-			delete (body as Record<string, unknown>).workflows;
-
-			// Back-compat: legacy top-level *_command fields (build_command, test_command, etc.)
-			// are folded into components[0].commands when no `components` field was supplied.
-			// This keeps the propose_project tool, the project assistant, and the provisional
-			// promotion path working after Follow-up A removed the legacy schema. Existing
-			// components stored on disk are not modified — callers who want to update components
-			// must pass a fresh `components` array. See multi-repo follow-up Issue 2 / Issue 5.
-			if (!Array.isArray(components)) {
-				const LEGACY_KEY_MAP: Record<string, string> = {
-					build_command: "build",
-					test_command: "test",
-					typecheck_command: "check",
-					test_unit_command: "unit",
-					test_e2e_command: "e2e",
-				};
-				const legacyCmds: Record<string, string> = {};
-				for (const [legacyKey, newKey] of Object.entries(LEGACY_KEY_MAP)) {
-					const v = (body as Record<string, unknown>)[legacyKey];
-					if (typeof v === "string" && v.trim().length > 0) legacyCmds[newKey] = v.trim();
-				}
-				const legacyHook = (body as Record<string, unknown>).worktree_setup_command;
-				const hasAnyLegacy = Object.keys(legacyCmds).length > 0
-					|| (typeof legacyHook === "string" && legacyHook.trim().length > 0);
-				if (hasAnyLegacy) {
-					const existing = ctx.projectConfigStore.getComponents();
-					const defaultName = existing[0]?.name || ctx.project.name || "default";
-					const defaultRepo = existing[0]?.repo || ".";
-					const mergedCommands = { ...(existing[0]?.commands ?? {}), ...legacyCmds };
-					const defaultComponent: Record<string, unknown> = {
-						name: defaultName,
-						repo: defaultRepo,
-						commands: mergedCommands,
-					};
-					if (existing[0]?.relativePath) defaultComponent.relative_path = existing[0].relativePath;
-					const hookValue = (typeof legacyHook === "string" && legacyHook.trim().length > 0)
-						? legacyHook.trim()
-						: existing[0]?.worktreeSetupCommand;
-					if (hookValue) defaultComponent.worktree_setup_command = hookValue;
-					// Preserve existing per-component config (qa_* keys etc.) — the legacy
-					// flat-key write path must not silently wipe it.
-					if (existing[0]?.config && Object.keys(existing[0].config).length > 0) {
-						defaultComponent.config = { ...existing[0].config };
-					}
-					// Replace the first component but preserve any additional components on disk.
-					const remaining = existing.slice(1).map(c => {
-						const entry: Record<string, unknown> = { name: c.name, repo: c.repo };
-						if (c.relativePath) entry.relative_path = c.relativePath;
-						if (c.worktreeSetupCommand) entry.worktree_setup_command = c.worktreeSetupCommand;
-						if (c.commands) entry.commands = c.commands;
-						if (c.config && Object.keys(c.config).length > 0) entry.config = { ...c.config };
-						return entry;
-					});
-					components = [defaultComponent, ...remaining];
-				}
-				// Legacy flat keys remain in `body` so they are ALSO written as legacy
-				// flat-config entries (preserves GET round-trip for existing API clients
-				// that only know the legacy schema). The structural components mirror is
-				// the source of truth for workflow steps and the Components UI.
-			}
-
-			// Validate ALL flat keys before writing ANY (atomic: all-or-nothing)
-			for (const [key] of Object.entries(body)) {
-				if (key.includes(".")) {
-					json({ error: `Config key "${key}" must not contain dots` }, 400);
-					return;
-				}
-			}
-
-			// Validate workflows structurally if both components and workflows are present.
-			if (components && workflows && Array.isArray(components) && typeof workflows === "object") {
-				try {
-					const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-					const errors = validateAllWorkflows(
-						workflows as Parameters<typeof validateAllWorkflows>[0],
-						components as Parameters<typeof validateAllWorkflows>[1],
-					);
-					if (errors.length > 0) {
-						json({ error: "Workflow validation failed", details: errors }, 400);
-						return;
-					}
-				} catch (err) {
-					console.warn("[server] workflow validation skipped:", err);
-				}
-			}
-
-			// Native-YAML migrated fields: reject legacy string payloads (must be structured
-			// types or null/empty to clear). For sandbox_tokens we still need to merge
-			// redacted values via mergeSandboxSecrets; the merge helper now operates on
-			// structured arrays.
-			const migratedExtracted: Record<string, unknown> = {};
-			const MIGRATED_FIELDS = [
-				{ key: "config_directories", expect: "array" as const },
-				{ key: "sandbox_tokens", expect: "array" as const },
-			];
-			for (const { key, expect } of MIGRATED_FIELDS) {
-				if (!(key in body)) continue;
-				const v = (body as Record<string, unknown>)[key];
-				if (v === null || v === "") {
-					migratedExtracted[key] = null;
-					delete (body as Record<string, unknown>)[key];
-					continue;
-				}
-				if (typeof v === "string") {
-					json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
-					return;
-				}
-				if (expect === "array" && !Array.isArray(v)) {
-					json({ error: `Field "${key}" must be an array` }, 400);
-					return;
-				}
-				migratedExtracted[key] = v;
-				delete (body as Record<string, unknown>)[key];
-			}
-
-			// Merge secrets for migrated structured sandbox_tokens, and for any legacy
-			// keys that still carry inline credentials (sandbox_credentials).
-			if (Array.isArray(migratedExtracted.sandbox_tokens)) {
-				migratedExtracted.sandbox_tokens = mergeSandboxTokensStructured(
-					migratedExtracted.sandbox_tokens as Array<{ key: string; enabled?: boolean; value?: string }>,
-					ctx.secretsStore,
-				);
-			}
-			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
-
-			// Write legacy flat keys.
-			for (const [key, value] of Object.entries(body)) {
-				if (value === null || value === "") {
-					ctx.projectConfigStore.remove(key);
-				} else if (typeof value === "string") {
-					ctx.projectConfigStore.set(key, value);
-				}
-			}
-
-			// Apply migrated structured fields via typed setters.
-			if ("config_directories" in migratedExtracted) {
-				const v = migratedExtracted.config_directories;
-				if (v === null) {
-					ctx.projectConfigStore.remove("config_directories");
-				} else if (Array.isArray(v)) {
-					ctx.projectConfigStore.setConfigDirectories(
-						v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
-							path: String(e.path),
-							types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
-						})),
-					);
-				}
-			}
-			if ("sandbox_tokens" in migratedExtracted) {
-				const v = migratedExtracted.sandbox_tokens;
-				if (v === null) {
-					ctx.projectConfigStore.remove("sandbox_tokens");
-				} else if (Array.isArray(v)) {
-					ctx.projectConfigStore.setSandboxTokens(
-						v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
-							key: String(e.key),
-							enabled: e.enabled !== false,
-						})),
-					);
-				}
-			}
-
-			// Persist structured fields if provided.
-			if (Array.isArray(components)) {
-				const normalized = (components as Array<Record<string, unknown>>).map(c => ({
-					name: String(c.name ?? ""),
-					repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
-					relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
-					worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
-					commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
-					config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
-				}));
-				ctx.projectConfigStore.setComponents(normalized);
-			}
-			if (workflows && typeof workflows === "object" && !Array.isArray(workflows)) {
-				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
-			}
-
-			if (baseRefWarnings.length > 0) {
-				json({ ok: true, warnings: baseRefWarnings });
-				return;
-			}
-			json({ ok: true });
-			return;
-		}
-	}
+	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults,
+	// GET /api/projects/:id/config/resolved moved to the core route registry
+	// (STR-01 cohort 2) — see src/server/routes/project-config-routes.ts and
+	// docs/design/route-registry.md (including the fall-through-parity shims
+	// for unhandled methods on those paths).
 
 	// GET /api/projects/:id/qa-testing-config
 	const evConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/qa-testing-config$/);
@@ -7970,997 +7521,11 @@ async function handleApiRoute(
 	}
 
 	// ── Pack-Based Marketplace (design §9 / §9.1 / §9.2) ──────────────
-	if (url.pathname.startsWith("/api/marketplace/") || url.pathname === "/api/packs/conflicts") {
-		if (!marketplaceInstaller || !marketplaceSourceStore) { json({ error: "marketplace not available" }, 500); return; }
-		const installer = marketplaceInstaller;
-		const sourceStore = marketplaceSourceStore;
-
-		// ── Built-in first-party source (built-in-first-party-packs §4.4, §6.4) ──
-		// The built-in source is synthetic + non-persisted: it is composed only here
-		// and points at the shipped first-party packs resolved in place.
-		const BUILTIN_SOURCE_ID = "builtin";
-		const builtinSource = { id: BUILTIN_SOURCE_ID, url: "builtin:", builtin: true, addedAt: new Date(0).toISOString() };
-		// A pack name is "built-in" iff a shipped first-party pack declares it.
-		const isBuiltinPackName = (name: string): boolean =>
-			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
-		// True iff a real user install of `(scope, packName)` exists in the ledger.
-		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
-			installer.listInstalled(allContexts(normalizeConfigProjectId(projectId))).some((p) => p.scope === scope && p.packName === packName);
-
-		const sourceDisplayName = (source: Pick<MarketplaceSource, "id" | "displayName" | "type"> & { builtin?: boolean }): string =>
-			source.builtin ? "Built-in" : source.displayName ?? source.id;
-		const sourceTypeForBrowse = (source: Pick<MarketplaceSource, "type"> & { builtin?: boolean }): "builtin" | "pack" | "mcp-gateway" | "mcp-registry" =>
-			source.builtin ? "builtin" : (source.type ?? "pack");
-		const browseRowWithSource = (pack: BrowsePack, source: Pick<MarketplaceSource, "id" | "displayName" | "type"> & { builtin?: boolean }): BrowsePack => {
-			const type = sourceTypeForBrowse(source);
-			return {
-				...pack,
-				source: { id: source.id, name: sourceDisplayName(source), type: type === "mcp-registry" ? "pack" : type, ...(source.builtin ? { builtin: true } : {}) },
-				browseKey: `${source.id}:${pack.dirName}`,
-			};
-		};
-
-		const MARKET_SCOPES = new Set(["global-user", "server", "project"]);
-		const parseScope = (raw: unknown): InstallScope | null =>
-			typeof raw === "string" && MARKET_SCOPES.has(raw) ? (raw as InstallScope) : null;
-
-		type ScopeTarget = { scope: InstallScope; projectBase?: string; store: PackOrderStore };
-		const resolveScopeTarget = (
-			scope: InstallScope,
-			projectId: string | undefined,
-		): { ok: true; target: ScopeTarget } | { ok: false; status: number; error: string } => {
-			const effectiveProjectId = normalizeConfigProjectId(projectId);
-			if (scope === "project") {
-				if (!projectId) return { ok: false, status: 400, error: "projectId required for project scope" };
-				if (!effectiveProjectId) return { ok: true, target: { scope: "server", store: projectConfigStore } };
-				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
-				if (!ctx) return { ok: false, status: 404, error: "Project not found" };
-				return { ok: true, target: { scope, projectBase: ctx.project.rootPath, store: ctx.projectConfigStore } };
-			}
-			return { ok: true, target: { scope, store: projectConfigStore } };
-		};
-
-		const errStatus = (code: string, notInstalled = 409): number => {
-			switch (code) {
-				case "unknown_source": return 404;
-				case "unknown_pack": return 404;
-				case "invalid_pack": return 422;
-				case "already_installed": return 409;
-				case "not_installed": return notInstalled;
-				case "unsafe_name": return 400;
-				case "git_failed": return 502;
-				default: return 400;
-			}
-		};
-		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
-			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
-			if (err instanceof Error && err.name === "McpGatewayError") { json({ error: err.message }, /fetch failed|HTTP|timed out/i.test(err.message) ? 502 : 422); return; }
-			jsonError(500, err);
-		};
-
-		// All scope contexts present for cross-scope listing. Each carries its
-		// scope's `pack_order` so `listInstalled` returns rows in precedence order
-		// (finding #2) — the UI relies on that order to build reorder payloads.
-		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> => {
-			const effectiveProjectId = normalizeConfigProjectId(projectId);
-			const ctxs: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> = [
-				{ scope: "server", packOrder: projectConfigStore.getPackOrder("server") },
-				{ scope: "global-user", packOrder: projectConfigStore.getPackOrder("global-user") },
-			];
-			if (effectiveProjectId) {
-				const ctx = projectContextManager.getOrCreate(effectiveProjectId);
-				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath, packOrder: ctx.projectConfigStore.getPackOrder("project") });
-			}
-			return ctxs;
-		};
-
-		// ── Managed-runtime activation/consent wiring (P3) ─────────
-		// Resolve a pack's SERVER-DERIVED packId + its runtime contributions + the
-		// effective deployment config carried by its providers, so the supervisor
-		// (start/stop/down) can be addressed by {packId, runtimeId}. Mirrors
-		// buildActivationCatalogue's on-disk entry resolution (works for built-in
-		// first-party packs too). Returns null when the pack is not resolvable.
-		const resolvePackRuntimeContext = (
-			scope: InstallScope,
-			projectBase: string | undefined,
-			store: PackOrderStore,
-			packName: string,
-		): { packId: string; runtimes: Array<{ id: string; listName: string; manifest: Record<string, unknown> }>; deploymentConfig: Record<string, unknown>; hasDeploymentSurface: boolean } | null => {
-			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
-			if (base === undefined) return null;
-			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
-			let entry = entries.find((e) => e.manifest?.name === packName);
-			if ((!entry || !entry.manifest) && scope === "server") {
-				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
-			}
-			if (!entry || !entry.manifest) return null;
-			const packId = packIdFromRoot(entry.path);
-			if (!packId) return null;
-			let contribs;
-			try { contribs = loadPackContributions(entry.path, entry.manifest); }
-			catch { return { packId, runtimes: [], deploymentConfig: {}, hasDeploymentSurface: false }; }
-			// Effective deployment config = each provider's FLAT schema defaults
-			// (ProviderContribution.config) overlaid with its persisted store config.
-			// Hindsight's `memory` provider carries the deployment mode/dataDir/etc.
-			const deploymentConfig: Record<string, unknown> = {};
-			let hasDeploymentSurface = false;
-			for (const p of contribs.providers) {
-				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-				Object.assign(deploymentConfig, merged);
-				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-			}
-			// `hasDeploymentSurface` = the pack exposes a provider whose config ACTUALLY
-			// carries the deployment mode (external/managed/…). A runtime-only pack with NO
-			// provider — OR a pack whose only provider has no deployment mode — has no
-			// external/managed concept, so its `on-enable` runtime starts in the runtime's
-			// default mode rather than being suppressed by the external-default start plan
-			// (mirrors the REST start path's no-surface fallback so activation and
-			// `/api/pack-runtimes/:id/start` never diverge).
-			// A runtime's activation ref (`listName`) is its manifest id — pack-contributions
-			// enforces `runtime.id === contents.runtimes[] entry`, so the two are identical
-			// (the reference's separate `listName` field collapsed into `id` here).
-			return { packId, runtimes: contribs.runtimes.map((r) => ({ id: r.id, listName: r.id, manifest: r.manifest })), deploymentConfig, hasDeploymentSurface };
-		};
-
-		// ── All-source Browse ─────────────────────────────────────
-		// GET /api/marketplace/browse?projectId=<optional>
-		if (url.pathname === "/api/marketplace/browse" && req.method === "GET") {
-			type BrowseSourceState = {
-				sourceId: string;
-				sourceName: string;
-				sourceType: "builtin" | "pack" | "mcp-gateway" | "mcp-registry";
-				builtin?: boolean;
-				status: "ok" | "loading" | "error" | "unsupported";
-				error?: string;
-				lastSyncedAt?: string;
-			};
-			const sources: BrowseSourceState[] = [];
-			const packs: BrowsePack[] = [];
-			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e): BrowsePack => ({
-				...e.manifest!,
-				dirName: e.manifest!.name,
-				hasTools: e.manifest!.contents.tools.length > 0,
-				builtin: true,
-				provided: true,
-			} as BrowsePack));
-			sources.push({ sourceId: builtinSource.id, sourceName: sourceDisplayName(builtinSource), sourceType: "builtin", builtin: true, status: "ok" });
-			packs.push(...builtinPacks.map((pack) => browseRowWithSource(pack, builtinSource)));
-
-			for (const source of sourceStore.list()) {
-				const sourceType = sourceTypeForBrowse(source);
-				const state: BrowseSourceState = {
-					sourceId: source.id,
-					sourceName: sourceDisplayName(source),
-					sourceType,
-					status: "ok",
-					...(source.lastSyncedAt ? { lastSyncedAt: source.lastSyncedAt } : {}),
-				};
-				if (sourceType === "mcp-registry") {
-					sources.push({ ...state, status: "unsupported", error: source.unsupportedReason ?? "source type is unsupported" });
-					continue;
-				}
-				try {
-					const rows = await installer.browseSourcePacks(source.id);
-					const refreshed = sourceStore.get(source.id) ?? source;
-					sources.push({ ...state, ...(refreshed.lastSyncedAt ? { lastSyncedAt: refreshed.lastSyncedAt } : {}) });
-					packs.push(...rows.map((pack) => browseRowWithSource(pack, refreshed)));
-				} catch (err) {
-					sources.push({ ...state, status: "error", error: err instanceof Error ? err.message : String(err) });
-				}
-			}
-			json({ sources, packs });
-			return;
-		}
-
-		// ── Sources ───────────────────────────────────────────────
-		// GET /api/marketplace/sources
-		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
-			// Prepend the synthetic, non-removable built-in source (§4.4).
-			json({ sources: [builtinSource, ...sourceStore.list()] });
-			return;
-		}
-		// POST /api/marketplace/sources { url, ref?, type? }
-		if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
-			const body = await readBody(req);
-			const srcUrl = body && typeof (body as any).url === "string" ? (body as any).url.trim() : "";
-			if (!srcUrl) { json({ error: "url is required" }, 400); return; }
-			if (sourceStore.getByUrl(srcUrl)) { json({ error: `source already registered: ${srcUrl}` }, 409); return; }
-			let source;
-			try {
-				source = sourceStore.add({ url: srcUrl, ref: (body as any).ref, type: (body as any).type });
-			} catch (err) { jsonError(400, err); return; }
-			try {
-				await installer.syncMarketplaceSource(source.id);
-			} catch (err) {
-				// Roll back the registration if the initial sync/fetch fails.
-				sourceStore.remove(source.id);
-				handleMarketErr(err);
-				return;
-			}
-			json({ source: sourceStore.get(source.id) }, 201);
-			return;
-		}
-		// /api/marketplace/sources/:id[...]
-		const sourceMatch = url.pathname.match(/^\/api\/marketplace\/sources\/([^/]+)(\/sync|\/packs)?$/);
-		if (sourceMatch) {
-			const id = decodeURIComponent(sourceMatch[1]);
-			const sub = sourceMatch[2];
-			// Built-in source (§4.4): special-cased BEFORE the 404 check because
-			// `sourceStore.get("builtin")` is undefined (never persisted).
-			if (id === BUILTIN_SOURCE_ID) {
-				if (!sub && req.method === "DELETE") {
-					json({ error: "the built-in source cannot be removed" }, 403);
-					return;
-				}
-				if (sub === "/sync" && req.method === "POST") {
-					// No-op resync: built-in packs ride the app upgrade.
-					json({ source: builtinSource });
-					return;
-				}
-				if (sub === "/packs" && req.method === "GET") {
-					// Map the shipped first-party packs to the same browse-row shape
-					// `installer.browsePacks` returns, flagged builtin + provided.
-					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
-						...e.manifest!,
-						dirName: e.manifest!.name,
-						hasTools: e.manifest!.contents.tools.length > 0,
-						builtin: true,
-						provided: true,
-					}));
-					json({ packs });
-					return;
-				}
-				json({ error: "unsupported built-in source operation" }, 405);
-				return;
-			}
-			if (!isValidSourceId(id) || !sourceStore.get(id)) { json({ error: `unknown source: ${id}` }, 404); return; }
-
-			if (!sub && req.method === "DELETE") {
-				sourceStore.remove(id);
-				try { fs.rmSync(installer.cacheDirFor(id), { recursive: true, force: true }); } catch { /* ignore */ }
-				res.writeHead(204); res.end();
-				return;
-			}
-			if (sub === "/sync" && req.method === "POST") {
-				try { await installer.syncMarketplaceSource(id); } catch (err) { handleMarketErr(err); return; }
-				json({ source: sourceStore.get(id) });
-				return;
-			}
-			if (sub === "/packs" && req.method === "GET") {
-				try { json({ packs: await installer.browseSourcePacks(id) }); } catch (err) { handleMarketErr(err); }
-				return;
-			}
-		}
-
-		// ── Install / update / uninstall ──────────────────────────
-		// POST /api/marketplace/install { sourceId, dirName, scope, projectId? }
-		// `dirName` is the physical source subdir to read; the installed identity
-		// is the pack's `manifest.name` (design §1.4). `packName` is accepted as a
-		// back-compat alias for `dirName`.
-		if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const dirName = typeof body?.dirName === "string" ? body.dirName : (typeof body?.packName === "string" ? body.packName : undefined);
-			if (typeof body?.sourceId !== "string" || typeof dirName !== "string") { json({ error: "sourceId and dirName are required" }, 400); return; }
-			// Built-in packs are resolved in place; they cannot be copy-installed (§4.4).
-			if (body.sourceId === BUILTIN_SOURCE_ID) { json({ error: "built-in packs are provided in place and cannot be installed" }, 403); return; }
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			try {
-				const targetScope = st.target.scope;
-				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
-				invalidateResolverCaches();
-				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
-				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
-			} catch (err) { handleMarketErr(err); }
-			return;
-		}
-		// POST /api/marketplace/update { scope, packName, projectId? }
-		if (url.pathname === "/api/marketplace/update" && req.method === "POST") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
-			// Built-in packs update with the app; a server-scope built-in with no
-			// ledger entry has nothing to update (§4.4). A genuine user install of
-			// the same name proceeds normally below.
-			if (scope === "server" && isBuiltinPackName(body.packName) && !hasUserInstall("server", body.packName, body?.projectId)) {
-				json({ error: "built-in packs update with the app; nothing to update" }, 403);
-				return;
-			}
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			try {
-				const targetScope = st.target.scope;
-				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
-				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
-				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
-				invalidateResolverCaches();
-				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
-				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
-				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
-			} catch (err) { handleMarketErr(err, 409); }
-			return;
-		}
-		// DELETE /api/marketplace/installed { scope, packName, projectId? }
-		if (url.pathname === "/api/marketplace/installed" && req.method === "DELETE") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
-			// Built-in packs are not in the install ledger and cannot be uninstalled
-			// (§4.4); only enable/disable applies. A genuine user install of the same
-			// name (ledger entry present) proceeds normally below.
-			if (isBuiltinPackName(body.packName) && !hasUserInstall(scope, body.packName, body?.projectId)) {
-				json({ error: "built-in packs cannot be uninstalled" }, 403);
-				return;
-			}
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			// P3 — tear down this pack's managed runtimes BEFORE removing it, preserving
-			// bind-mounted data (no `-v`, no state removal). A missing Docker install is
-			// tolerated (down returns a docker-unavailable STATUS, never throws), so an
-			// uninstall on a Docker-less host still proceeds. A REAL teardown failure (down
-			// throws) is reported and the uninstall is ABORTED — never silently swallowed.
-			if (packRuntimeSupervisor) {
-				const teardownFailures: string[] = [];
-				try {
-					const rtCtx = resolvePackRuntimeContext(st.target.scope, st.target.projectBase, st.target.store, body.packName);
-					if (rtCtx && rtCtx.runtimes.length > 0) {
-						const projectId = st.target.scope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-						// Tear down EVERY runtime contribution unconditionally — do NOT gate on the
-						// CURRENT saved deployment mode (resolveRuntimeStartPlan). A pack started in a
-						// managed mode and later reconfigured to `external` would otherwise skip
-						// teardown and leak its still-running containers. `down` is read-only/minimal
-						// and idempotent (it never resolves start-only inputs like
-						// HINDSIGHT_API_LLM_API_KEY, reuses an already-rendered .env only when one
-						// exists, and maps a missing Docker install to a docker-unavailable STATUS
-						// rather than throwing), so calling it for an external-only never-started
-						// runtime is a harmless no-op (`compose down` on an absent project exits 0).
-						for (const rc of rtCtx.runtimes) {
-							try {
-								await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: false, removeState: false });
-							} catch (err) {
-								teardownFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
-							}
-						}
-					}
-				} catch (err) {
-					// Resolving the pack's runtime context failed (e.g. the pack is no longer
-					// resolvable on disk) — there is nothing to tear down; proceed.
-					console.warn(`[pack-runtimes] uninstall runtime teardown skipped: ${(err as Error)?.message ?? err}`);
-				}
-				if (teardownFailures.length > 0) {
-					json({ error: "runtime teardown failed; pack not uninstalled", details: teardownFailures }, 502);
-					return;
-				}
-			}
-			try {
-				const targetScope = st.target.scope;
-				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
-				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
-				invalidateResolverCaches();
-				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
-				res.writeHead(204); res.end();
-			} catch (err) { handleMarketErr(err, 404); }
-			return;
-		}
-		// GET /api/marketplace/installed?projectId=
-		if (url.pathname === "/api/marketplace/installed" && req.method === "GET") {
-			const projectId = url.searchParams.get("projectId") || undefined;
-			try {
-				// Prepend synthetic built-in pack rows (§6.4): a distinct non-install
-				// row kind (no meta/ledger entry) flagged `builtin: true`. A
-				// user-installed same-name pack still appears as its own ledger row.
-				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
-					scope: "server" as InstallScope,
-					packName: e.manifest!.name,
-					manifest: e.manifest!,
-					meta: e.meta,
-					status: "ok" as const,
-					builtin: true,
-					// Built-in packs ship with the app: no upstream source to check, never
-					// "update available" (they update with the app upgrade, §4.2).
-					updateAvailable: false,
-					sourceStatus: "ok" as const,
-					// Default-disabled built-in packs (manifest `defaultDisabled: true`, e.g.
-					// Hindsight) surface a stable wire field the Marketplace UI keys on
-					// (`defaultDisabled`) and the UI intent alias (`requiresGuidedSetup`) so the
-					// guided-setup wizard routes an explicit enable through configuration first.
-					defaultDisabled: e.manifest!.defaultDisabled === true,
-					requiresGuidedSetup: e.manifest!.defaultDisabled === true,
-				}));
-				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
-			} catch (err) { jsonError(500, err); }
-			return;
-		}
-
-		// ── pack-order (§9.2) ─────────────────────────────────────
-		if (url.pathname === "/api/marketplace/pack-order" && req.method === "GET") {
-			const scope = parseScope(url.searchParams.get("scope"));
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const projectId = url.searchParams.get("projectId") || undefined;
-			const st = resolveScopeTarget(scope, projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const targetScope = st.target.scope;
-			json({ scope: targetScope, order: st.target.store.getPackOrder(targetScope) });
-			return;
-		}
-		if (url.pathname === "/api/marketplace/pack-order" && req.method === "PUT") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (!Array.isArray(body?.order) || !body.order.every((x: unknown) => typeof x === "string")) { json({ error: "order must be a string array" }, 400); return; }
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const targetScope = st.target.scope;
-			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-			// Normalize: drop names not installed at this scope; append on-disk-but-absent
-			// packs at lowest priority (front), preserving the requested order otherwise.
-			const installedNames = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])
-				.filter((p) => p.scope === targetScope && p.status !== "corrupt")
-				.map((p) => p.packName);
-			const installedSet = new Set(installedNames);
-			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
-			const missing = installedNames.filter((n) => !filtered.includes(n));
-			const normalized = [...missing, ...filtered];
-			st.target.store.setPackOrder(targetScope, normalized);
-			invalidateResolverCaches();
-			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
-			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
-			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
-			return;
-		}
-
-		// ── pack-activation (pack-schema-v1 §6.7) ──────────────────
-		// The `catalogue` is the UNFILTERED authoritative source for the Market UI
-		// toggles: read straight from the INSTALLED pack's pack.yaml manifest
-		// contents (NOT from the runtime-filtered /api/tools or /api/ext/contributions),
-		// so a disabled entity still appears and can be re-enabled. `disabled` is the
-		// current pack_activation override; checked = name ∉ disabled[kind].
-		type PackActivationMcpOperationEntry = {
-			name: string;
-			label?: string;
-			description?: string;
-			toolName?: string;
-			policyKey: string;
-			selected: boolean;
-			disabledByActivation: boolean;
-			inputSchema?: unknown;
-		};
-		const mcpPolicyKey = (serverName: string, subNamespace: string | undefined, operationName?: string): string => {
-			const parts = ["mcp", serverName];
-			if (subNamespace) parts.push(subNamespace);
-			if (operationName) parts.push(operationName);
-			return parts.join("__");
-		};
-		const activationMcpRef = (entry: PackEntry, mcp: ResolvedMcpContribution | { listName: string; serverName: string; subNamespace?: string; config?: any; sourceFile?: string }, metaDetails: Record<string, unknown>): string => {
-			return activationMcpContributionId(entry, mcp, metaDetails, sourceStore.getByUrl(String(entry.meta?.sourceUrl ?? ""))?.id);
-		};
-		const operationsForMcp = (mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown }, metaDetails: Record<string, unknown>): McpOperationMetadataEntry[] => {
-			return operationMetadataForMcpContribution(mcp, metaDetails);
-		};
-		const runtimeOperationsForMcp = (
-			mcp: { listName: string; serverName: string; subNamespace?: string },
-			contributionId: string,
-			routes: McpToolRouteSnapshot[],
-		): McpOperationMetadataEntry[] => {
-			const out: McpOperationMetadataEntry[] = [];
-			const seen = new Set<string>();
-			for (const route of routes) {
-				const routeContributionId = safeString(route.contributionId);
-				const routeListName = safeString(route.listName);
-				const routeServerName = safeString(route.serverName ?? route.publicServerName);
-				const routeSubNamespace = safeString(route.subNamespace);
-				const belongsToContribution = routeContributionId
-					? routeContributionId === contributionId
-					: routeListName === mcp.listName && routeServerName === mcp.serverName && routeSubNamespace === mcp.subNamespace;
-				if (!belongsToContribution) continue;
-				const parsed = typeof route.name === "string" ? parseMcpToolName(route.name) : undefined;
-				const rawName = safeString(route.mcpToolName);
-				const name = parsed?.sub && parsed.sub === mcp.subNamespace && parsed.op ? parsed.op : rawName;
-				if (!name || seen.has(name)) continue;
-				seen.add(name);
-				out.push({
-					name,
-					...(safeString(route.description) ? { description: safeString(route.description) } : {}),
-					...(route.inputSchema !== undefined ? { inputSchema: route.inputSchema } : {}),
-				});
-			}
-			return out;
-		};
-
-		const buildActivationCatalogue = (
-			scope: InstallScope,
-			projectBase: string | undefined,
-			store: PackOrderStore,
-			packName: string,
-			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
-			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
-			if (base === undefined) return null;
-			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
-			let entry = entries.find((e) => e.manifest?.name === packName);
-			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
-			// toggleable at server scope — resolve their catalogue from the built-in band.
-			if ((!entry || !entry.manifest) && scope === "server") {
-				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
-			}
-			if (!entry || !entry.manifest) return null;
-			const c = entry.manifest.contents;
-			const metaDetails = readYamlMapping(path.join(entry.path, ".pack-meta.yaml")) ?? {};
-			const activationStore = store as unknown as ProjectConfigStore;
-			const currentDisabled = activationStore.getPackActivation?.(scope as PackOrderScope, packName) ?? {};
-			const disabledMcpRefs = new Set(currentDisabled.mcp ?? []);
-			const disabledMcpOperations = currentDisabled.mcpOperations ?? {};
-			const concreteTools = readConcretePackToolsFromGroups(entry.path, c.tools);
-			const descriptions = readPackEntityDescriptions(entry.path, entry.manifest);
-			if (Object.keys(concreteTools.descriptions).length > 0) {
-				descriptions.tools = concreteTools.descriptions;
-			} else {
-				delete descriptions.tools;
-			}
-			// Valid entrypoint display metadata from the entrypoint files. Invalid or
-			// unsupported entrypoint kinds are omitted so retired launch surfaces do not
-			// render as activation toggles.
-			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "session-menu" | "route"; routeId?: string }>();
-			const mcpByListName = new Map<string, Record<string, unknown>>();
-			const piExtensionByListName = new Map<string, Record<string, unknown>>();
-			try {
-				const contributions = loadPackContributions(entry.path, entry.manifest);
-				for (const ep of contributions.entrypoints) {
-					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
-				}
-				const mcpManager = scope === "project" ? sessionManager.getMcpManager({ projectId }) : sessionManager.getMcpManager();
-				const statuses = mcpManager?.getServerStatuses() ?? [];
-				const runtimeRoutes = mcpManager?.getToolRouteSnapshots?.() ?? [];
-				for (const mcp of contributions.mcp ?? []) {
-					const transport = mcp.config.url ? "http" : "stdio";
-					const contributionId = activationMcpRef(entry, mcp, metaDetails);
-					const status = statuses.find((s) => s.ownerContributions?.some((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope)))
-						?? statuses.find((s) => s.name === mcp.serverName);
-					const owner = status?.ownerContributions?.find((c) => c.contributionId === contributionId || (c.listName === mcp.listName && c.origin.packName === entry.manifest!.name && c.origin.scope === entry.scope));
-					const overriddenBy = status && !owner
-						? (status.origin?.scope === "manual" ? "overridden-by-manual" : "overridden-by-marketplace")
-						: undefined;
-					const disabledOps = [...new Set(disabledMcpOperations[contributionId] ?? [])];
-					const disabledOpsSet = new Set(disabledOps);
-					const staticOperationMetadata = operationsForMcp(mcp, metaDetails);
-					const operationMetadata = staticOperationMetadata.length > 0
-						? staticOperationMetadata
-						: runtimeOperationsForMcp(mcp, contributionId, runtimeRoutes);
-					const knownOperationNames = new Set(operationMetadata.map((op) => op.name));
-					const operations = operationMetadata.map((op): PackActivationMcpOperationEntry => {
-						const policyKey = mcpPolicyKey(mcp.serverName, mcp.subNamespace, op.name);
-						return {
-							name: op.name,
-							...(op.label ? { label: op.label } : {}),
-							...(op.description ? { description: op.description } : {}),
-							...(op.inputSchema !== undefined ? { inputSchema: op.inputSchema } : {}),
-							toolName: policyKey,
-							policyKey,
-							selected: !disabledOpsSet.has(op.name),
-							disabledByActivation: disabledOpsSet.has(op.name),
-						};
-					});
-					const staleDisabledOperations = disabledOps.filter((name) => !knownOperationNames.has(name));
-					mcpByListName.set(mcp.listName, {
-						ref: mcp.listName,
-						contributionId,
-						listName: mcp.listName,
-						serverName: mcp.serverName,
-						policyKey: mcpPolicyKey(mcp.serverName, mcp.subNamespace),
-						selected: !disabledMcpRefs.has(contributionId) && !disabledMcpRefs.has(mcp.listName),
-						...(safeString(metaDetails.sourceId) ? { sourceId: safeString(metaDetails.sourceId) } : {}),
-						...(entry.manifest?.name ? { installedPackName: entry.manifest.name } : {}),
-						...(safeString(metaDetails.gatewayProviderId) ? { gatewayProviderId: safeString(metaDetails.gatewayProviderId) } : {}),
-						...(mcp.subNamespace ? { subNamespace: mcp.subNamespace } : {}),
-						...(mcp.label ? { label: mcp.label } : {}),
-						...(mcp.description ? { description: mcp.description } : {}),
-						transport,
-						...(mcp.config.command ? { command: mcp.config.command } : {}),
-						...(mcp.config.args ? { args: mcp.config.args } : {}),
-						...(mcp.config.cwd ? { cwd: mcp.config.cwd } : {}),
-						...(mcp.config.env ? { env: Object.keys(mcp.config.env) } : {}),
-						...(mcp.config.url ? { url: mcp.config.url } : {}),
-						...(mcp.config.headers ? { headers: Object.keys(mcp.config.headers) } : {}),
-						...(status ? { status: status.status, ownerStatus: overriddenBy ?? (owner ? status.status : status.status), toolCount: operations.length > 0 ? operations.filter((op) => op.selected).length : status.toolCount } : {}),
-						...(operations.length > 0 ? { operations, selectedOperationCount: operations.filter((op) => op.selected).length, totalOperationCount: operations.length } : { selectedOperationCount: undefined, totalOperationCount: undefined }),
-						...(disabledOps.length > 0 ? { disabledOperations: disabledOps } : {}),
-						...(staleDisabledOperations.length > 0 ? { staleDisabledOperations } : {}),
-						...(overriddenBy ? { ownerStatus: overriddenBy, overriddenBy: status?.origin?.packName ?? status?.origin?.scope } : {}),
-						...(status?.error ? { error: status.error } : {}),
-					});
-					if (mcp.description) {
-						descriptions.mcp = { ...(descriptions.mcp ?? {}), [mcp.listName]: mcp.description };
-					}
-				}
-			} catch { /* metadata is optional; listName is the stable key */ }
-			try {
-				const resolvedPiExtensions = sessionManager.resolveMarketplacePiExtensionContributions(projectId)
-					.filter((piExtension) => piExtension.origin.scope === entry.scope && piExtension.origin.packName === entry.manifest!.name);
-				const piExtensions = resolvedPiExtensions.length > 0 ? resolvedPiExtensions : loadPiExtensionContributionsFromRuntime(entry.path, entry.manifest);
-				const disabledPiExtensions = new Set(((store as unknown as ProjectConfigStore).getPackActivation?.(scope as PackOrderScope, packName).piExtensions) ?? []);
-				for (const piExtension of piExtensions) {
-					const diagnostic = disabledPiExtensions.has(piExtension.listName)
-						? piExtensionDiagnostic("disabled", "disabled_by_activation", `Pi extension "${piExtension.listName}" is disabled for pack "${entry.manifest.name}".`)
-						: piExtension.diagnostic;
-					piExtensionByListName.set(piExtension.listName, {
-						ref: piExtension.listName,
-						listName: piExtension.listName,
-						...(piExtension.entryRelativePath ? { entryRelativePath: piExtension.entryRelativePath } : {}),
-						diagnostic,
-						tools: (piExtension.discovery?.tools ?? []).map((tool) => ({ name: tool.name, ...(tool.description ? { description: tool.description } : {}) })),
-					});
-				}
-			} catch { /* pi extension metadata is optional; listName is the stable key */ }
-			const baseCatalogue = {
-				roles: [...c.roles],
-				tools: concreteTools.tools,
-				skills: [...c.skills],
-				entrypoints: (c.entrypoints ?? []).flatMap((listName) => {
-					const meta = entrypointByListName.get(listName);
-					return meta ? [{ listName, ...meta }] : [];
-				}),
-				// One-line per-entity descriptions for the activation disclosure (R3).
-				// Read from the SAME installed pack dir as the catalogue above — never
-				// from the runtime-filtered /api/tools or /api/ext/contributions.
-				descriptions,
-			};
-			if ((entry.manifest.schema ?? 1) < 2) return baseCatalogue;
-			// `hooks` and `workflows` are deliberately OMITTED (finding EXT-03): neither
-			// is activation-toggleable — `hooks` was removed as a contribution kind
-			// entirely, and `workflows` is reserved-but-not-loadable. Echoing them here
-			// would resurrect the phantom Market UI toggle the finding fixed.
-			return {
-				roles: baseCatalogue.roles,
-				tools: baseCatalogue.tools,
-				skills: baseCatalogue.skills,
-				entrypoints: baseCatalogue.entrypoints,
-				providers: [...(c.providers ?? [])],
-				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
-				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
-				runtimes: [...(c.runtimes ?? [])],
-				descriptions,
-			};
-		};
-		const mcpContributionLookup = (catalogue: { mcp?: Array<string | Record<string, unknown>> }): Map<string, string> => {
-			const out = new Map<string, string>();
-			for (const entry of catalogue.mcp ?? []) {
-				if (typeof entry === "string") {
-					out.set(entry, entry);
-					continue;
-				}
-				const contributionId = safeString(entry.contributionId) ?? safeString(entry.ref) ?? safeString(entry.listName);
-				if (!contributionId) continue;
-				for (const alias of [entry.contributionId, entry.ref, entry.listName, entry.legacyRef]) {
-					const key = safeString(alias);
-					if (key) out.set(key, contributionId);
-				}
-			}
-			return out;
-		};
-		const packActivationRevision = (disabled: unknown): string =>
-			`act:${createHash("sha256").update(JSON.stringify(disabled ?? {})).digest("hex").slice(0, 16)}`;
-		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {
-			const scope = parseScope(url.searchParams.get("scope"));
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const projectId = url.searchParams.get("projectId") || undefined;
-			const packName = url.searchParams.get("packName") || "";
-			if (!packName) { json({ error: "packName is required" }, 400); return; }
-			const st = resolveScopeTarget(scope, projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const targetScope = st.target.scope;
-			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(projectId) : undefined;
-			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
-			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
-			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const disabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
-			json({ scope: targetScope, packName, catalogue, disabled, revision: packActivationRevision(disabled) });
-			return;
-		}
-		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "PUT") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const packName = typeof body?.packName === "string" ? body.packName : "";
-			if (!packName) { json({ error: "packName is required" }, 400); return; }
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const targetScope = st.target.scope;
-			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
-			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
-			// Normalize the requested disabled refs against the pack's declared
-			// catalogue (drop refs for entities the pack does not declare).
-			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
-			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
-			const mcpLookup = mcpContributionLookup(catalogue);
-			const catalogueMcpContributionIds = new Set(mcpLookup.values());
-			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
-			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "mcp" | "piExtensions" | "runtimes", valid: Set<string>): string[] => {
-				const raw = reqDisabled[kind];
-				if (!Array.isArray(raw)) return [];
-				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
-			};
-			const normalizeMcpRefs = (): string[] => {
-				const raw = reqDisabled.mcp;
-				if (!Array.isArray(raw)) return [];
-				return [...new Set(raw.flatMap((x) => typeof x === "string" ? [mcpLookup.get(x) ?? ""] : []).filter((x) => x && catalogueMcpContributionIds.has(x)))];
-			};
-			const normalizeMcpOperationsForCatalogue = (): Record<string, string[]> | undefined => {
-				const raw = reqDisabled.mcpOperations;
-				const source = raw === undefined ? beforeActivation.mcpOperations : raw;
-				if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
-				const out: Record<string, string[]> = {};
-				for (const [rawContributionId, rawOps] of Object.entries(source)) {
-					const contributionId = mcpLookup.get(rawContributionId) ?? rawContributionId;
-					if (!catalogueMcpContributionIds.has(contributionId) || !Array.isArray(rawOps)) continue;
-					const ops = [...new Set(rawOps.filter((x): x is string => typeof x === "string" && x.length > 0))];
-					if (ops.length > 0) out[contributionId] = ops;
-				}
-				return Object.keys(out).length > 0 ? out : undefined;
-			};
-			// `hooks`/`workflows` are deliberately excluded (finding EXT-03): neither is
-			// activation-toggleable, so a PUT body carrying either is silently dropped
-			// (never persisted, never echoed back) rather than resurrecting the phantom
-			// toggle.
-			const normalized = {
-				roles: normaliseKind("roles", new Set(catalogue.roles)),
-				tools: normaliseKind("tools", new Set(catalogue.tools)),
-				skills: normaliseKind("skills", new Set(catalogue.skills)),
-				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
-				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
-				mcp: normalizeMcpRefs(),
-				mcpOperations: normalizeMcpOperationsForCatalogue(),
-				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
-				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
-			};
-			// P3 — managed-runtime activation side effects. Enabling a
-			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit
-			// user start action; disabling (enabled → disabled) stops it. The external
-			// (non-Docker) deployment mode never starts a container. Toggling any other
-			// entity — or a pack with no runtimes — is inert here, so install/update/
-			// list/status never start Docker.
-			//
-			// CRITICAL ordering: the Docker side effects run BEFORE the activation state
-			// is persisted, and a side effect that MATTERS (start/stop throwing, or a
-			// start that fails to come up) aborts the whole PUT WITHOUT persisting — so
-			// Bobbit never records "enabled"/"disabled" while Docker did the opposite. A
-			// graceful `docker-unavailable` status is TOLERATED (there is nothing to
-			// start/stop on a Docker-less host; the provider is defensive and the toggle
-			// is just metadata), so it persists and is reported, not treated as a hard
-			// failure. Stop is best-effort: only a thrown stop blocks a disable.
-			const prevDisabledRuntimes = new Set(beforeActivation.runtimes ?? []);
-			const runtimeStatuses: Array<Record<string, unknown>> = [];
-			const sideEffectFailures: string[] = [];
-			if (packRuntimeSupervisor && (catalogue.runtimes?.length ?? 0) > 0) {
-				const nextDisabledRuntimes = new Set(normalized.runtimes);
-				const rtCtx = resolvePackRuntimeContext(targetScope, st.target.projectBase, st.target.store, packName);
-				if (rtCtx && rtCtx.runtimes.length > 0) {
-					const runtimeProjectId = targetScope === "project" ? targetProjectId : undefined;
-					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
-					// A runtime-only pack with NO provider deployment-config surface has no
-					// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
-					// external (start:false) and would wrongly suppress its `on-enable` start.
-					// Mirror the REST start path's no-surface fallback: enabling such a runtime
-					// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
-					// the manifest default). When a deployment surface exists, honour plan.start.
-					const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
-					const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
-					for (const rc of rtCtx.runtimes) {
-						const ref = rc.listName;
-						const wasDisabled = prevDisabledRuntimes.has(ref);
-						const nowDisabled = nextDisabledRuntimes.has(ref);
-						const policy = readRuntimeStartPolicy(rc.manifest);
-						try {
-							if (wasDisabled && !nowDisabled) {
-								// disabled → enabled: explicit enable. Only `on-enable` runtimes
-								// auto-start, and only when the deployment mode is a managed
-								// (Docker) mode — external mode avoids the Docker start entirely.
-								// A provider-less runtime pack has no such gate (startWhenEnabled).
-								if (policy === "on-enable" && startWhenEnabled) {
-									const status = await packRuntimeSupervisor.start(rtCtx.packId, rc.id, { projectId: runtimeProjectId, mode: startMode, config: plan.config });
-									runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-									// A managed enable that does not come up running (and is not a
-									// tolerated docker-unavailable) is a real failure: don't persist
-									// "enabled" while the container is unhealthy/down.
-									if (status.status !== "running" && status.status !== "starting" && status.status !== "docker-unavailable") {
-										sideEffectFailures.push(`${rtCtx.packId}:${rc.id} failed to start (${status.status}${status.message ? `: ${status.message}` : ""})`);
-									}
-								}
-							} else if (!wasDisabled && nowDisabled) {
-								// enabled → disabled: stop the managed container UNCONDITIONALLY — do NOT
-								// gate on the CURRENT saved deployment mode (plan.start). A runtime started
-								// in a managed mode and later reconfigured to `external` would otherwise
-								// skip the stop and leak its still-running container. `stop` is
-								// read-only/minimal and idempotent: it never resolves start-only inputs
-								// (e.g. HINDSIGHT_API_LLM_API_KEY), reuses an already-rendered .env only
-								// when one exists, and maps a missing Docker install to a
-								// docker-unavailable STATUS rather than throwing — so calling it for an
-								// external-only never-started runtime is a harmless no-op (`compose stop`
-								// on an absent project exits 0) and never 502s the disable.
-								const status = await packRuntimeSupervisor.stop(rtCtx.packId, rc.id, { projectId: runtimeProjectId });
-								runtimeStatuses.push({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-							}
-						} catch (err) {
-							// A thrown start/stop (e.g. compose up/stop exploded) is a hard
-							// failure: abort the PUT so persisted state matches Docker reality.
-							runtimeStatuses.push({
-								id: encodePackRuntimeId(rtCtx.packId, rc.id),
-								packId: rtCtx.packId,
-								runtimeId: rc.id,
-								status: "error",
-								message: (err as Error)?.message ?? String(err),
-							});
-							sideEffectFailures.push(`${rtCtx.packId}:${rc.id}: ${(err as Error)?.message ?? String(err)}`);
-						}
-					}
-				}
-			}
-
-			// A side effect that matters failed → do NOT persist (state is unchanged) and
-			// surface the failure with the prior activation so the client/UI reverts the
-			// toggle instead of believing the change took effect.
-			if (sideEffectFailures.length > 0) {
-				json({
-					scope: targetScope,
-					packName,
-					catalogue,
-					disabled: beforeActivation,
-					runtimes: runtimeStatuses,
-					error: `runtime activation failed: ${sideEffectFailures.join("; ")}`,
-				}, 502);
-				return;
-			}
-
-			const before = beforeActivation.mcp ?? [];
-			const beforeOps = beforeActivation.mcpOperations ?? {};
-			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
-			// Default-disabled built-in packs (e.g. Hindsight): maintain the explicit
-			// force-enabled marker so an explicit ENABLE persists. Enabling clears all
-			// disabled refs (an empty record — indistinguishable from "never touched",
-			// which the default-disabled overlay would otherwise re-disable), so we record
-			// the pack name in a marker that the overlay honours. Disabling-all (or any
-			// partial disable) drops the marker; the persisted record then wins verbatim.
-			// Only server-scope built-in packs are default-disabled, so this is inert for
-			// everything else.
-			if (targetScope === "server" && getDefaultDisabledInfo(packName, cfgStore) !== null) {
-				const nowAllEnabled = [
-					normalized.roles, normalized.tools, normalized.skills, normalized.entrypoints,
-					normalized.providers, normalized.mcp, normalized.piExtensions, normalized.runtimes,
-				].every((refs) => refs.length === 0) && !normalized.mcpOperations;
-				const marker = readForceEnabledPacks(cfgStore);
-				if (nowAllEnabled) marker.add(packName);
-				else marker.delete(packName);
-				writeForceEnabledPacks(cfgStore, marker);
-			}
-			invalidateResolverCaches();
-			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
-			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
-			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
-			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
-			json({ scope: targetScope, packName, catalogue: refreshedCatalogue, disabled: nextDisabled, revision: packActivationRevision(nextDisabled), ...(runtimeStatuses.length > 0 ? { runtimes: runtimeStatuses } : {}), ...(mcpReload ? { mcpReload } : {}) });
-			return;
-		}
-
-		// ── purge a managed runtime (P3 explicit purge) ───────────
-		// POST /api/marketplace/purge-runtime { packName, scope, runtimeId, projectId? }
-		//   `compose down -v` + remove supervisor-owned runtime state (rendered env,
-		//   persisted generated secrets + allocated ports). Bind-mounted DATA is
-		//   preserved by the supervisor — only Docker volumes + bookkeeping are removed.
-		if (url.pathname === "/api/marketplace/purge-runtime" && req.method === "POST") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (typeof body?.packName !== "string" || !body.packName) { json({ error: "packName is required" }, 400); return; }
-			if (typeof body?.runtimeId !== "string" || !body.runtimeId) { json({ error: "runtimeId is required" }, 400); return; }
-			if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const rtCtx = resolvePackRuntimeContext(st.target.scope, st.target.projectBase, st.target.store, body.packName);
-			if (!rtCtx) { json({ error: "pack not installed at this scope" }, 404); return; }
-			const rc = rtCtx.runtimes.find((r) => r.id === body.runtimeId || r.listName === body.runtimeId);
-			if (!rc) { json({ error: `unknown runtime ${body.runtimeId}` }, 404); return; }
-			const projectId = st.target.scope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-			try {
-				const status = await packRuntimeSupervisor.down(rtCtx.packId, rc.id, { projectId, volumes: true, removeState: true });
-				json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-			} catch (err) {
-				if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-				if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-				jsonError(500, err);
-			}
-			return;
-		}
-
-		if (url.pathname === "/api/marketplace/pack-activation/mcp-operation" && req.method === "PATCH") {
-			const body = (await readBody(req)) as any;
-			const scope = parseScope(body?.scope);
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const contributionId = typeof body?.contributionId === "string" ? body.contributionId : "";
-			const operationName = typeof body?.operationName === "string" ? body.operationName : "";
-			if (!contributionId || !operationName) { json({ error: "contributionId and operationName are required" }, 400); return; }
-			if (typeof body?.disabled !== "boolean") { json({ error: "disabled must be boolean" }, 400); return; }
-			const st = resolveScopeTarget(scope, body?.projectId);
-			if (!st.ok) { json({ error: st.error }, st.status); return; }
-			const targetScope = st.target.scope;
-			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
-			let matchedPackName = "";
-			let matchedCatalogue: ReturnType<typeof buildActivationCatalogue> = null;
-			let matchedEntry: Record<string, unknown> | undefined;
-			for (const installed of installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }])) {
-				if (installed.scope !== targetScope || installed.status === "corrupt") continue;
-				const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, installed.packName, targetProjectId);
-				if (!catalogue) continue;
-				const lookup = mcpContributionLookup(catalogue);
-				if (lookup.get(contributionId) === contributionId) {
-					matchedPackName = installed.packName;
-					matchedCatalogue = catalogue;
-					matchedEntry = (catalogue.mcp ?? []).find((entry): entry is Record<string, unknown> => {
-						if (typeof entry === "string") return entry === contributionId;
-						return mcpContributionLookup({ mcp: [entry] }).get(contributionId) === contributionId;
-					}) as Record<string, unknown> | undefined;
-					break;
-				}
-			}
-			if (!matchedPackName || !matchedCatalogue) { json({ error: "unknown MCP contribution for scope" }, 404); return; }
-			const cfgStore = st.target.store as unknown as ProjectConfigStore;
-			const current = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
-			const currentRevision = packActivationRevision(current);
-			if (typeof body?.expectedRevision === "string" && body.expectedRevision !== currentRevision) {
-				json({ error: "stale activation revision", code: "STALE_REVISION", scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: current, catalogue: matchedCatalogue, revision: currentRevision }, 409);
-				return;
-			}
-			const operationRows = Array.isArray(matchedEntry?.operations) ? matchedEntry.operations.filter((op): op is Record<string, unknown> => !!op && typeof op === "object" && !Array.isArray(op)) : [];
-			const knownOperationNames = new Set(operationRows.map((op) => safeString(op.name)).filter((name): name is string => !!name));
-			const nextOps = { ...(current.mcpOperations ?? {}) };
-			const currentOps = new Set(nextOps[contributionId] ?? []);
-			if (!knownOperationNames.has(operationName) && !(body.disabled === false && currentOps.has(operationName))) {
-				json({ error: `unknown MCP operation for contribution: ${operationName}` }, 400);
-				return;
-			}
-			if (body.disabled) currentOps.add(operationName);
-			else currentOps.delete(operationName);
-			if (currentOps.size > 0) nextOps[contributionId] = [...currentOps].sort();
-			else delete nextOps[contributionId];
-			cfgStore.setPackActivation(targetScope as PackOrderScope, matchedPackName, {
-				...current,
-				mcpOperations: Object.keys(nextOps).length > 0 ? nextOps : undefined,
-			});
-			invalidateResolverCaches();
-			const mcpReload = await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
-			const refreshedCatalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, matchedPackName, targetProjectId) ?? matchedCatalogue;
-			const nextDisabled = cfgStore.getPackActivation(targetScope as PackOrderScope, matchedPackName);
-			json({ scope: targetScope, packName: matchedPackName, contributionId, operationName, disabled: nextDisabled, catalogue: refreshedCatalogue, revision: packActivationRevision(nextDisabled), ...(mcpReload ? { mcpReload } : {}) });
-			return;
-		}
-
-		// ── conflicts (§4 / §9) ───────────────────────────────────
-		if (url.pathname === "/api/packs/conflicts" && req.method === "GET") {
-			const projectId = url.searchParams.get("projectId") || undefined;
-			const conflicts: ConflictWire[] = [
-				...buildConflictsFor("roles", configCascade.resolveRolesEntries(projectId)),
-				...buildConflictsFor("tools", configCascade.resolveToolsEntries(projectId)),
-			];
-			const skillCwd = resolveSkillDiscoveryCwd(process.cwd(), projectId ?? null);
-			const skillStore = resolveProjectConfigStore(projectId ?? null);
-			conflicts.push(...buildConflictsFor("skills", discoverSlashSkillsResolved(skillCwd, skillStore, skillMarketContext(projectId ?? null))));
-			json({ conflicts });
-			return;
-		}
-
-		json({ error: "not found" }, 404);
-		return;
-	}
+	// GET/POST/PUT/DELETE/PATCH /api/marketplace/* (sources, browse, install/
+	// update/uninstall, pack-order, pack-activation, mcp-operation toggles,
+	// purge-runtime) and GET /api/packs/conflicts moved to the core route
+	// registry (STR-01 cohort 2) — see src/server/routes/marketplace-routes.ts
+	// and docs/design/route-registry.md.
 
 	// PUT /api/project-config — update server-scope project config fields
 	if (url.pathname === "/api/project-config" && req.method === "PUT") {

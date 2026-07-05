@@ -13,6 +13,7 @@ import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
@@ -86,11 +87,27 @@ E2E_PI_DIR = bobbitDir();
  * Used by tests to prevent worktree creation on goal/session create.
  * This avoids creating real git worktrees (slow, leaky, conflicts between
  * parallel test runs that share the same repo).
+ *
+ * Uniqueness note: this used to key the path off `${port()}-${Date.now()}`
+ * alone. `port()` falls back to a shared literal ("3099") whenever
+ * `E2E_PORT` isn't set (e.g. plain unit-phase test files that import this
+ * module directly, outside the gateway harness), and `Date.now()` has 1ms
+ * granularity — cheap enough for either (a) two calls in the SAME process
+ * (nonGitCwd() → cleanupWorkerTempCwds() → nonGitCwd() again) or (b) two
+ * DIFFERENT processes racing this file concurrently to land on the exact
+ * same millisecond and compute the identical path. (b) is a genuine
+ * cross-process collision: one process's `awaitableRm` can delete the
+ * directory out from under another process's still-running `git commit` in
+ * it ("fatal: Unable to read current working directory"). A `randomUUID()`
+ * suffix makes every call — regardless of process, port, or clock
+ * resolution — collision-free by construction; confirmed flaky before this
+ * fix via `tests/e2e-setup-worker-temp-cleanup.test.ts` (~1/5 solo, worse
+ * under concurrent phase load).
  */
 let _nonGitCwd: string | undefined;
 export function nonGitCwd(): string {
 	if (!_nonGitCwd) {
-		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${port()}-${Date.now()}`);
+		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${port()}-${Date.now()}-${randomUUID()}`);
 		mkdirSync(_nonGitCwd, { recursive: true });
 	}
 	return _nonGitCwd;
@@ -103,7 +120,7 @@ export function nonGitCwd(): string {
 let _gitCwd: string | undefined;
 export function gitCwd(): string {
 	if (!_gitCwd) {
-		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${port()}-${Date.now()}`);
+		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${port()}-${Date.now()}-${randomUUID()}`);
 		mkdirSync(_gitCwd, { recursive: true });
 		writeFileSync(join(_gitCwd, "README.md"), "# E2E test repo\n");
 		execFileSync("git", ["init"], { cwd: _gitCwd, stdio: "pipe" });
