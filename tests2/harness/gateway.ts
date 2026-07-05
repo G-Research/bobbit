@@ -38,6 +38,12 @@ import { createFencedFetch } from "./fenced-fetch.js";
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
 const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
+// Src-booted gateway: __dirname resolves builtins to non-existent src paths, so
+// point the builtin config + packs at the repo-root source trees (dist-relative
+// defaults only exist after a build). Production/legacy dist-boot leave these
+// undefined and keep their dist-relative defaults.
+const BUILTINS_DIR = resolve(REPO_ROOT, "defaults");
+const BUILTIN_PACKS_DIR = resolve(REPO_ROOT, "market-packs");
 const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
@@ -215,6 +221,8 @@ async function boot(): Promise<BootedGateway> {
 		skipTitleGeneration: true,
 		skipRemotePush: true,
 		skipNonLocalRemoteGit: true,
+		builtinsDir: BUILTINS_DIR,
+		builtinPacksDir: BUILTIN_PACKS_DIR,
 	}, deps);
 
 	// Suppress the startup internet probe / aigw auto-discovery without env flags.

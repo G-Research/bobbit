@@ -1794,6 +1794,18 @@ export interface GatewayConfig {
 	skipRemotePush?: boolean;
 	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_REMOTE/BOBBIT_TEST_NO_EXTERNAL behavior. */
 	skipNonLocalRemoteGit?: boolean;
+	/**
+	 * Override for the builtin `defaults/` tree. Defaults to undefined, in which
+	 * case BuiltinConfigProvider uses its dist-relative default. Used by the v2
+	 * test harness to point a src-booted gateway at the repo-root `defaults/`.
+	 */
+	builtinsDir?: string;
+	/**
+	 * Override for the builtin packs (`market-packs/`) dir. Defaults to undefined,
+	 * in which case resolveBuiltinPacksDir uses its dist-relative default. Used by
+	 * the v2 test harness to point a src-booted gateway at repo-root `market-packs/`.
+	 */
+	builtinPacksDir?: string;
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
@@ -2032,7 +2044,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		};
 	}
 
-	const builtinConfigProvider = new BuiltinConfigProvider();
+	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
 	// builtins, so no seeding to disk is needed. Workflows are project-
@@ -2112,7 +2124,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		return buildMarketToolRootsForProject({
 			projectId: effectiveProjectId,
-			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir()),
+			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
 		});
@@ -2175,7 +2187,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// deduped by resolved path with the same `seen` set, so a user-installed
 		// same-name pack (pushed later from a scope band) still wins when the
 		// registry collapses to one winning pack per packId.
-		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir())) {
+		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir))) {
 			const key = path.resolve(e.path);
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -8562,7 +8574,7 @@ async function handleApiRoute(
 		const builtinSource = { id: BUILTIN_SOURCE_ID, url: "builtin:", builtin: true, addedAt: new Date(0).toISOString() };
 		// A pack name is "built-in" iff a shipped first-party pack declares it.
 		const isBuiltinPackName = (name: string): boolean =>
-			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).some((e) => e.manifest?.name === name);
 		// True iff a real user install of `(scope, packName)` exists in the ledger.
 		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
 			installer.listInstalled(allContexts(normalizeConfigProjectId(projectId))).some((p) => p.scope === scope && p.packName === packName);
@@ -8648,7 +8660,7 @@ async function handleApiRoute(
 			};
 			const sources: BrowseSourceState[] = [];
 			const packs: BrowsePack[] = [];
-			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e): BrowsePack => ({
+			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e): BrowsePack => ({
 				...e.manifest!,
 				dirName: e.manifest!.name,
 				hasTools: e.manifest!.contents.tools.length > 0,
@@ -8732,7 +8744,7 @@ async function handleApiRoute(
 				if (sub === "/packs" && req.method === "GET") {
 					// Map the shipped first-party packs to the same browse-row shape
 					// `installer.browsePacks` returns, flagged builtin + provided.
-					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e) => ({
 						...e.manifest!,
 						dirName: e.manifest!.name,
 						hasTools: e.manifest!.contents.tools.length > 0,
@@ -8850,7 +8862,7 @@ async function handleApiRoute(
 				// Prepend synthetic built-in pack rows (§6.4): a distinct non-install
 				// row kind (no meta/ledger entry) flagged `builtin: true`. A
 				// user-installed same-name pack still appears as its own ledger row.
-				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e) => ({
 					scope: "server" as InstallScope,
 					packName: e.manifest!.name,
 					manifest: e.manifest!,
@@ -8976,7 +8988,7 @@ async function handleApiRoute(
 			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
 			// toggleable at server scope — resolve their catalogue from the built-in band.
 			if ((!entry || !entry.manifest) && scope === "server") {
-				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).find((e) => e.manifest?.name === packName);
 			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
