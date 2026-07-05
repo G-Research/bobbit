@@ -79,7 +79,9 @@ export function createScope(gw: GatewayFixture): TestScope {
 
 			for (const id of goals) {
 				await withRetry(async () => {
-					const resp = await gw.api(`/api/goals/${id}`, { method: "DELETE" });
+					// cascade=true tears down the goal's team + children; without it the
+					// server returns 422 CASCADE_REQUIRED for goals that spawned a team.
+					const resp = await gw.api(`/api/goals/${id}?cascade=true`, { method: "DELETE" });
 					if (!resp.ok && resp.status !== 404) throw new Error(`goal DELETE ${resp.status}`);
 				}, `goal ${id}`);
 			}
