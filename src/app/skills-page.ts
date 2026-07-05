@@ -5,7 +5,7 @@ import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, FolderOpen, Plus, X, Za
 import { renderApp } from "./state.js";
 import { gatewayFetch } from "./api.js";
 import { setHashRoute } from "./routing.js";
-import { getConfigScope, setConfigScope, getConfigProjectId, renderConfigScopeRow } from "./config-scope.js";
+import { getConfigScope, setConfigScope, getConfigApiProjectId, renderConfigScopeRow } from "./config-scope.js";
 
 // Module-level state
 let slashSkills: Array<{ name: string; description: string; source: string; filePath: string; content: string; originPackName?: string | null }> = [];
@@ -28,6 +28,10 @@ export function clearSkillsPageState(): void {
 	directoriesExpanded = false;
 }
 
+function slashSkillsDetailsUrl(): string {
+	return `/api/slash-skills/details?projectId=${encodeURIComponent(getConfigApiProjectId())}`;
+}
+
 export async function loadSkillsPageData(showLoading = true): Promise<void> {
 	if (showLoading) {
 		loading = true;
@@ -36,11 +40,7 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 	}
 
 	try {
-		const projectId = getConfigProjectId();
-		const skillsUrl = projectId
-			? `/api/slash-skills/details?projectId=${encodeURIComponent(projectId)}`
-			: "/api/slash-skills/details";
-		const slashRes = await gatewayFetch(skillsUrl);
+		const slashRes = await gatewayFetch(slashSkillsDetailsUrl());
 
 		if (slashRes.ok) {
 			const data = await slashRes.json();
@@ -156,7 +156,7 @@ async function saveCustomDirs(): Promise<void> {
 			body: JSON.stringify({ skill_directories: JSON.stringify(customDirs) }),
 		});
 		// Background refresh to pick up any newly discovered skills
-		const slashRes = await gatewayFetch("/api/slash-skills/details");
+		const slashRes = await gatewayFetch(slashSkillsDetailsUrl());
 		if (slashRes.ok) {
 			const data = await slashRes.json();
 			slashSkills = data.skills || [];

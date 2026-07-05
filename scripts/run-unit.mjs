@@ -82,6 +82,13 @@ if (!existsSync(join(projectRoot, "dist", "server"))) {
 
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
+// Live server secrets (token / TLS / sandbox-agent auth) resolve to an OS
+// user-level directory via serverSecretsDir(). Pin BOBBIT_SECRETS_DIR to an
+// isolated temp dir for the whole unit phase so no test can ever write real
+// admin secrets into the developer's home dir.
+const unitSecretsDir = process.env.BOBBIT_SECRETS_DIR
+	|| join(realpathSync(tmpdir()), `bobbit-unit-secrets-${process.pid}`);
+mkdirSync(unitSecretsDir, { recursive: true });
 
 // Live heartbeat sink for the node-logic runner. The hung-test reporter (paired
 // with the normal tap reporter) writes the set of test files still in flight to
@@ -90,12 +97,12 @@ const npx = isWin ? "npx.cmd" : "npx";
 // timeouts and pins the runner outside any single test.
 const heartbeatDir = mkdtempSync(join(realpathSync(tmpdir()), "bobbit-unit-hb-"));
 const nodeHeartbeatFile = join(heartbeatDir, "node-heartbeat.json");
-
 const testEnv = {
 	...process.env,
 	NODE_ENV: "test",
 	BOBBIT_TEST_NO_EXTERNAL: process.env.BOBBIT_TEST_NO_EXTERNAL || "1",
 	BOBBIT_TEST_NO_REMOTE: process.env.BOBBIT_TEST_NO_REMOTE || "1",
+	BOBBIT_SECRETS_DIR: unitSecretsDir,
 	// Consumed by tests/helpers/hung-test-reporter.mjs (node runner only).
 	BOBBIT_UNIT_NODE_HEARTBEAT_FILE: nodeHeartbeatFile,
 };
@@ -261,6 +268,12 @@ function run(label, args, opts = {}) {
 	});
 }
 
+// Per-test timeout for node-logic. node's default is Infinity, so a single test
+// whose body awaits something that never resolves hangs the ENTIRE phase until
+// the outer runner kill (~1050s) — an opaque, unactionable gate timeout. Bound
+// it generously: the slowest real node-logic test is ~1s, so 120s never flakes a
+// legitimate test even under heavy gate contention, but converts an infinite
+// hang into a named `test timed out` failure that points straight at the culprit.
 const nodeArgs = [
 	"tsx",
 	"--import", "./tests/helpers/css-stub-loader.mjs",

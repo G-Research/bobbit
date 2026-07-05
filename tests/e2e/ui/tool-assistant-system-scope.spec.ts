@@ -1,25 +1,25 @@
 /**
- * Browser E2E — Tools page "New Tool" button with system scope POSTs
- * /api/sessions with `{ toolAssistant: true, projectId: "system" }` and
- * succeeds even when zero real projects are registered.
+ * Browser E2E — Tools page "New Tool" button uses the user-facing
+ * Headquarters server workspace scope.
  *
- * The synthetic "system" project is registered server-side at startup but
- * filtered out of GET /api/projects (hidden), so state.projects can be
- * empty while the POST still resolves.
+ * Under the Headquarters split, the synthetic "system" project is hidden
+ * compatibility-only. First-party UI should POST `/api/sessions` with
+ * `{ toolAssistant: true, projectId: "headquarters" }` and succeed even when
+ * no normal projects are registered.
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
-test.describe("Tools page — New Tool with system scope", () => {
-	test("POST body carries projectId='system' and server returns 201", async ({ page }) => {
+test.describe("Tools page — New Tool with Headquarters scope", () => {
+	test("POST body carries projectId='headquarters' and server returns 201", async ({ page }) => {
 		await openApp(page);
 
-		// Remove the harness "default" project so only the hidden system
-		// project remains. This proves that the system-scope tool-assistant
-		// path doesn't depend on any real project being registered.
-		const list = await apiFetch("/api/projects").then(r => r.json()) as Array<{ id: string }>;
+		// Remove normal projects. Headquarters is immutable and remains the
+		// user-facing server workspace for tool assistants.
+		const list = await apiFetch("/api/projects").then(r => r.json()) as Array<{ id: string; kind?: string }>;
 		for (const p of list) {
+			if (p.id === "headquarters" || p.kind === "headquarters") continue;
 			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" });
 		}
 
@@ -39,7 +39,7 @@ test.describe("Tools page — New Tool with system scope", () => {
 			}
 		});
 
-		// Click "New Tool" (system scope is the default).
+		// Click "New Tool" (Headquarters scope is the default).
 		const newToolBtn = page.locator("button").filter({ hasText: /New Tool/ }).first();
 		await expect(newToolBtn).toBeVisible({ timeout: 10_000 });
 		const postPromise = page.waitForResponse((resp) => resp.request().method() === "POST" && new URL(resp.url()).pathname === "/api/sessions", { timeout: 10_000 });
@@ -48,11 +48,11 @@ test.describe("Tools page — New Tool with system scope", () => {
 
 		expect(postBody, "POST /api/sessions body must be captured").not.toBeNull();
 		expect(postBody.toolAssistant).toBe(true);
-		expect(postBody.projectId).toBe("system");
+		expect(postBody.projectId).toBe("headquarters");
 		expect(postStatus, "POST /api/sessions must succeed (201)").toBe(201);
 	});
 
-	test("persistence — system project survives reload (still POSTs successfully)", async ({ page }) => {
+	test("persistence — Headquarters scope survives reload (still POSTs successfully)", async ({ page }) => {
 		await openApp(page);
 		await page.reload();
 		await navigateToHash(page, "#/tools");

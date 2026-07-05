@@ -1,5 +1,5 @@
 import path from "node:path";
-import { bobbitConfigDir, bobbitDir, bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitDir, bobbitStateDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID, type RegisteredProject } from "./project-registry.js";
 import { GoalStore } from "./goal-store.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
@@ -27,10 +27,10 @@ import type { RemoteGitPolicy } from "../skills/git.js";
 /**
  * A container holding a complete set of stores scoped to one project.
  *
- * Each registered project gets its own ProjectContext with stores pointing
+ * Each normal project gets its own ProjectContext with stores pointing
  * at `<project-root>/.bobbit/state/` and `<project-root>/.bobbit/config/`.
- * Headquarters is the exception: it aliases the server `bobbitStateDir()` /
- * `bobbitConfigDir()` so BOBBIT_DIR redirects do not create a second scope.
+ * Headquarters is the exception: it is the server workspace itself and aliases
+ * `bobbitStateDir()` / `bobbitConfigDir()` under the physical Headquarters dir.
  *
  * NOTE: Store constructors are being updated in parallel to accept
  * stateDir/configDir parameters. This file will compile once those
@@ -84,7 +84,7 @@ export class ProjectContext {
       this.stateDir = bobbitStateDir();
       this.configDir = bobbitConfigDir();
     } else {
-      this.bobbitDir = path.join(project.rootPath, ".bobbit");
+      this.bobbitDir = normalProjectBobbitDir(project.rootPath);
       this.stateDir = path.join(this.bobbitDir, "state");
       this.configDir = path.join(this.bobbitDir, "config");
     }

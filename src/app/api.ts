@@ -36,6 +36,12 @@ import {
 import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
+import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
+
+function configApiProjectId(projectId?: string | null): string {
+	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
+	return !selected || selected === "system" || isHeadquartersProject(selected) ? HEADQUARTERS_PROJECT_ID : selected;
+}
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -1604,7 +1610,9 @@ export async function fetchGoalGitStatus(
 export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
 	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
-		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
+		const body: Record<string, any> = { title, spec, team: true, worktree: !isHeadquartersProject(projectId) };
+		const trimmedCwd = typeof cwd === "string" ? cwd.trim() : "";
+		if (trimmedCwd) body.cwd = trimmedCwd;
 		if (workflowId) body.workflowId = workflowId;
 		if (reattemptOf) body.reattemptOf = reattemptOf;
 		if (sandboxed !== undefined) body.sandboxed = !!sandboxed;
@@ -2428,9 +2436,11 @@ export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
 	}
 }
 
-export async function fetchRoles(): Promise<RoleData[]> {
+export async function fetchRoles(projectId?: string): Promise<RoleData[]> {
 	try {
-		const res = await gatewayFetch("/api/roles");
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
+		const res = await gatewayFetch(`/api/roles${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch roles: ${res.status}`);
 		const data = await res.json();
 		const roles: RoleData[] = data.roles || data || [];
@@ -2491,7 +2501,7 @@ export interface McpServerInfo {
 export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
 		const params = new URLSearchParams();
-		if (opts?.projectId) params.set("projectId", opts.projectId);
+		params.set("projectId", configApiProjectId(opts?.projectId));
 		if (opts?.cwd) params.set("cwd", opts.cwd);
 		if (opts?.ensure) params.set("ensure", "true");
 		const qs = params.toString();
@@ -2670,7 +2680,8 @@ export interface PackContributionsWire {
  *  (reconcile-on-uninstall keys off a row disappearing, not becoming empty). */
 export async function fetchContributions(projectId?: string): Promise<PackContributionsWire[]> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/ext/contributions${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch contributions: ${res.status}`);
 		const data = await res.json();
@@ -2683,7 +2694,8 @@ export async function fetchContributions(projectId?: string): Promise<PackContri
 
 export async function fetchToolsResponse(projectId?: string): Promise<ToolsResponse> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
 		return normalizeToolsResponse(await res.json());
@@ -2708,9 +2720,10 @@ export async function fetchToolDetail(name: string, projectId?: string): Promise
 	}
 }
 
-export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string | null }): Promise<boolean> {
+export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string | null }, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`, {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}${qs}`, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
@@ -2727,9 +2740,11 @@ export async function updateTool(name: string, updates: { description?: string; 
 // TOOL GROUP POLICY API
 // ============================================================================
 
-export async function fetchGroupPolicies(): Promise<Record<string, string>> {
+export async function fetchGroupPolicies(projectId?: string): Promise<Record<string, string>> {
 	try {
-		const res = await gatewayFetch("/api/tool-group-policies");
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
+		const res = await gatewayFetch(`/api/tool-group-policies${qs}`);
 		if (!res.ok) return {};
 		const raw = await res.json();
 		// The cascade endpoint returns { group: { policy, origin } } — normalize to flat { group: policy }
@@ -2747,10 +2762,10 @@ export async function fetchGroupPolicies(): Promise<Record<string, string>> {
 	}
 }
 
-export async function updateGroupPolicy(group: string, policy: string | null): Promise<void> {
+export async function updateGroupPolicy(group: string, policy: string | null, projectId?: string): Promise<void> {
 	await gatewayFetch(`/api/tool-group-policies/${encodeURIComponent(group)}`, {
 		method: "PUT",
-		body: JSON.stringify({ policy }),
+		body: JSON.stringify(projectId ? { policy, projectId } : { policy }),
 	});
 }
 
@@ -2763,6 +2778,7 @@ export async function createRole(role: {
 	model?: string;
 	thinkingLevel?: string;
 	description?: string;
+	projectId?: string;
 }): Promise<RoleData | null> {
 	try {
 		// Strip undefined fields so the wire payload stays minimal and the
@@ -2775,6 +2791,7 @@ export async function createRole(role: {
 			accessory: role.accessory,
 		};
 		if (role.toolPolicies !== undefined) body.toolPolicies = role.toolPolicies;
+		if (role.projectId !== undefined && role.projectId !== "") body.projectId = role.projectId;
 		if (role.model !== undefined && role.model !== "") body.model = role.model;
 		if (role.thinkingLevel !== undefined && role.thinkingLevel !== "") body.thinkingLevel = role.thinkingLevel;
 		if (role.description !== undefined && role.description !== "") body.description = role.description;
@@ -2787,6 +2804,17 @@ export async function createRole(role: {
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create role", message, { code, stack });
+		return null;
+	}
+}
+
+export async function fetchRoleDetail(name: string, projectId?: string): Promise<RoleData | null> {
+	try {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}${qs}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
 		return null;
 	}
 }
@@ -2895,8 +2923,9 @@ export async function postBootTiming(sample: unknown): Promise<void> {
 // SANDBOX STATUS API
 // ============================================================================
 
-export async function fetchSandboxStatus() {
-	const res = await gatewayFetch("/api/sandbox-status");
+export async function fetchSandboxStatus(projectId?: string) {
+	const apiProjectId = configApiProjectId(projectId);
+	const res = await gatewayFetch(`/api/sandbox-status?projectId=${encodeURIComponent(apiProjectId)}`);
 	if (!res.ok) return null;
 	return res.json();
 }

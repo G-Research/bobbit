@@ -13,7 +13,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import WebSocket from "ws";
-import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd, injectDefaultProjectId, defaultProject } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Config — agent tool tests need much longer timeouts
@@ -467,13 +467,12 @@ test.describe("Artifacts API", () => {
 });
 
 test.describe("Slash Skills API", () => {
-	test("GET /api/slash-skills discovers SKILL.md files", async () => {
-		// Create a test skill in .claude/skills/ under an isolated temp dir
-		// to avoid cache collisions with other tests
+	test("GET /api/slash-skills discovers project SKILL.md files", async () => {
+		// Discovery is scoped by explicit projectId and resolves from that project root.
 		const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
 		const { join } = await import("node:path");
-		const tmpCwd = join(process.cwd(), `.e2e-slash-skill-test-${Date.now()}`);
-		const skillDir = join(tmpCwd, ".claude", "skills", "test-skill");
+		const project = await defaultProject();
+		const skillDir = join(project.rootPath, ".claude", "skills", "test-skill");
 		mkdirSync(skillDir, { recursive: true });
 		writeFileSync(join(skillDir, "SKILL.md"), `---
 name: test-skill
@@ -485,7 +484,7 @@ Do something with $ARGUMENTS.
 `);
 
 		try {
-			const resp = await apiFetch(`/api/slash-skills?cwd=${encodeURIComponent(tmpCwd)}`);
+			const resp = await apiFetch(`/api/slash-skills?projectId=${encodeURIComponent(project.id)}`);
 			expect(resp.status).toBe(200);
 			const { skills } = await resp.json();
 			expect(Array.isArray(skills)).toBe(true);
@@ -495,24 +494,16 @@ Do something with $ARGUMENTS.
 			expect(testSkill.argumentHint).toBe("<thing>");
 			expect(testSkill.source).toBe("project");
 		} finally {
-			rmSync(tmpCwd, { recursive: true, force: true });
+			rmSync(skillDir, { recursive: true, force: true });
 		}
 	});
 
-	test("GET /api/slash-skills returns array for empty cwd", async () => {
-		const { mkdirSync } = await import("node:fs");
-		const { join } = await import("node:path");
-		const tmpCwd = join(process.cwd(), `.e2e-slash-empty-${Date.now()}`);
-		mkdirSync(tmpCwd, { recursive: true });
-		try {
-			const resp = await apiFetch(`/api/slash-skills?cwd=${encodeURIComponent(tmpCwd)}`);
-			expect(resp.status).toBe(200);
-			const { skills } = await resp.json();
-			expect(Array.isArray(skills)).toBe(true);
-		} finally {
-			const { rmSync } = await import("node:fs");
-			rmSync(tmpCwd, { recursive: true, force: true });
-		}
+	test("GET /api/slash-skills returns array for explicit project without cwd", async () => {
+		const project = await defaultProject();
+		const resp = await apiFetch(`/api/slash-skills?projectId=${encodeURIComponent(project.id)}`);
+		expect(resp.status).toBe(200);
+		const { skills } = await resp.json();
+		expect(Array.isArray(skills)).toBe(true);
 	});
 });
 

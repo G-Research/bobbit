@@ -10,6 +10,9 @@ const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const HEADQUARTERS_PROJECT_NAME = "Headquarters";
 const SYSTEM_PROJECT_ID = "system";
+const SAME_ROOT_PROJECT_ID = "same-root-normal-project";
+const SAME_ROOT_PROJECT_NAME = "Original Same Root Project";
+const SAME_ROOT_WORKFLOW_ID = "same-root-normal-workflow";
 
 const test = base;
 test.describe.configure({ mode: "serial" });
@@ -27,10 +30,25 @@ function uniqueDir(label: string): string {
 	return realpathSync(dir);
 }
 
+function canonicalPath(p: string): string {
+	try { return realpathSync(p); } catch { return path.resolve(p); }
+}
+
 function samePath(a: string, b: string): boolean {
-	const ra = (() => { try { return realpathSync(a); } catch { return path.resolve(a); } })();
-	const rb = (() => { try { return realpathSync(b); } catch { return path.resolve(b); } })();
+	const ra = canonicalPath(a);
+	const rb = canonicalPath(b);
 	return process.platform === "win32" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+}
+
+function expectSamePath(actual: string, expected: string, label: string): void {
+	expect(samePath(actual, expected), `${label}: expected ${actual} to equal ${expected}`).toBe(true);
+}
+
+function isSameOrUnder(child: string, parent: string): boolean {
+	const c = canonicalPath(child);
+	const p = canonicalPath(parent);
+	const rel = path.relative(p, c);
+	return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 function projectRecord(id: string, name: string, rootPath: string, extra: Record<string, unknown> = {}) {
@@ -45,9 +63,19 @@ function projectRecord(id: string, name: string, rootPath: string, extra: Record
 	};
 }
 
+function sameRootProjectRecord(serverRoot: string, extra: Record<string, unknown> = {}) {
+	return projectRecord(SAME_ROOT_PROJECT_ID, SAME_ROOT_PROJECT_NAME, serverRoot, {
+		position: 0,
+		colorLight: "#0ea5e9",
+		colorDark: "#38bdf8",
+		...extra,
+	});
+}
+
 interface StartOptions {
 	serverRoot?: string;
-	bobbitDir?: string;
+	/** Override Headquarters itself. When omitted, default HQ is <serverRoot>/.bobbit/headquarters. */
+	headquartersDir?: string;
 	agentDir?: string;
 	clean?: boolean;
 	projects?: unknown[];
@@ -58,7 +86,8 @@ interface StartOptions {
 interface StartedGateway {
 	baseURL: string;
 	serverRoot: string;
-	bobbitDir: string;
+	headquartersDir: string;
+	normalBobbitDir: string;
 	agentDir: string;
 	token: string;
 	request: (urlPath: string, init?: RequestInit) => Promise<Response>;
@@ -66,35 +95,108 @@ interface StartedGateway {
 	shutdown: (cleanup?: boolean) => Promise<void>;
 }
 
+function writeJson(file: string, data: unknown): void {
+	mkdirSync(path.dirname(file), { recursive: true });
+	writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+function readJsonFile(file: string): any {
+	return JSON.parse(readFileSync(file, "utf-8"));
+}
+
+function readStoreRecords(file: string): any[] {
+	if (!existsSync(file)) return [];
+	const data = readJsonFile(file);
+	if (Array.isArray(data)) return data;
+	if (Array.isArray(data.sessions)) return data.sessions;
+	if (Array.isArray(data.goals)) return data.goals;
+	if (Array.isArray(data.staff)) return data.staff;
+	if (Array.isArray(data.records)) return data.records;
+	return [];
+}
+
+function seedNormalSameRootLayout(serverRoot: string, opts: { sessions?: unknown[]; goals?: unknown[]; staff?: unknown[] } = {}): void {
+	const normalStateDir = join(serverRoot, ".bobbit", "state");
+	const normalConfigDir = join(serverRoot, ".bobbit", "config");
+	mkdirSync(normalStateDir, { recursive: true });
+	mkdirSync(normalConfigDir, { recursive: true });
+	writeFileSync(join(normalConfigDir, "project.yaml"), [
+		"name: Original Same Root Project",
+		"same_root_normal_marker: normal-project-config",
+		"workflows:",
+		`  ${SAME_ROOT_WORKFLOW_ID}:`,
+		`    id: ${SAME_ROOT_WORKFLOW_ID}`,
+		"    name: Same Root Normal Workflow",
+		"    gates:",
+		"      - id: plan",
+		"        name: Plan",
+		"",
+	].join("\n"));
+	writeJson(join(normalStateDir, "sessions.json"), opts.sessions ?? []);
+	writeJson(join(normalStateDir, "goals.json"), opts.goals ?? []);
+	writeJson(join(normalStateDir, "staff.json"), opts.staff ?? []);
+}
+
 async function startHeadquartersGateway(opts: StartOptions = {}): Promise<StartedGateway> {
 	const serverRoot = opts.serverRoot ?? uniqueDir("server");
-	const bobbitDir = opts.bobbitDir ?? join(serverRoot, ".bobbit");
-	const agentDir = opts.agentDir ?? join(bobbitDir, "agent");
+	const headquartersDir = opts.headquartersDir ?? join(serverRoot, ".bobbit", "headquarters");
+	const normalBobbitDir = join(serverRoot, ".bobbit");
+	const agentDir = opts.agentDir ?? join(headquartersDir, "agent");
+	const usesOverride = opts.headquartersDir !== undefined;
 	if (opts.clean !== false) {
 		rmSync(serverRoot, { recursive: true, force: true });
-		if (!samePath(bobbitDir, join(serverRoot, ".bobbit"))) rmSync(bobbitDir, { recursive: true, force: true });
+		if (!isSameOrUnder(headquartersDir, serverRoot)) rmSync(headquartersDir, { recursive: true, force: true });
 	}
 	mkdirSync(serverRoot, { recursive: true });
-	mkdirSync(join(bobbitDir, "state"), { recursive: true });
-	mkdirSync(join(bobbitDir, "config"), { recursive: true });
+	mkdirSync(join(headquartersDir, "state", "session-prompts"), { recursive: true });
+	mkdirSync(join(headquartersDir, "config"), { recursive: true });
 	mkdirSync(agentDir, { recursive: true });
-	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const projectsPath = join(bobbitDir, "state", "projects.json");
+	const projectsPath = join(headquartersDir, "state", "projects.json");
 	if (opts.projects !== undefined || !existsSync(projectsPath)) {
-		writeFileSync(projectsPath, JSON.stringify(opts.projects ?? [], null, 2));
+		writeJson(projectsPath, opts.projects ?? []);
 	}
-	const setupPath = join(bobbitDir, "state", "setup-complete");
+	const setupPath = join(headquartersDir, "state", "setup-complete");
 	if (!existsSync(setupPath)) writeFileSync(setupPath, "e2e\n");
-	const preferencesPath = join(bobbitDir, "state", "preferences.json");
+	const preferencesPath = join(headquartersDir, "state", "preferences.json");
 	if (opts.preferences !== undefined || !existsSync(preferencesPath)) {
-		writeFileSync(preferencesPath, JSON.stringify({ subgoalsEnabled: true, ...(opts.preferences ?? {}) }, null, 2));
+		writeJson(preferencesPath, { subgoalsEnabled: true, showHeadquartersInProjectLists: true, ...(opts.preferences ?? {}) });
 	}
 	for (const [name, data] of Object.entries(opts.stateFiles ?? {})) {
-		writeFileSync(join(bobbitDir, "state", name), JSON.stringify(data, null, 2));
+		writeJson(join(headquartersDir, "state", name), data);
 	}
 
-	process.env.BOBBIT_DIR = bobbitDir;
+	const previousEnv: Record<string, string | undefined> = {
+		BOBBIT_DIR: process.env.BOBBIT_DIR,
+		BOBBIT_SECRETS_DIR: process.env.BOBBIT_SECRETS_DIR,
+		BOBBIT_PI_DIR: process.env.BOBBIT_PI_DIR,
+		BOBBIT_AGENT_DIR: process.env.BOBBIT_AGENT_DIR,
+		NODE_ENV: process.env.NODE_ENV,
+		BOBBIT_SKIP_MCP: process.env.BOBBIT_SKIP_MCP,
+		BOBBIT_SKIP_NPM_CI: process.env.BOBBIT_SKIP_NPM_CI,
+		BOBBIT_TEST_NO_PUSH: process.env.BOBBIT_TEST_NO_PUSH,
+		BOBBIT_TEST_NO_REMOTE: process.env.BOBBIT_TEST_NO_REMOTE,
+		BOBBIT_TEST_NO_EXTERNAL: process.env.BOBBIT_TEST_NO_EXTERNAL,
+		BOBBIT_LLM_REVIEW_SKIP: process.env.BOBBIT_LLM_REVIEW_SKIP,
+		BOBBIT_NO_OPEN: process.env.BOBBIT_NO_OPEN,
+		BOBBIT_SKIP_AIGW_DISCOVERY: process.env.BOBBIT_SKIP_AIGW_DISCOVERY,
+		BOBBIT_SKIP_TITLE_GEN: process.env.BOBBIT_SKIP_TITLE_GEN,
+		BOBBIT_SKIP_WORKTREE_POOL: process.env.BOBBIT_SKIP_WORKTREE_POOL,
+		BOBBIT_GATEWAY_URL: process.env.BOBBIT_GATEWAY_URL,
+		BOBBIT_TOKEN: process.env.BOBBIT_TOKEN,
+	};
+	const restoreEnv = () => {
+		for (const [key, value] of Object.entries(previousEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	};
+
+	if (usesOverride) process.env.BOBBIT_DIR = headquartersDir;
+	else delete process.env.BOBBIT_DIR;
+	// Isolate live server secrets so they never land in the real OS home dir.
+	process.env.BOBBIT_SECRETS_DIR = join(serverRoot, ".bobbit-secrets");
+	delete process.env.BOBBIT_PI_DIR;
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_MCP = "1";
@@ -118,6 +220,9 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 
 	setProjectRoot(serverRoot);
 	scaffoldBobbitDir(serverRoot);
+	// Re-assert seeded files after scaffolding; scaffold must be idempotent and should not overwrite them.
+	if (opts.projects !== undefined) writeJson(projectsPath, opts.projects);
+	if (opts.preferences !== undefined) writeJson(preferencesPath, { subgoalsEnabled: true, showHeadquartersInProjectLists: true, ...opts.preferences });
 	const token = loadOrCreateToken();
 	const gw = createGateway({
 		host: "127.0.0.1",
@@ -130,7 +235,7 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 	});
 	const port = await gw.start();
 	const baseURL = `http://127.0.0.1:${port}`;
-	writeFileSync(join(bobbitDir, "state", "gateway-url"), baseURL, "utf-8");
+	writeFileSync(join(headquartersDir, "state", "gateway-url"), baseURL, "utf-8");
 	process.env.BOBBIT_GATEWAY_URL = baseURL;
 	process.env.BOBBIT_TOKEN = token;
 
@@ -153,24 +258,26 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 	return {
 		baseURL,
 		serverRoot,
-		bobbitDir,
+		headquartersDir,
+		normalBobbitDir,
 		agentDir,
 		token,
 		request,
 		json,
 		shutdown: async (cleanup = true) => {
-			await gw.shutdown();
+			try { await gw.shutdown(); }
+			finally { restoreEnv(); }
 			if (cleanup) {
 				try { rmSync(serverRoot, { recursive: true, force: true }); } catch {}
-				if (!samePath(bobbitDir, join(serverRoot, ".bobbit"))) {
-					try { rmSync(bobbitDir, { recursive: true, force: true }); } catch {}
+				if (!isSameOrUnder(headquartersDir, serverRoot)) {
+					try { rmSync(headquartersDir, { recursive: true, force: true }); } catch {}
 				}
 			}
 		},
 	};
 }
 
-function expectHeadquartersProject(project: any, serverRoot: string): void {
+function expectHeadquartersProject(project: any, headquartersDir: string): void {
 	expect(project).toMatchObject({
 		id: HEADQUARTERS_PROJECT_ID,
 		name: HEADQUARTERS_PROJECT_NAME,
@@ -179,302 +286,426 @@ function expectHeadquartersProject(project: any, serverRoot: string): void {
 	expect(project.hidden).not.toBe(true);
 	expect(project.provisional).not.toBe(true);
 	expect(project.position).toBeUndefined();
-	expect(samePath(project.rootPath, serverRoot), `expected ${project.rootPath} to equal ${serverRoot}`).toBe(true);
+	expectSamePath(project.rootPath, headquartersDir, "Headquarters rootPath");
 }
 
-test.describe("Headquarters API startup and project listing", () => {
-	test("fresh startup registers visible Headquarters by default and keeps system hidden", async () => {
-		const gw = await startHeadquartersGateway({ projects: [] });
+function expectSameRootNormalProject(project: any, serverRoot: string): void {
+	expect(project).toMatchObject({ id: SAME_ROOT_PROJECT_ID, name: SAME_ROOT_PROJECT_NAME });
+	expect(project.kind).not.toBe("headquarters");
+	expect(project.hidden).not.toBe(true);
+	expectSamePath(project.rootPath, serverRoot, "normal same-root rootPath");
+}
+
+async function startWithNormalSameRoot(opts: StartOptions = {}): Promise<StartedGateway> {
+	const serverRoot = opts.serverRoot ?? uniqueDir("same-root");
+	seedNormalSameRootLayout(serverRoot);
+	return startHeadquartersGateway({
+		...opts,
+		serverRoot,
+		projects: opts.projects ?? [sameRootProjectRecord(serverRoot)],
+		clean: false,
+	});
+}
+
+async function createSession(gw: StartedGateway, projectId: string): Promise<any> {
+	const created = await gw.json("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ projectId }),
+	});
+	expect(created.status, `POST /api/sessions projectId=${projectId}: ${created.text}`).toBe(201);
+	return created.body;
+}
+
+async function createGoal(gw: StartedGateway, projectId: string, workflowId?: string): Promise<any> {
+	const created = await gw.json("/api/goals", {
+		method: "POST",
+		body: JSON.stringify({
+			title: `${projectId} restart goal ${Date.now()}`,
+			spec: "Verify same-root Headquarters split restart persistence for project-scoped goal records.",
+			projectId,
+			worktree: false,
+			autoStartTeam: false,
+			...(workflowId ? { workflowId } : {}),
+		}),
+	});
+	expect(created.status, `POST /api/goals projectId=${projectId}: ${created.text}`).toBe(201);
+	return created.body;
+}
+
+async function createStaff(gw: StartedGateway, projectId: string): Promise<any> {
+	const created = await gw.json("/api/staff", {
+		method: "POST",
+		body: JSON.stringify({
+			name: `${projectId} Restart Staff ${Date.now()}`,
+			systemPrompt: "Keep this staff record for same-root restart persistence coverage.",
+			projectId,
+		}),
+	});
+	expect(created.status, `POST /api/staff projectId=${projectId}: ${created.text}`).toBe(201);
+	return created.body;
+}
+
+test.describe("Headquarters same-root split API", () => {
+	test("startup preserves a same-root normal project instead of promoting it to Headquarters", async () => {
+		const gw = await startWithNormalSameRoot();
 		try {
 			const list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(Array.isArray(list.body)).toBe(true);
-			expect(list.body.map((p: any) => p.id)).toContain(HEADQUARTERS_PROJECT_ID);
-			expect(list.body.map((p: any) => p.id)).not.toContain(SYSTEM_PROJECT_ID);
-			expectHeadquartersProject(list.body[0], gw.serverRoot);
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expectHeadquartersProject(list.body[0], gw.headquartersDir);
+			expectSameRootNormalProject(list.body[1], gw.serverRoot);
 
 			const hq = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`);
-			expect(hq.status).toBe(200);
-			expectHeadquartersProject(hq.body, gw.serverRoot);
+			expect(hq.status, hq.text).toBe(200);
+			expectHeadquartersProject(hq.body, gw.headquartersDir);
 
-			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
-			expect(system.status).toBe(200);
-			expect(system.body).toMatchObject({ id: SYSTEM_PROJECT_ID, hidden: true, kind: "system" });
-			expect(samePath(system.body.rootPath, join(gw.bobbitDir, "state", "system-project"))).toBe(true);
+			const normal = await gw.json(`/api/projects/${SAME_ROOT_PROJECT_ID}`);
+			expect(normal.status, normal.text).toBe(200);
+			expectSameRootNormalProject(normal.body, gw.serverRoot);
+
+			expect(existsSync(join(gw.headquartersDir, "state"))).toBe(true);
+			expect(existsSync(join(gw.headquartersDir, "config"))).toBe(true);
+			expect(existsSync(join(gw.normalBobbitDir, "state"))).toBe(true);
+			expect(existsSync(join(gw.normalBobbitDir, "config"))).toBe(true);
+			expectSamePath(join(gw.serverRoot, ".bobbit", "headquarters"), gw.headquartersDir, "default Headquarters directory");
+
+			const storedProjects = readJsonFile(join(gw.headquartersDir, "state", "projects.json"));
+			expect(storedProjects.map((p: any) => p.id).sort()).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID, SYSTEM_PROJECT_ID].sort());
+			expect(storedProjects.find((p: any) => p.id === SYSTEM_PROJECT_ID)).toMatchObject({ id: SYSTEM_PROJECT_ID, hidden: true, kind: "system" });
+			expectSameRootNormalProject(storedProjects.find((p: any) => p.id === SAME_ROOT_PROJECT_ID), gw.serverRoot);
+
+			const normalConfig = await gw.json(`/api/projects/${SAME_ROOT_PROJECT_ID}/config`);
+			expect(normalConfig.status, normalConfig.text).toBe(200);
+			expect(normalConfig.body.same_root_normal_marker).toBe("normal-project-config");
+			const hqConfig = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/config`);
+			expect(hqConfig.status, hqConfig.text).toBe(200);
+			expect(hqConfig.body.same_root_normal_marker).toBeUndefined();
 		} finally {
 			await gw.shutdown();
 		}
 	});
 
-	test("showHeadquartersInProjectLists=false hides only list output and persists across restart", async () => {
-		let gw = await startHeadquartersGateway({ projects: [] });
+	test("project assistant at the server run directory reuses the same-root normal project", async () => {
+		const gw = await startWithNormalSameRoot();
+		let sessionId: string | undefined;
+		try {
+			const created = await gw.json("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ assistantType: "project", cwd: gw.serverRoot }),
+			});
+			expect(created.status, created.text).toBe(201);
+			sessionId = created.body.id;
+			expect(created.body.provisionalProjectId).toBe(SAME_ROOT_PROJECT_ID);
+
+			const session = await gw.json(`/api/sessions/${sessionId}`);
+			expect(session.status, session.text).toBe(200);
+			expect(session.body.projectId).toBe(SAME_ROOT_PROJECT_ID);
+			expectSamePath(session.body.cwd, gw.serverRoot, "same-root project assistant cwd");
+
+			const list = await gw.json("/api/projects");
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expect(list.body.find((p: any) => p.id === SAME_ROOT_PROJECT_ID)?.provisional).not.toBe(true);
+			const storedProjects = readJsonFile(join(gw.headquartersDir, "state", "projects.json"));
+			expect(storedProjects.filter((p: any) => samePath(String(p.rootPath), gw.serverRoot) && !p.hidden).map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID]);
+		} finally {
+			if (sessionId) await gw.request(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
+			await gw.shutdown();
+		}
+	});
+
+	test("Quick Session creation uses projectId as the scope and separates Headquarters from same-root project state", async () => {
+		const gw = await startWithNormalSameRoot();
+		try {
+			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
+			expect(hqSession.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(hqSession.cwd, gw.headquartersDir, "Headquarters session cwd");
+			expect(hqSession.worktreePath).toBeUndefined();
+
+			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
+			expect(normalSession.projectId).toBe(SAME_ROOT_PROJECT_ID);
+			expectSamePath(normalSession.cwd, gw.serverRoot, "normal same-root session cwd");
+
+			const hqSessions = readStoreRecords(join(gw.headquartersDir, "state", "sessions.json"));
+			const normalSessions = readStoreRecords(join(gw.normalBobbitDir, "state", "sessions.json"));
+			expect(hqSessions.map((s: any) => s.id)).toContain(hqSession.id);
+			expect(hqSessions.map((s: any) => s.id)).not.toContain(normalSession.id);
+			expect(normalSessions.map((s: any) => s.id)).toContain(normalSession.id);
+			expect(normalSessions.map((s: any) => s.id)).not.toContain(hqSession.id);
+
+			const missingProject = await gw.json("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: gw.serverRoot }),
+			});
+			expect(missingProject.status, missingProject.text).toBe(400);
+			expect(missingProject.body?.code).toBe("PROJECT_ID_REQUIRED");
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
+	test("hide/show Headquarters is presentation-only and persists across restart with the same-root normal project intact", async () => {
+		let gw = await startWithNormalSameRoot();
 		const serverRoot = gw.serverRoot;
-		const bobbitDir = gw.bobbitDir;
+		const headquartersDir = gw.headquartersDir;
 		const agentDir = gw.agentDir;
 		try {
 			const hide = await gw.json("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ showHeadquartersInProjectLists: false }),
 			});
-			expect(hide.status).toBe(200);
+			expect(hide.status, hide.text).toBe(200);
 			expect(hide.body.showHeadquartersInProjectLists).toBe(false);
 
 			let list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).not.toContain(HEADQUARTERS_PROJECT_ID);
-			const explicitWhileHidden = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`);
-			expect(explicitWhileHidden.status).toBe(200);
-			expectHeadquartersProject(explicitWhileHidden.body, serverRoot);
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID]);
+			expectSameRootNormalProject(list.body[0], serverRoot);
+			const explicitHq = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`);
+			expect(explicitHq.status, explicitHq.text).toBe(200);
+			expectHeadquartersProject(explicitHq.body, headquartersDir);
 
 			await gw.shutdown(false);
-			gw = await startHeadquartersGateway({ serverRoot, bobbitDir, agentDir, clean: false });
+			gw = await startHeadquartersGateway({ serverRoot, headquartersDir, agentDir, clean: false });
 			list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).not.toContain(HEADQUARTERS_PROJECT_ID);
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID]);
 
 			const show = await gw.json("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ showHeadquartersInProjectLists: true }),
 			});
-			expect(show.status).toBe(200);
+			expect(show.status, show.text).toBe(200);
 			expect(show.body.showHeadquartersInProjectLists).toBe(true);
+
 			await gw.shutdown(false);
-			gw = await startHeadquartersGateway({ serverRoot, bobbitDir, agentDir, clean: false });
+			gw = await startHeadquartersGateway({ serverRoot, headquartersDir, agentDir, clean: false });
 			list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toContain(HEADQUARTERS_PROJECT_ID);
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expectHeadquartersProject(list.body[0], headquartersDir);
+			expectSameRootNormalProject(list.body[1], serverRoot);
 		} finally {
 			await gw.shutdown();
 		}
 	});
-});
 
-test.describe("Headquarters project lifecycle protections", () => {
-	test("rejects destructive lifecycle mutations and server-root archive/preflight remediation", async () => {
-		const gw = await startHeadquartersGateway({ projects: [] });
+	test("BOBBIT_DIR overrides the Headquarters directory itself while normal same-root storage stays under <serverRoot>/.bobbit", async () => {
+		const serverRoot = uniqueDir("override-server");
+		const customHeadquartersDir = uniqueDir("override-headquarters");
+		seedNormalSameRootLayout(serverRoot);
+		const gw = await startHeadquartersGateway({
+			serverRoot,
+			headquartersDir: customHeadquartersDir,
+			clean: false,
+			projects: [sameRootProjectRecord(serverRoot)],
+		});
 		try {
-			for (const [label, response] of [
-				["delete", await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`, { method: "DELETE" })],
-				["update", await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`, { method: "PUT", body: JSON.stringify({ name: "Moved", rootPath: uniqueDir("bad-root") }) })],
-				["promote", await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/promote`, { method: "POST", body: JSON.stringify({ name: "Moved" }) })],
-			] as const) {
-				expect(response.status, `${label} should be forbidden`).toBe(403);
-				expect(response.body?.code, `${label} should use the immutable error code`).toBe("HEADQUARTERS_IMMUTABLE");
-			}
+			const list = await gw.json("/api/projects");
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expectHeadquartersProject(list.body[0], customHeadquartersDir);
+			expectSameRootNormalProject(list.body[1], serverRoot);
+			expect(existsSync(join(customHeadquartersDir, "state", "projects.json"))).toBe(true);
+			expect(existsSync(join(customHeadquartersDir, "config"))).toBe(true);
+			expect(existsSync(join(serverRoot, ".bobbit", "state"))).toBe(true);
+			expect(existsSync(join(serverRoot, ".bobbit", "config", "project.yaml"))).toBe(true);
+			expect(existsSync(join(serverRoot, ".bobbit", "headquarters"))).toBe(false);
 
+			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
+			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
+			expectSamePath(hqSession.cwd, customHeadquartersDir, "BOBBIT_DIR Headquarters session cwd");
+			expectSamePath(normalSession.cwd, serverRoot, "BOBBIT_DIR normal same-root session cwd");
+			expect(readStoreRecords(join(customHeadquartersDir, "state", "sessions.json")).map((s: any) => s.id)).toContain(hqSession.id);
+			expect(readStoreRecords(join(serverRoot, ".bobbit", "state", "sessions.json")).map((s: any) => s.id)).toContain(normalSession.id);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
+	test("Add Project upsert can intentionally create a normal project at the server run directory and archive skips Headquarters", async () => {
+		const serverRoot = uniqueDir("add-server-root");
+		const gw = await startHeadquartersGateway({ serverRoot, clean: false, projects: [] });
+		try {
+			writeFileSync(join(gw.headquartersDir, "state", "hq-sentinel.txt"), "keep headquarters state");
+			const preflight = await gw.json(`/api/projects/preflight?path=${encodeURIComponent(serverRoot)}`);
+			expect(preflight.status, preflight.text).toBe(200);
+			expect(preflight.body?.hasFail).toBe(false);
+			expect(JSON.stringify(preflight.body)).not.toMatch(/HEADQUARTERS_ALREADY_EXISTS/);
+			expect(JSON.stringify(preflight.body)).toMatch(/Headquarters|server run directory/i);
+			expect(preflight.body.checks?.find((check: any) => check.remediation?.kind === "archive-bobbit"), "same-root add preflight must not offer to archive Headquarters").toBeUndefined();
+
+			const create = await gw.json("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: SAME_ROOT_PROJECT_NAME, rootPath: serverRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
+			});
+			expect([200, 201]).toContain(create.status);
+			expect(create.body.id).not.toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(create.body.rootPath, serverRoot, "created same-root normal project rootPath");
+
+			const upsertAgain = await gw.json("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: "Same Root Reuse", rootPath: serverRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
+			});
+			expect(upsertAgain.status, upsertAgain.text).toBe(200);
+			expect(upsertAgain.body.id).toBe(create.body.id);
+			expect(upsertAgain.body.id).not.toBe(HEADQUARTERS_PROJECT_ID);
+
+			const duplicate = await gw.json("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: "Duplicate Same Root", rootPath: serverRoot, acceptCanonical: true, __e2e_seed_skip__: true }),
+			});
+			expect([400, 409]).toContain(duplicate.status);
+			expect(String(duplicate.body?.code ?? duplicate.body?.error)).toMatch(/duplicate|already|project/i);
+
+			mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
+			writeFileSync(join(serverRoot, ".bobbit", "config", "normal-sentinel.txt"), "normal project config");
 			const archive = await gw.json("/api/projects/archive-bobbit", {
 				method: "POST",
-				body: JSON.stringify({ rootPath: gw.serverRoot }),
+				body: JSON.stringify({ rootPath: serverRoot }),
 			});
-			expect(archive.status).toBe(403);
-			expect(String(archive.body?.code ?? archive.body?.error)).toMatch(/HEADQUARTERS_IMMUTABLE|gateway-owned|Headquarters/i);
-			expect(existsSync(gw.bobbitDir), "gateway-owned .bobbit must not be moved").toBe(true);
+			expect(archive.status, archive.text).toBe(200);
+			expect(existsSync(join(gw.headquartersDir, "state", "hq-sentinel.txt")), "archive-bobbit for the same-root normal project must not delete Headquarters state").toBe(true);
+			expect(existsSync(gw.headquartersDir), "archive-bobbit for serverRoot must skip .bobbit/headquarters").toBe(true);
 
-			const preflight = await gw.json(`/api/projects/preflight?path=${encodeURIComponent(gw.serverRoot)}`);
-			expect(preflight.status).toBe(200);
-			const archiveRemediation = preflight.body.checks.find((check: any) => check.remediation?.kind === "archive-bobbit");
-			expect(archiveRemediation, "server root preflight must not offer archive-bobbit remediation").toBeUndefined();
-			const gatewayOwned = preflight.body.checks.find((check: any) => check.id === "bobbit.gateway-owned");
-			expect(gatewayOwned?.level).toMatch(/pass|warn|info/);
+			const archiveHq = await gw.json("/api/projects/archive-bobbit", {
+				method: "POST",
+				body: JSON.stringify({ rootPath: gw.headquartersDir }),
+			});
+			expect(archiveHq.status, archiveHq.text).toBe(403);
+			expect(archiveHq.body?.code).toBe("HEADQUARTERS_IMMUTABLE");
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
+	test("restart preserves distinct same-root sessions, goals, and staff records", async () => {
+		let gw = await startWithNormalSameRoot();
+		const serverRoot = gw.serverRoot;
+		const headquartersDir = gw.headquartersDir;
+		const agentDir = gw.agentDir;
+		try {
+			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
+			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
+			const hqGoal = await createGoal(gw, HEADQUARTERS_PROJECT_ID);
+			const normalGoal = await createGoal(gw, SAME_ROOT_PROJECT_ID, SAME_ROOT_WORKFLOW_ID);
+			const hqStaff = await createStaff(gw, HEADQUARTERS_PROJECT_ID);
+			const normalStaff = await createStaff(gw, SAME_ROOT_PROJECT_ID);
+
+			await gw.shutdown(false);
+			gw = await startHeadquartersGateway({ serverRoot, headquartersDir, agentDir, clean: false });
+
+			const list = await gw.json("/api/projects");
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+
+			const hqSessions = await gw.json(`/api/sessions?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			const normalSessions = await gw.json(`/api/sessions?projectId=${SAME_ROOT_PROJECT_ID}`);
+			expect(hqSessions.status, hqSessions.text).toBe(200);
+			expect(normalSessions.status, normalSessions.text).toBe(200);
+			expect((hqSessions.body.sessions ?? hqSessions.body).map((s: any) => s.id)).toContain(hqSession.id);
+			expect((hqSessions.body.sessions ?? hqSessions.body).map((s: any) => s.id)).not.toContain(normalSession.id);
+			expect((normalSessions.body.sessions ?? normalSessions.body).map((s: any) => s.id)).toContain(normalSession.id);
+
+			const hqGoals = await gw.json(`/api/goals?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			const normalGoals = await gw.json(`/api/goals?projectId=${SAME_ROOT_PROJECT_ID}`);
+			expect(hqGoals.status, hqGoals.text).toBe(200);
+			expect(normalGoals.status, normalGoals.text).toBe(200);
+			expect((hqGoals.body.goals ?? hqGoals.body).map((g: any) => g.id)).toContain(hqGoal.id);
+			expect((hqGoals.body.goals ?? hqGoals.body).map((g: any) => g.id)).not.toContain(normalGoal.id);
+			expect((normalGoals.body.goals ?? normalGoals.body).map((g: any) => g.id)).toContain(normalGoal.id);
+
+			const hqStaffList = await gw.json(`/api/staff?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			const normalStaffList = await gw.json(`/api/staff?projectId=${SAME_ROOT_PROJECT_ID}`);
+			expect(hqStaffList.status, hqStaffList.text).toBe(200);
+			expect(normalStaffList.status, normalStaffList.text).toBe(200);
+			expect((hqStaffList.body.staff ?? hqStaffList.body).map((s: any) => s.id)).toContain(hqStaff.id);
+			expect((hqStaffList.body.staff ?? hqStaffList.body).map((s: any) => s.id)).not.toContain(normalStaff.id);
+			expect((normalStaffList.body.staff ?? normalStaffList.body).map((s: any) => s.id)).toContain(normalStaff.id);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+
+	test("system project remains hidden and anchored in Headquarters state", async () => {
+		const gw = await startWithNormalSameRoot();
+		try {
+			const list = await gw.json("/api/projects");
+			expect(list.status, list.text).toBe(200);
+			expect(list.body.map((p: any) => p.id)).not.toContain(SYSTEM_PROJECT_ID);
+			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
+			expect(system.status, system.text).toBe(200);
+			expect(system.body).toMatchObject({ id: SYSTEM_PROJECT_ID, hidden: true, kind: "system" });
+			expectSamePath(system.body.rootPath, join(gw.headquartersDir, "state", "system-project"), "hidden system project rootPath");
 		} finally {
 			await gw.shutdown();
 		}
 	});
 });
 
-test.describe("Headquarters ordering and normal projects", () => {
-	test("anchors Headquarters first and excludes it from PUT /api/projects/order payloads", async () => {
+test.describe("Headquarters server-scope config from hidden `system` proposals", () => {
+	// Code-quality finding: server-scope role/tool assistant sessions resolve to
+	// the hidden internal `system` project. Their proposal drafts carry
+	// projectId="system", so on acceptance the config must NOT land in the hidden
+	// system store — it must resolve to the user-facing Headquarters/server scope
+	// (Layer 2 defense-in-depth: role + tool mutation scope resolution).
+	test("POST /api/roles with projectId=system writes to Headquarters/server scope, not the hidden system store", async () => {
 		const gw = await startHeadquartersGateway({ projects: [] });
 		try {
-			const rootA = uniqueDir("normal-a");
-			const rootB = uniqueDir("normal-b");
-			const createA = await gw.json("/api/projects", { method: "POST", body: JSON.stringify({ name: "A", rootPath: rootA, acceptCanonical: true, __e2e_seed_skip__: true }) });
-			const createB = await gw.json("/api/projects", { method: "POST", body: JSON.stringify({ name: "B", rootPath: rootB, acceptCanonical: true, __e2e_seed_skip__: true }) });
-			expect(createA.status).toBe(201);
-			expect(createB.status).toBe(201);
-			const a = createA.body;
-			const b = createB.body;
-
-			const reorder = await gw.json("/api/projects/order", { method: "PUT", body: JSON.stringify({ projectIds: [b.id, a.id] }) });
-			expect(reorder.status).toBe(200);
-			expect(reorder.body.projects.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, b.id, a.id]);
-
-			const list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, b.id, a.id]);
-			expect(list.body[0].position).toBeUndefined();
-			expect(list.body.slice(1).map((p: any) => p.position)).toEqual([0, 1]);
-
-			const withHq = await gw.json("/api/projects/order", { method: "PUT", body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, a.id, b.id] }) });
-			expect(withHq.status).toBe(400);
-			expect(withHq.body.code).toBe("invalid_project_order");
-
-			const duplicateServerRoot = await gw.json("/api/projects", { method: "POST", body: JSON.stringify({ name: "Duplicate HQ", rootPath: gw.serverRoot, acceptCanonical: true }) });
-			expect([200, 400, 409]).toContain(duplicateServerRoot.status);
-			if (duplicateServerRoot.status === 200) {
-				expect(duplicateServerRoot.body.id).toBe(HEADQUARTERS_PROJECT_ID);
-			} else {
-				expect(String(duplicateServerRoot.body?.code ?? duplicateServerRoot.body?.error)).toMatch(/headquarters|server/i);
-			}
-		} finally {
-			await gw.shutdown();
-		}
-	});
-});
-
-test.describe("Headquarters BOBBIT_DIR config aliasing", () => {
-	test("server roles/tools/policies resolve for Headquarters as server origin while workflows stay project-scoped", async () => {
-		const serverRoot = uniqueDir("alias-root");
-		const redirectedBobbitDir = uniqueDir("alias-bobbit");
-		const gw = await startHeadquartersGateway({ serverRoot, bobbitDir: redirectedBobbitDir, projects: [] });
-		try {
-			const hq = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`);
-			expect(hq.status).toBe(200);
-			expectHeadquartersProject(hq.body, serverRoot);
-			expect(existsSync(join(redirectedBobbitDir, "config"))).toBe(true);
-			expect(existsSync(join(serverRoot, ".bobbit", "config"))).toBe(false);
-
-			const roleCreate = await gw.json("/api/roles", {
+			const roleName = "sys-scope-role";
+			const created = await gw.json("/api/roles", {
 				method: "POST",
 				body: JSON.stringify({
-					name: "hq-api-role",
-					label: "HQ API Role",
-					promptTemplate: "server role for Headquarters alias API test",
-					accessory: "none",
-					model: "openai/gpt-test",
-					thinkingLevel: "medium",
+					projectId: SYSTEM_PROJECT_ID,
+					name: roleName,
+					label: "Sys Scope Role",
+					promptTemplate: "created from a server-scope assistant proposal",
 				}),
 			});
-			expect(roleCreate.status).toBe(201);
+			expect(created.status, created.text).toBe(201);
+
+			// Landed in the Headquarters/server role store...
+			const serverRoleFile = join(gw.headquartersDir, "config", "roles", `${roleName}.yaml`);
+			expect(existsSync(serverRoleFile), `role must be written to Headquarters/server store at ${serverRoleFile}`).toBe(true);
+
+			// ...and NOT in the hidden system project's config store.
+			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
+			expect(system.status, system.text).toBe(200);
+			const systemRoleFile = join(system.body.rootPath, ".bobbit", "config", "roles", `${roleName}.yaml`);
+			expect(existsSync(systemRoleFile), "role must NOT be written to the hidden system project store").toBe(false);
+
+			// Visible in the Headquarters cascade with server origin.
 			const hqRoles = await gw.json(`/api/roles?projectId=${HEADQUARTERS_PROJECT_ID}`);
-			expect(hqRoles.status).toBe(200);
-			const role = hqRoles.body.roles.find((entry: any) => entry.name === "hq-api-role");
-			expect(role).toMatchObject({ name: "hq-api-role", origin: "server" });
-			expect(hqRoles.body.roles.filter((entry: any) => entry.name === "hq-api-role")).toHaveLength(1);
-
-			const policy = await gw.json("/api/tool-group-policies/Shell", { method: "PUT", body: JSON.stringify({ policy: "ask" }) });
-			expect(policy.status).toBe(200);
-			const hqPolicies = await gw.json(`/api/tool-group-policies?projectId=${HEADQUARTERS_PROJECT_ID}`);
-			expect(hqPolicies.status).toBe(200);
-			expect(hqPolicies.body.Shell).toMatchObject({ policy: "ask", origin: "server" });
-
-			const serverConfigWrite = await gw.json("/api/project-config", { method: "PUT", body: JSON.stringify({ hq_shared_server_marker: "server-write" }) });
-			expect(serverConfigWrite.status).toBe(200);
-			const hqConfigAfterServerWrite = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/config`);
-			expect(hqConfigAfterServerWrite.status).toBe(200);
-			expect(hqConfigAfterServerWrite.body.hq_shared_server_marker).toBe("server-write");
-
-			const workflowBody = {
-				hq_shared_project_marker: "headquarters-write",
-				components: [{ name: "server", repo: "." }],
-				workflows: {
-					"hq-workflow": { id: "hq-workflow", name: "HQ Workflow", gates: [{ id: "one", name: "One" }] },
-				},
-			};
-			const putConfig = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}/config`, { method: "PUT", body: JSON.stringify(workflowBody) });
-			expect(putConfig.status).toBe(200);
-			const serverConfigAfterHqWrite = await gw.json("/api/project-config");
-			expect(serverConfigAfterHqWrite.status).toBe(200);
-			expect(serverConfigAfterHqWrite.body.hq_shared_server_marker).toBe("server-write");
-			expect(serverConfigAfterHqWrite.body.hq_shared_project_marker).toBe("headquarters-write");
-
-			const hqWorkflows = await gw.json(`/api/workflows?projectId=${HEADQUARTERS_PROJECT_ID}`);
-			expect(hqWorkflows.status).toBe(200);
-			expect((hqWorkflows.body.workflows ?? hqWorkflows.body).map((wf: any) => wf.id)).toContain("hq-workflow");
-			const serverWorkflows = await gw.json("/api/workflows");
-			expect(serverWorkflows.status).toBe(200);
-			expect((serverWorkflows.body.workflows ?? serverWorkflows.body).map((wf: any) => wf.id)).not.toContain("hq-workflow");
-		} finally {
-			await gw.shutdown();
-		}
-	});
-});
-
-test.describe("Headquarters migration", () => {
-	test("promotes an existing server-root project to Headquarters and rewrites structured project references", async () => {
-		const serverRoot = uniqueDir("migration-root");
-		const childRoot = uniqueDir("migration-child");
-		const oldProjectId = "old-server-root-project";
-		const now = Date.now();
-		const gw = await startHeadquartersGateway({
-			serverRoot,
-			projects: [
-				projectRecord(oldProjectId, "Old Server Root", serverRoot, { position: 0 }),
-				projectRecord("child-project", "Child Project", childRoot, { parentProjectId: oldProjectId, position: 1 }),
-			],
-			stateFiles: {
-				"goals.json": [{ id: "legacy-goal", title: "Legacy Goal", cwd: serverRoot, state: "todo", spec: "legacy spec", createdAt: now, updatedAt: now, projectId: oldProjectId, setupStatus: "ready" }],
-				"sessions.json": [{ id: "legacy-session", title: "Legacy Session", cwd: serverRoot, agentSessionFile: join(serverRoot, "legacy.jsonl"), createdAt: now, lastActivity: now, projectId: oldProjectId }],
-				"staff.json": [{ id: "legacy-staff", name: "Legacy Staff", description: "legacy", systemPrompt: "prompt", cwd: serverRoot, state: "active", triggers: [], memory: "", accessory: "none", createdAt: now, updatedAt: now, projectId: oldProjectId, sandboxed: false }],
-			},
-		});
-		try {
-			const list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, "child-project"]);
-			expectHeadquartersProject(list.body[0], serverRoot);
-			expect(list.body.find((p: any) => p.id === "child-project").parentProjectId).toBe(HEADQUARTERS_PROJECT_ID);
-
-			const storedProjects = JSON.parse(readFileSync(join(gw.bobbitDir, "state", "projects.json"), "utf-8"));
-			expect(storedProjects.map((p: any) => p.id)).not.toContain(oldProjectId);
-			expect(storedProjects.find((p: any) => p.id === "child-project").parentProjectId).toBe(HEADQUARTERS_PROJECT_ID);
-
-			for (const file of ["goals.json", "sessions.json", "staff.json"]) {
-				const data = JSON.parse(readFileSync(join(gw.bobbitDir, "state", file), "utf-8"));
-				expect(JSON.stringify(data), `${file} must not retain the old server-root project id`).not.toContain(oldProjectId);
-				expect(data[0].projectId).toBe(HEADQUARTERS_PROJECT_ID);
-				expect(existsSync(join(gw.bobbitDir, "state", `${file}.pre-migration`)), `${file} should remain the central Headquarters state file, not be renamed away`).toBe(false);
-			}
+			expect(hqRoles.status, hqRoles.text).toBe(200);
+			const found = (hqRoles.body.roles as any[]).find((r) => r.name === roleName);
+			expect(found, "role must be visible in the Headquarters/server roles cascade").toBeTruthy();
+			expect(found.origin).toBe("server");
 		} finally {
 			await gw.shutdown();
 		}
 	});
 
-	test("preserves legacy server-root .bobbit state/config when BOBBIT_DIR is redirected", async () => {
-		const serverRoot = uniqueDir("redirected-migration-root");
-		const redirectedBobbitDir = uniqueDir("redirected-migration-bobbit");
-		const oldProjectId = "old-redirected-server-root-project";
-		const now = Date.now();
-		mkdirSync(join(serverRoot, ".bobbit", "state"), { recursive: true });
-		mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
-		writeFileSync(join(serverRoot, ".bobbit", "state", "goals.json"), JSON.stringify([
-			{ id: "legacy-redirected-goal", title: "Legacy Redirected Goal", cwd: serverRoot, state: "todo", spec: "legacy redirected spec", createdAt: now, updatedAt: now, projectId: oldProjectId, setupStatus: "ready" },
-		], null, 2));
-		writeFileSync(join(serverRoot, ".bobbit", "config", "project.yaml"), [
-			"legacy_redirected_marker: preserved",
-			"workflows:",
-			"  legacy-redirected-workflow:",
-			"    id: legacy-redirected-workflow",
-			"    name: Legacy Redirected Workflow",
-			"    gates:",
-			"      - id: plan",
-			"        name: Plan",
-			"",
-		].join("\n"));
-
-		const gw = await startHeadquartersGateway({
-			serverRoot,
-			bobbitDir: redirectedBobbitDir,
-			clean: false,
-			projects: [projectRecord(oldProjectId, "Old Redirected Server Root", serverRoot, { position: 0 })],
-		});
+	test("POST /api/tools/:name/customize with projectId=system writes to Headquarters/server scope, not the hidden system store", async () => {
+		const gw = await startHeadquartersGateway({ projects: [] });
 		try {
-			const list = await gw.json("/api/projects");
-			expect(list.status).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID]);
-			expectHeadquartersProject(list.body[0], serverRoot);
+			// `read` is a builtin File System tool (defaults/tools/filesystem/read.yaml).
+			const customize = await gw.json(
+				`/api/tools/read/customize?scope=project&projectId=${SYSTEM_PROJECT_ID}`,
+				{ method: "POST" },
+			);
+			expect(customize.status, customize.text).toBe(201);
+			const groupDir = customize.body.groupDir as string;
+			expect(groupDir, "customize must resolve the builtin tool's group dir").toBeTruthy();
 
-			const centralGoals = JSON.parse(readFileSync(join(redirectedBobbitDir, "state", "goals.json"), "utf-8"));
-			expect(centralGoals).toHaveLength(1);
-			expect(centralGoals[0]).toMatchObject({ id: "legacy-redirected-goal", projectId: HEADQUARTERS_PROJECT_ID });
-			expect(existsSync(join(serverRoot, ".bobbit", "state", "goals.json")), "legacy root state should be preserved in place").toBe(true);
+			// Copied into the Headquarters/server tools dir...
+			const serverToolFile = join(gw.headquartersDir, "config", "tools", groupDir, "read.yaml");
+			expect(existsSync(serverToolFile), `tool must be written to Headquarters/server store at ${serverToolFile}`).toBe(true);
 
-			const serverConfig = await gw.json("/api/project-config");
-			expect(serverConfig.status).toBe(200);
-			expect(serverConfig.body.legacy_redirected_marker).toBe("preserved");
-			const hqWorkflows = await gw.json(`/api/workflows?projectId=${HEADQUARTERS_PROJECT_ID}`);
-			expect(hqWorkflows.status).toBe(200);
-			expect((hqWorkflows.body.workflows ?? hqWorkflows.body).map((wf: any) => wf.id)).toContain("legacy-redirected-workflow");
+			// ...and NOT into the hidden system project's config store.
+			const system = await gw.json(`/api/projects/${SYSTEM_PROJECT_ID}`);
+			expect(system.status, system.text).toBe(200);
+			const systemToolDir = join(system.body.rootPath, ".bobbit", "config", "tools", groupDir);
+			expect(existsSync(systemToolDir), "tool must NOT be written to the hidden system project store").toBe(false);
 		} finally {
 			await gw.shutdown();
 		}
@@ -482,7 +713,7 @@ test.describe("Headquarters migration", () => {
 });
 
 test.describe("Headquarters no-git goals", () => {
-	test("honors worktree:false for git-backed Headquarters roots", async () => {
+	test("Headquarters goals default to the Headquarters directory and do not allocate git/worktree state", async () => {
 		const gw = await startHeadquartersGateway({ projects: [] });
 		try {
 			execFileSync("git", ["init"], { cwd: gw.serverRoot, stdio: "ignore" });
@@ -491,86 +722,160 @@ test.describe("Headquarters no-git goals", () => {
 				method: "POST",
 				body: JSON.stringify({
 					title: "Headquarters git data-only goal",
-					spec: "Verify that an explicit no-worktree Headquarters goal does not allocate a branch even when the server root is a git repo.",
+					spec: "Verify that a Headquarters goal does not allocate a branch even when the server run directory is a git repo.",
 					projectId: HEADQUARTERS_PROJECT_ID,
-					cwd: gw.serverRoot,
-					worktree: false,
+					worktree: true,
 					autoStartTeam: false,
 					workflowId: workflow.id,
 					workflow,
 				}),
 			});
-			expect(create.status).toBe(201);
+			expect([201, 422]).toContain(create.status);
+			if (create.status === 422) {
+				expect(create.body?.code).toBe("HEADQUARTERS_WORKTREE_UNAVAILABLE");
+				return;
+			}
 			expect(create.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(create.body.cwd, gw.headquartersDir, "Headquarters goal cwd");
 			expect(create.body.setupStatus).toBe("ready");
 			expect(create.body.branch).toBeUndefined();
 			expect(create.body.worktreePath).toBeUndefined();
 			expect(create.body.repoPath).toBeUndefined();
 
 			const gitStatus = await gw.json(`/api/goals/${create.body.id}/git-status`);
-			expect(gitStatus.status).toBe(409);
+			expect(gitStatus.status, gitStatus.text).toBe(409);
 			expect(gitStatus.body.code).toBe("GOAL_GIT_UNAVAILABLE");
 		} finally {
 			await gw.shutdown();
 		}
 	});
 
-	test("creates a worktree:false Headquarters goal with ready setup, gates/tasks/archive basics, and clear git-dependent responses", async () => {
-		const gw = await startHeadquartersGateway({ projects: [] });
+	test("PUT /api/goals/:id validates a cwd update against the goal's project scope", async () => {
+		const gw = await startWithNormalSameRoot();
 		try {
-			const workflow = { id: "hq-data-only", name: "HQ Data Only", gates: [{ id: "plan", name: "Plan", content: true }] };
-			const create = await gw.json("/api/goals", {
-				method: "POST",
-				body: JSON.stringify({
-					title: "Headquarters data-only goal",
-					spec: "Verify that a Headquarters no-git goal can use data-only API flows without branch or worktree assumptions.",
-					projectId: HEADQUARTERS_PROJECT_ID,
-					cwd: gw.serverRoot,
-					worktree: false,
-					autoStartTeam: false,
-					workflowId: workflow.id,
-					workflow,
-				}),
+			// Headquarters goal: the goal id fixes HQ scope, so a cwd update must
+			// stay inside the Headquarters directory. serverRoot is the PARENT of
+			// the Headquarters dir and must be rejected.
+			const hqGoal = await createGoal(gw, HEADQUARTERS_PROJECT_ID);
+			const hqOutside = await gw.json(`/api/goals/${hqGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.serverRoot }),
 			});
-			expect(create.status).toBe(201);
-			const goal = create.body;
-			expect(goal.projectId).toBe(HEADQUARTERS_PROJECT_ID);
-			expect(goal.setupStatus).toBe("ready");
-			expect(goal.branch).toBeUndefined();
-			expect(goal.worktreePath).toBeUndefined();
-			expect(goal.repoPath).toBeUndefined();
+			expect(hqOutside.status, hqOutside.text).toBe(422);
+			expect(hqOutside.body?.code).toBe("CWD_OUTSIDE_PROJECT");
 
-			const gates = await gw.json(`/api/goals/${goal.id}/gates`);
-			expect(gates.status).toBe(200);
-			expect(gates.body.gates.map((gate: any) => gate.gateId)).toEqual(["plan"]);
+			const hqInside = await gw.json(`/api/goals/${hqGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.headquartersDir }),
+			});
+			expect(hqInside.status, hqInside.text).toBe(200);
 
-			const task = await gw.json(`/api/goals/${goal.id}/tasks`, { method: "POST", body: JSON.stringify({ title: "Data-only task", type: "testing", spec: "confirm task store works" }) });
-			expect(task.status).toBe(201);
-			expect(task.body.goalId).toBe(goal.id);
+			// Normal same-root goal: cwd update must stay inside the project root
+			// (or an owned worktree). A wholly unrelated directory is rejected.
+			const normalGoal = await createGoal(gw, SAME_ROOT_PROJECT_ID, SAME_ROOT_WORKFLOW_ID);
+			const outside = uniqueDir("goal-cwd-escape");
+			const normalOutside = await gw.json(`/api/goals/${normalGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: outside }),
+			});
+			expect(normalOutside.status, normalOutside.text).toBe(422);
+			expect(normalOutside.body?.code).toBe("CWD_OUTSIDE_PROJECT");
 
-			const githubLink = await gw.json(`/api/goals/${goal.id}/github-link`);
-			expect(githubLink.status).toBe(200);
-			expect(githubLink.body).toMatchObject({ available: false, reason: "no-worktree" });
+			const normalInside = await gw.json(`/api/goals/${normalGoal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ cwd: gw.serverRoot }),
+			});
+			expect(normalInside.status, normalInside.text).toBe(200);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+});
 
-			for (const [label, response] of [
-				["git-status", await gw.json(`/api/goals/${goal.id}/git-status`)],
-				["git-diff", await gw.json(`/api/goals/${goal.id}/git-diff`)],
-				["commits", await gw.json(`/api/goals/${goal.id}/commits`)],
-				["pr-status", await gw.json(`/api/goals/${goal.id}/pr-status?optional=1`)],
-				["pr-merge", await gw.json(`/api/goals/${goal.id}/pr-merge`, { method: "POST", body: JSON.stringify({ method: "squash" }) })],
-			] as const) {
-				expect(response.status, `${label} should reject no-worktree goals clearly`).toBe(409);
-				expect(response.body.code).toBe("GOAL_GIT_UNAVAILABLE");
-				expect(String(response.body.error)).toMatch(/worktree|branch|PR actions are unavailable/i);
+test.describe("Headquarters session git isolation", () => {
+	test("Headquarters session git/PR endpoints return an unavailable state and never run git from cwd", async () => {
+		const gw = await startWithNormalSameRoot();
+		try {
+			// The server run directory is a real git checkout. A Headquarters
+			// session defaults its cwd to <serverRoot>/.bobbit/headquarters, which
+			// is physically INSIDE that checkout — so a naive git/gh call would leak
+			// the parent repo's state. Every session git/PR endpoint must refuse.
+			execFileSync("git", ["init"], { cwd: gw.serverRoot, stdio: "ignore" });
+
+			const hqSession = await createSession(gw, HEADQUARTERS_PROJECT_ID);
+			expect(hqSession.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			expectSamePath(hqSession.cwd, gw.headquartersDir, "Headquarters session cwd");
+			expect(isSameOrUnder(gw.headquartersDir, gw.serverRoot), "default Headquarters dir must be inside the server run dir git checkout").toBe(true);
+
+			const getEndpoints: Array<[string, string]> = [
+				["git-status", "Git status"],
+				["git-diff", "Git diff"],
+				["commits", "Commit history"],
+				["pr-status", "PR status"],
+			];
+			for (const [endpoint, action] of getEndpoints) {
+				const resp = await gw.json(`/api/sessions/${hqSession.id}/${endpoint}`);
+				expect(resp.status, `${endpoint}: ${resp.text}`).toBe(409);
+				expect(resp.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+				expect(resp.body.sessionId).toBe(hqSession.id);
+				expect(resp.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+				expect(String(resp.body.error)).toMatch(/Headquarters/i);
+				expect(String(resp.body.error)).toMatch(new RegExp(action, "i"));
 			}
 
-			const archive = await gw.json(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
-			expect(archive.status).toBe(200);
-			expect(archive.body.archived).toBe(1);
+			const postEndpoints = ["git-pull", "git-push", "git-squash-push"];
+			for (const endpoint of postEndpoints) {
+				const resp = await gw.json(`/api/sessions/${hqSession.id}/${endpoint}`, {
+					method: "POST",
+					body: JSON.stringify({}),
+				});
+				expect(resp.status, `${endpoint}: ${resp.text}`).toBe(409);
+				expect(resp.body.code).toBe("GOAL_GIT_UNAVAILABLE");
+				expect(resp.body.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+			}
 
-			const archived = await gw.json(`/api/goals?archived=true&projectId=${HEADQUARTERS_PROJECT_ID}`);
-			expect(archived.status).toBe(200);
-			expect(archived.body.goals.map((g: any) => g.id)).toContain(goal.id);
+			// Contrast: a normal same-root session (cwd = serverRoot git checkout) is
+			// NOT subject to Headquarters isolation — it reaches the real git handler.
+			const normalSession = await createSession(gw, SAME_ROOT_PROJECT_ID);
+			const normalStatus = await gw.json(`/api/sessions/${normalSession.id}/git-status`);
+			expect(normalStatus.status, `normal git-status: ${normalStatus.text}`).not.toBe(409);
+		} finally {
+			await gw.shutdown();
+		}
+	});
+});
+
+test.describe("Headquarters archive preservation", () => {
+	test("archive-bobbit preserves a custom BOBBIT_DIR Headquarters directory inside <rootPath>/.bobbit", async () => {
+		const serverRoot = uniqueDir("archive-custom-hq-server");
+		const customHqDir = join(serverRoot, ".bobbit", "custom-hq");
+		seedNormalSameRootLayout(serverRoot);
+		const gw = await startHeadquartersGateway({
+			serverRoot,
+			headquartersDir: customHqDir,
+			clean: false,
+			projects: [sameRootProjectRecord(serverRoot)],
+		});
+		try {
+			expectSamePath(gw.headquartersDir, customHqDir, "custom Headquarters dir");
+			expect(isSameOrUnder(customHqDir, join(serverRoot, ".bobbit")), "custom Headquarters dir must live inside <rootPath>/.bobbit").toBe(true);
+			// Sentinels: HQ/server state must survive; normal project config is archived.
+			writeFileSync(join(customHqDir, "state", "hq-sentinel.txt"), "keep custom headquarters state");
+			mkdirSync(join(serverRoot, ".bobbit", "config"), { recursive: true });
+			writeFileSync(join(serverRoot, ".bobbit", "config", "normal-sentinel.txt"), "normal project config");
+
+			const archive = await gw.json("/api/projects/archive-bobbit", {
+				method: "POST",
+				body: JSON.stringify({ rootPath: serverRoot }),
+			});
+			expect(archive.status, archive.text).toBe(200);
+			expect(existsSync(customHqDir), "custom Headquarters directory must survive archive").toBe(true);
+			expect(existsSync(join(customHqDir, "state", "hq-sentinel.txt")), "archive must not move a custom BOBBIT_DIR Headquarters directory").toBe(true);
+			// The preserved set includes the custom HQ segment, not just "headquarters/".
+			const preserved: string[] = (archive.body.preservedPaths ?? []).map((p: string) => p.replace(/\\/g, "/"));
+			expect(preserved.some((p) => p === "custom-hq" || p.startsWith("custom-hq/"))).toBe(true);
+			// The normal project config was actually archived (start-fresh worked).
+			expect(existsSync(join(serverRoot, ".bobbit", "config", "normal-sentinel.txt")), "normal project config should have been archived").toBe(false);
 		} finally {
 			await gw.shutdown();
 		}

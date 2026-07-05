@@ -8,16 +8,17 @@
  * 4. Multi-project session lifecycle keeps data isolated per project.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, defaultProject, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, defaultProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let _counter = 0;
 
 /** Create a unique temp dir for a project root. */
 function uniqueProjectDir(): string {
-	const dir = join(nonGitCwd(), `proj-isolation-${Date.now()}-${++_counter}`);
+	const dir = join(tmpdir(), `proj-isolation-${process.pid}-${Date.now()}-${++_counter}`);
 	mkdirSync(dir, { recursive: true });
 	// Create .bobbit/state so the project context can initialise stores
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });

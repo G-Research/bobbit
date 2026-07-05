@@ -2,7 +2,7 @@
 
 **This tool grants full shell access to the host machine.** The auth token is equivalent to an SSH key.
 
-- 256-bit cryptographically random token generated on first run, persisted at `.bobbit/state/token` with mode `0600`
+- 256-bit cryptographically random token generated on first run, persisted in `serverSecretsDir()` (an OS user-level directory outside any project root, defaulting to `<AppData|Library/Application Support|~/.local/state>/bobbit/secrets/<hash>/token`) with mode `0600`. Override with `BOBBIT_SECRETS_DIR`. Stored outside the Headquarters project directory to prevent same-root normal-project agents from reading the gateway admin token. See [headquarters.md — Live secrets exception](headquarters.md#live-secrets-exception-serversecretsdir).
 - All API routes and WebSocket connections require the token
 - Constant-time token comparison prevents timing attacks
 - IP-based rate limiting on failed auth attempts (automatic lockout)

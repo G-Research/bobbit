@@ -1,14 +1,23 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitStateDir, serverSecretsDir } from "../bobbit-dir.js";
 
 function tokenDir(): string {
-	return bobbitStateDir();
+	return serverSecretsDir();
 }
 
 function tokenFile(): string {
 	return path.join(tokenDir(), "token");
+}
+
+/**
+ * Legacy token location under the Headquarters state dir. Read as a fallback
+ * so a server that boots before the relocation migration still authenticates
+ * with the existing token. Writes always go to the new `serverSecretsDir()`.
+ */
+function legacyTokenFile(): string {
+	return path.join(bobbitStateDir(), "token");
 }
 
 export function generateToken(): string {
@@ -18,11 +27,15 @@ export function generateToken(): string {
 export function loadOrCreateToken(forceNew = false): string {
 	const file = tokenFile();
 	if (!forceNew) {
-		try {
-			const token = fs.readFileSync(file, "utf-8").trim();
-			if (token.length >= 64) return token;
-		} catch {
-			// Token file doesn't exist yet
+		// Prefer the new secrets-dir location, then fall back to the legacy
+		// Headquarters-state token so a pre-migration boot still authenticates.
+		for (const candidate of [file, legacyTokenFile()]) {
+			try {
+				const token = fs.readFileSync(candidate, "utf-8").trim();
+				if (token.length >= 64) return token;
+			} catch {
+				// Token file doesn't exist at this candidate.
+			}
 		}
 	}
 
@@ -33,12 +46,15 @@ export function loadOrCreateToken(forceNew = false): string {
 }
 
 export function readToken(): string | null {
-	try {
-		const token = fs.readFileSync(tokenFile(), "utf-8").trim();
-		return token.length >= 64 ? token : null;
-	} catch {
-		return null;
+	for (const candidate of [tokenFile(), legacyTokenFile()]) {
+		try {
+			const token = fs.readFileSync(candidate, "utf-8").trim();
+			if (token.length >= 64) return token;
+		} catch {
+			// Not present at this candidate.
+		}
 	}
+	return null;
 }
 
 /** Constant-time token comparison to prevent timing attacks */

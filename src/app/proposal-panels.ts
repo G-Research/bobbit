@@ -69,6 +69,7 @@ import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
+import { defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
 	isHistoricalProposalTab,
@@ -94,6 +95,31 @@ import type { TriggerDef as _TriggerDef } from "./render-triggers.js";
 function isSessionArchived(sessionId: string | null | undefined): boolean {
 	if (!sessionId) return false;
 	return state.archivedSessions.some((s) => s.id === sessionId);
+}
+
+function proposalProjectId(type: ProposalType, sessionId: string | null | undefined): string | undefined {
+	const slot = type ? state.activeProposals[type] : undefined;
+	const explicit = !slot || !sessionId || slot.sessionId === sessionId ? slot?.fields?.projectId : undefined;
+	if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
+	if (!sessionId) return undefined;
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	if (session?.projectId) return session.projectId;
+	const activeId = activeSessionId();
+	if (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId) {
+		return state.chatPanel?.agentInterface?.projectId || undefined;
+	}
+	return undefined;
+}
+
+function resolveGoalProposalProjectId(sessionId: string | null | undefined, fields: Record<string, unknown> | undefined): string | undefined {
+	const explicit = fields?.projectId;
+	if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
+	const fromSession = proposalProjectId("goal", sessionId);
+	if (fromSession) return fromSession;
+	const session = sessionId ? state.gatewaySessions.find(s => s.id === sessionId) : undefined;
+	if (session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;
+	return undefined;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -384,7 +410,7 @@ async function ensureStaffProposalRolesLoaded(): Promise<void> {
 	if (_staffProposalRolesLoaded) return;
 	_staffProposalRolesLoaded = true;
 	try {
-		_staffProposalRoles = await fetchRoles();
+		_staffProposalRoles = await fetchRoles(staffPreviewProjectId());
 		renderApp();
 	} catch {
 		/* roles are optional; leave list empty */
@@ -1631,26 +1657,16 @@ function renderProposalSubgoalsTab(config: GoalFormConfig): TemplateResult {
 function goalPreviewPanel() {
 	// Populate previewProjectId for re-attempt / assistant sessions where it
 	// wasn't seeded by the +New Goal picker. Resolution order:
-	// 1. Active session's projectId (server inherits this for re-attempts).
-	// 2. Original goal's projectId via reattemptGoalId.
-	// 3. Match proposal cwd against a registered project's rootPath.
+	// 1. Proposal/project assistant field.
+	// 2. Active session's projectId (server inherits this for re-attempts).
+	// 3. Original goal's projectId via reattemptGoalId. Never infer from cwd.
 	{
 		const sid = state.activeProposals.goal?.sessionId || activeSessionId();
-		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
-		let candidate = sess?.projectId;
-		if (!candidate && sess?.reattemptGoalId) {
-			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
-		}
-		if (!candidate) {
-			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
-			if (cwd) {
-				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-				const target = norm(cwd);
-				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
-			}
-		}
-		if (candidate && state.projects.some(p => p.id === candidate) && state.previewProjectId !== candidate) {
-			state.previewProjectId = candidate;
+		const candidate = resolveGoalProposalProjectId(sid, state.activeProposals.goal?.fields);
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			if (state.previewProjectId !== candidate) state.previewProjectId = candidate;
+		} else if (state.previewProjectId) {
+			state.previewProjectId = "";
 		}
 	}
 	useGoalProposalTabsContext(goalProposalTabsContextKey("preview"));
@@ -1739,7 +1755,8 @@ function goalPreviewPanel() {
 		// (e.g. change workflow) and try again. See goal spec §1.
 		let goal;
 		try {
-			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
+			const submitCwd = isHeadquartersProject(projectId) && !state.previewCwdEdited ? "" : state.previewCwd.trim();
+			goal = await createGoal(trimmedTitle, submitCwd, {
 				spec: state.previewSpec,
 				workflowId,
 				workflow: inlineWorkflowField,
@@ -1959,7 +1976,7 @@ let _toolsLoaded = false;
 function ensureToolsLoaded(): void {
 	if (_toolsLoaded) return;
 	_toolsLoaded = true;
-	fetchTools().then((tools) => { _availableTools = tools; renderApp(); });
+	fetchTools(state.previewProjectId || undefined).then((tools) => { _availableTools = tools; renderApp(); });
 }
 
 function rolePreviewPanel() {
@@ -1977,6 +1994,11 @@ function rolePreviewPanel() {
 		if (!trimmedName || !trimmedLabel) return;
 		const proposalSessionId = state.activeProposals.role?.sessionId ?? activeSessionId();
 		const isRoleAssistant = state.assistantType === "role";
+		const projectId = proposalProjectId("role", proposalSessionId);
+		if (!projectId) {
+			showConnectionError("No project selected for this role", "Dismiss this proposal and create the role from a project or Headquarters settings.");
+			return;
+		}
 
 		// Parse tools: comma-separated string -> array
 		const toolsList = state.rolePreviewTools
@@ -1994,6 +2016,7 @@ function rolePreviewPanel() {
 			promptTemplate: state.rolePreviewPrompt,
 			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
 			accessory: state.rolePreviewAccessory,
+			projectId,
 		});
 		if (!created) return;
 
@@ -2366,6 +2389,8 @@ function staffPreviewSessionId(): string | undefined {
 }
 
 function staffPreviewProjectId(sessionId = staffPreviewSessionId()): string | undefined {
+	const explicit = state.activeProposals.staff?.fields?.projectId;
+	if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
 	if (!sessionId) return undefined;
 	const session = state.gatewaySessions.find(s => s.id === sessionId)
 		|| state.archivedSessions.find(s => s.id === sessionId);
@@ -2387,12 +2412,13 @@ function activeProjectForStaffPreview() {
 function effectiveStaffPreviewCwd(project = activeProjectForStaffPreview()): string | undefined {
 	const explicitCwd = state.staffPreviewCwd.trim();
 	if (explicitCwd) return explicitCwd;
-	return project?.rootPath || undefined;
+	return defaultCwdForProjectSession(project);
 }
 
 function seedStaffPreviewCwdFromProject(project = activeProjectForStaffPreview()): void {
 	if (state.staffPreviewCwdEdited || state.staffPreviewCwd.trim()) return;
-	if (project?.rootPath) state.staffPreviewCwd = project.rootPath;
+	const cwd = defaultCwdForProjectSession(project);
+	if (cwd) state.staffPreviewCwd = cwd;
 }
 
 function staffPreviewPanel() {
@@ -2438,6 +2464,10 @@ function staffPreviewPanel() {
 		const submitProject = submitProjectId
 			? state.projects.find(p => p.id === submitProjectId)
 			: undefined;
+		if (!submitProjectId || !submitProject) {
+			showConnectionError("No project selected for this staff agent", "Dismiss this proposal and start staff creation from a project or Headquarters.");
+			return;
+		}
 		const cwd = effectiveStaffPreviewCwd(submitProject);
 		// Optional role from the panel's role <select> (null/empty ⇒ no role).
 		// Unknown roles are rejected server-side (404) — no extra client validation.
@@ -2456,7 +2486,7 @@ function staffPreviewPanel() {
 				description: state.staffPreviewDescription,
 				systemPrompt: state.staffPreviewPrompt,
 				cwd,
-				worktree: state.staffPreviewWorktree,
+				worktree: isHeadquartersProject(submitProject) ? false : state.staffPreviewWorktree,
 				triggers,
 				projectId: submitProjectId,
 				sandboxed,
@@ -3191,7 +3221,7 @@ function ensureProposalRolesLoaded(): void {
 function ensureProposalGroupPoliciesLoaded(): void {
 	if (_proposalGroupPoliciesCache !== null || _proposalGroupPoliciesLoading) return;
 	_proposalGroupPoliciesLoading = true;
-	fetchGroupPolicies().then((gp) => {
+	fetchGroupPolicies(state.previewProjectId || undefined).then((gp) => {
 		_proposalGroupPoliciesCache = gp;
 		_proposalGroupPoliciesLoading = false;
 		renderApp();
@@ -3457,9 +3487,9 @@ function syncProposalFormState(): void {
 	_proposalTitle = proposal.title;
 	_proposalSpec = proposal.spec;
 	_proposalParentGoalId = proposal.parentGoalId || "";
-	// Preserve project rootPath when proposal doesn't specify cwd
+	// Preserve normal project rootPath when proposal doesn't specify cwd; Headquarters defaults server-side.
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
-	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
+	_proposalCwd = proposal.cwd || defaultCwdForProjectSession(proposalProject) || "";
 	const selectedInlineWorkflow = selectedInlineWorkflowDraft();
 	_proposalWorkflowId = selectedInlineWorkflow?.id || proposal.workflow || "";
 	if (selectedInlineWorkflow) _selectedWorkflowId = selectedInlineWorkflow.id;
@@ -3489,9 +3519,9 @@ function syncProposalFormState(): void {
 function goalProposalPanel() {
 	// Populate previewProjectId for re-attempt / assistant sessions where it
 	// wasn't seeded by the +New Goal picker. Resolution order:
-	// 1. Source session's projectId (server inherits this for re-attempts).
-	// 2. Original goal's projectId via reattemptGoalId.
-	// 3. Match proposal cwd against a registered project's rootPath.
+	// 1. Proposal/project assistant field.
+	// 2. Source session's projectId (server inherits this for re-attempts).
+	// 3. Original goal's projectId via reattemptGoalId. Never infer from cwd.
 	//
 	// Always replace a stale previewProjectId when the current proposal resolves
 	// to a concrete project. Historical and project-scoped goal proposals may be
@@ -3502,21 +3532,12 @@ function goalProposalPanel() {
 		const sid = _proposalOverride?.type === "goal"
 			? (_proposalOverrideSessionId || activeSessionId() || state.activeProposals.goal?.sessionId || null)
 			: (state.activeProposals.goal?.sessionId || activeSessionId());
-		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
-		let candidate = sess?.projectId;
-		if (!candidate && sess?.reattemptGoalId) {
-			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
-		}
-		if (!candidate) {
-			const cwd = ((_proposalOverride?.type === "goal" ? _proposalOverride.fields : state.activeProposals.goal?.fields) as any)?.cwd as string | undefined;
-			if (cwd) {
-				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-				const target = norm(cwd);
-				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
-			}
-		}
-		if (candidate && state.projects.some(p => p.id === candidate) && state.previewProjectId !== candidate) {
-			state.previewProjectId = candidate;
+		const fields = (_proposalOverride?.type === "goal" ? _proposalOverride.fields : state.activeProposals.goal?.fields) as Record<string, unknown> | undefined;
+		const candidate = resolveGoalProposalProjectId(sid, fields);
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			if (state.previewProjectId !== candidate) state.previewProjectId = candidate;
+		} else if (state.previewProjectId) {
+			state.previewProjectId = "";
 		}
 	}
 	useGoalProposalTabsContext(goalProposalTabsContextKey("proposal"));

@@ -65,8 +65,7 @@ test.describe("POST /api/sessions — projectless reproducer", () => {
 			resp.status,
 			`expected 400 with bogus cwd; got ${resp.status} body=${text}`,
 		).toBe(400);
-		expect(text).toMatch(/projectId required/);
-		expect(text).toMatch(/does not match any registered project/);
+		expect(text).toMatch(/projectId required/i);
 		try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
 	});
 

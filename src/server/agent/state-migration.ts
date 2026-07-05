@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import YAML from "yaml";
+import { serverSecretsDir } from "../bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -9,7 +9,6 @@ import {
 	type RegisteredProject,
 } from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
-import type { PersistedSession } from "./session-store.js";
 import type { PersistedStaff } from "./staff-store.js";
 import type { PersistedTask } from "./task-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -19,6 +18,9 @@ const MIGRATION_MARKER = ".migrated-to-per-project";
 const PRE_MIGRATION_SUFFIX = ".pre-migration";
 const RECOVERY_MARKER = ".pre-migration-recovered";
 const HEADQUARTERS_ID_MIGRATION_MARKER = ".headquarters-project-id-migrated";
+const HEADQUARTERS_DIR_MIGRATION_MARKER = ".headquarters-dir-migrated";
+const HEADQUARTERS_MIGRATION_DIAGNOSTICS = "headquarters-migration-diagnostics.json";
+const PER_PROJECT_MIGRATION_DIAGNOSTICS = "per-project-state-migration-diagnostics.json";
 const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
@@ -37,6 +39,32 @@ function canonicalPathKey(p: string): string {
 	} catch {
 		return pathKey(p);
 	}
+}
+
+function readJsonValue<T = unknown>(filePath: string): T | undefined {
+	try {
+		if (!fs.existsSync(filePath)) return undefined;
+		return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+	} catch {
+		console.log(`[migration] Warning: could not parse ${filePath}, skipping`);
+		return undefined;
+	}
+}
+
+function stableStringify(value: unknown): string {
+	return JSON.stringify(value, Object.keys(flattenObjectKeys(value)).sort(), 2);
+}
+
+function flattenObjectKeys(value: unknown, keys: Record<string, true> = {}): Record<string, true> {
+	if (Array.isArray(value)) {
+		for (const item of value) flattenObjectKeys(item, keys);
+	} else if (value && typeof value === "object") {
+		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+			keys[key] = true;
+			flattenObjectKeys(nested, keys);
+		}
+	}
+	return keys;
 }
 
 // Helper: read a JSON array file, return empty array if missing/corrupt.
@@ -81,238 +109,943 @@ function registrySave(projectRegistry: ProjectRegistry): void {
 	(projectRegistry as unknown as { save(): void }).save();
 }
 
-function rewriteProjectIdReferences(value: unknown, oldProjectIds: Set<string>): boolean {
-	let changed = false;
-	if (Array.isArray(value)) {
-		for (const item of value) {
-			if (rewriteProjectIdReferences(item, oldProjectIds)) changed = true;
-		}
-		return changed;
-	}
-	if (!value || typeof value !== "object") return false;
-	const record = value as Record<string, unknown>;
-	for (const [key, nested] of Object.entries(record)) {
-		if ((key === "projectId" || key === "parentProjectId") && typeof nested === "string" && oldProjectIds.has(nested)) {
-			record[key] = HEADQUARTERS_PROJECT_ID;
-			changed = true;
-			continue;
-		}
-		if (key === "provisionalProjectId" && typeof nested === "string" && oldProjectIds.has(nested)) {
-			delete record[key];
-			changed = true;
-			continue;
-		}
-		if (rewriteProjectIdReferences(nested, oldProjectIds)) changed = true;
-	}
-	return changed;
-}
-
-function walkJsonFiles(root: string, visit: (filePath: string) => void): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(root, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		const p = path.join(root, entry.name);
-		if (entry.isDirectory()) {
-			walkJsonFiles(p, visit);
-			continue;
-		}
-		if (!entry.isFile()) continue;
-		if (!entry.name.endsWith(".json")) continue;
-		if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX) || entry.name.endsWith(PRE_MIGRATION_SUFFIX)) continue;
-		if (entry.name.endsWith(".tmp")) continue;
-		visit(p);
-	}
-}
-
-function rewriteProjectIdsInJsonTree(root: string, oldProjectIds: Set<string>): void {
-	if (oldProjectIds.size === 0) return;
-	walkJsonFiles(root, (filePath) => {
-		let data: unknown;
-		try {
-			data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-		} catch {
-			return;
-		}
-		if (!rewriteProjectIdReferences(data, oldProjectIds)) return;
-		backupForHeadquartersMigration(filePath);
-		fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-		console.log(`[migration] Rewrote stale project references in ${filePath}`);
-	});
-}
-
-function scanStaleProjectIdReferences(root: string, oldProjectIds: Set<string>): string[] {
-	const hits: string[] = [];
-	if (oldProjectIds.size === 0) return hits;
-	const visit = (value: unknown, filePath: string, trail: string): void => {
-		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, filePath, `${trail}[${index}]`));
-			return;
-		}
-		if (!value || typeof value !== "object") return;
-		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-			const nextTrail = trail ? `${trail}.${key}` : key;
-			if (
-				(key === "projectId" || key === "parentProjectId" || key === "provisionalProjectId") &&
-				typeof nested === "string" &&
-				oldProjectIds.has(nested)
-			) {
-				hits.push(`${filePath}:${nextTrail}`);
-			}
-			visit(nested, filePath, nextTrail);
-		}
-	};
-	walkJsonFiles(root, (filePath) => {
-		try {
-			visit(JSON.parse(fs.readFileSync(filePath, "utf-8")), filePath, "");
-		} catch {
-			// Ignore malformed sidecars; normal store loads already warn elsewhere.
-		}
-	});
-	return hits;
-}
-
-function dropSearchIndexesForHeadquartersMigration(stateDir: string): void {
-	for (const name of ["search.flex", "search.lance", "search.db", "search.db-wal", "search.db-shm"]) {
-		const target = path.join(stateDir, name);
-		if (!fs.existsSync(target)) continue;
-		const backup = target + HEADQUARTERS_BACKUP_SUFFIX;
-		try {
-			if (!fs.existsSync(backup)) {
-				fs.renameSync(target, backup);
-				console.log(`[migration] Moved search index ${name} → ${path.basename(backup)} for reindex`);
-			} else {
-				fs.rmSync(target, { recursive: true, force: true });
-				console.log(`[migration] Removed stale search index ${name} for reindex`);
-			}
-		} catch (err) {
-			console.log(`[migration] Warning: could not reset search index ${target}: ${err}`);
-		}
-	}
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function deepMergeLegacyIntoCurrent(legacy: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...legacy, ...current };
-	for (const [key, legacyValue] of Object.entries(legacy)) {
-		const currentValue = current[key];
-		if (isPlainRecord(legacyValue) && isPlainRecord(currentValue)) {
-			merged[key] = deepMergeLegacyIntoCurrent(legacyValue, currentValue);
-		}
-	}
-	return merged;
+interface HeadquartersDirectoryMigrationInput {
+	serverRunDir: string;
+	headquartersDir: string;
+	headquartersStateDir: string;
+	headquartersConfigDir: string;
+	legacyServerBobbitDir: string;
 }
 
-function readYamlRecord(filePath: string): Record<string, unknown> | null {
+interface PerProjectMigrationDiagnostics {
+	version: 1;
+	runAt: string;
+	paths: {
+		centralStateDir: string;
+		serverCwd: string;
+	};
+	sameRootNormalProjectIds: string[];
+	ambiguousRecords: Array<{ file: string; key: string; reason: string }>;
+}
+
+interface HeadquartersMigrationDiagnostics {
+	version: 1;
+	runAt: string;
+	paths: {
+		serverRunDir: string;
+		headquartersDir: string;
+		headquartersStateDir: string;
+		headquartersConfigDir: string;
+		legacyServerBobbitDir: string;
+		legacyStateDir: string;
+		legacyConfigDir: string;
+	};
+	copied: string[];
+	skipped: string[];
+	quarantinedConfigFiles: string[];
+	ambiguousRecords: Array<{ file: string; key: string; reason: string }>;
+	restoredNormalProjectIds: string[];
+	restoredNormalRecords: Array<{ file: string; key: string; projectId: string }>;
+	sanitizedHeadquartersRecords: Array<{ file: string; key: string; actions: string[] }>;
+	previousOverrideHints: string[];
+	failures: string[];
+}
+
+const SERVER_STATE_ENTRIES = new Set([
+	"projects.json",
+	"preferences.json",
+	"setup-complete",
+	"token",
+	"gateway-url",
+	"watchdog.json",
+	"actual-port",
+	"boot-timing.jsonl",
+	"session-prompts",
+	"proposal-drafts",
+	"preview",
+	"preview-artifacts",
+	"html-snapshots",
+	"mcp-extensions",
+	"tool-guard",
+	"tool-result-error-bridge",
+	"provider-bridge",
+	"google-code-assist",
+	"ext-store",
+	"marketplace-cache",
+	"pr-walkthrough",
+	"tls",
+	"sandbox-agent-auth",
+]);
+
+// Server-scope secrets that must never remain readable at the normal-project-owned
+// `<serverRunDir>/.bobbit/state` path after the Headquarters split. A same-root
+// normal project defaults cwd to `<serverRunDir>` and reads
+// `<serverRunDir>/.bobbit/{state,config}`, so leaving a live admin bearer `token`
+// (or TLS material / sandbox auth) there is a gateway-wide privilege escalation.
+const SERVER_SECRET_ENTRIES = ["token", "tls", "sandbox-agent-auth"] as const;
+
+const PROJECT_STORE_FILES = new Set([
+	"goals.json",
+	"sessions.json",
+	"staff.json",
+	"tasks.json",
+	"team-state.json",
+	"gateway-swarms.json",
+	"gates.json",
+	"inbox.json",
+	"session-costs.json",
+	"session-colors.json",
+	"bg-processes.json",
+]);
+const PROJECT_OBJECT_STORE_FILES = new Set(["session-costs.json", "session-colors.json", "bg-processes.json"]);
+
+function newHeadquartersDiagnostics(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
+	const legacyStateDir = path.join(input.legacyServerBobbitDir, "state");
+	const legacyConfigDir = path.join(input.legacyServerBobbitDir, "config");
+	return {
+		version: 1,
+		runAt: new Date().toISOString(),
+		paths: {
+			serverRunDir: path.resolve(input.serverRunDir),
+			headquartersDir: path.resolve(input.headquartersDir),
+			headquartersStateDir: path.resolve(input.headquartersStateDir),
+			headquartersConfigDir: path.resolve(input.headquartersConfigDir),
+			legacyServerBobbitDir: path.resolve(input.legacyServerBobbitDir),
+			legacyStateDir: path.resolve(legacyStateDir),
+			legacyConfigDir: path.resolve(legacyConfigDir),
+		},
+		copied: [],
+		skipped: [],
+		quarantinedConfigFiles: [],
+		ambiguousRecords: [],
+		restoredNormalProjectIds: [],
+		restoredNormalRecords: [],
+		sanitizedHeadquartersRecords: [],
+		previousOverrideHints: [],
+		failures: [],
+	};
+}
+
+function writeHeadquartersDiagnostics(stateDir: string, diagnostics: HeadquartersMigrationDiagnostics): void {
 	try {
-		if (!fs.existsSync(filePath)) return null;
-		const parsed = YAML.parse(fs.readFileSync(filePath, "utf-8"));
-		return isPlainRecord(parsed) ? parsed : null;
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, HEADQUARTERS_MIGRATION_DIAGNOSTICS), stableStringify(diagnostics), "utf-8");
 	} catch (err) {
-		console.log(`[migration] Warning: could not parse YAML ${filePath}: ${err}`);
-		return null;
+		console.log(`[migration] Warning: could not write Headquarters migration diagnostics: ${err}`);
 	}
 }
 
-function mergeLegacyProjectYaml(legacyFile: string, targetFile: string): void {
-	const legacy = readYamlRecord(legacyFile);
-	if (!legacy) return;
-	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-	if (!fs.existsSync(targetFile)) {
-		fs.copyFileSync(legacyFile, targetFile);
-		console.log(`[migration] Preserved legacy Headquarters config ${legacyFile} → ${targetFile}`);
+function writePerProjectDiagnostics(stateDir: string, diagnostics: PerProjectMigrationDiagnostics): void {
+	if (diagnostics.ambiguousRecords.length === 0) return;
+	try {
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, PER_PROJECT_MIGRATION_DIAGNOSTICS), stableStringify(diagnostics), "utf-8");
+	} catch (err) {
+		console.log(`[migration] Warning: could not write per-project migration diagnostics: ${err}`);
+	}
+}
+
+function copyFilePreserveFirst(src: string, dest: string, rel: string, diagnostics: HeadquartersMigrationDiagnostics): void {
+	try {
+		if (fs.existsSync(dest)) {
+			try {
+				if (fs.statSync(src).isFile() && fs.statSync(dest).isFile()) {
+					const a = fs.readFileSync(src);
+					const b = fs.readFileSync(dest);
+					if (a.equals(b)) diagnostics.skipped.push(`${rel}: already present`);
+					else diagnostics.skipped.push(`${rel}: destination differs; preserved existing Headquarters file`);
+				} else {
+					diagnostics.skipped.push(`${rel}: destination exists; preserved existing Headquarters entry`);
+				}
+			} catch {
+				diagnostics.skipped.push(`${rel}: destination exists; preserved existing Headquarters entry`);
+			}
+			return;
+		}
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+		diagnostics.copied.push(rel);
+	} catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
+	}
+}
+
+function copyTreePreserveFirst(src: string, dest: string, rel: string, diagnostics: HeadquartersMigrationDiagnostics): void {
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(src);
+	} catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
 		return;
 	}
-	const current = readYamlRecord(targetFile) ?? {};
-	const merged = deepMergeLegacyIntoCurrent(legacy, current);
-	if (JSON.stringify(merged) === JSON.stringify(current)) return;
-	backupForHeadquartersMigration(targetFile);
-	fs.writeFileSync(targetFile, YAML.stringify(merged), "utf-8");
-	console.log(`[migration] Merged legacy Headquarters config into ${targetFile}`);
+	if (stat.isSymbolicLink()) {
+		diagnostics.skipped.push(`${rel}: symlink skipped`);
+		return;
+	}
+	if (stat.isFile()) {
+		copyFilePreserveFirst(src, dest, rel, diagnostics);
+		return;
+	}
+	if (!stat.isDirectory()) {
+		diagnostics.skipped.push(`${rel}: special filesystem entry skipped`);
+		return;
+	}
+	fs.mkdirSync(dest, { recursive: true });
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(src, { withFileTypes: true }); }
+	catch (err) {
+		diagnostics.failures.push(`${rel}: ${(err as Error).message}`);
+		return;
+	}
+	for (const entry of entries) {
+		copyTreePreserveFirst(path.join(src, entry.name), path.join(dest, entry.name), path.join(rel, entry.name), diagnostics);
+	}
 }
 
-function copyMissingLegacyConfig(legacyConfigDir: string, centralConfigDir: string): void {
-	if (samePath(legacyConfigDir, centralConfigDir) || !fs.existsSync(legacyConfigDir)) return;
-	const walk = (srcDir: string): void => {
-		let entries: fs.Dirent[];
-		try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
-		for (const entry of entries) {
-			const src = path.join(srcDir, entry.name);
-			const rel = path.relative(legacyConfigDir, src);
-			const dest = path.join(centralConfigDir, rel);
-			if (entry.isDirectory()) {
-				walk(src);
-				continue;
-			}
-			if (!entry.isFile()) continue;
-			if (rel.replace(/\\/g, "/") === "project.yaml") {
-				mergeLegacyProjectYaml(src, dest);
-				continue;
-			}
-			if (fs.existsSync(dest)) continue;
-			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.copyFileSync(src, dest);
-			console.log(`[migration] Preserved legacy Headquarters config ${src} → ${dest}`);
-		}
-	};
-	walk(legacyConfigDir);
+function recordKeyForFile(fileName: string, record: Record<string, unknown>): string {
+	if (fileName === "gates.json") return `${String(record.goalId ?? "")}::${String(record.gateId ?? "")}`;
+	if (fileName === "team-state.json" || fileName === "gateway-swarms.json") return String(record.goalId ?? "");
+	if (fileName === "session-costs.json" || fileName === "session-colors.json") return String(record.id ?? record.sessionId ?? "");
+	return String(record.id ?? record.goalId ?? record.staffId ?? "");
 }
 
-function mergeLegacyJsonArrayFile(
-	legacyFile: string,
-	targetFile: string,
-	oldProjectIds: Set<string>,
-	keyFor: (item: Record<string, unknown>) => string,
+const HEADQUARTERS_EXECUTION_STORE_FILES = new Set(["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]);
+const HEADQUARTERS_GIT_WORKTREE_FIELDS = [
+	"worktreePath",
+	"repoPath",
+	"repoWorktrees",
+	"branch",
+	"setupStatus",
+	"setupError",
+	"worktreePushPolicy",
+	"remotePublicationPolicy",
+	"worktreeSetupCommand",
+	"worktreeSetupTimeoutMs",
+	"sandboxBranch",
+	"sandboxBaseBranch",
+	"baseSha",
+] as const;
+
+function isPathInsideOrEqual(candidate: string, root: string): boolean {
+	const rootKey = pathKey(root).replace(/[\\/]+$/, "");
+	const candidateKey = pathKey(candidate).replace(/[\\/]+$/, "");
+	return candidateKey === rootKey || candidateKey.startsWith(`${rootKey}${path.sep}`);
+}
+
+function isValidHeadquartersCwd(value: unknown, headquartersDirPath: string): value is string {
+	return typeof value === "string" && path.isAbsolute(value) && isPathInsideOrEqual(value, headquartersDirPath);
+}
+
+function pushSanitizedHeadquartersRecord(
+	diagnostics: HeadquartersMigrationDiagnostics,
+	fileName: string,
+	key: string,
+	actions: string[],
 ): void {
-	const legacy = readJsonArray<Record<string, unknown>>(legacyFile);
-	if (legacy.length === 0) return;
-	const rewritten = JSON.parse(JSON.stringify(legacy)) as Record<string, unknown>[];
-	rewriteProjectIdReferences(rewritten, oldProjectIds);
-	const existing = readJsonArray<Record<string, unknown>>(targetFile);
-	const seen = new Set(existing.map(keyFor).filter(Boolean));
+	if (actions.length === 0) return;
+	diagnostics.sanitizedHeadquartersRecords.push({ file: fileName, key, actions });
+}
+
+function sanitizeHeadquartersExecutionRecord(
+	fileName: string,
+	record: Record<string, unknown>,
+	headquartersDirPath: string,
+	opts: { stampProjectId?: boolean } = {},
+): { record: Record<string, unknown>; actions: string[] } {
+	if (!HEADQUARTERS_EXECUTION_STORE_FILES.has(fileName)) return { record, actions: [] };
+	const sanitized: Record<string, unknown> = { ...record };
+	const actions: string[] = [];
+	const projectId = typeof sanitized.projectId === "string" ? sanitized.projectId : undefined;
+	if (!projectId && opts.stampProjectId !== false) {
+		sanitized.projectId = HEADQUARTERS_PROJECT_ID;
+		actions.push(`set projectId ${HEADQUARTERS_PROJECT_ID}`);
+	}
+
+	if ((fileName !== "team-state.json" && fileName !== "gateway-swarms.json") || "cwd" in sanitized) {
+		if (!isValidHeadquartersCwd(sanitized.cwd, headquartersDirPath)) {
+			const previous = typeof sanitized.cwd === "string" && sanitized.cwd.length > 0 ? sanitized.cwd : "<missing>";
+			sanitized.cwd = headquartersDirPath;
+			actions.push(`cwd ${previous} -> ${headquartersDirPath}`);
+		}
+	}
+
+	for (const field of HEADQUARTERS_GIT_WORKTREE_FIELDS) {
+		if (field in sanitized) {
+			delete sanitized[field];
+			actions.push(`removed ${field}`);
+		}
+	}
+
+	if ((fileName === "team-state.json" || fileName === "gateway-swarms.json") && Array.isArray(sanitized.agents)) {
+		let agentsChanged = false;
+		sanitized.agents = sanitized.agents.map(agent => {
+			if (!isPlainRecord(agent)) return agent;
+			const cleanAgent: Record<string, unknown> = { ...agent };
+			const nestedActions: string[] = [];
+			if ("cwd" in cleanAgent && !isValidHeadquartersCwd(cleanAgent.cwd, headquartersDirPath)) {
+				const previous = typeof cleanAgent.cwd === "string" && cleanAgent.cwd.length > 0 ? cleanAgent.cwd : "<missing>";
+				cleanAgent.cwd = headquartersDirPath;
+				nestedActions.push(`agent cwd ${previous} -> ${headquartersDirPath}`);
+			}
+			for (const field of HEADQUARTERS_GIT_WORKTREE_FIELDS) {
+				if (field in cleanAgent) {
+					delete cleanAgent[field];
+					nestedActions.push(`removed agent.${field}`);
+				}
+			}
+			if (nestedActions.length > 0) {
+				agentsChanged = true;
+				actions.push(...nestedActions);
+			}
+			return cleanAgent;
+		});
+		if (agentsChanged) actions.push("sanitized team agents");
+	}
+
+	return { record: sanitized, actions };
+}
+
+function sanitizeHeadquartersStoreFile(
+	filePath: string,
+	fileName: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+	opts: { stampMissingProjectId?: boolean } = {},
+): void {
+	if (!fs.existsSync(filePath) || !HEADQUARTERS_EXECUTION_STORE_FILES.has(fileName)) return;
+	const { records, shape } = readStoreRecordsWithShape(filePath, fileName);
+	if (records.length === 0) return;
+	let changed = false;
+	const sanitizedRecords = records.map(record => {
+		const projectId = typeof record.projectId === "string" ? record.projectId : undefined;
+		if (projectId && projectId !== HEADQUARTERS_PROJECT_ID && fileName !== "team-state.json" && fileName !== "gateway-swarms.json") return record;
+		const key = recordKeyForFile(fileName, record);
+		const result = sanitizeHeadquartersExecutionRecord(fileName, record, headquartersDirPath, { stampProjectId: opts.stampMissingProjectId !== false });
+		if (result.actions.length > 0) {
+			changed = true;
+			pushSanitizedHeadquartersRecord(diagnostics, fileName, key, result.actions);
+		}
+		return result.record;
+	});
+	if (!changed) return;
+	writeStoreRecords(filePath, sanitizedRecords, shape);
+}
+
+function sanitizeExistingHeadquartersStores(
+	headquartersStateDir: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+	opts: { stampMissingProjectId?: boolean } = {},
+): void {
+	for (const fileName of ["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]) {
+		sanitizeHeadquartersStoreFile(path.join(headquartersStateDir, fileName), fileName, headquartersDirPath, diagnostics, opts);
+	}
+}
+
+/**
+ * On-disk shape of a per-project store file. Most stores
+ * (goals/staff/tasks/team-state/gates/inbox) are plain JSON arrays, but
+ * `sessions.json` is a versioned envelope `{ version: 2, epoch, sessions: [...] }`
+ * written by SessionStore. The migration MUST round-trip whichever shape it
+ * finds: rewriting the envelope as a bare array (the previous bug) flattened its
+ * top-level keys into `{ id: "version" | "epoch" | "sessions" }` pseudo-records,
+ * which SessionStore cannot load — so Headquarters sessions silently vanished on
+ * the next restart. Pinned by tests/headquarters-state-migration.test.ts.
+ */
+type StoreFileShape = { kind: "array" } | { kind: "sessions-v2"; epoch: number };
+
+function isSessionsEnvelopeFile(fileName: string): boolean {
+	return fileName === "sessions.json";
+}
+
+/**
+ * Read a store file into flat records plus the shape needed to write it back
+ * unchanged. Arbitrary object-shaped files are flattened key-by-key into
+ * `{ id, ... }` records (the legacy behaviour for non-array stores).
+ */
+function readStoreRecordsWithShape(filePath: string, fileName: string): { records: Record<string, unknown>[]; shape: StoreFileShape } {
+	const sessionsEnvelope = isSessionsEnvelopeFile(fileName);
+	const value = readJsonValue<unknown>(filePath);
+	if (Array.isArray(value)) return { records: value.filter(isPlainRecord), shape: { kind: "array" } };
+	if (
+		sessionsEnvelope &&
+		isPlainRecord(value) &&
+		(value as { version?: unknown }).version === 2 &&
+		Array.isArray((value as { sessions?: unknown }).sessions)
+	) {
+		const epoch = typeof (value as { epoch?: unknown }).epoch === "number" ? (value as { epoch: number }).epoch : 0;
+		return { records: ((value as { sessions: unknown[] }).sessions).filter(isPlainRecord), shape: { kind: "sessions-v2", epoch } };
+	}
+	if (isPlainRecord(value)) {
+		return {
+			records: Object.entries(value).map(([id, record]) => isPlainRecord(record) ? { id, ...record } : { id, value: record }),
+			shape: { kind: "array" },
+		};
+	}
+	// Missing/unreadable: write a bare array. SessionStore accepts the legacy v1
+	// array shape and upgrades it to the v2 envelope on its next save. The envelope
+	// is only ever *preserved* here when the file already exists in that shape, so a
+	// sanitize/merge of an existing HQ store never downgrades it to the array form.
+	return { records: [], shape: { kind: "array" } };
+}
+
+function writeStoreRecords(filePath: string, records: Record<string, unknown>[], shape: StoreFileShape): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	const payload = shape.kind === "sessions-v2"
+		? { version: 2 as const, epoch: shape.epoch, sessions: records }
+		: records;
+	fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
+}
+
+function mergeRecordsByKey(
+	filePath: string,
+	fileName: string,
+	records: Record<string, unknown>[],
+	diagnostics: HeadquartersMigrationDiagnostics,
+	label: string,
+): void {
+	if (records.length === 0) return;
+	const { records: existing, shape } = readStoreRecordsWithShape(filePath, fileName);
+	const indexByKey = new Map(existing.map((record, index) => [recordKeyForFile(fileName, record), index] as const).filter(([key]) => Boolean(key)));
 	let added = 0;
-	for (const item of rewritten) {
-		const key = keyFor(item);
-		if (!key || seen.has(key)) continue;
-		existing.push(item);
-		seen.add(key);
+	let repaired = 0;
+	for (const record of records) {
+		const key = recordKeyForFile(fileName, record);
+		if (!key) continue;
+		const existingIndex = indexByKey.get(key);
+		if (existingIndex !== undefined) {
+			const current = existing[existingIndex];
+			if (
+				label.startsWith("normal:") &&
+				typeof record.projectId === "string" &&
+				current.projectId === HEADQUARTERS_PROJECT_ID &&
+				record.projectId !== HEADQUARTERS_PROJECT_ID
+			) {
+				existing[existingIndex] = { ...record, ...current, projectId: record.projectId };
+				repaired++;
+			}
+			continue;
+		}
+		existing.push(record);
+		indexByKey.set(key, existing.length - 1);
 		added++;
 	}
-	if (added === 0 && fs.existsSync(targetFile)) return;
-	fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-	backupForHeadquartersMigration(targetFile);
-	fs.writeFileSync(targetFile, JSON.stringify(existing, null, 2), "utf-8");
-	console.log(`[migration] Preserved ${added} legacy Headquarters state entr${added === 1 ? "y" : "ies"} from ${legacyFile}`);
+	if (added === 0 && repaired === 0 && fs.existsSync(filePath)) return;
+	writeStoreRecords(filePath, existing, shape);
+	diagnostics.copied.push(`${label}: ${added} added, ${repaired} repaired ${fileName} record${added + repaired === 1 ? "" : "s"}`);
 }
 
-function preserveLegacyServerRootBobbitForHeadquarters(
-	centralStateDir: string,
-	centralConfigDir: string,
-	serverCwd: string,
-	oldProjectIds: Set<string>,
-): void {
-	if (oldProjectIds.size === 0) return;
-	const legacyBobbitDir = path.join(path.resolve(serverCwd), ".bobbit");
-	const legacyStateDir = path.join(legacyBobbitDir, "state");
-	const legacyConfigDir = path.join(legacyBobbitDir, "config");
+function sameRootNormalProjectsFrom(
+	projects: Record<string, unknown>[],
+	serverRunDir: string,
+): Record<string, unknown>[] {
+	const serverKey = canonicalPathKey(serverRunDir);
+	return projects.filter(project => {
+		const id = typeof project.id === "string" ? project.id : "";
+		if (!id || id === HEADQUARTERS_PROJECT_ID || id === SYSTEM_PROJECT_ID) return false;
+		if (project.kind === "headquarters" || project.kind === "system" || project.hidden === true) return false;
+		return typeof project.rootPath === "string" && canonicalPathKey(project.rootPath) === serverKey;
+	});
+}
 
-	if (!samePath(legacyStateDir, centralStateDir) && fs.existsSync(legacyStateDir)) {
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "goals.json"), path.join(centralStateDir, "goals.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "sessions.json"), path.join(centralStateDir, "sessions.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "staff.json"), path.join(centralStateDir, "staff.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "tasks.json"), path.join(centralStateDir, "tasks.json"), oldProjectIds, item => String(item.id ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "team-state.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gateway-swarms.json"), path.join(centralStateDir, "team-state.json"), oldProjectIds, item => String(item.goalId ?? ""));
-		mergeLegacyJsonArrayFile(path.join(legacyStateDir, "gates.json"), path.join(centralStateDir, "gates.json"), oldProjectIds, item => `${String(item.goalId ?? "")}::${String(item.gateId ?? "")}`);
+function readProjectsFile(filePath: string): Record<string, unknown>[] {
+	return readJsonArray<Record<string, unknown>>(filePath).filter(isPlainRecord);
+}
+
+function collectProjectEvidence(
+	headquartersStateDir: string,
+	legacyStateDir: string,
+	serverRunDir: string,
+): { current: Record<string, unknown>[]; backups: Record<string, unknown>[]; sameRoot: Record<string, unknown>[]; sameRootIds: Set<string> } {
+	const projectFiles = [
+		path.join(headquartersStateDir, "projects.json"),
+		path.join(legacyStateDir, "projects.json"),
+	];
+	const backupFiles = projectFiles.map(file => file + HEADQUARTERS_BACKUP_SUFFIX);
+	const current = projectFiles.flatMap(readProjectsFile);
+	const backups = backupFiles.flatMap(readProjectsFile);
+	const sameRoot = [...sameRootNormalProjectsFrom(current, serverRunDir), ...sameRootNormalProjectsFrom(backups, serverRunDir)];
+	const sameRootIds = new Set(sameRoot.map(project => String(project.id)).filter(Boolean));
+	return { current, backups, sameRoot, sameRootIds };
+}
+
+function repairProjectsFileForHeadquartersSplit(
+	projectsFile: string,
+	legacyProjectsFile: string,
+	serverRunDir: string,
+	headquartersDirPath: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): Set<string> {
+	let projects = readProjectsFile(projectsFile);
+	if (projects.length === 0) {
+		projects = readProjectsFile(legacyProjectsFile);
+	}
+	const backupProjects = [
+		...readProjectsFile(projectsFile + HEADQUARTERS_BACKUP_SUFFIX),
+		...readProjectsFile(legacyProjectsFile + HEADQUARTERS_BACKUP_SUFFIX),
+	];
+	const sameRootBackups = sameRootNormalProjectsFrom(backupProjects, serverRunDir);
+	const restoredIds = new Set<string>();
+	let changed = false;
+
+	for (const backup of sameRootBackups) {
+		const id = String(backup.id ?? "");
+		if (!id || projects.some(project => project.id === id)) continue;
+		projects.push({ ...backup });
+		restoredIds.add(id);
+		changed = true;
 	}
 
-	copyMissingLegacyConfig(legacyConfigDir, centralConfigDir);
+	for (const project of projects) {
+		if (project.id !== HEADQUARTERS_PROJECT_ID && project.kind !== "headquarters") continue;
+		if (project.id !== HEADQUARTERS_PROJECT_ID) {
+			project.id = HEADQUARTERS_PROJECT_ID;
+			changed = true;
+		}
+		if (project.name !== HEADQUARTERS_PROJECT_NAME) {
+			project.name = HEADQUARTERS_PROJECT_NAME;
+			changed = true;
+		}
+		if (project.kind !== "headquarters") {
+			project.kind = "headquarters";
+			changed = true;
+		}
+		if (typeof project.rootPath !== "string" || !samePath(project.rootPath, headquartersDirPath)) {
+			project.rootPath = path.resolve(headquartersDirPath);
+			changed = true;
+		}
+		for (const key of ["position", "provisional", "parentProjectId", "hidden"]) {
+			if (key in project) {
+				delete project[key];
+				changed = true;
+			}
+		}
+	}
+
+	const seen = new Set<string>();
+	projects = projects.filter(project => {
+		const id = String(project.id ?? "");
+		if (!id || seen.has(id)) return false;
+		seen.add(id);
+		return true;
+	});
+
+	if (changed || restoredIds.size > 0 || (projects.length > 0 && !fs.existsSync(projectsFile))) {
+		fs.mkdirSync(path.dirname(projectsFile), { recursive: true });
+		backupForHeadquartersMigration(projectsFile);
+		fs.writeFileSync(projectsFile, JSON.stringify(projects, null, 2), "utf-8");
+		for (const id of restoredIds) diagnostics.restoredNormalProjectIds.push(id);
+	}
+
+	return new Set(sameRootNormalProjectsFrom([...projects, ...backupProjects], serverRunDir).map(project => String(project.id)).filter(Boolean));
+}
+
+function routeLegacyProjectStoreFile(
+	fileName: string,
+	legacyFile: string,
+	targetFile: string,
+	headquartersDirPath: string,
+	projectEvidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const legacyRecords = readStoreRecordsWithShape(legacyFile, fileName).records;
+	if (legacyRecords.length === 0) return;
+	const backupRecords = readStoreRecordsWithShape(legacyFile + HEADQUARTERS_BACKUP_SUFFIX, fileName).records;
+	const backupByKey = new Map<string, Record<string, unknown>>();
+	for (const record of backupRecords) {
+		const key = recordKeyForFile(fileName, record);
+		if (key) backupByKey.set(key, record);
+	}
+	const projectsById = new Map(projectEvidence.current.map(project => [String(project.id ?? ""), project]));
+	const hqRecords: Record<string, unknown>[] = [];
+	const normalRecordsByProject = new Map<string, Record<string, unknown>[]>();
+	const seenLegacyKeys = new Set<string>();
+	// When the source and target are the same file (BOBBIT_DIR-override same-root
+	// repair), records re-attributed to a normal project must be REMOVED from the
+	// Headquarters store — merging them into the normal store alone would leave a
+	// duplicate under `headquarters`.
+	const inPlace = samePath(legacyFile, targetFile);
+	const routedNormalKeys = new Set<string>();
+
+	const routeNormal = (projectId: string, record: Record<string, unknown>, key: string): void => {
+		const bucket = normalRecordsByProject.get(projectId) ?? [];
+		bucket.push(record);
+		normalRecordsByProject.set(projectId, bucket);
+		if (key) routedNormalKeys.add(key);
+		diagnostics.restoredNormalRecords.push({ file: fileName, key, projectId });
+	};
+
+	for (const record of legacyRecords) {
+		const key = recordKeyForFile(fileName, record);
+		if (key) seenLegacyKeys.add(key);
+		const backup = key ? backupByKey.get(key) : undefined;
+		const backupProjectId = typeof backup?.projectId === "string" ? backup.projectId : undefined;
+		const projectId = typeof record.projectId === "string" ? record.projectId : undefined;
+
+		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
+			// Finding C: the CURRENT (post-promotion) record is authoritative. The
+			// stale `.pre-headquarters-id-migration` backup is a pre-promotion
+			// snapshot — overwriting the live record with it would silently DROP any
+			// updates made after promotion (progressed goals, updated sessions, …).
+			// Prefer the current record's fields; use the backup only to (a) recover
+			// the correct normal projectId and (b) fill in fields the promotion may
+			// have stripped (e.g. worktree/git metadata). Current wins on conflict.
+			routeNormal(backupProjectId, { ...backup, ...record, projectId: backupProjectId }, key);
+			continue;
+		}
+		if (projectId && projectId !== HEADQUARTERS_PROJECT_ID && projectsById.has(projectId)) {
+			routeNormal(projectId, record, key);
+			continue;
+		}
+		if (!projectId) {
+			if (projectEvidence.sameRootIds.size > 0) {
+				diagnostics.ambiguousRecords.push({ file: fileName, key, reason: "missing projectId while same-root normal project evidence exists" });
+				continue;
+			}
+			hqRecords.push({ ...record, projectId: HEADQUARTERS_PROJECT_ID });
+			continue;
+		}
+		if (projectId === HEADQUARTERS_PROJECT_ID) {
+			hqRecords.push(record);
+			continue;
+		}
+		diagnostics.ambiguousRecords.push({ file: fileName, key, reason: `unknown projectId ${projectId}` });
+	}
+
+	for (const [key, backup] of backupByKey) {
+		if (seenLegacyKeys.has(key)) continue;
+		const backupProjectId = typeof backup.projectId === "string" ? backup.projectId : undefined;
+		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
+			routeNormal(backupProjectId, { ...backup, projectId: backupProjectId }, key);
+		}
+	}
+
+	const existingHeadquartersKeys = new Set(readStoreRecordsWithShape(targetFile, fileName).records
+		.map(record => recordKeyForFile(fileName, record))
+		.filter(Boolean));
+	const sanitizedHeadquartersRecords = hqRecords.map(record => {
+		const key = recordKeyForFile(fileName, record);
+		const result = sanitizeHeadquartersExecutionRecord(fileName, record, headquartersDirPath);
+		if (result.actions.length > 0 && key && !existingHeadquartersKeys.has(key)) {
+			pushSanitizedHeadquartersRecord(diagnostics, fileName, key, result.actions);
+		}
+		return result.record;
+	});
+	mergeRecordsByKey(targetFile, fileName, sanitizedHeadquartersRecords, diagnostics, "headquarters");
+	sanitizeHeadquartersStoreFile(targetFile, fileName, headquartersDirPath, diagnostics, { stampMissingProjectId: projectEvidence.sameRootIds.size === 0 });
+	for (const [projectId, records] of normalRecordsByProject) {
+		const project = projectsById.get(projectId);
+		if (!project || typeof project.rootPath !== "string") continue;
+		const normalFile = path.join(project.rootPath, ".bobbit", "state", fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+		mergeRecordsByKey(normalFile, fileName, records, diagnostics, `normal:${projectId}`);
+	}
+	// In-place (override) repair: drop records now attributed to a normal project
+	// from the Headquarters store so they no longer double up under `headquarters`.
+	// Records that were left ambiguous / genuinely headquarters are preserved.
+	if (inPlace && routedNormalKeys.size > 0) {
+		const { records: existing, shape } = readStoreRecordsWithShape(targetFile, fileName);
+		const kept = existing.filter(record => {
+			const key = recordKeyForFile(fileName, record);
+			return !key || !routedNormalKeys.has(key);
+		});
+		if (kept.length !== existing.length) {
+			writeStoreRecords(targetFile, kept, shape);
+			diagnostics.copied.push(`headquarters: removed ${existing.length - kept.length} re-attributed normal record${existing.length - kept.length === 1 ? "" : "s"} from ${fileName}`);
+		}
+	}
+}
+
+function quarantineLegacyConfig(
+	legacyConfigDir: string,
+	headquartersStateDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const quarantineDir = path.join(headquartersStateDir, "migration-quarantine", "config", "legacy-server-bobbit-config");
+	copyTreePreserveFirst(legacyConfigDir, quarantineDir, "migration-quarantine/config/legacy-server-bobbit-config", diagnostics);
+	const collect = (dir: string): void => {
+		let entries: fs.Dirent[];
+		try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const child = path.join(dir, entry.name);
+			if (entry.isDirectory()) collect(child);
+			else if (entry.isFile()) diagnostics.quarantinedConfigFiles.push(path.relative(quarantineDir, child).replace(/\\/g, "/"));
+		}
+	};
+	collect(quarantineDir);
+}
+
+/**
+ * Recursively compare two filesystem trees for byte-equivalence, mirroring what
+ * {@link copyTreePreserveFirst} actually copies: symlinks and special entries are
+ * skipped (so their presence is not required for equivalence), files must have
+ * identical bytes, and directories must have byte-equivalent children. Used to
+ * PROVE a relocated server secret landed intact before we delete the reachable
+ * source. Returns false on any read/stat error so callers fail closed.
+ */
+function treesEqual(a: string, b: string): boolean {
+	let sa: fs.Stats;
+	let sb: fs.Stats;
+	try {
+		sa = fs.lstatSync(a);
+		sb = fs.lstatSync(b);
+	} catch {
+		return false;
+	}
+	if (sa.isSymbolicLink()) return true; // copy skips symlinks; not required at dest
+	if (sa.isFile()) {
+		if (!sb.isFile()) return false;
+		try {
+			return fs.readFileSync(a).equals(fs.readFileSync(b));
+		} catch {
+			return false;
+		}
+	}
+	if (sa.isDirectory()) {
+		if (!sb.isDirectory()) return false;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(a, { withFileTypes: true });
+		} catch {
+			return false;
+		}
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue; // copy skips symlinks
+			if (!treesEqual(path.join(a, entry.name), path.join(b, entry.name))) return false;
+		}
+		return true;
+	}
+	return true; // special entries are skipped by the copy
+}
+
+/**
+ * Security: relocate LIVE server secrets (`token`, `tls`, `sandbox-agent-auth`)
+ * out of `sourceStateDir` and into the OS-level `serverSecretsDir()`, which lives
+ * OUTSIDE any project root.
+ *
+ * Both the Headquarters state dir (`<serverRunDir>/.bobbit/headquarters/state` by
+ * default) and the legacy `<serverRunDir>/.bobbit/state` are DESCENDANTS of a
+ * same-root normal project's default cwd (`<serverRunDir>`), so leaving a live
+ * admin bearer `token` (or TLS material / sandbox auth) there is a gateway-wide
+ * privilege escalation. This moves each entry so exactly ONE live copy remains,
+ * in `serverSecretsDir()`.
+ *
+ * Preserve-first: never overwrite a secret already present in `serverSecretsDir()`
+ * — that copy is authoritative (preserves an existing token VALUE / continuity).
+ * When the target already exists we simply drop the reachable duplicate. A
+ * NON-secret marker is left behind so the move is traceable. Idempotent: a no-op
+ * once no reachable copy remains.
+ *
+ * FATAL by design (finding B): if a live secret cannot be provably removed from
+ * the project-reachable path — the copy into serverSecretsDir() failed / is not
+ * byte-equivalent, or the reachable source survives deletion — this THROWS rather
+ * than merely logging. Continuing would leave the admin bearer token readable
+ * under a same-root normal project's cwd, re-opening the S1 privilege escalation.
+ * Diagnostics are persisted before the throw so the failure is auditable.
+ */
+function relocateServerSecretsToSecretsDir(
+	sourceStateDir: string,
+	secretsDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	// Never relocate onto itself (e.g. BOBBIT_SECRETS_DIR pointed at the state dir).
+	if (samePath(sourceStateDir, secretsDir)) return;
+	for (const entry of SERVER_SECRET_ENTRIES) {
+		const src = path.join(sourceStateDir, entry);
+		if (!fs.existsSync(src)) continue; // already relocated / never present
+		const dest = path.join(secretsDir, entry);
+		try {
+			const destPreexisted = fs.existsSync(dest);
+			if (!destPreexisted) {
+				// 1. Preserve the secret in the secrets dir before removal.
+				fs.mkdirSync(secretsDir, { recursive: true });
+				copyTreePreserveFirst(src, dest, path.join("server-secrets", entry), diagnostics);
+				// FATAL: prove the copy produced a byte-equivalent secret BEFORE we
+				// delete the reachable source. Deleting after a bad copy would lose the
+				// secret; keeping the source leaves the admin token readable.
+				if (!fs.existsSync(dest) || !treesEqual(src, dest)) {
+					throw new Error("copied secret into serverSecretsDir is missing or not byte-equivalent to the source");
+				}
+				diagnostics.copied.push(`security: relocated live server secret "${entry}" into serverSecretsDir (outside any project root)`);
+			} else {
+				// secretsDir already holds the authoritative live copy — just drop the
+				// project-reachable duplicate. Preserves token continuity.
+				diagnostics.skipped.push(`security: server secret "${entry}" already present in serverSecretsDir; removed project-reachable duplicate`);
+			}
+			// 2. Remove the reachable copy from the project-reachable state dir.
+			fs.rmSync(src, { recursive: true, force: true });
+			// FATAL: prove the reachable source is actually gone. If it survives, the
+			// live admin bearer token / TLS / sandbox auth stays readable under a
+			// project-reachable path (S1 escalation) — refuse to continue.
+			if (fs.existsSync(src)) {
+				throw new Error("reachable server secret survived removal from the project-reachable state dir");
+			}
+			// 3. Leave a NON-secret marker so operators can trace the move.
+			try {
+				fs.writeFileSync(
+					path.join(sourceStateDir, `.${entry}-moved-to-server-secrets`),
+					`Moved to the OS-level Bobbit server secrets directory on ${new Date().toISOString()}. Live secrets no longer live under any project-reachable path.\n`,
+					"utf-8",
+				);
+			} catch { /* marker is best-effort and contains no secret */ }
+		} catch (err) {
+			// FATAL: leaving a live server secret readable under a project-reachable
+			// path re-opens the same-root admin-token escalation. Persist diagnostics
+			// (never containing the secret), then abort — fail closed.
+			const message = `security: refusing to continue — could not provably relocate live server secret "${entry}" out of a project-reachable path (${src}): ${(err as Error).message}`;
+			diagnostics.failures.push(message);
+			try {
+				writeHeadquartersDiagnostics(diagnostics.paths.headquartersStateDir, diagnostics);
+			} catch { /* best-effort audit; the throw below is the real signal */ }
+			throw new Error(message);
+		}
+	}
+}
+
+/**
+ * Security: relocate legacy `<serverRunDir>/.bobbit/state` server secrets into
+ * `serverSecretsDir()` (preserve-first) and strip the legacy copies. Thin wrapper
+ * over {@link relocateServerSecretsToSecretsDir} kept for call-site clarity — the
+ * legacy state dir is normal-project-owned after the split, so the same reachable
+ * escalation applies. Only call in the default no-override, non-source-is-target
+ * case (the override legacy dir is handled by relocating the HQ state dir).
+ */
+function neutralizeLegacyServerSecrets(
+	legacyStateDir: string,
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	relocateServerSecretsToSecretsDir(legacyStateDir, serverSecretsDir(), diagnostics);
+}
+
+export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationDiagnostics {
+	const serverRunDir = path.resolve(input.serverRunDir);
+	const headquartersDirPath = path.resolve(input.headquartersDir);
+	const headquartersStateDir = path.resolve(input.headquartersStateDir);
+	const headquartersConfigDir = path.resolve(input.headquartersConfigDir);
+	const legacyServerBobbitDir = path.resolve(input.legacyServerBobbitDir);
+	const legacyStateDir = path.join(legacyServerBobbitDir, "state");
+	const legacyConfigDir = path.join(legacyServerBobbitDir, "config");
+	const diagnostics = newHeadquartersDiagnostics({ serverRunDir, headquartersDir: headquartersDirPath, headquartersStateDir, headquartersConfigDir, legacyServerBobbitDir });
+
+	try {
+		fs.mkdirSync(headquartersStateDir, { recursive: true });
+		fs.mkdirSync(headquartersConfigDir, { recursive: true });
+	} catch (err) {
+		diagnostics.failures.push(`prepare Headquarters directories: ${(err as Error).message}`);
+		writeHeadquartersDiagnostics(headquartersStateDir, diagnostics);
+		throw err;
+	}
+
+	const defaultHeadquartersDir = path.join(serverRunDir, ".bobbit", "headquarters");
+	const usingOverride = !samePath(headquartersDirPath, defaultHeadquartersDir);
+	const sourceIsTarget = samePath(legacyStateDir, headquartersStateDir) && samePath(legacyConfigDir, headquartersConfigDir);
+	const useLegacyDefaultSource = !usingOverride || sourceIsTarget;
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
+		for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
+			const src = path.join(legacyStateDir, entry.name);
+			const dest = path.join(headquartersStateDir, entry.name);
+			if (PROJECT_STORE_FILES.has(entry.name)) continue;
+			if (SERVER_STATE_ENTRIES.has(entry.name) || entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
+				copyTreePreserveFirst(src, dest, entry.name, diagnostics);
+			}
+		}
+		// Relocate the legacy `<serverRunDir>/.bobbit/state` server secrets out to
+		// the OS-level serverSecretsDir(); leaving them at a normal-project-reachable
+		// path is a gateway-wide privilege escalation.
+		neutralizeLegacyServerSecrets(legacyStateDir, diagnostics);
+	} else if (usingOverride) {
+		diagnostics.skipped.push("legacy default .bobbit/state: BOBBIT_DIR/BOBBIT_PI_DIR-style Headquarters override is used in place");
+	}
+
+	// Always relocate any live server secrets that were copied into (or already
+	// live at) the Headquarters state dir out to serverSecretsDir(). The default
+	// Headquarters dir is `<serverRunDir>/.bobbit/headquarters`, a descendant of a
+	// same-root normal project's cwd, so the admin token / TLS / sandbox auth must
+	// not remain there. Preserve-first: an existing secretsDir copy wins (token
+	// continuity). Runs for both default and BOBBIT_DIR-override installs.
+	relocateServerSecretsToSecretsDir(headquartersStateDir, serverSecretsDir(), diagnostics);
+
+	const projectsFile = path.join(headquartersStateDir, "projects.json");
+	const legacyProjectsFile = path.join(legacyStateDir, "projects.json");
+	const inactiveLegacyProjectsFile = path.join(headquartersStateDir, ".inactive-legacy-default-projects.json");
+	const inactiveLegacyStateDir = path.join(headquartersStateDir, ".inactive-legacy-default-state");
+	const sameRootIds = repairProjectsFileForHeadquartersSplit(
+		projectsFile,
+		useLegacyDefaultSource ? legacyProjectsFile : inactiveLegacyProjectsFile,
+		serverRunDir,
+		headquartersDirPath,
+		diagnostics,
+	);
+	const evidence = collectProjectEvidence(headquartersStateDir, useLegacyDefaultSource ? legacyStateDir : inactiveLegacyStateDir, serverRunDir);
+	for (const id of sameRootIds) evidence.sameRootIds.add(id);
+	const sameRootEvidence = evidence.sameRootIds.size > 0;
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
+		for (const fileName of PROJECT_STORE_FILES) {
+			const legacyFile = path.join(legacyStateDir, fileName);
+			if (!fs.existsSync(legacyFile)) continue;
+			const targetFile = path.join(headquartersStateDir, fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+			if (PROJECT_OBJECT_STORE_FILES.has(fileName)) {
+				if (sameRootEvidence) {
+					diagnostics.ambiguousRecords.push({ file: fileName, key: "*", reason: "object-shaped project store requires manual attribution when same-root normal project evidence exists" });
+				} else {
+					copyTreePreserveFirst(legacyFile, targetFile, fileName, diagnostics);
+				}
+				continue;
+			}
+			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
+		}
+	} else if (usingOverride && !sourceIsTarget && sameRootEvidence) {
+		// B1: BOBBIT_DIR/BOBBIT_PI_DIR-override installs promoted per-store records
+		// (sessions/goals/staff/…) under `headquarters` and left their
+		// `.pre-headquarters-id-migration` per-store backups in the SAME override
+		// state dir. `repairProjectsFileForHeadquartersSplit` restored the normal
+		// project's registry record above, but without this the promoted records
+		// stay attributed to headquarters. Re-run the per-store repair reading the
+		// per-store files and backups from the override state dir (which is both the
+		// source and the Headquarters target — routeLegacyProjectStoreFile detects
+		// the in-place case and strips re-attributed normal records from the HQ
+		// store). Reuses the same routing/evidence helpers as the non-override path.
+		for (const fileName of PROJECT_STORE_FILES) {
+			const overrideFile = path.join(headquartersStateDir, fileName);
+			const hasBackup = fs.existsSync(overrideFile + HEADQUARTERS_BACKUP_SUFFIX);
+			if (!fs.existsSync(overrideFile) && !hasBackup) continue;
+			const targetFile = path.join(headquartersStateDir, fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+			if (PROJECT_OBJECT_STORE_FILES.has(fileName)) {
+				// Object-shaped stores can't be safely re-attributed key-by-key when
+				// same-root evidence exists — flag for manual attribution, matching
+				// the non-override branch.
+				diagnostics.ambiguousRecords.push({ file: fileName, key: "*", reason: "object-shaped project store requires manual attribution when same-root normal project evidence exists (override install)" });
+				continue;
+			}
+			routeLegacyProjectStoreFile(fileName, overrideFile, targetFile, headquartersDirPath, evidence, diagnostics);
+		}
+	}
+
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir)) {
+		if (sameRootEvidence) {
+			quarantineLegacyConfig(legacyConfigDir, headquartersStateDir, diagnostics);
+			diagnostics.skipped.push("legacy default .bobbit/config: same-root normal project evidence exists; config quarantined instead of activated in Headquarters");
+		} else {
+			copyTreePreserveFirst(legacyConfigDir, headquartersConfigDir, "config", diagnostics);
+		}
+	} else if (usingOverride) {
+		diagnostics.skipped.push("legacy default .bobbit/config: Headquarters override config is used in place");
+	}
+
+	sanitizeExistingHeadquartersStores(headquartersStateDir, headquartersDirPath, diagnostics, { stampMissingProjectId: !sameRootEvidence });
+
+	try {
+		fs.writeFileSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
+	} catch (err) {
+		diagnostics.failures.push(`write marker: ${(err as Error).message}`);
+	}
+	writeHeadquartersDiagnostics(headquartersStateDir, diagnostics);
+	return diagnostics;
 }
 
 function migrateHeadquartersProjectAliases(
@@ -321,121 +1054,71 @@ function migrateHeadquartersProjectAliases(
 	projectRegistry: ProjectRegistry,
 	serverCwd: string,
 ): { oldProjectIds: Set<string>; headquartersProject?: RegisteredProject } {
+	void centralConfigDir;
 	const oldProjectIds = new Set<string>();
 	const projects = registryProjectMap(projectRegistry);
 	if (!projects) return { oldProjectIds };
 
 	const projectsFile = path.join(centralStateDir, "projects.json");
-	const serverRoot = path.resolve(serverCwd);
-	const serverRootKey = canonicalPathKey(serverRoot);
+	const headquartersRoot = path.resolve(path.dirname(centralStateDir));
 	let headquartersProject = projects.get(HEADQUARTERS_PROJECT_ID);
-	const serverRootCandidates = [...projects.values()].filter(project => {
-		if (project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters") return false;
-		if (project.id === SYSTEM_PROJECT_ID || project.kind === "system" || project.hidden) return false;
-		return canonicalPathKey(project.rootPath) === serverRootKey;
-	});
-
-	for (const project of serverRootCandidates) oldProjectIds.add(project.id);
-
 	let registryChanged = false;
-	const markProjectsBackup = (): void => backupForHeadquartersMigration(projectsFile);
-	const repairHeadquarters = (project: RegisteredProject): void => {
-		if (project.id !== HEADQUARTERS_PROJECT_ID) {
-			projects.delete(project.id);
-			project.id = HEADQUARTERS_PROJECT_ID;
-			projects.set(project.id, project);
-			registryChanged = true;
-		}
-		if (project.name !== HEADQUARTERS_PROJECT_NAME) {
-			project.name = HEADQUARTERS_PROJECT_NAME;
-			registryChanged = true;
-		}
-		const resolvedRoot = path.resolve(serverRoot);
-		if (path.resolve(project.rootPath) !== resolvedRoot) {
-			project.rootPath = resolvedRoot;
-			registryChanged = true;
-		}
-		if (project.kind !== "headquarters") {
-			project.kind = "headquarters";
-			registryChanged = true;
-		}
-		if (project.hidden !== undefined) {
-			delete project.hidden;
-			registryChanged = true;
-		}
-		if (project.provisional !== undefined) {
-			delete project.provisional;
-			registryChanged = true;
-		}
-		if (project.position !== undefined) {
-			delete project.position;
-			registryChanged = true;
-		}
-		if (project.parentProjectId !== undefined) {
-			delete project.parentProjectId;
-			registryChanged = true;
-		}
-	};
 
-	if (!headquartersProject && serverRootCandidates.length > 0) {
-		headquartersProject = serverRootCandidates[0];
-		markProjectsBackup();
-		repairHeadquarters(headquartersProject);
+	const backupProjects = readProjectsFile(projectsFile + HEADQUARTERS_BACKUP_SUFFIX);
+	const sameRootBackups = sameRootNormalProjectsFrom(backupProjects, serverCwd);
+	for (const backup of sameRootBackups) {
+		const id = String(backup.id ?? "");
+		if (!id || projects.has(id)) continue;
+		projects.set(id, backup as unknown as RegisteredProject);
+		registryChanged = true;
+		console.log(`[migration] Restored same-root normal project ${id} from Headquarters id migration backup`);
 	}
 
 	if (headquartersProject) {
-		repairHeadquarters(headquartersProject);
-	}
-
-	if (headquartersProject && serverRootCandidates.length > 0) {
-		markProjectsBackup();
-		for (const candidate of serverRootCandidates) {
-			if (candidate === headquartersProject || candidate.id === HEADQUARTERS_PROJECT_ID) continue;
-			projects.delete(candidate.id);
+		if (headquartersProject.name !== HEADQUARTERS_PROJECT_NAME) {
+			headquartersProject.name = HEADQUARTERS_PROJECT_NAME;
 			registryChanged = true;
 		}
-	}
-
-	if (oldProjectIds.size > 0) {
-		for (const project of projects.values()) {
-			if (project.parentProjectId && oldProjectIds.has(project.parentProjectId)) {
-				if (project.id === HEADQUARTERS_PROJECT_ID) delete project.parentProjectId;
-				else project.parentProjectId = HEADQUARTERS_PROJECT_ID;
-				registryChanged = true;
-			}
+		if (headquartersProject.kind !== "headquarters") {
+			headquartersProject.kind = "headquarters";
+			registryChanged = true;
+		}
+		if (!samePath(headquartersProject.rootPath, headquartersRoot)) {
+			headquartersProject.rootPath = headquartersRoot;
+			registryChanged = true;
+		}
+		if (headquartersProject.hidden !== undefined) {
+			delete headquartersProject.hidden;
+			registryChanged = true;
+		}
+		if (headquartersProject.provisional !== undefined) {
+			delete headquartersProject.provisional;
+			registryChanged = true;
+		}
+		if (headquartersProject.position !== undefined) {
+			delete headquartersProject.position;
+			registryChanged = true;
+		}
+		if (headquartersProject.parentProjectId !== undefined) {
+			delete headquartersProject.parentProjectId;
+			registryChanged = true;
 		}
 	}
 
 	if (registryChanged) {
-		markProjectsBackup();
+		backupForHeadquartersMigration(projectsFile);
 		registrySave(projectRegistry);
-		const promotedIds = [...oldProjectIds].join(", ");
-		console.log(promotedIds
-			? `[migration] Promoted server-root project reference(s) ${promotedIds} to Headquarters`
-			: "[migration] Repaired Headquarters project registry record");
-	}
-
-	if (oldProjectIds.size > 0) {
-		preserveLegacyServerRootBobbitForHeadquarters(centralStateDir, centralConfigDir, serverCwd, oldProjectIds);
-		rewriteProjectIdsInJsonTree(centralStateDir, oldProjectIds);
-		dropSearchIndexesForHeadquartersMigration(centralStateDir);
-		const staleRefs = scanStaleProjectIdReferences(centralStateDir, oldProjectIds);
-		if (staleRefs.length > 0) {
-			throw new Error(
-				`Headquarters project id migration left stale project id references: ${staleRefs.slice(0, 20).join(", ")}`,
-			);
-		}
-	}
-
-	if (headquartersProject || oldProjectIds.size > 0) {
 		try {
 			fs.mkdirSync(centralStateDir, { recursive: true });
 			fs.writeFileSync(path.join(centralStateDir, HEADQUARTERS_ID_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
 		} catch (err) {
-			console.log(`[migration] Warning: could not write Headquarters id migration marker: ${err}`);
+			console.log(`[migration] Warning: could not write Headquarters id repair marker: ${err}`);
 		}
 	}
 
+	// This function intentionally no longer returns old normal ids for rewrite.
+	// Same-root normal projects remain normal projects; per-store backup repair is
+	// handled by migrateLegacyHeadquartersDirectory().
 	return { oldProjectIds, headquartersProject };
 }
 
@@ -485,7 +1168,7 @@ export function migrateToPerProjectState(
 	const headquartersAliasMigration = migrateHeadquartersProjectAliases(centralStateDir, centralConfigDir, projectRegistry, serverCwd);
 	const markerPath = path.join(centralStateDir, MIGRATION_MARKER);
 
-	// 1. Already migrated? Headquarters id promotion still ran above because it
+	// 1. Already migrated? Headquarters split repair still ran above because it
 	// is independent of the older per-project state marker.
 	if (fs.existsSync(markerPath)) return;
 
@@ -501,19 +1184,42 @@ export function migrateToPerProjectState(
 		projectRegistry.getByPath(serverCwd) ??
 		projects[0];
 
+	const legacyDefaultStateDir = path.join(serverCwd, ".bobbit", "state");
+	const projectEvidence = collectProjectEvidence(centralStateDir, legacyDefaultStateDir, serverCwd);
+	for (const project of sameRootNormalProjectsFrom(projects as unknown as Record<string, unknown>[], serverCwd)) {
+		projectEvidence.sameRootIds.add(String(project.id));
+	}
+	const sameRootEvidence = projectEvidence.sameRootIds.size > 0;
+	const perProjectDiagnostics: PerProjectMigrationDiagnostics = {
+		version: 1,
+		runAt: new Date().toISOString(),
+		paths: {
+			centralStateDir: path.resolve(centralStateDir),
+			serverCwd: path.resolve(serverCwd),
+		},
+		sameRootNormalProjectIds: [...projectEvidence.sameRootIds].sort(),
+		ambiguousRecords: [],
+	};
+	const markAmbiguous = (file: string, key: string, reason: string): void => {
+		perProjectDiagnostics.ambiguousRecords.push({ file, key, reason });
+		console.log(`[migration] Ambiguous ${file} record ${key || "<unknown>"}: ${reason}`);
+	};
+
 	console.log(
-		`[migration] Starting per-project state migration. Default project: "${defaultProject.name}" (${defaultProject.id})`,
+		`[migration] Starting per-project state migration. Default project: "${defaultProject.name}" (${defaultProject.id})${sameRootEvidence ? `; same-root evidence: ${perProjectDiagnostics.sameRootNormalProjectIds.join(", ")}` : ""}`,
 	);
 
 	// Helper: resolve project for a given projectId.
-	const resolveProject = (projectId?: string): RegisteredProject => {
+	const resolveProject = (projectId?: string): RegisteredProject | undefined => {
 		if (projectId) {
 			if (headquartersAliasMigration.oldProjectIds.has(projectId)) {
 				return projectRegistry.get(HEADQUARTERS_PROJECT_ID) ?? defaultProject;
 			}
 			const p = projectRegistry.get(projectId);
 			if (p) return p;
+			if (sameRootEvidence) return undefined;
 		}
+		if (sameRootEvidence) return undefined;
 		return defaultProject;
 	};
 
@@ -581,6 +1287,56 @@ export function migrateToPerProjectState(
 		writeJsonArray(centralFile, [], { backup: true });
 	}
 
+	// Envelope-aware variants of writeBucket / clearCentralBucketIfDefaultMissing for
+	// sessions.json. Unlike goals/tasks/staff (true arrays), sessions.json is a
+	// versioned envelope `{ version: 2, epoch, sessions: [...] }` written by
+	// SessionStore. Reading it with readJsonArray returns [] (dropping every session)
+	// and writing it as a bare array (or clearing with `[]`) corrupts the store so
+	// SessionStore loads nothing after restart. These preserve the discovered shape.
+	function writeSessionBucket(
+		centralFile: string,
+		project: RegisteredProject,
+		sessions: Record<string, unknown>[],
+		sourceShape: StoreFileShape,
+	): void {
+		const targetFile = path.join(ensureProjectStateDir(project), "sessions.json");
+		if (samePath(targetFile, centralFile)) {
+			backupForHeadquartersMigration(targetFile);
+			writeStoreRecords(targetFile, sessions, sourceShape);
+			return;
+		}
+		if (sessions.length === 0) return;
+		fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+		const targetExists = fs.existsSync(targetFile);
+		const { records: existing, shape: existingShape } = readStoreRecordsWithShape(targetFile, "sessions.json");
+		const existingIds = new Set(existing.map(item => String(item.id)));
+		let added = 0;
+		for (const session of sessions) {
+			if (!existingIds.has(String(session.id))) {
+				existing.push(session);
+				added++;
+			}
+		}
+		// Preserve the target's own envelope when it already exists; otherwise adopt
+		// the source envelope shape so a brand-new per-project file stays v2.
+		writeStoreRecords(targetFile, existing, targetExists ? existingShape : sourceShape);
+		if (added > 0) console.log(`[migration] Wrote ${added} new items to ${targetFile}`);
+	}
+
+	function clearCentralSessionsBucketIfDefaultMissing(
+		centralFile: string,
+		groups: Map<string, Record<string, unknown>[]>,
+		shape: StoreFileShape,
+	): void {
+		const defaultTarget = path.join(ensureProjectStateDir(defaultProject), "sessions.json");
+		if (!samePath(defaultTarget, centralFile)) return;
+		if (groups.has(defaultProject.id)) return;
+		if (!fs.existsSync(centralFile)) return;
+		// Write an EMPTY v2 envelope, never a bare `[]`, so SessionStore can load it.
+		backupForHeadquartersMigration(centralFile);
+		writeStoreRecords(centralFile, [], shape);
+	}
+
 	// Helper: safely rename a file with .pre-migration suffix.
 	function renameForBackup(filePath: string): void {
 		try {
@@ -605,6 +1361,16 @@ export function migrateToPerProjectState(
 
 	for (const goal of centralGoals) {
 		const project = resolveProject(goal.projectId);
+		if (!project) {
+			markAmbiguous("goals.json", String(goal.id ?? ""), goal.projectId ? `unknown projectId ${goal.projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = goalsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				goalsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(goal);
+			continue;
+		}
 		goal.projectId = project.id;
 		goalProjectMap.set(goal.id, project);
 		let bucket = goalsByProject.get(project.id);
@@ -624,12 +1390,25 @@ export function migrateToPerProjectState(
 	console.log(`[migration] Distributed ${centralGoals.length} goals across ${goalsByProject.size} project(s)`);
 
 	// ── 3. Sessions ──
+	// sessions.json is a versioned envelope (see writeSessionBucket) — read and write
+	// it envelope-aware so distribution never flattens/clears it to a bare array.
 	const centralSessionsFile = path.join(centralStateDir, "sessions.json");
-	const centralSessions = readJsonArray<PersistedSession>(centralSessionsFile);
-	const sessionsByProject = new Map<string, PersistedSession[]>();
+	const { records: centralSessions, shape: sessionsShape } = readStoreRecordsWithShape(centralSessionsFile, "sessions.json");
+	const sessionsByProject = new Map<string, Record<string, unknown>[]>();
 
 	for (const session of centralSessions) {
-		const project = resolveProject(session.projectId);
+		const projectId = typeof session.projectId === "string" ? session.projectId : undefined;
+		const project = resolveProject(projectId);
+		if (!project) {
+			markAmbiguous("sessions.json", String(session.id ?? ""), projectId ? `unknown projectId ${projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = sessionsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				sessionsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(session);
+			continue;
+		}
 		session.projectId = project.id;
 		let bucket = sessionsByProject.get(project.id);
 		if (!bucket) {
@@ -641,9 +1420,9 @@ export function migrateToPerProjectState(
 
 	for (const [projectId, sessions] of sessionsByProject) {
 		const project = projectRegistry.get(projectId)!;
-		writeBucket(centralSessionsFile, "sessions.json", project, sessions, "id");
+		writeSessionBucket(centralSessionsFile, project, sessions, sessionsShape);
 	}
-	clearCentralBucketIfDefaultMissing(centralSessionsFile, "sessions.json", sessionsByProject);
+	clearCentralSessionsBucketIfDefaultMissing(centralSessionsFile, sessionsByProject, sessionsShape);
 	console.log(`[migration] Distributed ${centralSessions.length} sessions across ${sessionsByProject.size} project(s)`);
 
 	// ── 4. Tasks — resolve project via goalId → goal's project ──
@@ -652,11 +1431,22 @@ export function migrateToPerProjectState(
 	const tasksByProject = new Map<string, PersistedTask[]>();
 
 	for (const task of centralTasks) {
-		const project = goalProjectMap.get(task.goalId) ?? defaultProject;
-		let bucket = tasksByProject.get(project.id);
+		const project = goalProjectMap.get(task.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous("tasks.json", String(task.id ?? ""), `goalId ${task.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = tasksByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				tasksByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(task);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = tasksByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			tasksByProject.set(project.id, bucket);
+			tasksByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(task);
 	}
@@ -678,11 +1468,22 @@ export function migrateToPerProjectState(
 	const teamsByProject = new Map<string, PersistedTeamEntry[]>();
 
 	for (const team of centralTeams) {
-		const project = goalProjectMap.get(team.goalId) ?? defaultProject;
-		let bucket = teamsByProject.get(project.id);
+		const project = goalProjectMap.get(team.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous(path.basename(centralTeamsFile), String(team.goalId ?? ""), `goalId ${team.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = teamsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				teamsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(team);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = teamsByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			teamsByProject.set(project.id, bucket);
+			teamsByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(team);
 	}
@@ -700,11 +1501,22 @@ export function migrateToPerProjectState(
 	const gatesByProject = new Map<string, GateState[]>();
 
 	for (const gate of centralGates) {
-		const project = goalProjectMap.get(gate.goalId) ?? defaultProject;
-		let bucket = gatesByProject.get(project.id);
+		const project = goalProjectMap.get(gate.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous("gates.json", `${String(gate.goalId ?? "")}::${String(gate.gateId ?? "")}`, `goalId ${gate.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = gatesByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				gatesByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(gate);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = gatesByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			gatesByProject.set(project.id, bucket);
+			gatesByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(gate);
 	}
@@ -744,6 +1556,17 @@ export function migrateToPerProjectState(
 	const staffByProject = new Map<string, PersistedStaff[]>();
 	for (const staff of centralStaff) {
 		const project = resolveProject(staff.projectId);
+		if (!project) {
+			const staffKey = String(staff.id ?? (staff as unknown as Record<string, unknown>).staffId ?? "");
+			markAmbiguous("staff.json", staffKey, staff.projectId ? `unknown projectId ${staff.projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = staffByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				staffByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(staff);
+			continue;
+		}
 		staff.projectId = project.id;
 		let bucket = staffByProject.get(project.id);
 		if (!bucket) {
@@ -786,6 +1609,7 @@ export function migrateToPerProjectState(
 	}
 
 	// ── 9. Write migration marker ──
+	writePerProjectDiagnostics(centralStateDir, perProjectDiagnostics);
 	try {
 		fs.writeFileSync(markerPath, new Date().toISOString(), "utf-8");
 		console.log("[migration] Per-project state migration complete. Marker written.");

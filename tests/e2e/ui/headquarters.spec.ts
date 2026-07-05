@@ -7,14 +7,18 @@
  */
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
 import type { Locator, Page } from "@playwright/test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import path, { join } from "node:path";
 import { apiFetch, registerProject, deleteSession, deleteGoal } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const HEADQUARTERS_NAME = "Headquarters";
+const STARTUP_SAME_ROOT_PROJECT_ID = "same-root-startup-project";
+const STARTUP_SAME_ROOT_PROJECT_NAME = "Same Root Startup Project";
+
+test.use({ splitHeadquartersServerRoot: true, sameRootProjectAtStartup: true });
 
 type ProjectRecord = {
 	id: string;
@@ -52,7 +56,24 @@ function normalProjectIcon(scope: Locator): Locator {
 		'svg.lucide-folder-open',
 		'svg[class*="lucide-folder-open"]',
 		'[data-lucide="folder-open"]',
+		'svg.lucide-folder',
+		'svg[class*="lucide-folder"]',
+		'[data-lucide="folder"]',
 	].join(", ")).first();
+}
+
+function canonicalPath(p: string): string {
+	try { return realpathSync(p); } catch { return path.resolve(p); }
+}
+
+function samePath(a: string, b: string): boolean {
+	const ra = canonicalPath(a);
+	const rb = canonicalPath(b);
+	return process.platform === "win32" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+}
+
+function expectSamePath(actual: string, expected: string, label: string): void {
+	expect(samePath(actual, expected), `${label}: expected ${actual} to equal ${expected}`).toBe(true);
 }
 
 async function parseJsonResponse<T = any>(resp: Response): Promise<T> {
@@ -77,7 +98,7 @@ async function getHeadquartersProject(): Promise<ProjectRecord> {
 	const project = await parseJsonResponse<ProjectRecord>(resp);
 	expect(project.id, "Headquarters must use the stable project id").toBe(HEADQUARTERS_PROJECT_ID);
 	expect(project.name, "Headquarters must use the stable display name").toBe(HEADQUARTERS_NAME);
-	expect(project.rootPath, "Headquarters must expose the server run directory rootPath").toBeTruthy();
+	expect(project.rootPath, "Headquarters must expose its isolated Headquarters directory rootPath").toBeTruthy();
 	return project;
 }
 
@@ -176,6 +197,72 @@ async function createNormalProject(name: string): Promise<ProjectRecord> {
 	return project;
 }
 
+async function createSameRootProject(gateway: GatewayInfo, name = `Same Root UI ${Date.now()}`): Promise<ProjectRecord> {
+	const resp = await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify({ name, rootPath: gateway.serverRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
+	});
+	expect(resp.ok, `same-root project registration failed: ${resp.status} ${await resp.clone().text().catch(() => "")}`).toBe(true);
+	const project = await parseJsonResponse<ProjectRecord>(resp);
+	expect(project.id).not.toBe(HEADQUARTERS_PROJECT_ID);
+	expectSamePath(project.rootPath, gateway.serverRoot, "same-root normal project rootPath");
+	createdProjects.add(project.id);
+	return project;
+}
+
+async function startupSameRootProject(gateway: GatewayInfo): Promise<ProjectRecord> {
+	await setHeadquartersVisible(true);
+	for (const project of await listVisibleProjects()) {
+		if (project.id === HEADQUARTERS_PROJECT_ID || samePath(project.rootPath, gateway.serverRoot)) continue;
+		await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" });
+	}
+	const projects = await listVisibleProjects();
+	const sameRoot = projects.find((project) => samePath(project.rootPath, gateway.serverRoot));
+	expect(sameRoot, `expected startup same-root project at ${gateway.serverRoot}`).toBeTruthy();
+	return sameRoot!;
+}
+
+async function createSessionViaSplashPicker(page: Page, projectName: string): Promise<{ id: string; requestBody: Record<string, unknown> }> {
+	const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
+	await expect(splash).toBeVisible({ timeout: 15_000 });
+	await expect(splash).toContainText("Quick Session");
+	await splash.click();
+	const picker = page.locator('[data-testid="splash-project-picker"]').first();
+	await expect(picker).toBeVisible({ timeout: 10_000 });
+	const row = picker.locator('[data-testid="splash-project-picker-item"]').filter({ hasText: projectName }).first();
+	await expect(row, `project picker should contain ${projectName}`).toBeVisible({ timeout: 10_000 });
+	const sessionCreated = page.waitForResponse((resp) =>
+		resp.url().includes("/api/sessions") && resp.request().method() === "POST",
+		{ timeout: 30_000 },
+	);
+	await row.click();
+	const resp = await sessionCreated;
+	expect(resp.ok(), `Quick Session POST /api/sessions should succeed: ${resp.status()}`).toBe(true);
+	const requestBody = resp.request().postDataJSON?.() ?? JSON.parse(resp.request().postData() || "{}");
+	const body = await resp.json();
+	expect(body.id, "Quick Session response should include a session id").toBeTruthy();
+	createdSessions.add(body.id);
+	await expect(page).toHaveURL(/#\/session\//, { timeout: 20_000 });
+	return { id: body.id, requestBody };
+}
+
+async function openAddProjectDialog(page: Page): Promise<void> {
+	await openApp(page);
+	await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+	await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 10_000 });
+}
+
+async function waitForPreflight(page: Page, timeoutMs = 10_000): Promise<Locator> {
+	const panel = page.locator('[data-testid="preflight-panel"]').first();
+	await expect(panel).toBeVisible({ timeout: timeoutMs });
+	await expect.poll(async () => {
+		const rows = await page.locator('[data-testid="preflight-check"]').count();
+		const loading = await panel.getAttribute("data-loading");
+		return rows > 0 || loading === null;
+	}, { timeout: timeoutMs }).toBe(true);
+	return panel;
+}
+
 async function createNoWorktreeHeadquartersGoal(hq: ProjectRecord): Promise<Response> {
 	return apiFetch("/api/goals", {
 		method: "POST",
@@ -209,7 +296,103 @@ test.describe("Headquarters browser UX", () => {
 		await cleanupCreatedArtifacts();
 	});
 
-	test("fresh server shows Headquarters with TowerControl and Quick Session creates a Headquarters session", async ({ page }) => {
+	test("same-root startup shows Headquarters and the original normal project distinctly; Quick Session uses the selected scope", async ({ page, gateway }) => {
+		const sameRootProject = await startupSameRootProject(gateway);
+		expect(sameRootProject.id).toBe(STARTUP_SAME_ROOT_PROJECT_ID);
+		expect(sameRootProject.name).toBe(STARTUP_SAME_ROOT_PROJECT_NAME);
+		expectSamePath(sameRootProject.rootPath, gateway.serverRoot, "startup same-root normal project rootPath");
+		const hq = await getHeadquartersProject();
+		expectSamePath(hq.rootPath, gateway.bobbitDir, "BOBBIT_DIR Headquarters rootPath");
+
+		await openApp(page);
+		const hqHeader = projectHeader(page, HEADQUARTERS_PROJECT_ID);
+		const sameRootHeader = projectHeader(page, sameRootProject.id);
+		await expect(hqHeader).toBeVisible({ timeout: 15_000 });
+		await expect(sameRootHeader).toBeVisible({ timeout: 15_000 });
+		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
+			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
+		);
+		expect(headerIds.slice(0, 2), "Headquarters should be first and same-root normal project second").toEqual([HEADQUARTERS_PROJECT_ID, sameRootProject.id]);
+		await expect(headquartersIcon(hqHeader), "Headquarters row should use TowerControl").toBeVisible({ timeout: 10_000 });
+		await expect(normalProjectIcon(sameRootHeader), "same-root normal project should keep folder identity").toBeVisible({ timeout: 10_000 });
+		await expect(headquartersIcon(sameRootHeader), "same-root normal project must not use TowerControl").toHaveCount(0);
+
+		const splash = page.locator('[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]').first();
+		await expect(splash).toBeVisible({ timeout: 10_000 });
+		await splash.click();
+		const picker = page.locator('[data-testid="splash-project-picker"]').first();
+		await expect(picker).toBeVisible({ timeout: 10_000 });
+		const rows = picker.locator('[data-testid="splash-project-picker-item"]');
+		await expect(rows.first()).toContainText(HEADQUARTERS_NAME);
+		await expect(headquartersIcon(rows.first()), "picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+		await expect(rows.nth(1)).toContainText(sameRootProject.name);
+		await expect(normalProjectIcon(rows.nth(1)), "picker should use folder identity for same-root normal project").toBeVisible({ timeout: 10_000 });
+		await page.keyboard.press("Escape");
+
+		const hqSession = await createSessionViaSplashPicker(page, HEADQUARTERS_NAME);
+		expect(hqSession.requestBody.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+		let sessionResp = await apiFetch(`/api/sessions/${hqSession.id}`);
+		expect(sessionResp.ok).toBe(true);
+		let session = await parseJsonResponse<any>(sessionResp);
+		expect(session.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+		expectSamePath(session.cwd, gateway.bobbitDir, "Headquarters Quick Session cwd");
+		await deleteSession(hqSession.id).catch(() => {});
+		createdSessions.delete(hqSession.id);
+
+		await openApp(page);
+		const normalSession = await createSessionViaSplashPicker(page, sameRootProject.name);
+		expect(normalSession.requestBody.projectId).toBe(sameRootProject.id);
+		sessionResp = await apiFetch(`/api/sessions/${normalSession.id}`);
+		expect(sessionResp.ok).toBe(true);
+		session = await parseJsonResponse<any>(sessionResp);
+		expect(session.projectId).toBe(sameRootProject.id);
+		expectSamePath(session.cwd, gateway.serverRoot, "same-root normal Quick Session cwd");
+	});
+
+	test("same-root hide/show and restart keep the normal project visible while Headquarters is hidden", async ({ page, gateway }) => {
+		await prepareOnlyHeadquarters();
+		const sameRootProject = await createSameRootProject(gateway, `Same Root Hide ${Date.now()}`);
+		await openApp(page);
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+		await expect(projectHeader(page, sameRootProject.id)).toBeVisible({ timeout: 15_000 });
+
+		await setHeadquartersCheckbox(page, false);
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toHaveCount(0);
+		await expect(projectHeader(page, sameRootProject.id), "hiding Headquarters must not hide the same-root normal project").toBeVisible({ timeout: 15_000 });
+
+		await crashAndRestart(gateway, page);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID), "hidden preference should persist across restart").toHaveCount(0);
+		await expect(projectHeader(page, sameRootProject.id), "same-root normal project should persist across restart").toBeVisible({ timeout: 15_000 });
+		const projects = await listVisibleProjects();
+		expect(projects.map((project) => project.id)).toContain(sameRootProject.id);
+		expect(projects.map((project) => project.id)).not.toContain(HEADQUARTERS_PROJECT_ID);
+
+		await setHeadquartersCheckbox(page, true);
+		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 15_000 });
+		await expect(projectHeader(page, sameRootProject.id)).toBeVisible({ timeout: 15_000 });
+	});
+
+	test("Add Project preflight for the server run directory warns without offering to archive Headquarters", async ({ page, gateway }, testInfo) => {
+		await prepareOnlyHeadquarters();
+		await openAddProjectDialog(page);
+		const input = page.locator('input[placeholder="/path/to/project"]').first();
+		await input.fill(gateway.serverRoot);
+		let panel: Locator;
+		try {
+			panel = await waitForPreflight(page);
+		} catch (err) {
+			testInfo.skip(true, `preflight panel unavailable: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		await expect(panel).toHaveAttribute("data-has-fail", "0");
+		await expect(panel).toContainText(/Headquarters|server run directory/i);
+		await expect(page.locator('[data-testid="preflight-archive-cta"]'), "same-root Add Project must not offer to archive/delete Headquarters state").toHaveCount(0);
+		const continueButton = page.locator("button").filter({ hasText: "Continue" }).first();
+		await expect(continueButton, "server run directory should be addable as an explicit normal project").toBeEnabled();
+	});
+
+	test("fresh server shows Headquarters with TowerControl and Quick Session creates a Headquarters session", async ({ page, gateway }) => {
 		await prepareOnlyHeadquarters();
 		await openApp(page);
 
@@ -225,6 +408,7 @@ test.describe("Headquarters browser UX", () => {
 		expect(sessionResp.ok, "created Headquarters session should be readable").toBe(true);
 		const session = await parseJsonResponse<any>(sessionResp);
 		expect(session.projectId, "created session should persist projectId=headquarters").toBe(HEADQUARTERS_PROJECT_ID);
+		expectSamePath(session.cwd, gateway.bobbitDir, "created Headquarters session cwd");
 	});
 
 	test("New Staff uses Headquarters directly when it is the only visible project", async ({ page }) => {
@@ -367,7 +551,7 @@ test.describe("Headquarters browser UX", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.getByText("This Headquarters goal runs in the server directory without a git worktree.", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(/This Headquarters goal runs in the Headquarters directory without a git worktree\./i).first()).toBeVisible({ timeout: 15_000 });
 			await expect(page.getByText("Git branch", { exact: false }).first()).toBeVisible();
 			await expect(page.getByRole("button", { name: /create pr|open pr|ready to merge|merge|reset worktree|fork|branch/i })).toHaveCount(0);
 			return;

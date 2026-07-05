@@ -30,7 +30,7 @@
  * `state.previewProjectId` from the active session's `projectId`.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProjectId, deleteSession } from "../e2e-setup.js";
+import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Re-attempt goal proposal project binding @repro", () => {
@@ -49,7 +49,7 @@ test.describe("Re-attempt goal proposal project binding @repro", () => {
 			body: JSON.stringify({
 				title: "Original goal to re-attempt",
 				spec: "Original spec body.",
-				cwd: ".",
+				cwd: nonGitCwd(),
 				worktree: false,
 				autoStartTeam: false,
 				projectId,

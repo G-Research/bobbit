@@ -6,7 +6,7 @@
  * customize/override endpoints, and cascade correctness.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, rawApiFetch } from "./e2e-setup.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -49,6 +49,15 @@ async function deleteProject(id: string) {
 // ---------------------------------------------------------------------------
 
 test.describe("Config Cascade API", () => {
+
+	test("GET /api/tools and /api/roles require projectId", async () => {
+		for (const pathname of ["/api/tools", "/api/roles"]) {
+			const res = await rawApiFetch(pathname);
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.code).toBe("PROJECT_ID_REQUIRED");
+		}
+	});
 
 	test("GET /api/roles returns items with origin field @smoke", async () => {
 		const res = await apiFetch("/api/roles");

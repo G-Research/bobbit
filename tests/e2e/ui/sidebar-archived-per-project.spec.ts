@@ -3,7 +3,7 @@
  * Collapse/search/order matrices live in tests/ui-fixtures/sidebar-archived-fixture.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
+import { apiFetch, deleteGoal, waitForHealth } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -18,13 +18,13 @@ async function registerProject(name: string): Promise<{ id: string; rootPath: st
 	});
 	expect(resp.status).toBe(201);
 	const data = await resp.json();
-	return { id: data.id, rootPath };
+	return { id: data.id, rootPath: data.rootPath || rootPath };
 }
 
-async function createArchivedGoal(projectId: string, title: string): Promise<string> {
+async function createArchivedGoal(project: { id: string; rootPath: string }, title: string): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
-		body: JSON.stringify({ title, cwd: nonGitCwd(), worktree: false, projectId, autoStartTeam: false }),
+		body: JSON.stringify({ title, cwd: project.rootPath, worktree: false, projectId: project.id, autoStartTeam: false }),
 	});
 	expect(resp.status).toBe(201);
 	const goal = await resp.json();
@@ -46,8 +46,8 @@ test.describe("Per-project Archived subsection full-stack smoke", () => {
 		const projectB = await registerProject(`proj-archived-b-${suffix}`);
 		const goalATitle = `ArchivedAlpha-${suffix}`;
 		const goalBTitle = `ArchivedBravo-${suffix}`;
-		const goalAId = await createArchivedGoal(projectA.id, goalATitle);
-		const goalBId = await createArchivedGoal(projectB.id, goalBTitle);
+		const goalAId = await createArchivedGoal(projectA, goalATitle);
+		const goalBId = await createArchivedGoal(projectB, goalBTitle);
 
 		try {
 			await openApp(page);

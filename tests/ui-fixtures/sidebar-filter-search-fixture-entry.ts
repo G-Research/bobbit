@@ -131,7 +131,7 @@ window.fetch = (async (input: RequestInfo | URL) => {
 	if (url.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
 	if (url === "/api/staff" || url.startsWith("/api/staff?") || url === "/api/staff/orphaned") return response({ staff: [] });
 	if (url === "/api/preferences") return response({});
-	if (url === "/api/sandbox-status") return response({ available: false, configured: false });
+	if (url.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	return response({ ok: true });
 }) as typeof window.fetch;
 

@@ -41,31 +41,50 @@ function assertSamePath(actual: string | undefined, expected: string): void {
 	assert.equal(path.normalize(actual), path.normalize(expected));
 }
 
+async function withDefaultHeadquartersDirEnv<T>(run: () => Promise<T> | T): Promise<T> {
+	const previousBobbitDir = process.env.BOBBIT_DIR;
+	const previousBobbitPiDir = process.env.BOBBIT_PI_DIR;
+	delete process.env.BOBBIT_DIR;
+	delete process.env.BOBBIT_PI_DIR;
+	try {
+		return await run();
+	} finally {
+		if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+		else process.env.BOBBIT_DIR = previousBobbitDir;
+		if (previousBobbitPiDir === undefined) delete process.env.BOBBIT_PI_DIR;
+		else process.env.BOBBIT_PI_DIR = previousBobbitPiDir;
+	}
+}
+
 describe("validateAgentDirTarget", () => {
-	it("accepts and creates the default <projectRoot>/.bobbit/agent path inside the worktree", async (t) => {
-		const validate = await loadValidationFn();
-		const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-");
-		t.after(() => cleanup(projectRoot));
+	it("accepts and creates the default <projectRoot>/.bobbit/headquarters/agent path inside the worktree", async (t) => {
+		await withDefaultHeadquartersDirEnv(async () => {
+			const validate = await loadValidationFn();
+			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-");
+			t.after(() => cleanup(projectRoot));
 
-		const defaultDir = path.join(projectRoot, ".bobbit", "agent");
-		const result = await validate(defaultDir, projectRoot);
+			const defaultDir = path.join(projectRoot, ".bobbit", "headquarters", "agent");
+			const result = await validate(defaultDir, projectRoot);
 
-		assert.equal(result.ok, true, JSON.stringify(result.error));
-		assertSamePath(result.resolvedPath, defaultDir);
-		assert.equal(fs.statSync(defaultDir).isDirectory(), true);
+			assert.equal(result.ok, true, JSON.stringify(result.error));
+			assertSamePath(result.resolvedPath, defaultDir);
+			assert.equal(fs.statSync(defaultDir).isDirectory(), true);
+		});
 	});
 
-	it("accepts nested paths under the default agent directory", async (t) => {
-		const validate = await loadValidationFn();
-		const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-nested-");
-		t.after(() => cleanup(projectRoot));
+	it("accepts nested paths under the default Headquarters agent directory", async (t) => {
+		await withDefaultHeadquartersDirEnv(async () => {
+			const validate = await loadValidationFn();
+			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-nested-");
+			t.after(() => cleanup(projectRoot));
 
-		const nested = path.join(projectRoot, ".bobbit", "agent", "nested");
-		const result = await validate(nested, projectRoot);
+			const nested = path.join(projectRoot, ".bobbit", "headquarters", "agent", "nested");
+			const result = await validate(nested, projectRoot);
 
-		assert.equal(result.ok, true, JSON.stringify(result.error));
-		assertSamePath(result.resolvedPath, nested);
-		assert.equal(fs.statSync(nested).isDirectory(), true);
+			assert.equal(result.ok, true, JSON.stringify(result.error));
+			assertSamePath(result.resolvedPath, nested);
+			assert.equal(fs.statSync(nested).isDirectory(), true);
+		});
 	});
 
 	it("rejects non-default paths inside the git worktree", async (t) => {

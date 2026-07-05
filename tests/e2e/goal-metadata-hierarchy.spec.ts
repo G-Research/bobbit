@@ -286,8 +286,8 @@ test.describe.serial("Anti-asymmetry — disabled tool across the goal subtree",
 // 4. Filesystem treatment via the goalProvisioned lifecycle hook (git worktrees)
 // ════════════════════════════════════════════════════════════════════════════
 
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(FIXTURE_PACK_DIR, packDir, { recursive: true });
 	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [

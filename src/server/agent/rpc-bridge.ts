@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
+import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -264,6 +265,45 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * and emit exactly one leading `--no-approve` and `--no-context-files` that no
  * caller can override.
  */
+/**
+ * Resolve the gateway credentials to inject into a direct (non-sandbox) child's
+ * env: BOBBIT_TOKEN + BOBBIT_GATEWAY_URL.
+ *
+ * Sandbox children receive these via `-e` in spawnDockerExec (from
+ * options.gatewayToken / gatewayUrl). Direct children use the same option, but
+ * only when SessionManager supplied a scoped token. Never fall back to the
+ * gateway admin token here: if no scoped token is provided, BOBBIT_TOKEN is
+ * omitted. The gateway URL still resolves from explicit options, env, or the
+ * gateway-url state file.
+ *
+ * Exported (with injectable deps) for deterministic unit testing without a real
+ * spawn. Pinned by tests/rpc-bridge-gateway-env.test.ts.
+ */
+export function resolveDirectGatewayEnv(
+	opts: { gatewayToken?: string; gatewayUrl?: string },
+	deps: {
+		stateDir?: () => string;
+		envGatewayUrl?: string;
+	} = {},
+): Record<string, string> {
+	const stateDirFn = deps.stateDir ?? bobbitStateDir;
+	const envGatewayUrl = deps.envGatewayUrl ?? process.env.BOBBIT_GATEWAY_URL;
+
+	const env: Record<string, string> = {};
+	if (opts.gatewayToken) env.BOBBIT_TOKEN = opts.gatewayToken;
+
+	let gwUrl = opts.gatewayUrl ?? envGatewayUrl;
+	if (!gwUrl) {
+		try {
+			gwUrl = fs.readFileSync(path.join(stateDirFn(), "gateway-url"), "utf-8").trim();
+		} catch {
+			// gateway-url not yet written (very early startup) — leave unset.
+		}
+	}
+	if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
+	return env;
+}
+
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 	const args = ["--mode", "rpc", "--no-approve", "--no-context-files"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
@@ -447,10 +487,12 @@ export class RpcBridge {
 		if (this.options.containerId) {
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
 		} else {
-			// Trust our self-signed CA cert if available; fall back to disabling TLS verification
-			const caCertPath = path.join(bobbitStateDir(), "tls", "ca.crt");
-			const tlsEnv = fs.existsSync(caCertPath)
-				? { NODE_EXTRA_CA_CERTS: caCertPath }
+			// Trust our self-signed CA cert if available; fall back to disabling TLS
+			// verification. TLS material moved to serverSecretsDir() after the S1
+			// relocation, so resolve via the tls helper rather than bobbitStateDir().
+			const caCert = caCertPath();
+			const tlsEnv = fs.existsSync(caCert)
+				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
 			this.process = spawn(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
@@ -458,6 +500,16 @@ export class RpcBridge {
 				env: {
 					...process.env,
 					BOBBIT_DIR: bobbitDir(),
+					// Direct (non-sandbox) children need the gateway credentials in env so
+					// agent-side helpers (defaults/tools/_shared/gateway.ts,
+					// tool-guard-extension.ts, tool-activation.ts) can call back into the
+					// gateway. Sandbox sessions get these via `-e` in spawnDockerExec; the
+					// S1 secret relocation removed the token from a project-reachable file,
+					// so the on-disk fallback in those helpers no longer resolves. Inject
+					// from the relocation-aware helpers here — the token is never written to
+					// a project-reachable path. Placed before `this.options.env` so an
+					// explicit caller override still wins.
+					...this._resolveDirectGatewayEnv(),
 					...tlsEnv,
 					...this.options.env,
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
@@ -466,6 +518,22 @@ export class RpcBridge {
 				},
 			});
 		}
+	}
+
+	/**
+	 * Resolve the gateway credentials to inject into a direct (non-sandbox)
+	 * child's env: BOBBIT_TOKEN + BOBBIT_GATEWAY_URL.
+	 *
+	 * Sandbox children receive these via `-e` in spawnDockerExec (from
+	 * this.options.gatewayToken / gatewayUrl). Direct children use the same option,
+	 * but only when SessionManager supplied a scoped token. Never fall back to the
+	 * gateway admin token in the agent env.
+	 */
+	private _resolveDirectGatewayEnv(): Record<string, string> {
+		return resolveDirectGatewayEnv({
+			gatewayToken: this.options.gatewayToken,
+			gatewayUrl: this.options.gatewayUrl,
+		});
 	}
 
 	/**
@@ -936,7 +1004,7 @@ function marketPackMountMappings(projectBase?: string, projectMarketPacksRoot?: 
 	const mappings: MountMapping[] = [
 		{
 			containerPrefix: SERVER_MARKET_PACKS_CONTAINER_DIR,
-			hostPath: scopePaths("server", getProjectRoot()).marketPacksRoot,
+			hostPath: scopePaths("server", headquartersDir()).marketPacksRoot,
 		},
 		{
 			containerPrefix: GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR,

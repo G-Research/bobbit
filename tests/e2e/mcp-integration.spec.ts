@@ -40,6 +40,11 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 // Resolve paths for the mock MCP server
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+const hqQuery = `projectId=${encodeURIComponent(HEADQUARTERS_PROJECT_ID)}`;
+const hqMcpServersPath = `/api/mcp-servers?${hqQuery}`;
+const hqMcpRestartPath = (name: string) => `/api/mcp-servers/${encodeURIComponent(name)}/restart?${hqQuery}`;
+const hqToolsPath = `/api/tools?${hqQuery}`;
 
 /** The MCP config that points to our mock server */
 const mcpConfig = {
@@ -75,14 +80,14 @@ test.afterAll(() => {
 
 test("server discovery, restart, and connected status", async () => {
 	// Restart to ensure the mock server is connected
-	const restartResp = await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+	const restartResp = await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
 	expect(restartResp.status).toBe(200);
 	const restartResult = await restartResp.json();
 	expect(restartResult.status).toBe("connected");
 	expect(restartResult.toolCount).toBe(2);
 
 	// Verify the server list shows it connected with correct metadata
-	const resp = await apiFetch("/api/mcp-servers");
+	const resp = await apiFetch(hqMcpServersPath);
 	expect(resp.status).toBe(200);
 	const servers = await resp.json();
 	const mock = servers.find((s: any) => s.name === "mock");
@@ -105,12 +110,12 @@ test("server discovery, restart, and connected status", async () => {
 
 test("tool execution via /api/internal/mcp-call", async () => {
 	// Ensure the mock server is connected
-	await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+	await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
 
-	// Create a test session for the X-Bobbit-Session-Id header
+	// Create a Headquarters-scoped test session for the X-Bobbit-Session-Id header.
 	const sessResp = await apiFetch("/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ title: "mcp-test-session" }),
+		body: JSON.stringify({ title: "mcp-test-session", projectId: HEADQUARTERS_PROJECT_ID }),
 	});
 	const testSessionId = (await sessResp.json()).id;
 
@@ -151,9 +156,9 @@ test("tool execution via /api/internal/mcp-call", async () => {
 
 test("MCP tools appear in GET /api/tools with correct metadata", async () => {
 	// Ensure the mock server is connected
-	await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+	await apiFetch(hqMcpRestartPath("mock"), { method: "POST" });
 
-	const resp = await apiFetch("/api/tools");
+	const resp = await apiFetch(hqToolsPath);
 	expect(resp.status).toBe(200);
 	const { tools } = await resp.json();
 	const toolNames = tools.map((t: any) => t.name);

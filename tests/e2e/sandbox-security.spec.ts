@@ -9,8 +9,10 @@
  * Uses the per-project token model: one token per project, sessions
  * are tracked under the project scope via addSession().
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { bobbitDir, readE2EToken, nonGitCwd, injectDefaultProjectId, createGoal, deleteGoal, registerProject } from "./e2e-setup.js";
 
 // Helper to make requests with admin token
 async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
@@ -170,6 +172,121 @@ test.describe("Sandbox Security Boundaries", () => {
 			body: JSON.stringify({ cwd: "/tmp" }),
 		});
 		expect([400, 403]).toContain(res.status);
+	});
+
+	// ── Session-creation scope ownership (before goal mutation/resolution) ──
+
+	test("cannot create a session in a project outside its sandbox scope", async ({ gateway }) => {
+		const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+			method: "POST",
+			body: JSON.stringify({ projectId: "some-other-project", cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(403);
+		const body = await res.json();
+		expect(body.code).toBe("SANDBOX_SCOPE_VIOLATION");
+	});
+
+	test("cannot create an assistant/server-scope session under a sandbox token", async ({ gateway }) => {
+		for (const assistantType of ["project", "role", "tool"]) {
+			const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+				method: "POST",
+				body: JSON.stringify({ assistantType, projectId, cwd: nonGitCwd() }),
+			});
+			expect(res.status, `assistantType=${assistantType}`).toBe(403);
+			expect((await res.json()).code).toBe("SANDBOX_SCOPE_VIOLATION");
+		}
+	});
+
+	test("scoped token cannot read or mutate a task from another project's goal", async ({ gateway }) => {
+		const otherRoot = mkdtempSync(join(dirname(bobbitDir()), `task-scope-other-${Date.now()}-`));
+		let scopedGoalId = "";
+		let otherGoalId = "";
+		let otherProjectId = "";
+		try {
+			const scopedGoal = await createGoal({ title: `Scoped task goal ${Date.now()}`, worktree: false });
+			scopedGoalId = scopedGoal.id as string;
+			const scopedProjectId = scopedGoal.projectId as string;
+
+			const otherProject = await registerProject({ name: `task-scope-other-${Date.now()}`, rootPath: otherRoot, seedWorkflows: false });
+			otherProjectId = otherProject.id;
+			const otherGoal = await createGoal({
+				projectId: otherProject.id,
+				cwd: otherProject.rootPath,
+				title: `Out-of-scope task goal ${Date.now()}`,
+				worktree: false,
+			});
+			otherGoalId = otherGoal.id as string;
+
+			const scopedTaskResp = await adminFetch(gateway.baseURL, `/api/goals/${scopedGoalId}/tasks`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Scoped task", type: "implementation" }),
+			});
+			const scopedTaskText = await scopedTaskResp.text();
+			expect(scopedTaskResp.status, scopedTaskText).toBe(201);
+			const scopedTask = JSON.parse(scopedTaskText);
+
+			const otherTaskResp = await adminFetch(gateway.baseURL, `/api/goals/${otherGoalId}/tasks`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Other project task", type: "implementation", spec: "original" }),
+			});
+			const otherTaskText = await otherTaskResp.text();
+			expect(otherTaskResp.status, otherTaskText).toBe(201);
+			const otherTask = JSON.parse(otherTaskText);
+
+			const taskToken = gateway.sessionManager.sandboxTokenStore.register(scopedProjectId);
+			gateway.sessionManager.sandboxTokenStore.addGoal(scopedProjectId, scopedGoalId);
+
+			const allowed = await sandboxFetch(gateway.baseURL, `/api/tasks/${scopedTask.id}`, taskToken, {
+				method: "PUT",
+				body: JSON.stringify({ spec: "allowed" }),
+			});
+			expect(allowed.status, await allowed.text()).toBe(200);
+
+			const deniedGet = await sandboxFetch(gateway.baseURL, `/api/tasks/${otherTask.id}`, taskToken);
+			expect(deniedGet.status).toBe(403);
+
+			const deniedPut = await sandboxFetch(gateway.baseURL, `/api/tasks/${otherTask.id}`, taskToken, {
+				method: "PUT",
+				body: JSON.stringify({ spec: "pwned" }),
+			});
+			expect(deniedPut.status).toBe(403);
+			expect((await deniedPut.json()).code).toBe("SANDBOX_SCOPE_VIOLATION");
+
+			const otherTaskAfter = await (await adminFetch(gateway.baseURL, `/api/tasks/${otherTask.id}`)).json();
+			expect(otherTaskAfter.spec).toBe("original");
+		} finally {
+			if (scopedGoalId) await deleteGoal(scopedGoalId).catch(() => {});
+			if (otherGoalId) await deleteGoal(otherGoalId).catch(() => {});
+			if (otherProjectId) await adminFetch(gateway.baseURL, `/api/projects/${otherProjectId}`, { method: "DELETE" }).catch(() => {});
+			rmSync(otherRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("cannot attach to an out-of-scope goal, and does not transition it to in-progress", async ({ gateway }) => {
+		// Create a real todo goal in the harness default project (a different
+		// project + goal than the sandbox scope). The sandbox token must be
+		// rejected BEFORE the goal auto-transition mutates its state.
+		const goal = await createGoal({ title: `Sandbox scope guard ${Date.now()}`, worktree: false });
+		const outOfScopeGoalId = goal.id as string;
+		try {
+			const before = await adminFetch(gateway.baseURL, `/api/goals/${outOfScopeGoalId}`);
+			expect((await before.json()).state).toBe("todo");
+
+			const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+				method: "POST",
+				body: JSON.stringify({ projectId, goalId: outOfScopeGoalId }),
+			});
+			expect(res.status).toBe(403);
+			expect((await res.json()).code).toBe("SANDBOX_SCOPE_VIOLATION");
+
+			// The critical invariant: the out-of-scope goal was NOT flipped to
+			// in-progress. This pins the "goal auto-transition runs after the
+			// sandbox ownership check" fix.
+			const after = await adminFetch(gateway.baseURL, `/api/goals/${outOfScopeGoalId}`);
+			expect((await after.json()).state).toBe("todo");
+		} finally {
+			await deleteGoal(outOfScopeGoalId).catch(() => {});
+		}
 	});
 
 	// ── Token persistence check ────────────────────────────────────────

@@ -9,6 +9,20 @@
 import { ProjectSandbox } from "./project-sandbox.js";
 import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
+import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
+
+/**
+ * Headquarters and the hidden `system` compatibility anchor are data-only /
+ * no-worktree / no-git scopes (their cwd is the Headquarters directory, not a
+ * git checkout). They must NEVER participate in the per-project Docker sandbox
+ * lifecycle: no container, no git clone/mount of the server-run-dir checkout,
+ * and no one-off `<projectDir>/.bobbit/{state,config}` layout. This is the
+ * single funnel where a `ProjectSandbox` is created/started, so gating here
+ * covers every caller (session-setup, session-manager, staff-manager, …).
+ */
+export function isSandboxExemptProject(projectId: string): boolean {
+	return projectId === HEADQUARTERS_PROJECT_ID || projectId === SYSTEM_PROJECT_ID;
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -90,6 +104,12 @@ export class SandboxManager {
 	 * the bootstrap in case config has changed.
 	 */
 	async ensureForProject(projectId: string): Promise<void> {
+		// Headquarters / hidden `system` scopes are never sandboxed. Skip entirely
+		// so HQ sessions/goals run un-sandboxed with cwd = the Headquarters
+		// directory, never cloning the server-run-dir git checkout or creating a
+		// one-off `<hqDir>/.bobbit/{state,config}` layout.
+		if (isSandboxExemptProject(projectId)) return;
+
 		// Already fully initialized — fast path.
 		const existing = this.sandboxes.get(projectId);
 		if (existing && existing.getStatus().status === "ready") return;
@@ -131,6 +151,12 @@ export class SandboxManager {
 	 * If a sandbox already exists for this project, reconnects to it.
 	 */
 	async initForProject(projectId: string, opts: ProjectSandboxOptions): Promise<void> {
+		// Defensive: Headquarters / hidden `system` scopes must never construct a
+		// ProjectSandbox even if a caller bypasses `ensureForProject`.
+		if (isSandboxExemptProject(projectId)) {
+			throw new Error(`[sandbox-manager] refusing to create a sandbox for exempt project ${projectId} (Headquarters/system are never sandboxed)`);
+		}
+
 		// If already tracked, just return — init was already done
 		if (this.sandboxes.has(projectId)) {
 			const existing = this.sandboxes.get(projectId)!;

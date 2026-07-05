@@ -12,6 +12,7 @@ export interface ProjectIdentity {
 	id?: string;
 	kind?: string;
 	name?: string;
+	rootPath?: string;
 }
 
 export function isHeadquartersProject(projectOrId?: ProjectIdentity | string | null): boolean {
@@ -43,6 +44,11 @@ export function projectIconKind(project?: ProjectIdentity | string | null): "hea
 
 export function projectIconTestId(project?: ProjectIdentity | string | null): "headquarters-icon" | "project-folder-icon" {
 	return isHeadquartersProject(project) ? "headquarters-icon" : "project-folder-icon";
+}
+
+export function defaultCwdForProjectSession(project?: ProjectIdentity | null): string | undefined {
+	if (!project || isHeadquartersProject(project)) return undefined;
+	return project.rootPath || undefined;
 }
 
 export function projectSearchText(project: ProjectIdentity): string {

@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bobbitDir, getProjectRoot, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
@@ -208,7 +208,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		fs.mkdirSync(hostPath, { recursive: true });
 		addReadonlyDirectoryMount(hostPath, containerPath);
 	};
-	addMarketPacksRootMount(scopePaths("server", getProjectRoot()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
+	addMarketPacksRootMount(scopePaths("server", headquartersDir()).marketPacksRoot, SERVER_MARKET_PACKS_CONTAINER_DIR);
 	addMarketPacksRootMount(scopePaths("global-user", os.homedir()).marketPacksRoot, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR);
 	const projectMarketPacksRoot = config.projectMarketPacksRoot ?? (workspaceDir ? scopePaths("project", workspaceDir).marketPacksRoot : undefined);
 	if (projectMarketPacksRoot) {

@@ -87,8 +87,13 @@ const PREFERENCE_AGENT_DIR_HISTORY = "agentDirHistory";
 const MIGRATION_DIRS = new Set(["sessions", "bin"]);
 const MIGRATION_FILES = new Set(["auth.json", "models.json", "settings.json", "google-code-assist.json"]);
 
+function headquartersDirForEnv(projectRoot: string, env: NodeJS.ProcessEnv = process.env): string {
+	const override = nonEmptyString(env.BOBBIT_DIR) ?? nonEmptyString(env.BOBBIT_PI_DIR);
+	return normalizeAbsolutePath(override ? normalizeAgentDirInput(override, projectRoot) : path.join(projectRoot, ".bobbit", "headquarters"));
+}
+
 export function defaultAgentDir(projectRoot: string): string {
-	return normalizeAbsolutePath(path.join(projectRoot, ".bobbit", "agent"));
+	return normalizeAbsolutePath(path.join(headquartersDirForEnv(projectRoot), "agent"));
 }
 
 export function normalizeAgentDirInput(input: string, projectRoot: string): string {
@@ -104,8 +109,8 @@ export function normalizeAgentDirInput(input: string, projectRoot: string): stri
 
 export function resolveAgentDir(input: ResolveAgentDirInput): AgentDirResolution {
 	const projectRoot = normalizeAbsolutePath(input.projectRoot);
-	const defaultDir = defaultAgentDir(projectRoot);
 	const env = input.env ?? process.env;
+	const defaultDir = normalizeAbsolutePath(path.join(headquartersDirForEnv(projectRoot, env), "agent"));
 	const bobbitEnv = nonEmptyString(env.BOBBIT_AGENT_DIR);
 	if (bobbitEnv) {
 		return { dir: normalizeAgentDirInput(bobbitEnv, projectRoot), source: "BOBBIT_AGENT_DIR", raw: bobbitEnv, projectRoot, defaultDir };
@@ -143,7 +148,7 @@ export function initializeAgentDirRuntimeState(input: ResolveAgentDirInput & { s
 	return initializeAgentDirRuntime({
 		...input,
 		projectRoot,
-		stateDir: input.stateDir ? normalizeAbsolutePath(input.stateDir) : path.join(projectRoot, ".bobbit", "state"),
+		stateDir: input.stateDir ? normalizeAbsolutePath(input.stateDir) : path.join(headquartersDirForEnv(projectRoot, input.env), "state"),
 	});
 }
 
@@ -160,7 +165,7 @@ export const resetAgentDirRuntimeForTests = resetAgentDirStateForTests;
 export function globalAgentDir(): string {
 	if (runtimeState) return runtimeState.startup.dir;
 	const projectRoot = normalizeAbsolutePath(process.cwd());
-	return initializeAgentDirRuntime({ projectRoot, stateDir: path.join(projectRoot, ".bobbit", "state") }).startup.dir;
+	return initializeAgentDirRuntime({ projectRoot, stateDir: path.join(headquartersDirForEnv(projectRoot), "state") }).startup.dir;
 }
 
 export function getAgentDirState(): AgentDirRuntimeState {
@@ -251,7 +256,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string, comm
 	const allowedDefault = defaultAgentDir(normalizedProjectRoot);
 	const allowedDefaultCandidates = [allowedDefault, realpathForExistingPrefix(allowedDefault) ?? allowedDefault];
 	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, resolvedPath)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, resolvedPath);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, resolvedPath);
 	}
 
 	// Before creating a missing directory, resolve the deepest existing parent.
@@ -259,7 +264,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string, comm
 	// the git worktree, without leaving behind a rejected directory in the repo.
 	const preCreateRealTarget = realpathForExistingPrefix(resolvedPath);
 	if (preCreateRealTarget && isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, preCreateRealTarget)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, preCreateRealTarget);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, preCreateRealTarget);
 	}
 
 	try {
@@ -287,7 +292,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string, comm
 	}
 
 	if (isDisallowedInsideWorktree(gitRootForComparison, allowedDefaultCandidates, realResolvedPath)) {
-		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the project default .bobbit/agent directory.", rawInput, realResolvedPath);
+		return validationError("INSIDE_WORKTREE", "Choose a directory outside the git worktree, or use the default agent directory.", rawInput, realResolvedPath);
 	}
 
 	try {

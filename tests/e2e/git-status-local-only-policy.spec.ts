@@ -5,10 +5,9 @@
  * only the HTTP handler's policy/observability decisions, not Git itself.
  */
 import { mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, defaultProjectId, deleteSession } from "./e2e-setup.js";
+import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "./e2e-setup.js";
 
 let serverModule: any;
 
@@ -48,7 +47,7 @@ function okResult(overrides: Record<string, unknown> = {}) {
 }
 
 async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> {
-	const cwd = join(tmpdir(), `bobbit-e2e-git-status-policy-${tag}-${process.pid}-${Date.now()}`);
+	const cwd = join(nonGitCwd(), `git-status-policy-${tag}-${process.pid}-${Date.now()}`);
 	mkdirSync(cwd, { recursive: true });
 	const projectId = await defaultProjectId();
 	const resp = await apiFetch("/api/sessions", {

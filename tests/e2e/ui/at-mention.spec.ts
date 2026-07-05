@@ -27,8 +27,9 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apiFetch, deleteSession, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch, deleteSession } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 // The gateway-harness is worker-scoped, so projects created here persist across
@@ -47,11 +48,9 @@ const IMAGE_FILE = "pic.png";
 const PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
-/** A unique fixture dir under the worker's non-git tmp root. `nonGitCwd()` is
- *  memoized per worker, so each test must use its own subdir — otherwise the
- *  second project registered at the same rootPath fails with a duplicate 400. */
+/** A unique fixture project root outside the harness default project. */
 function uniqueCwd(): string {
-	const cwd = join(nonGitCwd(), `at-mention-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	const cwd = join(tmpdir(), `at-mention-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(cwd, { recursive: true });
 	return cwd;
 }

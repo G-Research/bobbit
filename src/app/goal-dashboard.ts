@@ -1784,7 +1784,7 @@ function renderHeadquartersNoWorktreeNotice(goal: Goal): TemplateResult | typeof
 	if (!isHeadquartersNoWorktreeGoal(goal)) return nothing;
 	return html`
 		<div class="setup-banner" data-testid="headquarters-no-worktree-notice" style="background:color-mix(in oklch, var(--info, var(--primary)) 10%, transparent);border-color:color-mix(in oklch, var(--info, var(--primary)) 35%, var(--border));color:var(--foreground);">
-			<span>This Headquarters goal runs in the server directory without a git worktree. Git branch and merge actions are unavailable.</span>
+			<span>This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch and merge actions are unavailable.</span>
 		</div>
 	`;
 }
@@ -1990,7 +1990,7 @@ async function toggleRoleDropdown(): Promise<void> {
 		renderApp();
 		return;
 	}
-	if (state.roles.length === 0) await fetchRoles();
+	if (state.roles.length === 0) await fetchRoles(currentGoal?.projectId ?? undefined);
 	roleDropdownOpen = true;
 	renderApp();
 }

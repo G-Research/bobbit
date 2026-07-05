@@ -60,7 +60,12 @@ export interface GatewayInfo {
 }
 
 function readHarnessToken(info: GatewayInfo): string {
-	try { return readFileSync(join(info.bobbitDir, "state", "token"), "utf-8").trim(); } catch {}
+	// Live token lives under serverSecretsDir() (BOBBIT_SECRETS_DIR); fall back to
+	// the legacy Headquarters-state location for older fixtures.
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR || join(info.bobbitDir, ".secrets");
+	for (const p of [join(secretsDir, "token"), join(info.bobbitDir, "state", "token")]) {
+		try { return readFileSync(p, "utf-8").trim(); } catch {}
+	}
 	const token = process.env.BOBBIT_TOKEN?.trim();
 	if (token && token.length >= 64) return token;
 	throw new Error(`missing token for ${info.bobbitDir}`);
@@ -186,6 +191,9 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
+		// land in the developer's real OS home dir (serverSecretsDir() default).
+		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
 		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
 		process.env.BOBBIT_AGENT_DIR = agentDir;
@@ -379,5 +387,58 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		}
 	}, { auto: true }],
 });
+
+function needsHeadquartersConfigProjectId(path: string, method: string): boolean {
+	const bare = path.split("?")[0];
+	if (method === "GET" && /^\/api\/(tools|roles)(\?|$)/.test(path)) return true;
+	if ((method === "GET" || method === "PUT") && /^\/api\/tools\/[^/]+$/.test(bare)) return true;
+	if (method === "GET" && /^\/api\/tools\/[^/]+\/renderer$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/ext/contributions") return true;
+	if (method === "GET" && /^\/api\/ext\/packs\/[^/]+\/panels\/[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/tools\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "POST" && /^\/api\/roles$/.test(bare)) return true;
+	if ((method === "GET" || method === "PUT" || method === "DELETE") && /^\/api\/roles\/(?!assistant\/prompts(?:\/|$))[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/roles\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/tool-group-policies") return true;
+	if (method === "PUT" && /^\/api\/tool-group-policies\/[^/]+$/.test(bare)) return true;
+	return false;
+}
+
+function injectHeadquartersDiscoveryProjectId(path: string, method: string): string {
+	if (!needsHeadquartersConfigProjectId(path, method)) return path;
+	if (/[?&]projectId=/.test(path)) return path;
+	return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
+}
+
+function injectHeadquartersDiscoveryUrl(input: RequestInfo | URL, init?: RequestInit): RequestInfo | URL {
+	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+	// rawApiFetch deliberately exercises missing-projectId guard paths.
+	if ((new Error().stack || "").includes("rawApiFetch")) return input;
+	const value = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+	let parsed: URL;
+	try { parsed = new URL(value); } catch { return input; }
+	const nextPath = injectHeadquartersDiscoveryProjectId(`${parsed.pathname}${parsed.search}`, method);
+	if (nextPath === `${parsed.pathname}${parsed.search}`) return input;
+	parsed.pathname = nextPath.split("?")[0] || parsed.pathname;
+	parsed.search = nextPath.includes("?") ? nextPath.slice(nextPath.indexOf("?")) : "";
+	if (typeof input === "string") return parsed.href;
+	if (input instanceof URL) return parsed;
+	return new Request(parsed.href, input);
+}
+
+const FETCH_PATCH_KEY = Symbol.for("bobbit.inProcessHarness.discoveryProjectIdFetchPatch");
+const globalWithPatch = globalThis as typeof globalThis & { [FETCH_PATCH_KEY]?: true };
+if (!globalWithPatch[FETCH_PATCH_KEY]) {
+	const originalFetch = globalThis.fetch.bind(globalThis);
+	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => originalFetch(injectHeadquartersDiscoveryUrl(input, init), init)) as typeof fetch;
+	globalWithPatch[FETCH_PATCH_KEY] = true;
+}
+
+/** In-process authenticated fetch helper with explicit Headquarters discovery scope. */
+export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method || "GET").toUpperCase();
+	const { apiFetch: setupApiFetch } = await import("./e2e-setup.js");
+	return setupApiFetch(injectHeadquartersDiscoveryProjectId(path, method), opts);
+}
 
 export { expect } from "@playwright/test";
