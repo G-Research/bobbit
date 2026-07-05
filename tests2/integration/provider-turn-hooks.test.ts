@@ -42,7 +42,7 @@ import {
 } from "../../src/server/agent/provider-bridge-extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
+const fixturePackDir = path.resolve(__dirname, "..", "..", "tests", "fixtures", "packs", "provider-demo");
 const PACK_NAME = "provider-demo";
 
 interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }

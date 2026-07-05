@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 // band — listProviders enumerates installed market packs additively — so no
 // built-in pack is removed and the fixture is still discovered.
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
+const fixturePackDir = path.resolve(__dirname, "..", "..", "tests", "fixtures", "packs", "provider-demo");
 const PACK_NAME = "provider-demo";
 
 function writeMeta(packDir: string): void {

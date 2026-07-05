@@ -1,4 +1,4 @@
-import { expect } from "@playwright/test";
+import { expect } from "./_e2e/in-process-harness.js";
 import { test } from "./_e2e/in-process-harness.js";
 import { connectWs, createSession, deleteSession, messageEndPredicate } from "./_e2e/e2e-setup.js";
 

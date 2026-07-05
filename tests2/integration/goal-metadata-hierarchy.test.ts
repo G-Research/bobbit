@@ -41,7 +41,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const FIXTURE_PACK_DIR = path.resolve(__dirname, "..", "fixtures", "packs", "goal-provisioned-demo");
+const FIXTURE_PACK_DIR = path.resolve(__dirname, "..", "..", "tests", "fixtures", "packs", "goal-provisioned-demo");
 const PACK_NAME = "goal-provisioned-demo";
 const MARKER_FILE = ".goal-provisioned-marker.json";
 const COUNT_FILE = ".goal-provisioned-count";

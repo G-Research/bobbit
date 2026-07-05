@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_e2e/in-process-harness.js";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

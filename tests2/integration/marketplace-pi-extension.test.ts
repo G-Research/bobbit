@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const FIXTURES = path.resolve(__dirname, "..", "fixtures", "market-sources");
+const FIXTURES = path.resolve(__dirname, "..", "..", "tests", "fixtures", "market-sources");
 const DEMO_SOURCE = path.join(FIXTURES, "pi-extension-demo-src");
 const FAILURE_SOURCE = path.join(FIXTURES, "pi-extension-failure-src");
 const SCOPE_SOURCE = path.join(FIXTURES, "pi-extension-scope-src");

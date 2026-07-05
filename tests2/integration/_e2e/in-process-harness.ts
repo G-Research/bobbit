@@ -37,6 +37,28 @@ import { assertNoLeaks, snapshotEntities } from "../../harness/leak-detector.js"
 import { createScope, type TestScope } from "../../harness/scope.js";
 import { currentScope, ensureGateway, gatewaySync, setScope } from "./runtime.js";
 
+// Playwright's retrying `await expect(fn).toPass({ timeout })` matcher — vitest
+// has no built-in equivalent. The received is a function containing assertions
+// that throw until they pass.
+vExpect.extend({
+	async toPass(received: unknown, opts?: { timeout?: number; intervals?: number[] }) {
+		const timeout = opts?.timeout ?? 5_000;
+		const start = Date.now();
+		let lastErr: unknown;
+		const fn = received as () => unknown | Promise<unknown>;
+		for (;;) {
+			try { await fn(); return { pass: true, message: () => "expected callback not to pass" }; }
+			catch (err) {
+				lastErr = err;
+				if (Date.now() - start > timeout) {
+					return { pass: false, message: () => `expected callback to pass within ${timeout}ms; last error: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}` };
+				}
+				await new Promise(r => setTimeout(r, 100));
+			}
+		}
+	},
+});
+
 export const expect = vExpect;
 export { currentScope };
 
@@ -157,6 +179,16 @@ function snapshotIds(gw: GatewayFixture): IdSnapshot {
 	return ids;
 }
 
+function hasVisibleDefaultProject(gw: GatewayFixture): boolean {
+	try {
+		for (const ctx of Array.from(gw.projectContextManager.visible?.() ?? []) as any[]) {
+			const proj = ctx?.project;
+			if (proj && !proj.hidden && proj.name === "default") return true;
+		}
+	} catch { /* */ }
+	return false;
+}
+
 async function sweepTo(gw: GatewayFixture, baseline: IdSnapshot): Promise<void> {
 	const now = snapshotIds(gw);
 	for (const id of now.sessions) if (!baseline.sessions.has(id)) {
@@ -168,7 +200,11 @@ async function sweepTo(gw: GatewayFixture, baseline: IdSnapshot): Promise<void> 
 	for (const id of now.projects) if (!baseline.projects.has(id) && id !== gw.defaultProjectId) {
 		await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 	}
-	await gw.restoreDefaultProject();
+	// Only HEAL the default project when a test actually removed it. Calling
+	// restoreDefaultProject() unconditionally re-seeds the default workflows and
+	// would clobber workflows a test registered mid-file (e.g. a custom
+	// per-goal workflow), breaking later tests in the same describe.
+	if (!hasVisibleDefaultProject(gw)) await gw.restoreDefaultProject();
 }
 
 function wrapDescribe(name: string, body: DescribeBody): void {
@@ -233,7 +269,11 @@ const describeImpl = ((name: string, body: DescribeBody) => wrapDescribe(name, b
 describeImpl.serial = (name, body) => wrapDescribe(name, body);
 describeImpl.parallel = (name, body) => wrapDescribe(name, body);
 describeImpl.only = (name, body) => { (vDescribe as any).only(name, () => wrapDescribe(name, body)); };
-describeImpl.skip = (name, body) => { (vDescribe as any).skip(name, body); };
+const describeSkip = ((name: string, body: DescribeBody) => { (vDescribe as any).skip(name, body); }) as CompatTest["describe"]["skip"] & { configure: (o?: unknown) => void; serial: (n: string, b: DescribeBody) => void };
+describeSkip.configure = () => { /* no-op */ };
+describeSkip.serial = (name: string, body: DescribeBody) => { (vDescribe as any).skip(name, body); };
+describeImpl.skip = describeSkip;
+describeImpl.serial.skip = describeSkip as any;
 describeImpl.configure = () => { /* no-op: vitest handles concurrency via config */ };
 testImpl.describe = describeImpl;
 
