@@ -54,10 +54,15 @@ protocol future cohorts should follow, and what's left after cohort 1.
   (`src/server/routes/maintenance-routes.ts`) — see
   [Cohort 8: maintenance + search admin](#cohort-8-maintenance--search-admin)
   below.
+- **Cohort 9: server/system routes** — harness, boot-timing, health,
+  setup-status, system-prompt, shutdown, CA certificate, sandbox/worktree
+  status routes, plus the E2E replay hook
+  (`src/server/routes/server-system-routes.ts`) — see
+  [Cohort 9: server/system routes](#cohort-9-serversystem-routes) below.
 - **Cohort 11: OAuth account routes** — the five `/api/oauth/*` account
   endpoints (`src/server/routes/oauth-account-routes.ts`) — see
   [Cohort 11: OAuth account routes](#cohort-11-oauth-account-routes) below.
-- Everything else in `handleApiRoute` (~328 remaining routes) is unchanged,
+- Everything else in `handleApiRoute` (~310 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -642,6 +647,61 @@ client calls includes `tests/ui-fixtures/search-preview-maintenance.spec.ts`,
 `tests/ui-fixtures/search-index-ui.spec.ts`, and
 `tests/ui-fixtures/settings-admin-fixture.spec.ts`.
 
+## Cohort 9: server/system routes
+
+One new module, registered after cohort 8's in `server.ts`:
+`src/server/routes/server-system-routes.ts`.
+
+This cohort intentionally picked a contiguous early-list "server/system"
+cluster from the first half of the remaining legacy chain. It avoids the
+explicitly taken maintenance/search-admin/session-utility/workflows/
+review-annotations families, has direct API/browser coverage for the highest
+value endpoints, and is mechanically low-risk: the handlers are all
+path+method-gated one-offs rather than large path-first blocks.
+
+| Method | Path |
+|---|---|
+| GET | `/api/harness-status` |
+| POST | `/api/harness/restart` |
+| POST | `/api/dev/boot-timing` |
+| GET | `/api/dev/boot-timing` |
+| GET | `/api/health` |
+| POST | `/api/internal/test/replay-buffered-events/:sessionId` |
+| GET | `/api/setup-status` |
+| POST | `/api/setup-status/dismiss` |
+| GET | `/api/system-prompt-context` |
+| PUT | `/api/system-prompt-context` |
+| POST | `/api/system-prompt/customise` |
+| POST | `/api/shutdown` |
+| GET | `/api/ca-cert` |
+| GET | `/api/sandbox-pool` |
+| GET | `/api/worktree-pool` |
+| GET | `/api/sandbox-status` |
+| POST | `/api/sandbox-image/build` |
+| GET | `/api/sandbox/host-tokens` |
+
+`CoreRouteCtx` grew append-only by five fields: `config`,
+`preferencesStore`, `sandboxManager`, `getAigwUrl`, and
+`writeProjectResolutionError`. Leaf helpers moved/imported directly by the
+route module include boot-timing persistence, harness restart sentinel,
+setup-status, E2E replay pacing, sandbox status helpers, host-token
+detection, and Bobbit config/state directory helpers.
+
+**Fall-through parity: no shim needed.** Every legacy block in this cohort
+gated on path and method in the same `if` condition. Method mismatches never
+entered a path-first branch, so they fell through to the generic terminal
+404. The registry entries are method-scoped the same way, so unregistered
+methods preserve that behavior without 405 shims.
+
+Registry count reconciliation: cohort 8 left ~333 remaining legacy routes.
+Moving these 18 routes leaves ~315 routes in the legacy chain.
+
+Parity evidence to run: `tests/e2e/harness-restart-api.spec.ts`,
+`tests/e2e/dev-boot-timing-api.spec.ts`, `tests/e2e/setup-status.spec.ts`,
+`tests/e2e/system-prompt-customise.spec.ts`, `tests/e2e/sandbox.spec.ts`,
+`tests/e2e/per-project-worktree-pool.spec.ts`, and the browser replay
+coverage in `tests/e2e/ui/stories-streaming.spec.ts`.
+
 ## Cohort 11: OAuth account routes
 
 `src/server/routes/oauth-account-routes.ts`.
@@ -664,6 +724,9 @@ pairs.
 | POST | `/api/oauth/start` |
 | POST | `/api/oauth/complete` |
 | POST | `/api/oauth/logout` |
+
+Registry count reconciliation: cohort 9 left ~315 remaining legacy routes.
+Moving these 5 routes leaves ~310 routes in the legacy chain.
 
 Pinning coverage: OAuth helper behavior is covered by `tests/oauth-google.test.ts`,
 `tests/oauth-complete-empty-code.test.ts`, and `tests/oauth-external-callbacks.test.ts`.
@@ -750,13 +813,14 @@ Route-level E2E coverage is `tests/e2e/oauth-flow-status.spec.ts` and
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~328 routes, including the largest/highest-traffic families
+- The other ~310 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
   the workflows + review-annotation families in cohort 6, and the session
-  utility cluster in cohort 7, and the maintenance + search-admin cluster in
-  cohort 8, and the OAuth account family in cohort 11 (all above).
+  utility cluster in cohort 7, the maintenance + search-admin cluster in
+  cohort 8, the server/system cluster in cohort 9, and the OAuth account
+  family in cohort 11 (all above).
   Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see

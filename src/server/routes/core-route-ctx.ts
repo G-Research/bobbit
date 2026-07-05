@@ -34,6 +34,9 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import type { ReviewAnnotationStore } from "../review-annotation-store.js";
 import type { BgProcessManager } from "../agent/bg-process-manager.js";
 import type { ToolManager } from "../agent/tool-manager.js";
+import type { PreferencesStore } from "../agent/preferences-store.js";
+import type { SandboxManager } from "../agent/sandbox-manager.js";
+import type { ResolvedProject } from "../agent/resolve-project.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -194,4 +197,16 @@ export interface CoreRouteCtx {
 	bgProcessManager: BgProcessManager;
 	noContent(): void;
 	toolManager: ToolManager;
+
+	// ── Cohort 9 (server/system routes) additions — append-only from here
+	// down. Never reorder the fields above.
+	config: {
+		host: string;
+		forceAuth?: boolean;
+		tls?: { caCert?: string };
+	};
+	preferencesStore: PreferencesStore;
+	sandboxManager?: SandboxManager;
+	getAigwUrl(prefs: PreferencesStore): string | undefined;
+	writeProjectResolutionError(resolved: Extract<ResolvedProject, { ok: false }>): void;
 }

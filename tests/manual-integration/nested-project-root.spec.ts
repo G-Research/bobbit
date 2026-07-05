@@ -56,6 +56,10 @@ async function startGW(dir: string, port: number): Promise<GW> {
 			BOBBIT_TEST_NO_PUSH: "1",
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			NODE_ENV: "test",
+			// Live server secrets (admin bearer token) live under serverSecretsDir(),
+			// which is OS-user-level by default. BOBBIT_SECRETS_DIR is the explicit
+			// override the product provides for test isolation.
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit-secrets"),
 		},
 		stdio: ["pipe", "pipe", "pipe"],
 	});
@@ -66,7 +70,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
 		try {
-			const tp = join(dir, ".bobbit", "state", "token");
+			const tp = join(dir, ".bobbit-secrets", "token");
 			if (existsSync(tp)) {
 				const t = readFileSync(tp, "utf-8").trim();
 				const r = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } });
@@ -76,7 +80,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		await new Promise(r => setTimeout(r, 300));
 	}
 	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Gateway not healthy:\n${stderr}`); }
-	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
+	const token = readFileSync(join(dir, ".bobbit-secrets", "token"), "utf-8").trim();
 	return { proc, port, dir, token, base: `http://127.0.0.1:${port}` };
 }
 
