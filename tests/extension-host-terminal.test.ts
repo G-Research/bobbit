@@ -376,6 +376,7 @@ describe("ChannelPtyService", () => {
 			NPM_TOKEN: "npm-secret",
 			LANG: "C.UTF-8",
 			COLORTERM: "truecolor",
+			ZDOTDIR: "/tmp/zdotdir-hermetic",
 		};
 		const original = new Map<string, string | undefined>();
 		for (const key of Object.keys(envPatch)) {
@@ -404,6 +405,9 @@ describe("ChannelPtyService", () => {
 			assert.equal(spawnEnv!.COLORTERM, "truecolor");
 			assert.equal(spawnEnv!.LANG, "C.UTF-8");
 			assert.ok(spawnEnv!.PATH || spawnEnv!.Path, "PATH/Path should be preserved");
+			if (process.platform !== "win32") {
+				assert.equal(spawnEnv!.ZDOTDIR, "/tmp/zdotdir-hermetic", "ZDOTDIR must pass through so zsh resolves the caller-designated rc directory");
+			}
 			for (const key of ["OPENAI_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "BOBBIT_TOKEN", "BOBBIT_GATEWAY_URL", "NPM_TOKEN"]) {
 				assert.equal(spawnEnv![key], undefined, `${key} should be stripped from PTY env`);
 			}
