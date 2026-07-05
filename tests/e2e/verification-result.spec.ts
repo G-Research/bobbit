@@ -266,6 +266,92 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-bad-html");
 	});
 
+	test("passes findings through when provided", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+
+		const promise = new Promise<any>((resolve) => {
+			harness.pendingResults.set("test-session-findings", resolve);
+		});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-findings",
+				verdict: "fail",
+				summary: "1 blocker found",
+				findings: [
+					{ severity: "blocker", summary: "SQL injection in query builder", file: "src/db.ts", line: 42 },
+					{ severity: "minor", summary: "Missing trailing comma" },
+				],
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const result = await promise;
+		expect(result.verdict).toBe(false);
+		expect(result.findings).toEqual([
+			{ severity: "blocker", summary: "SQL injection in query builder", file: "src/db.ts", line: 42 },
+			{ severity: "minor", summary: "Missing trailing comma" },
+		]);
+
+		harness.pendingResults.delete("test-session-findings");
+	});
+
+	test("omits findings from the resolved result when not provided (dark-compatible)", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+
+		const promise = new Promise<any>((resolve) => {
+			harness.pendingResults.set("test-session-no-findings", resolve);
+		});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-no-findings",
+				verdict: "pass",
+				summary: "All good",
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const result = await promise;
+		expect(result.findings).toBeUndefined();
+
+		harness.pendingResults.delete("test-session-no-findings");
+	});
+
+	test("drops malformed findings entries instead of rejecting the request", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+
+		const promise = new Promise<any>((resolve) => {
+			harness.pendingResults.set("test-session-bad-findings", resolve);
+		});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-bad-findings",
+				verdict: "fail",
+				summary: "issues found",
+				findings: [
+					{ severity: "catastrophic", summary: "not a real severity" },
+					{ severity: "major" }, // missing summary
+					"not even an object",
+					{ severity: "blocker", summary: "real finding" },
+				],
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const result = await promise;
+		expect(result.findings).toEqual([{ severity: "blocker", summary: "real finding" }]);
+
+		harness.pendingResults.delete("test-session-bad-findings");
+	});
+
 	test("resolver is removed from map after call (endpoint returns 404 on second call)", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 
