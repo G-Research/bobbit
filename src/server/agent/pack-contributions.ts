@@ -41,6 +41,9 @@ import { ALL_PROVIDER_HOOKS } from "./lifecycle-hooks.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+// Settings-section ids mirror panel ids (dotted namespaces allowed).
+const SETTINGS_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const SETTINGS_SECTION_DEFAULT_ORDER = 100;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -146,6 +149,29 @@ export interface PanelContribution {
 	/** Allowlisted params key that must match the tab instanceKey for parameterized panels. */
 	instanceParam?: string;
 	/** Absolute path of the declaring YAML (panels/<file>.yaml). */
+	sourceFile: string;
+	/** Absolute pack root (market-packs/<name>). */
+	packRoot: string;
+}
+
+/** A pack-scoped Settings-page section (settings/<file>.yaml) — pack-schema-v1
+ *  §8.5 / docs/design/pack-settings-contribution.md §4.1. Renders inline in an
+ *  existing Settings tab (no session, no tab lifecycle — unlike panels). */
+export interface SettingsSectionContribution {
+	id: string; // unique within the pack
+	title?: string;
+	/** v1: "system" only (docs/design/pack-settings-contribution.md §4.1 YAGNI). */
+	scope: "system";
+	/** Which existing Settings tab hosts it. */
+	tab: string;
+	/** Stable sort key within a tab; ties broken by packId. Default 100. */
+	order: number;
+	entry: string; // path relative to sourceFile, contained in packRoot
+	/** Preference keys this section's `host.preferences.set()` may write —
+	 *  the manifest-declared allowlist (§4.3). Re-checked LIVE against this same
+	 *  field at write time; a request never gets to assert its own allowlist. */
+	preferenceKeys: string[];
+	/** Absolute path of the declaring YAML (settings/<file>.yaml). */
 	sourceFile: string;
 	/** Absolute pack root (market-packs/<name>). */
 	packRoot: string;
@@ -318,6 +344,8 @@ export interface PackContributions {
 	packName: string;
 	packRoot: string;
 	panels: PanelContribution[];
+	/** settings/<file>.yaml — auto-discovered, mirrors panels[]. */
+	settingsSections: SettingsSectionContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
 	/** Channel handler files listed by contents.channels[]. */
@@ -355,6 +383,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		packName: manifest.name,
 		packRoot,
 		panels: loadPanels(packRoot),
+		settingsSections: loadSettingsSections(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
@@ -412,6 +441,82 @@ function loadPanels(packRoot: string): PanelContribution[] {
 		if (obj.instanceMode === "singleton" || obj.instanceMode === "parameterized") panel.instanceMode = obj.instanceMode;
 		if (typeof obj.instanceParam === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(obj.instanceParam)) panel.instanceParam = obj.instanceParam;
 		out.push(panel);
+	}
+	return out;
+}
+
+/**
+ * Auto-discover `settings/*.yaml` (docs/design/pack-settings-contribution.md
+ * §4.1). Copy-shaped from {@link loadPanels}: same malformed-file/duplicate-id/
+ * unsafe-entry tolerance, same `sourceFile`/`packRoot` bookkeeping. Two extra
+ * fields absent from panels:
+ *   - `scope` MUST be `"system"` (v1 YAGNI — anything else is dropped+warned,
+ *     not coerced, so a future `project` scope is an explicit new value, not a
+ *     silent reinterpretation of a malformed one);
+ *   - `preferenceKeys` (optional list) is the section's declared allowlist for
+ *     `host.preferences.set()` — re-read LIVE at every write (§4.3), never
+ *     trusted from a caller-supplied claim.
+ * Duplicate settings-section id within the pack = hard conflict (mirrors panels).
+ */
+function loadSettingsSections(packRoot: string): SettingsSectionContribution[] {
+	const dir = path.join(packRoot, "settings");
+	let files: string[];
+	try {
+		files = fs.readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
+	} catch {
+		return []; // no settings/ dir
+	}
+	const out: SettingsSectionContribution[] = [];
+	const seen = new Set<string>();
+	for (const f of files.sort()) {
+		const sourceFile = path.join(dir, f);
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping malformed settings section ${sourceFile}: ${String(err)}`);
+			continue;
+		}
+		if (!data || typeof data !== "object" || Array.isArray(data)) {
+			console.warn(`[pack-contributions] settings section ${sourceFile} is not a mapping; dropping`);
+			continue;
+		}
+		const obj = data as Record<string, unknown>;
+		const id = obj.id;
+		const entryField = obj.entry;
+		if (typeof id !== "string" || !SETTINGS_SECTION_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] settings section ${sourceFile} has invalid id; dropping`);
+			continue;
+		}
+		if (typeof entryField !== "string" || !isSafeRelativePath(entryField)) {
+			console.warn(`[pack-contributions] settings section '${id}' (${sourceFile}) has unsafe/missing entry; dropping`);
+			continue;
+		}
+		if (obj.scope !== "system") {
+			console.warn(`[pack-contributions] settings section '${id}' (${sourceFile}) has unsupported scope ${JSON.stringify(obj.scope)} (only "system" is supported); dropping`);
+			continue;
+		}
+		if (typeof obj.tab !== "string" || obj.tab.length === 0) {
+			// §4.1: an omitted `tab` is meant to fall back to a future "Extensions" tab,
+			// which does not exist yet — tolerant-drop rather than misplace it into an
+			// arbitrary existing tab (out of scope per the design doc; add the fallback
+			// tab before a second pack needs it).
+			console.warn(`[pack-contributions] settings section '${id}' (${sourceFile}) has no 'tab' and there is no fallback Extensions tab yet; dropping`);
+			continue;
+		}
+		if (seen.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares settings section id "${id}" more than once; settings section ids must be unique within a pack`,
+			);
+		}
+		seen.add(id);
+		const order = clampNumber(obj.order, SETTINGS_SECTION_DEFAULT_ORDER, -1_000_000, 1_000_000);
+		const preferenceKeys = Array.isArray(obj.preferenceKeys)
+			? obj.preferenceKeys.filter((k): k is string => typeof k === "string" && k.length > 0)
+			: [];
+		const section: SettingsSectionContribution = { id, scope: "system", tab: obj.tab, order, entry: entryField, preferenceKeys, sourceFile, packRoot };
+		if (typeof obj.title === "string" && obj.title.length > 0) section.title = obj.title;
+		out.push(section);
 	}
 	return out;
 }

@@ -98,6 +98,7 @@ import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
+import { mintSettingsSectionToken } from "./extension-host/settings-section-preferences.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import {
@@ -6184,6 +6185,60 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/ext/packs/:packId/settings-sections/:sectionId?projectId= — serve a
+	// PACK's pre-built ESM Settings-section module bytes (docs/design/
+	// pack-settings-contribution.md §4.2). Mirrors the panel-serving route above
+	// byte-for-byte: admin-bearer ONLY / static-asset-equivalent, no allowedTools
+	// check (serving bytes is not a capability invocation), entry re-validated to
+	// stay within the pack root.
+	const extSettingsSectionMatch = url.pathname.match(/^\/api\/ext\/packs\/([^/]+)\/settings-sections\/([^/]+)$/);
+	if (extSettingsSectionMatch && req.method === "GET") {
+		const packId = decodeURIComponent(extSettingsSectionMatch[1]);
+		const sectionId = decodeURIComponent(extSettingsSectionMatch[2]);
+		const sectionScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!sectionScope.ok) { writeConfigProjectScopeError(sectionScope); return; }
+		const section = packContributionRegistry.getSettingsSection(sectionScope.effectiveProjectId, packId, sectionId);
+		if (!section) {
+			json({ error: "no such settings section in this pack" }, 404);
+			return;
+		}
+		const fileAbs = path.resolve(path.dirname(section.sourceFile), section.entry);
+		if (!isPackPathWithinRoot(section.packRoot, fileAbs)) {
+			json({ error: "invalid settings section path" }, 404);
+			return;
+		}
+		let source: string;
+		try {
+			source = fs.readFileSync(fileAbs, "utf-8");
+		} catch {
+			json({ error: "settings section module not found" }, 404);
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-cache" });
+		res.end(source);
+		return;
+	}
+
+	// POST /api/ext/packs/:packId/settings-sections/:sectionId/surface-token —
+	// mint a SESSION-LESS pack-bound surface token for a settings section's
+	// `SettingsHostApi` (docs/design/pack-settings-contribution.md §4.3). No
+	// session/toolUseId identity exists for this surface (unlike
+	// `/api/ext/surface-token`); the token binds only `{packId, sectionId}` and is
+	// re-checked against the LIVE registry on every guarded preference write
+	// (`guardPackAttributedPreferenceWrite`), never trusted for what it may write.
+	const extSettingsSectionTokenMatch = url.pathname.match(/^\/api\/ext\/packs\/([^/]+)\/settings-sections\/([^/]+)\/surface-token$/);
+	if (extSettingsSectionTokenMatch && req.method === "POST") {
+		const packId = decodeURIComponent(extSettingsSectionTokenMatch[1]);
+		const sectionId = decodeURIComponent(extSettingsSectionTokenMatch[2]);
+		const section = packContributionRegistry.getSettingsSection(undefined, packId, sectionId);
+		if (!section) {
+			json({ error: "no such settings section in this pack" }, 404);
+			return;
+		}
+		json({ token: mintSettingsSectionToken(packId, sectionId) });
+		return;
+	}
+
 	// GET /api/ext/contributions?projectId= — project-scoped pack-contribution
 	// metadata for the client registries (pack-schema-v1 §6.4). Activation filtering
 	// is already applied by the registry (disabled entrypoints omitted). EVERY
@@ -6200,6 +6255,16 @@ async function handleApiRoute(
 				if (panel.title !== undefined) out.title = panel.title;
 				if (panel.instanceMode !== undefined) out.instanceMode = panel.instanceMode;
 				if (panel.instanceParam !== undefined) out.instanceParam = panel.instanceParam;
+				return out;
+			}),
+			// settingsSections: additive per docs/marketplace.md's forward-compat
+			// convention (mirrors how panels[] was added to this wire shape).
+			// `preferenceKeys` is intentionally OMITTED from the wire payload — the
+			// client never needs (and must never trust) the allowlist; the server
+			// re-resolves it live from the registry on every guarded write.
+			settingsSections: p.settingsSections.map((section) => {
+				const out: Record<string, unknown> = { id: section.id, tab: section.tab, order: section.order };
+				if (section.title !== undefined) out.title = section.title;
 				return out;
 			}),
 			entrypoints: p.entrypoints.map((e) => {
@@ -7256,7 +7321,9 @@ async function handleApiRoute(
 
 	// /api/preferences and /api/preferences/claude-code/confirmation moved to
 	// the core route registry (STR-01 cohort 12) — see
-	// src/server/routes/preferences-routes.ts and docs/design/route-registry.md.
+	// src/server/routes/preferences-routes.ts (which also carries the S5
+	// pack-attributed-write gate, docs/design/pack-settings-contribution.md §4.3)
+	// and docs/design/route-registry.md.
 
 	// GET /api/project-config, GET /api/project-config/defaults, and (below)
 	// PUT /api/project-config moved to the core route registry (STR-01
