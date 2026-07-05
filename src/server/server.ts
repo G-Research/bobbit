@@ -5011,7 +5011,12 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
 		const body = await readBody(req);
 		try {
-			projectRegistry.setVisibleOrder(body?.projectIds);
+			// When Headquarters is hidden from project lists it is not part of the
+			// client-visible reorder set, so the client cannot include it in the
+			// payload. Exclude it from reconciliation so its position is preserved
+			// rather than triggering a stale-order rejection.
+			const excludeIds = shouldShowHeadquartersInProjectLists() ? [] : [HEADQUARTERS_PROJECT_ID];
+			projectRegistry.setVisibleOrder(body?.projectIds, { excludeIds });
 			const projects = listProjectsForApi();
 			broadcastToAll({ type: "projects_changed", projects });
 			json({ projects });
