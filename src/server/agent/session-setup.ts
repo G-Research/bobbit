@@ -700,6 +700,14 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
 
+	// Eligibility-signal: thread the RESOLVED tool allowlist onto bridgeOptions
+	// purely as classification metadata for `isInProcessBridgeEligible`
+	// (`in-process-bridge-eligibility.ts` ORs `isReadOnlyToolPolicy(allowedTools)`
+	// into its `readOnly` check — see that file's header). `resolveBridgeOptions`
+	// (Step 1) always runs before this step, so `plan.bridgeOptions` already
+	// exists here. Purely additive: nothing else reads `bridgeOptions.allowedTools`.
+	plan.bridgeOptions.allowedTools = effectiveAllowedTools?.map(t => t.name);
+
 	// Generic role-accessory application. When a session is created with a
 	// role (roleName/role) that resolves to a Role carrying an `accessory`, and
 	// the caller did NOT explicitly pass one, surface the role's accessory so it

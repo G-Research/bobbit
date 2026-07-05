@@ -29,6 +29,9 @@ declare module "@mariozechner/mini-lit" {
 		"Update API key": string;
 		"Enter API key": string;
 		"Type a message...": string;
+		"Message will queue until the agent finishes…": string;
+		"message queued — will send after the agent finishes.": string;
+		"messages queued — will send after the agent finishes.": string;
 		"Failed to fetch file": string;
 		"Invalid source type": string;
 		PDF: string;
@@ -265,6 +268,9 @@ export const translations = {
 		"Update API key": "Update API key",
 		"Enter API key": "Enter API key",
 		"Type a message...": "Type a message...",
+		"Message will queue until the agent finishes…": "Message will queue until the agent finishes…",
+		"message queued — will send after the agent finishes.": "message queued — will send after the agent finishes.",
+		"messages queued — will send after the agent finishes.": "messages queued — will send after the agent finishes.",
 		"Failed to fetch file": "Failed to fetch file",
 		"Invalid source type": "Invalid source type",
 		PDF: "PDF",

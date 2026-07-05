@@ -16,9 +16,15 @@
  * contains the built lib/*.js bundles (produced by `npm run build:packs`, which
  * runs BEFORE this step) plus the hand-authored lib/routes.mjs server module. We
  * SKIP src/ (source-only) and any node_modules.
+ *
+ * The replace is atomic (see scripts/lib/atomic-copy-dir.mjs) — this directory
+ * (resolveBuiltinPacksDir()) is bind-mounted read-only into sandbox containers,
+ * and a naive rm -rf + copy leaves it missing/partial for any container created
+ * mid-rebuild.
  */
 import fs from "node:fs";
 import path from "node:path";
+import { atomicReplaceDir } from "./lib/atomic-copy-dir.mjs";
 
 const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "terminal", "experiment-runner"]; // explicit allowlist
 const SRC = "market-packs";
@@ -41,12 +47,16 @@ function copyDir(src, dest) {
   }
 }
 
-for (const name of FIRST_PARTY_PACKS) {
-  const src = path.join(SRC, name);
-  if (!fs.existsSync(src)) {
-    throw new Error(`copy-builtin-packs: first-party pack not found: ${src}`);
-  }
-  copyDir(src, path.join(DEST, name));
-}
+atomicReplaceDir(SRC, DEST, {
+  populate: (staging) => {
+    for (const name of FIRST_PARTY_PACKS) {
+      const src = path.join(SRC, name);
+      if (!fs.existsSync(src)) {
+        throw new Error(`copy-builtin-packs: first-party pack not found: ${src}`);
+      }
+      copyDir(src, path.join(staging, name));
+    }
+  },
+});
 
 console.log(`Built ${DEST}/ from ${SRC}/ (${FIRST_PARTY_PACKS.join(", ")})`);

@@ -223,11 +223,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-	// Mount builtin tools directory for cascade-resolved builtin extensions
-	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
-		args.push("-v", `${toDockerPath(builtinToolsDir)}:/tools-builtin:ro`);
-	}
-
 	// Mount shipped first-party market packs so pack-owned bobbit-extension tools
 	// (and any shared pack modules they import) resolve inside Docker sandboxes.
 	const addReadonlyDirectoryMount = (hostPath: string, containerPath: string): void => {
@@ -239,6 +234,18 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 			// Optional mount roots are absent until their corresponding feature/scope is used.
 		}
 	};
+	// Mount builtin tools directory for cascade-resolved builtin extensions. Guarded
+	// on existence like the mounts below: dist/server/defaults is rebuilt via an
+	// atomic rename (scripts/copy-defaults.mjs) so it's never observed missing or
+	// partial mid-rebuild, but a truly fresh checkout that hasn't been built yet
+	// (or a builtinToolsDir override pointing at a still-uncreated path) must not
+	// bind-mount a nonexistent host path — Docker silently auto-creates an empty
+	// directory for a missing `-v` source with no error, which then reads as
+	// "/tools-builtin/* not resolving" inside the sandbox for that container's
+	// entire lifetime.
+	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
+		addReadonlyDirectoryMount(builtinToolsDir, "/tools-builtin");
+	}
 	addReadonlyDirectoryMount(builtinPacksDir, BUILTIN_PACKS_CONTAINER_DIR);
 
 	// Mount installed marketplace pack roots, not only their tools/ subtrees, so
