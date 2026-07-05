@@ -1,10 +1,39 @@
 import tailwindcss from "@tailwindcss/vite";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
+
+/**
+ * Mirror of the server's bobbit-dir.ts resolution so Vite finds the same
+ * Headquarters state dir and OS-level secrets dir. Kept in sync manually;
+ * pinned by tests/vite-config-paths.test.ts.
+ */
+function headquartersDir(): string {
+	if (process.env.BOBBIT_DIR) return path.resolve(process.env.BOBBIT_DIR);
+	if (process.env.BOBBIT_PI_DIR) return path.resolve(process.env.BOBBIT_PI_DIR);
+	return path.join(process.cwd(), ".bobbit", "headquarters");
+}
+function headquartersStateDir(): string {
+	return path.join(headquartersDir(), "state");
+}
+/** OS-level server secrets dir (TLS material lives under <secretsDir>/tls). */
+function serverSecretsDir(): string {
+	if (process.env.BOBBIT_SECRETS_DIR) return path.resolve(process.env.BOBBIT_SECRETS_DIR);
+	const hash = crypto.createHash("sha256").update(headquartersDir()).digest("hex").slice(0, 16);
+	if (process.platform === "win32") {
+		const base = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+		return path.join(base, "bobbit", "secrets", hash);
+	}
+	if (process.platform === "darwin") {
+		return path.join(os.homedir(), "Library", "Application Support", "bobbit", "secrets", hash);
+	}
+	const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+	return path.join(base, "bobbit", "secrets", hash);
+}
 
 /** Find the NordLynx (NordVPN mesh) interface IPv4 address. */
 function findNordLynxIp(): string | null {
@@ -39,15 +68,22 @@ const proto = host === "localhost" ? "http" : "https";
  */
 function readGatewayUrl(): string {
 	if (process.env.GATEWAY_URL) return process.env.GATEWAY_URL;
-	const gwFile = path.join(process.cwd(), ".bobbit", "state", "gateway-url");
+	const gwFile = path.join(headquartersStateDir(), "gateway-url");
 	try {
 		if (fs.existsSync(gwFile)) return fs.readFileSync(gwFile, "utf-8").trim();
 	} catch {}
 	return `${proto}://${host}:3001`;  // fallback before first startup
 }
 
-// Load TLS cert for vite's own HTTPS server + proxy trust
-const tlsDir = path.join(process.cwd(), ".bobbit", "state", "tls");
+// Load TLS cert for vite's own HTTPS server + proxy trust. The HQ split
+// relocated TLS material from <project>/.bobbit/state/tls to the OS-level
+// serverSecretsDir(); fall back to the legacy path for pre-split installs.
+function resolveTlsDir(): string {
+	const secretsTls = path.join(serverSecretsDir(), "tls");
+	if (fs.existsSync(path.join(secretsTls, "cert.pem"))) return secretsTls;
+	return path.join(process.cwd(), ".bobbit", "state", "tls");
+}
+const tlsDir = resolveTlsDir();
 const certPath = path.join(tlsDir, "cert.pem");
 const keyPath = path.join(tlsDir, "key.pem");
 const tlsAvailable = proto === "https" && fs.existsSync(certPath) && fs.existsSync(keyPath);

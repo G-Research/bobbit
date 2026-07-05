@@ -351,9 +351,9 @@ test.describe("Headquarters same-root split API", () => {
 		try {
 			const list = await gw.json("/api/projects");
 			expect(list.status, list.text).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
-			expectHeadquartersProject(list.body[0], gw.headquartersDir);
-			expectSameRootNormalProject(list.body[1], gw.serverRoot);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
+			expectSameRootNormalProject(list.body[0], gw.serverRoot);
+			expectHeadquartersProject(list.body[1], gw.headquartersDir);
 
 			const hq = await gw.json(`/api/projects/${HEADQUARTERS_PROJECT_ID}`);
 			expect(hq.status, hq.text).toBe(200);
@@ -404,7 +404,7 @@ test.describe("Headquarters same-root split API", () => {
 
 			const list = await gw.json("/api/projects");
 			expect(list.status, list.text).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
 			expect(list.body.find((p: any) => p.id === SAME_ROOT_PROJECT_ID)?.provisional).not.toBe(true);
 			const storedProjects = readJsonFile(join(gw.headquartersDir, "state", "projects.json"));
 			expect(storedProjects.filter((p: any) => samePath(String(p.rootPath), gw.serverRoot) && !p.hidden).map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID]);
@@ -482,9 +482,9 @@ test.describe("Headquarters same-root split API", () => {
 			gw = await startHeadquartersGateway({ serverRoot, headquartersDir, agentDir, clean: false });
 			list = await gw.json("/api/projects");
 			expect(list.status, list.text).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
-			expectHeadquartersProject(list.body[0], headquartersDir);
-			expectSameRootNormalProject(list.body[1], serverRoot);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
+			expectSameRootNormalProject(list.body[0], serverRoot);
+			expectHeadquartersProject(list.body[1], headquartersDir);
 		} finally {
 			await gw.shutdown();
 		}
@@ -503,9 +503,9 @@ test.describe("Headquarters same-root split API", () => {
 		try {
 			const list = await gw.json("/api/projects");
 			expect(list.status, list.text).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
-			expectHeadquartersProject(list.body[0], customHeadquartersDir);
-			expectSameRootNormalProject(list.body[1], serverRoot);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
+			expectSameRootNormalProject(list.body[0], serverRoot);
+			expectHeadquartersProject(list.body[1], customHeadquartersDir);
 			expect(existsSync(join(customHeadquartersDir, "state", "projects.json"))).toBe(true);
 			expect(existsSync(join(customHeadquartersDir, "config"))).toBe(true);
 			expect(existsSync(join(serverRoot, ".bobbit", "state"))).toBe(true);
@@ -597,7 +597,7 @@ test.describe("Headquarters same-root split API", () => {
 
 			const list = await gw.json("/api/projects");
 			expect(list.status, list.text).toBe(200);
-			expect(list.body.map((p: any) => p.id)).toEqual([HEADQUARTERS_PROJECT_ID, SAME_ROOT_PROJECT_ID]);
+			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
 
 			const hqSessions = await gw.json(`/api/sessions?projectId=${HEADQUARTERS_PROJECT_ID}`);
 			const normalSessions = await gw.json(`/api/sessions?projectId=${SAME_ROOT_PROJECT_ID}`);
