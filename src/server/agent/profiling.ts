@@ -25,6 +25,9 @@
  * is exactly what we want when measuring cross-worker contention.
  */
 
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
+
 const PROFILE = process.env.BOBBIT_E2E_PROFILE === "1";
 const FLUSH_INTERVAL_MS = Number(process.env.BOBBIT_E2E_PROFILE_FLUSH_MS) || 5000;
 
@@ -146,12 +149,16 @@ export function reset(): void {
 	buckets.clear();
 }
 
-if (PROFILE) {
-	const timer = setInterval(() => flush("tick"), FLUSH_INTERVAL_MS);
-	if (typeof timer.unref === "function") timer.unref();
+export function startProfilingFlushTimer(clock: Clock = realClock): void {
+	const timer = clock.setInterval(() => flush("tick"), FLUSH_INTERVAL_MS);
+	if (typeof (timer as any).unref === "function") (timer as any).unref();
 	const onExit = () => { try { flush("exit"); } catch { /* best-effort */ } };
 	process.on("beforeExit", onExit);
 	process.on("exit", onExit);
+}
+
+if (PROFILE) {
+	startProfilingFlushTimer();
 }
 
 export const PROFILE_ENABLED = PROFILE;

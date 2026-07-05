@@ -1,4 +1,6 @@
-import fs from "node:fs";
+import type { Dirent } from "node:fs";
+import type { Clock, FsLike } from "../gateway-deps.js";
+import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
@@ -27,13 +29,14 @@ function defaultVerifierAccessory(id: string): string {
 export function shouldKeepDespiteOrphan(
 	ps: { worktreePath?: string; agentSessionFile?: string },
 	now: number = Date.now(),
+	fsImpl: FsLike = realFs,
 ): boolean {
 	const wtAlive = !!ps.worktreePath && (() => {
-		try { return fs.existsSync(ps.worktreePath!); } catch { return false; }
+		try { return fsImpl.existsSync(ps.worktreePath!); } catch { return false; }
 	})();
 	if (!wtAlive) return false;
 	const recentTranscript = !!ps.agentSessionFile && (() => {
-		try { return now - fs.statSync(ps.agentSessionFile!).mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS; }
+		try { return now - fsImpl.statSync(ps.agentSessionFile!).mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS; }
 		catch { return false; }
 	})();
 	return recentTranscript;
@@ -209,9 +212,17 @@ export type UpdatableSessionFields = Pick<
  * Simple JSON file store for gateway session metadata.
  * Allows sessions to survive server restarts.
  */
+type SessionStoreFs = FsLike & {
+	openSync: typeof import("node:fs").openSync;
+	fsyncSync: typeof import("node:fs").fsyncSync;
+	closeSync: typeof import("node:fs").closeSync;
+};
+
 export class SessionStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: SessionStoreFs;
+	private readonly clock: Clock;
 	private sessions: Map<string, PersistedSession> = new Map();
 	private saveTimer: ReturnType<typeof setTimeout> | null = null;
 	private static SAVE_DEBOUNCE_MS = 1000;
@@ -225,7 +236,9 @@ export class SessionStore {
 	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
 	private staleGuardTripped = false;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
+		this.fs = fsImpl as SessionStoreFs;
+		this.clock = clock;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
@@ -311,8 +324,8 @@ export class SessionStore {
 
 		for (const file of candidates) {
 			try {
-				if (!fs.existsSync(file)) continue;
-				const raw = fs.readFileSync(file, "utf-8");
+				if (!this.fs.existsSync(file)) continue;
+				const raw = this.fs.readFileSync(file, "utf-8");
 				const parsed = JSON.parse(raw);
 
 				if (Array.isArray(parsed)) {
@@ -348,8 +361,8 @@ export class SessionStore {
 	 */
 	private peekDiskEpoch(): number {
 		try {
-			if (!fs.existsSync(this.storeFile)) return -1;
-			const raw = fs.readFileSync(this.storeFile, "utf-8");
+			if (!this.fs.existsSync(this.storeFile)) return -1;
+			const raw = this.fs.readFileSync(this.storeFile, "utf-8");
 			const parsed = JSON.parse(raw);
 			if (Array.isArray(parsed)) return 0;
 			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
@@ -364,22 +377,22 @@ export class SessionStore {
 	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
 	private rotateBackups(): void {
 		try {
-			if (!fs.existsSync(this.storeFile)) return;
+			if (!this.fs.existsSync(this.storeFile)) return;
 			const N = SessionStore.BACKUP_COUNT;
 			// Drop the oldest if it exists.
-			try { if (fs.existsSync(this.bakPath(N))) fs.unlinkSync(this.bakPath(N)); } catch { /* non-fatal */ }
+			try { if (this.fs.existsSync(this.bakPath(N))) this.fs.unlinkSync(this.bakPath(N)); } catch { /* non-fatal */ }
 			// Shift .bak.{i} -> .bak.{i+1} for i = N-1 down to 1.
 			for (let i = N - 1; i >= 1; i--) {
 				try {
-					if (fs.existsSync(this.bakPath(i))) {
-						fs.renameSync(this.bakPath(i), this.bakPath(i + 1));
+					if (this.fs.existsSync(this.bakPath(i))) {
+						this.fs.renameSync(this.bakPath(i), this.bakPath(i + 1));
 					}
 				} catch { /* non-fatal */ }
 			}
 			// Copy current sessions.json → .bak.1 (copy, not rename — saveNow will
 			// overwrite via tmp+rename and we want to keep the current file present
 			// in case the new write fails).
-			try { fs.copyFileSync(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
+			try { this.fs.copyFileSync(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
 		} catch {
 			// Backup failure must never block a save.
 		}
@@ -404,8 +417,8 @@ export class SessionStore {
 	private saveNow(): void {
 		if (this.staleGuardTripped) return;
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
+			if (!this.fs.existsSync(this.storeDir)) {
+				this.fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 
 			// Stale-snapshot guard: if the on-disk epoch is HIGHER than what we
@@ -438,21 +451,21 @@ export class SessionStore {
 
 			// Atomic: write to .tmp, fsync, rename.
 			const tmp = `${this.storeFile}.tmp`;
-			const fd = fs.openSync(tmp, "w");
+			const fd = this.fs.openSync(tmp, "w");
 			try {
-				fs.writeFileSync(fd, json, "utf-8");
-				try { fs.fsyncSync(fd); } catch { /* fsync may fail on Windows network shares — non-fatal */ }
+				this.fs.writeFileSync(fd, json, "utf-8");
+				try { this.fs.fsyncSync(fd); } catch { /* fsync may fail on Windows network shares — non-fatal */ }
 			} finally {
-				fs.closeSync(fd);
+				this.fs.closeSync(fd);
 			}
-			fs.renameSync(tmp, this.storeFile);
+			this.fs.renameSync(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
 			// Best-effort cleanup of stray .tmp from a failed write.
 			try {
 				const tmp = `${this.storeFile}.tmp`;
-				if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+				if (this.fs.existsSync(tmp)) this.fs.unlinkSync(tmp);
 			} catch { /* ignore */ }
 		}
 	}
@@ -488,9 +501,9 @@ export class SessionStore {
 		let logged = 0;
 
 		const walk = (dir: string) => {
-			let entries: fs.Dirent[];
+			let entries: Dirent[];
 			try {
-				entries = fs.readdirSync(dir, { withFileTypes: true });
+				entries = this.fs.readdirSync(dir, { withFileTypes: true });
 			} catch {
 				return;
 			}
@@ -505,7 +518,7 @@ export class SessionStore {
 				const resolved = path.resolve(full);
 				if (tracked.has(resolved)) continue;
 				try {
-					const st = fs.statSync(full);
+					const st = this.fs.statSync(full);
 					if (st.mtimeMs < threshold) continue;
 				} catch {
 					continue;
@@ -520,7 +533,7 @@ export class SessionStore {
 		};
 
 		try {
-			if (fs.existsSync(agentSessionsRoot)) walk(agentSessionsRoot);
+			if (this.fs.existsSync(agentSessionsRoot)) walk(agentSessionsRoot);
 		} catch {
 			// non-fatal — return whatever we collected
 		}
@@ -539,7 +552,7 @@ export class SessionStore {
 	/** Schedule a debounced save — coalesces rapid writes into one disk flush. */
 	private save(): void {
 		if (this.saveTimer) return; // already scheduled
-		this.saveTimer = setTimeout(() => {
+		this.saveTimer = this.clock.setTimeout(() => {
 			this.saveTimer = null;
 			this.saveNow();
 		}, SessionStore.SAVE_DEBOUNCE_MS);
@@ -609,7 +622,7 @@ export class SessionStore {
 		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
 		if (critical) {
 			// If a debounced save is pending, cancel it — saveNow supersedes it.
-			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+			if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 			this.saveNow();
 		} else {
 			this.save(); // debounced — high-frequency, non-critical (lastActivity, lastReadAt, drafts, queue)
@@ -675,7 +688,7 @@ export class SessionStore {
 		if (!existing) return false;
 		this.generation++;
 		existing.archived = true;
-		existing.archivedAt = Date.now();
+		existing.archivedAt = this.clock.now();
 		this.saveNow(); // immediate — structural change
 		this.onIndexUpdate?.(existing);
 		return true;
@@ -721,7 +734,7 @@ export class SessionStore {
 	/** Flush any pending debounced save immediately (e.g. before shutdown). */
 	flush(): void {
 		if (this.saveTimer) {
-			clearTimeout(this.saveTimer);
+			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 			this.saveNow();
 		}

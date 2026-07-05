@@ -18,7 +18,8 @@
  * the same crash-recovery semantics.
  */
 
-import fs from "node:fs";
+import type { Clock, FsLike } from "../gateway-deps.js";
+import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
 import type { ClassifierPlanStep, ClassifyMutationDiff, MutationKind } from "./plan-mutation.js";
 
@@ -43,9 +44,13 @@ export const DEFAULT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export class PlanMutationStore {
 	private readonly dir: string;
-	private sweepTimer?: NodeJS.Timeout;
+	private readonly fs: FsLike;
+	private readonly clock: Clock;
+	private sweepTimer?: ReturnType<Clock["setInterval"]>;
 
-	constructor(stateDir: string, opts?: { startSweep?: boolean; sweepIntervalMs?: number }) {
+	constructor(stateDir: string, opts?: { startSweep?: boolean; sweepIntervalMs?: number }, fsImpl: FsLike = realFs, clock: Clock = realClock) {
+		this.fs = fsImpl;
+		this.clock = clock;
 		this.dir = path.join(stateDir, "plan-mutations");
 		// Daily best-effort sweep so the 24h TTL actually trims disk usage
 		// instead of relying on read-time filtering only. Opt-out for tests
@@ -54,7 +59,7 @@ export class PlanMutationStore {
 		const startSweep = opts?.startSweep ?? true;
 		if (startSweep) {
 			const interval = opts?.sweepIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
-			this.sweepTimer = setInterval(() => {
+			this.sweepTimer = this.clock.setInterval(() => {
 				try { this.pruneExpired(); } catch (err) { console.warn("[plan-mutation-store] periodic sweep failed:", err); }
 			}, interval);
 			this.sweepTimer.unref?.();
@@ -64,7 +69,7 @@ export class PlanMutationStore {
 	/** Cancel the periodic sweep timer (idempotent). */
 	stopSweep(): void {
 		if (this.sweepTimer) {
-			clearInterval(this.sweepTimer);
+			this.clock.clearInterval(this.sweepTimer);
 			this.sweepTimer = undefined;
 		}
 	}
@@ -75,7 +80,7 @@ export class PlanMutationStore {
 
 	private ensureDir(): void {
 		try {
-			if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
+			if (!this.fs.existsSync(this.dir)) this.fs.mkdirSync(this.dir, { recursive: true });
 		} catch (err) {
 			console.error("[plan-mutation-store] Failed to mkdir:", err);
 		}
@@ -84,8 +89,8 @@ export class PlanMutationStore {
 	private readFile(goalId: string): PendingMutation[] {
 		try {
 			const f = this.fileFor(goalId);
-			if (!fs.existsSync(f)) return [];
-			const raw = fs.readFileSync(f, "utf-8");
+			if (!this.fs.existsSync(f)) return [];
+			const raw = this.fs.readFileSync(f, "utf-8");
 			const parsed = JSON.parse(raw);
 			if (!Array.isArray(parsed)) return [];
 			return parsed as PendingMutation[];
@@ -100,10 +105,10 @@ export class PlanMutationStore {
 		try {
 			const f = this.fileFor(goalId);
 			if (mutations.length === 0) {
-				if (fs.existsSync(f)) fs.unlinkSync(f);
+				if (this.fs.existsSync(f)) this.fs.unlinkSync(f);
 				return;
 			}
-			fs.writeFileSync(f, JSON.stringify(mutations, null, 2), "utf-8");
+			this.fs.writeFileSync(f, JSON.stringify(mutations, null, 2), "utf-8");
 		} catch (err) {
 			console.error(`[plan-mutation-store] Failed to write mutations for ${goalId}:`, err);
 		}
@@ -143,11 +148,11 @@ export class PlanMutationStore {
 	 * removed entries. Idempotent and best-effort — failures on individual
 	 * goals are logged and skipped.
 	 */
-	pruneExpired(now: number = Date.now()): number {
+	pruneExpired(now: number = this.clock.now()): number {
 		let removed = 0;
 		try {
-			if (!fs.existsSync(this.dir)) return 0;
-			const entries = fs.readdirSync(this.dir);
+			if (!this.fs.existsSync(this.dir)) return 0;
+			const entries = this.fs.readdirSync(this.dir);
 			for (const name of entries) {
 				if (!name.endsWith(".json")) continue;
 				const goalId = name.slice(0, -".json".length);

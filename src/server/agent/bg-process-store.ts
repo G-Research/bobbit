@@ -16,6 +16,8 @@
  * `docs/design/persistent-bg-processes.md` §3.
  */
 import fs from "node:fs";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import path from "node:path";
 
 /** Persisted metadata for a single background process. See design §5.1. */
@@ -109,14 +111,14 @@ export class BgProcessStore {
 	private readonly storeFile: string;
 	private readonly filesRoot: string;
 	private processes: Map<string, PersistedBgProcess> = new Map();
-	private saveTimer: ReturnType<typeof setTimeout> | null = null;
+	private saveTimer: ReturnType<Clock["setTimeout"]> | null = null;
 	private static SAVE_DEBOUNCE_MS = 1000;
 	private static BACKUP_COUNT = 5;
 	private loadedEpoch = 0;
 	private writtenEpoch = 0;
 	private staleGuardTripped = false;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, private readonly clock: Clock = realClock) {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "bg-processes.json");
 		this.filesRoot = path.join(stateDir, "bg-processes");
@@ -263,7 +265,7 @@ export class BgProcessStore {
 
 	private save(): void {
 		if (this.saveTimer) return;
-		this.saveTimer = setTimeout(() => {
+		this.saveTimer = this.clock.setTimeout(() => {
 			this.saveTimer = null;
 			this.saveNow();
 		}, BgProcessStore.SAVE_DEBOUNCE_MS);
@@ -301,7 +303,7 @@ export class BgProcessStore {
 		if (onlyOffsets) {
 			this.save(); // debounced
 		} else {
-			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+			if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 			this.saveNow(); // recovery-critical
 		}
 	}
@@ -324,7 +326,7 @@ export class BgProcessStore {
 
 	flush(): void {
 		if (this.saveTimer) {
-			clearTimeout(this.saveTimer);
+			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 			this.saveNow();
 		}

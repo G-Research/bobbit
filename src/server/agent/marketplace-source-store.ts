@@ -11,7 +11,8 @@
  * missing file). See `docs/design/pack-based-marketplace.md` §7.1.
  */
 
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 
@@ -205,8 +206,10 @@ export function deriveSourceId(url: string, taken: ReadonlySet<string>): string 
 export class MarketplaceSourceStore {
 	private sources: MarketplaceSource[] = [];
 	private readonly file: string;
+	private readonly fs: FsLike;
 
-	constructor(configDir: string) {
+	constructor(configDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.file = path.join(configDir, "marketplace-sources.yaml");
 		this.load();
 	}
@@ -214,8 +217,8 @@ export class MarketplaceSourceStore {
 	private load(): void {
 		this.sources = [];
 		try {
-			if (!fs.existsSync(this.file)) return;
-			const raw = parse(fs.readFileSync(this.file, "utf-8"));
+			if (!this.fs.existsSync(this.file)) return;
+			const raw = parse(this.fs.readFileSync(this.file, "utf-8"));
 			if (!raw || typeof raw !== "object") return;
 			const list = (raw as Record<string, unknown>).sources;
 			if (!Array.isArray(list)) return;
@@ -234,9 +237,9 @@ export class MarketplaceSourceStore {
 	private save(): void {
 		try {
 			const dir = path.dirname(this.file);
-			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+			if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
 			const out = { sources: this.sources.map(serializeSource) };
-			fs.writeFileSync(this.file, stringify(out), "utf-8");
+			this.fs.writeFileSync(this.file, stringify(out), "utf-8");
 		} catch (err) {
 			console.error("[marketplace-source-store] Failed to save sources:", err);
 		}

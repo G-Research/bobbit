@@ -1,4 +1,6 @@
 import { performance } from "node:perf_hooks";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import type { SessionManager } from "./session-manager.js";
 import type { StaffManager } from "./staff-manager.js";
@@ -33,21 +35,24 @@ export interface InboxNudgerDeps {
 	sessionManager: SessionManager;
 	staffManager: StaffManager;
 	inboxStore: InboxStore;
+	clock?: Clock;
 }
 
 export class InboxNudger {
 	static readonly TICK_INTERVAL_MS = 15_000;
 
-	private intervalHandle: ReturnType<typeof setInterval> | null = null;
+	private intervalHandle: ReturnType<Clock["setInterval"]> | null = null;
 	private readonly nudgePending: Map<string, boolean> = new Map();
 	private readonly sessionManager: SessionManager;
 	private readonly staffManager: StaffManager;
 	private readonly inboxStore: InboxStore;
+	private readonly clock: Clock;
 
 	constructor(deps: InboxNudgerDeps) {
 		this.sessionManager = deps.sessionManager;
 		this.staffManager = deps.staffManager;
 		this.inboxStore = deps.inboxStore;
+		this.clock = deps.clock ?? realClock;
 	}
 
 	start(): void {
@@ -55,14 +60,14 @@ export class InboxNudger {
 		if (cpuDiagnosticsEnabled()) {
 			getCpuDiagnostics().recordTimer("inbox-nudger:interval", 0, { starts: 1, intervalMs: InboxNudger.TICK_INTERVAL_MS });
 		}
-		this.intervalHandle = setInterval(() => {
+		this.intervalHandle = this.clock.setInterval(() => {
 			this.tick();
 		}, InboxNudger.TICK_INTERVAL_MS);
 	}
 
 	stop(): void {
 		if (this.intervalHandle) {
-			clearInterval(this.intervalHandle);
+			this.clock.clearInterval(this.intervalHandle);
 			this.intervalHandle = null;
 			if (cpuDiagnosticsEnabled()) {
 				getCpuDiagnostics().recordTimer("inbox-nudger:interval", 0, { stops: 1 });
@@ -185,7 +190,7 @@ export class InboxNudger {
 			// restart for UI "last seen" displays. Set before enqueuePrompt so even if
 			// delivery fails the user can see the attempt timestamp.
 			try {
-				this.staffManager.updateStaff(staff.id, { lastWakeAt: Date.now() });
+				this.staffManager.updateStaff(staff.id, { lastWakeAt: this.clock.now() });
 			} catch (err) {
 				if (counters) counters.updateStaffErrors = 1;
 				console.warn(`[inbox-nudger] updateStaff(lastWakeAt) failed for ${staff.id} (non-fatal):`, err);

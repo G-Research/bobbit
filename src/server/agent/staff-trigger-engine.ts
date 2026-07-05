@@ -1,3 +1,5 @@
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import { execFileSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
@@ -135,12 +137,13 @@ export function cronMatches(expr: string, date: Date): boolean {
  * 60-second interval and cheap git log checks consume resources.
  */
 export class TriggerEngine {
-	private intervalHandle: ReturnType<typeof setInterval> | null = null;
+	private intervalHandle: ReturnType<Clock["setInterval"]> | null = null;
 
 	constructor(
 		private staffManager: StaffManager,
 		private sessionManager: SessionManager,
 		private inboxManager: InboxManager,
+		private readonly clock: Clock = realClock,
 	) {
 		// `sessionManager` kept on the instance for future use (e.g. trigger
 		// preflight checks that need session state). `fireTrigger` itself no
@@ -150,13 +153,13 @@ export class TriggerEngine {
 
 	start(): void {
 		this.tick();
-		this.intervalHandle = setInterval(() => this.tick(), 60_000);
+		this.intervalHandle = this.clock.setInterval(() => this.tick(), 60_000);
 		console.log("[trigger-engine] Started (60s poll interval)");
 	}
 
 	stop(): void {
 		if (this.intervalHandle) {
-			clearInterval(this.intervalHandle);
+			this.clock.clearInterval(this.intervalHandle);
 			this.intervalHandle = null;
 			console.log("[trigger-engine] Stopped");
 		}
@@ -218,7 +221,7 @@ export class TriggerEngine {
 	/** Returns true if the trigger was fired. */
 	private checkScheduleTrigger(staff: PersistedStaff, trigger: StaffTrigger): boolean {
 		if (!trigger.config.cron) return false;
-		const now = new Date();
+		const now = new Date(this.clock.now());
 		if (!cronMatches(trigger.config.cron, now)) return false;
 
 		// Don't re-fire in the same minute
@@ -284,7 +287,7 @@ export class TriggerEngine {
 	private fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): void {
 		console.log(`[trigger-engine] Firing ${trigger.type} trigger "${trigger.id}" for staff "${staff.name}"`);
 
-		this.staffManager.updateTriggerState(staff.id, trigger.id, { lastFired: Date.now() });
+		this.staffManager.updateTriggerState(staff.id, trigger.id, { lastFired: this.clock.now() });
 
 		let prompt = trigger.prompt || `Trigger fired: ${trigger.type}`;
 		if (extraContext) {

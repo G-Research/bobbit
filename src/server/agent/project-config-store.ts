@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import yaml from "yaml";
 
@@ -381,8 +382,10 @@ export class ProjectConfigStore {
 	private dirty = false;
 
 	private readonly configFile: string;
+	private readonly fs: FsLike;
 
-	constructor(configDir: string) {
+	constructor(configDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.configFile = path.join(configDir, "project.yaml");
 		this.load();
 		// Lazy migration: if any legacy shape was parsed, the next save() rewrites
@@ -410,13 +413,13 @@ export class ProjectConfigStore {
 		};
 
 		try {
-			if (!fs.existsSync(this.configFile)) {
+			if (!this.fs.existsSync(this.configFile)) {
 				this.data = {};
 				this.components = [];
 				this.workflows = undefined;
 				return;
 			}
-			const raw = yaml.parse(fs.readFileSync(this.configFile, "utf-8"));
+			const raw = yaml.parse(this.fs.readFileSync(this.configFile, "utf-8"));
 			if (!isPlainObject(raw)) return;
 
 			// Flat string map for legacy keys — exclude migrated keys (handled below).
@@ -567,8 +570,8 @@ export class ProjectConfigStore {
 	private save(): void {
 		try {
 			const dir = path.dirname(this.configFile);
-			if (!fs.existsSync(dir)) {
-				fs.mkdirSync(dir, { recursive: true });
+			if (!this.fs.existsSync(dir)) {
+				this.fs.mkdirSync(dir, { recursive: true });
 			}
 			// Merge structured side-tables (components[], workflows{}, native fields) with
 			// the legacy flat keys. Migrated keys are NEVER written from `this.data` —
@@ -607,7 +610,7 @@ export class ProjectConfigStore {
 			// Clear dirty flag — file is now in native form.
 			this.dirty = false;
 
-			fs.writeFileSync(this.configFile, yaml.stringify(out), "utf-8");
+			this.fs.writeFileSync(this.configFile, yaml.stringify(out), "utf-8");
 		} catch (err) {
 			console.error("[project-config-store] Failed to save project config:", err);
 		}
