@@ -12,6 +12,8 @@ interface PromptSection {
 	tokens: number;
 	/** F19: true when the AGENTS.md cascade budget (`BOBBIT_AGENTSMD_BUDGET`) truncated this section. */
 	truncated?: boolean;
+	/** F22: the `# Tools` markdown rendering mode (`BOBBIT_TOOLS_MD`) in effect for the "Tools" section. */
+	toolsMdMode?: "full" | "index";
 }
 
 @customElement("system-prompt-dialog")
@@ -134,6 +136,9 @@ export class SystemPromptDialog extends DialogBase {
 						<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
 						${section.truncated
 							? html`<span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0" title="Capped by BOBBIT_AGENTSMD_BUDGET — see the marker inside the content for the omitted source path.">truncated</span>`
+							: nothing}
+						${section.toolsMdMode === "index"
+							? html`<span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0" title="BOBBIT_TOOLS_MD=index — bullets omit the (params) name list; full schemas ship with each tool's JSON definition.">index</span>`
 							: nothing}
 						`; })()}
 					</div>

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
+import { resolveToolsMdMode, type ToolsMdMode } from "./tool-manager.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
 import { type ContextBlock, fenceBlock } from "./context-blocks.js";
@@ -600,6 +601,11 @@ export interface PromptSection {
 	 *  A/B measure the effect of `BOBBIT_AGENTSMD_BUDGET`. Absent/false when
 	 *  the budget is off or this section wasn't affected. */
 	truncated?: boolean;
+	/** F22: the `# Tools` markdown rendering mode (`"full"` | `"index"`) in
+	 *  effect for this section — only set on the "Tools" section — so the
+	 *  persisted `-prompt.json` breakdown can A/B measure `BOBBIT_TOOLS_MD`.
+	 *  See `resolveToolsMdMode()` in tool-manager.ts. */
+	toolsMdMode?: ToolsMdMode;
 }
 
 /**
@@ -831,7 +837,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 
 	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse)
 	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
+		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()), toolsMdMode: resolveToolsMdMode() });
 	}
 
 	// 4. Available Skills (stable prefix)

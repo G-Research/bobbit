@@ -141,6 +141,34 @@ function parseParamsField(value: unknown): string[] | undefined {
 	return out.length > 0 ? out : undefined;
 }
 
+/**
+ * F22 — `# Tools` markdown mode (see docs/internals.md "Prompt layout" +
+ * docs/design/tools-md-dedup.md for the measurement that motivated this).
+ *
+ * Ground truth: the `(params)` parameter-NAME list rendered per bullet by
+ * `getToolDocsForPrompt` (e.g. `bash(command, timeout?)`) restates, in a
+ * thinner form, information the model already receives via the actual JSON
+ * tool schema sent alongside every request (full `input_schema` with types,
+ * `required`, and per-field descriptions) — a separate, independently
+ * authored code path (`pi.registerTool()` / pi-coding-agent builtins), NOT
+ * generated from this same YAML. The one-line `summary` text is NOT a
+ * literal duplicate of the wire `description` (both are hand-authored,
+ * worded differently) but covers the same ground.
+ *
+ * `"full"` (default, unset) is byte-identical to pre-F22 behavior. `"index"`
+ * drops the `(params)` list from each bullet and adds a single pointer line
+ * noting that full parameter schemas already ship with the tool definitions.
+ */
+export type ToolsMdMode = "full" | "index";
+
+/** Resolve the effective `# Tools` markdown mode. `override` (e.g. a future
+ *  per-session preference) wins when it is a valid mode value; otherwise
+ *  falls back to the `BOBBIT_TOOLS_MD` env var. Any other/unset value ⇒ `"full"`. */
+export function resolveToolsMdMode(override?: ToolsMdMode): ToolsMdMode {
+	if (override === "full" || override === "index") return override;
+	return process.env.BOBBIT_TOOLS_MD === "index" ? "index" : "full";
+}
+
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
@@ -880,8 +908,16 @@ export class ToolManager {
 	 * Generates a single `# Tools` section with per-group summaries, docs, and footer links.
 	 *
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
+	 *
+	 * `modeOverride` (F22, see `resolveToolsMdMode`) selects the rendering mode.
+	 * Default (`"full"`, unset `BOBBIT_TOOLS_MD`) is byte-identical to pre-F22
+	 * output. `"index"` drops the `(params)` name list from each bullet — those
+	 * are parameter NAMES only; full types/required/descriptions already ship
+	 * in the tool's JSON schema sent to the model separately — and adds one
+	 * pointer line saying so.
 	 */
-	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
+	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext, modeOverride?: ToolsMdMode): string {
+		const mode = resolveToolsMdMode(modeOverride);
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		type Entry = { name: string; summary: string; params?: string[] };
@@ -919,6 +955,12 @@ export class ToolManager {
 		if (grouped.size === 0) return "";
 
 		const sections: string[] = ["# Tools", ""];
+		if (mode === "index") {
+			sections.push(
+				"_Index mode (`BOBBIT_TOOLS_MD=index`): names + one-line purpose only — full parameter schemas (types, required, descriptions) are already sent with each tool's JSON definition, not repeated here._",
+			);
+			sections.push("");
+		}
 
 		for (const [group, { groupDir, entries }] of grouped) {
 			const isMcp = group.startsWith('MCP: ');
@@ -943,7 +985,7 @@ export class ToolManager {
 			for (const entry of entries) {
 				const summary = entry.summary.replace(/\s+/g, " ").trim();
 				let head: string;
-				if (entry.params && entry.params.length > 0) {
+				if (mode === "full" && entry.params && entry.params.length > 0) {
 					head = `${entry.name}(${entry.params.join(", ")})`;
 				} else {
 					head = entry.name;

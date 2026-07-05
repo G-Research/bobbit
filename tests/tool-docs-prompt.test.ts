@@ -2,7 +2,7 @@
  * Unit tests for getToolDocsForPrompt() — verifies the compact one-bullet-per-tool
  * layout introduced by the "Compact tool docs in prompt" goal.
  */
-import { describe, it, after } from "node:test";
+import { describe, it, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -59,7 +59,7 @@ detail_docs: |-
 	"utf-8",
 );
 
-const { ToolManager } = await import("../src/server/agent/tool-manager.ts");
+const { ToolManager, resolveToolsMdMode } = await import("../src/server/agent/tool-manager.ts");
 
 after(() => {
 	try { fs.rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -237,6 +237,98 @@ describe("getToolDocsForPrompt — byte budget (real builtins)", () => {
 			`Tool docs prompt section is ${bytes} bytes; must be <= 8192. First 400 chars:\n${output.slice(0, 400)}`,
 		);
 		assert.ok(bytes > 0, "Should produce non-empty output");
+		fs.rmSync(fakeConfig, { recursive: true, force: true });
+	});
+});
+
+/**
+ * F22 — `BOBBIT_TOOLS_MD` full|index mode (`resolveToolsMdMode`, `getToolDocsForPrompt`
+ * mode param). Finding: the `(params)` name list rendered per bullet restates, in a
+ * thinner form, information the model already gets via the tool's own JSON schema
+ * (types/required/descriptions), maintained on a completely separate code path
+ * (`pi.registerTool()` / pi-coding-agent builtins — see docs/design/tools-md-dedup.md).
+ * Default (`"full"`, unset env var) must stay byte-identical to pre-F22 output.
+ */
+describe("resolveToolsMdMode", () => {
+	afterEach(() => { delete process.env.BOBBIT_TOOLS_MD; });
+
+	it("is 'full' by default (no env var, no override)", () => {
+		assert.equal(resolveToolsMdMode(), "full");
+	});
+
+	it("is 'full' for an unset/empty/unrecognized env var", () => {
+		assert.equal(resolveToolsMdMode(), "full");
+		process.env.BOBBIT_TOOLS_MD = "";
+		assert.equal(resolveToolsMdMode(), "full");
+		process.env.BOBBIT_TOOLS_MD = "bogus";
+		assert.equal(resolveToolsMdMode(), "full");
+	});
+
+	it("is 'index' when the env var is exactly 'index'", () => {
+		process.env.BOBBIT_TOOLS_MD = "index";
+		assert.equal(resolveToolsMdMode(), "index");
+	});
+
+	it("an explicit override wins over the env var", () => {
+		process.env.BOBBIT_TOOLS_MD = "index";
+		assert.equal(resolveToolsMdMode("full"), "full");
+		delete process.env.BOBBIT_TOOLS_MD;
+		assert.equal(resolveToolsMdMode("index"), "index");
+	});
+});
+
+describe("getToolDocsForPrompt — index mode (BOBBIT_TOOLS_MD=index)", () => {
+	afterEach(() => { delete process.env.BOBBIT_TOOLS_MD; });
+
+	it("flag off ('full', explicit or via unset env var) is byte-identical to pre-F22 output", () => {
+		const tm = new ToolManager(tmpConfigDir);
+		const withoutModeArg = tm.getToolDocsForPrompt();
+		const withExplicitFull = tm.getToolDocsForPrompt(undefined, undefined, undefined, "full");
+		assert.equal(withoutModeArg, withExplicitFull);
+		assert.ok(withoutModeArg.includes("- bash(command, timeout?) — Execute shell commands; returns stdout/stderr"));
+	});
+
+	it("drops the (params) name list from every bullet", () => {
+		const tm = new ToolManager(tmpConfigDir);
+		const output = tm.getToolDocsForPrompt(undefined, undefined, undefined, "index");
+		assert.ok(output.includes("- bash — Execute shell commands; returns stdout/stderr"), `expected bare bash bullet; got:\n${output}`);
+		assert.ok(output.includes("- read — Read file contents"), `expected bare read bullet; got:\n${output}`);
+		assert.ok(!output.includes("bash("), "index mode must not render a (params) list");
+		assert.ok(!output.includes("read("), "index mode must not render a (params) list");
+	});
+
+	it("still renders group headers with the detail-docs pointer (not duplication — new info)", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-state-idx-"));
+		const tm = new ToolManager(tmpConfigDir);
+		const output = tm.getToolDocsForPrompt(undefined, stateDir, undefined, "index");
+		assert.ok(output.includes(`## Shell — see ${path.join(stateDir, "tool-docs", "shell.md")}`));
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	it("adds exactly one pointer line noting full schemas ship with the tool definitions", () => {
+		const tm = new ToolManager(tmpConfigDir);
+		const output = tm.getToolDocsForPrompt(undefined, undefined, undefined, "index");
+		const noteCount = (output.match(/BOBBIT_TOOLS_MD=index/g) || []).length;
+		assert.equal(noteCount, 1, "expected exactly one mode-explainer line");
+	});
+
+	it("respects the BOBBIT_TOOLS_MD env var when no explicit mode arg is passed", () => {
+		process.env.BOBBIT_TOOLS_MD = "index";
+		const tm = new ToolManager(tmpConfigDir);
+		const output = tm.getToolDocsForPrompt();
+		assert.ok(!output.includes("bash("), "env var alone should switch to index mode");
+	});
+
+	it("is strictly smaller than full mode for the real builtin set", () => {
+		const builtinsDir = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "..", "defaults", "tools");
+		const fakeConfig = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-idx-budget-"));
+		fs.mkdirSync(path.join(fakeConfig, "tools"), { recursive: true });
+		const tm = new ToolManager(fakeConfig, builtinsDir);
+		const full = tm.getToolDocsForPrompt(undefined, undefined, undefined, "full");
+		const index = tm.getToolDocsForPrompt(undefined, undefined, undefined, "index");
+		assert.ok(index.length < full.length, `index (${index.length} chars) should be smaller than full (${full.length} chars)`);
+		// Measured on the real defaults/tools tree: full=7257 chars, index=5324 chars (~26.6% smaller).
+		assert.ok(index.length < full.length * 0.85, `expected at least a ~15% reduction; got full=${full.length} index=${index.length}`);
 		fs.rmSync(fakeConfig, { recursive: true, force: true });
 	});
 });
