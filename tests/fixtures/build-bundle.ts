@@ -17,6 +17,17 @@
  * on every OS we care about). Only one worker rebuilds; the others poll until
  * the lock is released, then re-check the mtime and skip. Combined with a
  * mtime-staleness gate, the steady-state cost is one `statSync` per worker.
+ *
+ * W2.Q (staleness across transitive deps): freshness used to be gated only on
+ * the caller-supplied `deps` list (defaulting to `[entry]`). Every call site
+ * hand-curates that list, and it's easy to miss a file that the entry imports
+ * *indirectly* (e.g. `agent-interface-dialog-escape-entry.ts` -> AgentInterface.ts
+ * -> MessageEditor.ts) — a change to that transitive file then leaves the
+ * cached bundle looking "fresh" and the spec silently exercises stale code.
+ * Fixed by asking esbuild for a `--metafile` on every build, which lists every
+ * file actually pulled into the bundle, and using *that* full input set (not
+ * the hand-written `deps`) as the freshness gate from then on. `deps` is now
+ * only a bootstrap fallback for the very first build, before a metafile exists.
  */
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -25,7 +36,12 @@ import path from "node:path";
 export interface BuildBundleOptions {
 	entry: string;
 	outfile: string;
-	/** Source file(s) whose mtime invalidates the bundle. Defaults to [entry]. */
+	/**
+	 * Bootstrap source file(s) used only before a metafile exists (i.e. the
+	 * very first build of `outfile`). Defaults to `[entry]`. Every subsequent
+	 * freshness check uses esbuild's own metafile — the full transitive input
+	 * set — instead, so this no longer needs to be exhaustive.
+	 */
 	deps?: string[];
 	/** esbuild flags appended after the entry. Default IIFE/ES2022/web tsconfig. */
 	extraFlags?: string[];
@@ -46,12 +62,43 @@ const LOCK_TIMEOUT_MS = 60_000;
 const LOCK_STALE_MS = 90_000;
 const POLL_INTERVAL_MS = 100;
 
-function isFresh(outfile: string, depMtime: number): boolean {
+function metafilePathFor(outfile: string): string {
+	return `${outfile}.meta.json`;
+}
+
+/**
+ * Resolve the full set of files that fed the last successful build of
+ * `outfile`, using esbuild's own `--metafile` output (every input actually
+ * pulled into the bundle, transitively). Falls back to the caller-supplied
+ * `fallbackDeps` when no metafile exists yet — the very first build, or a
+ * bundle left over from before this script wrote metafiles.
+ */
+function resolveTrackedInputs(outfile: string, fallbackDeps: string[]): string[] {
 	try {
-		return fs.statSync(outfile).mtimeMs >= depMtime;
+		const meta = JSON.parse(fs.readFileSync(metafilePathFor(outfile), "utf-8"));
+		const inputs = Object.keys(meta.inputs ?? {});
+		if (inputs.length > 0) return inputs.map((p) => path.resolve(p));
+	} catch { /* no metafile yet — use fallback */ }
+	return fallbackDeps;
+}
+
+function isFresh(outfile: string, trackedInputs: string[]): boolean {
+	let outMtime: number;
+	try {
+		outMtime = fs.statSync(outfile).mtimeMs;
 	} catch {
 		return false;
 	}
+	for (const input of trackedInputs) {
+		let inputMtime: number;
+		try {
+			inputMtime = fs.statSync(input).mtimeMs;
+		} catch {
+			return false; // a tracked input vanished/moved — force rebuild
+		}
+		if (inputMtime > outMtime) return false;
+	}
+	return true;
 }
 
 function sleep(ms: number): void {
@@ -73,11 +120,10 @@ function cleanupCssSidecar(outfile: string, existedBeforeBuild: boolean): void {
 
 export function buildBundle(opts: BuildBundleOptions): void {
 	const { entry, outfile } = opts;
-	const deps = opts.deps ?? [entry];
-	const depMtime = deps.reduce((m, p) => Math.max(m, fs.statSync(p).mtimeMs), 0);
+	const fallbackDeps = opts.deps ?? [entry];
 	const cssSidecarExisted = fs.existsSync(cssSidecarFor(outfile));
 
-	if (isFresh(outfile, depMtime)) {
+	if (isFresh(outfile, resolveTrackedInputs(outfile, fallbackDeps))) {
 		if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
 		return;
 	}
@@ -116,8 +162,9 @@ export function buildBundle(opts: BuildBundleOptions): void {
 			}
 			sleep(POLL_INTERVAL_MS);
 
-			// Another worker may have finished the rebuild while we slept.
-			if (isFresh(outfile, depMtime)) {
+			// Another worker may have finished the rebuild while we slept. Re-resolve
+			// tracked inputs — the metafile it wrote may cover a different input set.
+			if (isFresh(outfile, resolveTrackedInputs(outfile, fallbackDeps))) {
 				if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
 				return;
 			}
@@ -126,11 +173,12 @@ export function buildBundle(opts: BuildBundleOptions): void {
 
 	try {
 		// Re-check after acquiring the lock — earlier worker may have built it.
-		if (isFresh(outfile, depMtime)) {
+		if (isFresh(outfile, resolveTrackedInputs(outfile, fallbackDeps))) {
 			if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
 			return;
 		}
-		const flags = opts.extraFlags ?? DEFAULT_FLAGS;
+		const metaPath = metafilePathFor(outfile);
+		const flags = [...(opts.extraFlags ?? DEFAULT_FLAGS), `--metafile=${metaPath}`];
 		execSync(`npx esbuild ${entry} ${flags.join(" ")} --outfile=${outfile}`, { stdio: "pipe" });
 		// Most file:// fixtures don't link esbuild's CSS sidecar; leaving it behind
 		// creates untracked repo artifacts when a bundled component imports CSS.
