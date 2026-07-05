@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
@@ -76,7 +77,7 @@ async function execGit(
  * Set BOBBIT_TEST_NO_PUSH=1 in E2E tests to prevent any network traffic to GitHub.
  */
 export function shouldSkipRemotePush(): boolean {
-	return process.env.BOBBIT_TEST_NO_PUSH === "1";
+	return getLegacyTestRuntimeFlags().skipRemotePush;
 }
 
 function isLocalGitRemoteUrl(rawUrl: string): boolean {
@@ -102,7 +103,7 @@ function isLocalGitRemoteUrl(rawUrl: string): boolean {
  * fetch/reset semantics without network access.
  */
 export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin", commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
-	if (process.env.BOBBIT_TEST_NO_REMOTE !== "1" && process.env.BOBBIT_TEST_NO_EXTERNAL !== "1") return false;
+	if (!getLegacyTestRuntimeFlags().skipNonLocalRemoteGit) return false;
 	try {
 		const { stdout } = await execGit(["remote", "get-url", remote], { cwd, timeout: 5_000 }, commandRunner);
 		return !isLocalGitRemoteUrl(stdout.toString());

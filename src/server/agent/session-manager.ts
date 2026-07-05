@@ -1,6 +1,6 @@
 import { execFile as execFileCb, execFileSync } from "node:child_process";
-import type { Clock } from "../gateway-deps.js";
-import { realClock } from "../gateway-deps.js";
+import type { Clock, CommandRunner } from "../gateway-deps.js";
+import { realClock, realCommandRunner } from "../gateway-deps.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
@@ -1053,6 +1053,10 @@ export interface SessionManagerOptions {
 	extensionChannels?: ExtensionChannelServices;
 	/** Timer/clock implementation. Defaults to real timers. */
 	clock?: Clock;
+	/** Command runner implementation. Defaults to real child_process execution. */
+	commandRunner?: CommandRunner;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
+	skipTitleGeneration?: boolean;
 }
 
 type RestoreCoordinator = {
@@ -1073,6 +1077,8 @@ export class SessionManager {
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
 	private readonly clock: Clock;
+	private readonly commandRunner: CommandRunner;
+	private readonly skipTitleGeneration: boolean;
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
 	private _testBgProcessStore: BgProcessStore | null = null;
@@ -1469,6 +1475,8 @@ export class SessionManager {
 
 	constructor(options?: SessionManagerOptions) {
 		this.clock = options?.clock ?? realClock;
+		this.commandRunner = options?.commandRunner ?? realCommandRunner;
+		this.skipTitleGeneration = options?.skipTitleGeneration ?? false;
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -7304,7 +7312,7 @@ export class SessionManager {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
 		const sessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
-		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore };
+		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
@@ -7698,15 +7706,15 @@ export class SessionManager {
 		const persistedForBranchDelete = terminateStore.get(id);
 		const sessionBranch = persistedForBranchDelete?.branch;
 		const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
-		const skipRemoteBranchDelete = shouldSkipRemotePush() || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete);
+		const skipRemoteBranchDelete = shouldSkipRemotePush() || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner);
 		eagerDeleteRemoteSessionBranch({
 			branch: sessionBranch,
 			repoPath: repoPathForBranchDelete,
 			delegateOf: session.delegateOf,
 			skipPush: skipRemoteBranchDelete,
-			detectPrimary: detectPrimaryBranch,
+			detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner),
 			runGit: async (args, cwd) => {
-				await execFileAsync("git", args, { cwd, timeout: 15_000 });
+				await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
 			},
 		}).then(result => {
 			if (result.deleted) {
@@ -8530,15 +8538,15 @@ export class SessionManager {
 		const ctx = this.buildArchivedWorktreeScanContext();
 		if (!this.branchDeletionAllowed(item.branch, item.repoPath, ctx, item.key)) return false;
 		try {
-			await execFileAsync("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
+			await this.commandRunner.execFile("git", ["branch", "-D", item.branch], { cwd: item.repoPath });
 		} catch {
 			// Verify below before reporting success; branch deletion may have raced or been blocked.
 		}
 		const branchDeleted = !(await this.localBranchExistsUncached(item.repoPath, item.branch));
 		if (!branchDeleted) return false;
-		if (!(await shouldSkipRemotePushForTests(item.repoPath))) {
+		if (!(await shouldSkipRemotePushForTests(item.repoPath, "origin", this.commandRunner))) {
 			try {
-				await execFileAsync("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
+				await this.commandRunner.execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 });
 			} catch {
 				// Best effort: remote may be missing, unreachable, or already deleted.
 			}
@@ -8563,9 +8571,9 @@ export class SessionManager {
 
 	private async readGitWorktreeRefsUncached(repoPath: string): Promise<GitWorktreeRefs> {
 		try {
-			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const { stdout } = await this.commandRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
 			const entries: GitWorktreeRef[] = [];
-			for (const block of stdout.split("\n\n")) {
+			for (const block of stdout.toString().split("\n\n")) {
 				const pathMatch = block.match(/^worktree (.+)$/m);
 				const branchMatch = block.match(/^branch refs\/heads\/(.+)$/m);
 				const normalizedPath = normalizeWorktreeHostPath(pathMatch?.[1]);
@@ -8591,7 +8599,7 @@ export class SessionManager {
 	}
 
 	private localBranchExistsUncached(repoPath: string, branch: string): Promise<boolean> {
-		return execFileAsync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
+		return this.commandRunner.execFile("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath })
 			.then(() => true)
 			.catch(() => false);
 	}
@@ -8869,8 +8877,8 @@ export class SessionManager {
 	 */
 	async cleanupOrphanedSessionWorktrees(repoPath: string): Promise<void> {
 		try {
-			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
-			const blocks = stdout.split("\n\n");
+			const { stdout } = await this.commandRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const blocks = stdout.toString().split("\n\n");
 
 			// Build a set of branches/paths owned by live (non-archived) persisted sessions.
 			// Prior to the fix, pool worktree directories were renamed on claim but
@@ -8907,7 +8915,7 @@ export class SessionManager {
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
 					const { cleanupWorktree } = await import("../skills/git.js");
-					await cleanupWorktree(repoPath, wtPath, branch, true).catch(() => {});
+					await cleanupWorktree(repoPath, wtPath, branch, true, this.commandRunner).catch(() => {});
 				}
 			}
 		} catch (err) {
@@ -8921,8 +8929,8 @@ export class SessionManager {
 	 */
 	async listOrphanedSessionWorktrees(repoPath: string): Promise<Array<{ path: string; branch: string }>> {
 		try {
-			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
-			const blocks = stdout.split("\n\n");
+			const { stdout } = await this.commandRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const blocks = stdout.toString().split("\n\n");
 
 			const persistedBranches = new Set<string>();
 			const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();

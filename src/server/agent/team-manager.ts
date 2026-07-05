@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
-import type { Clock } from "../gateway-deps.js";
-import { realClock } from "../gateway-deps.js";
+import type { Clock, CommandRunner } from "../gateway-deps.js";
+import { realClock, realCommandRunner } from "../gateway-deps.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -255,6 +255,8 @@ export interface TeamManagerConfig {
 	projectContextManager?: ProjectContextManager;
 	/** Tool manager for resolving extension paths via the cascade */
 	toolManager?: ToolManager;
+	/** Command runner implementation. Defaults to real child_process execution. */
+	commandRunner?: CommandRunner;
 	/**
 	 * OrchestrationCore — the goal-agnostic child-agent lifecycle core
 	 * (docs/design/orchestration-core.md). The team-manager is the GOAL ADAPTER:
@@ -345,11 +347,13 @@ export class TeamManager {
 
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
+	private readonly commandRunner: CommandRunner;
 
 	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string, private readonly clock: Clock = realClock) {
 		this.sessionManager = sessionManager;
 		this.config = config;
 		this.taskManager = config.taskManager;
+		this.commandRunner = config.commandRunner ?? realCommandRunner;
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
@@ -1983,7 +1987,7 @@ export class TeamManager {
 			} else {
 				// Non-sandboxed: create a local-only member worktree. Goal branches may be
 				// unpublished, so prefer local refs before falling back to origin refs.
-				const worktreeOptions = { startPoint: memberStartPoint, pushPolicy: "local-only" as const };
+				const worktreeOptions = { startPoint: memberStartPoint, pushPolicy: "local-only" as const, commandRunner: this.commandRunner };
 				worktreeResult = await createWorktree(goal.repoPath!, branchName, worktreeOptions);
 				// Apply subdirectory offset to member worktree cwd
 				agentCwd = memberSubdirOffset && memberSubdirOffset !== "."

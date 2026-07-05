@@ -2,6 +2,7 @@ import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { configureLegacyTestRuntimeFlags, resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -922,6 +923,7 @@ async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
 	repoPath: string,
+	commandRunner: CommandRunner,
 ): Promise<void> {
 	const branches = new Set<string>();
 	if (goal.branch) branches.add(goal.branch);
@@ -940,7 +942,7 @@ async function deleteRemoteGoalBranches(
 
 	await Promise.allSettled(repoPaths.flatMap(rp => Array.from(branches).map(async (branch) => {
 		try {
-			await execFileAsync("git", ["push", "origin", "--delete", branch], {
+			await commandRunner.execFile("git", ["push", "origin", "--delete", branch], {
 				cwd: rp,
 				timeout: 15_000,
 			});
@@ -1766,6 +1768,16 @@ export interface GatewayConfig {
 	tls?: TlsConfig;
 	/** Force auth even on localhost (used by E2E tests). */
 	forceAuth?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_MCP behavior. */
+	skipMcp?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_WORKTREE_POOL behavior. */
+	skipWorktreePool?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
+	skipTitleGeneration?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_PUSH behavior. */
+	skipRemotePush?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_REMOTE/BOBBIT_TEST_NO_EXTERNAL behavior. */
+	skipNonLocalRemoteGit?: boolean;
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
@@ -1779,6 +1791,31 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		...deps,
 		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
 	});
+	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
+	const configRuntimeOverrides = {
+		skipRemotePush: config.skipRemotePush,
+		skipNonLocalRemoteGit: config.skipNonLocalRemoteGit,
+		skipMcp: config.skipMcp,
+		skipWorktreePool: config.skipWorktreePool,
+		skipTitleGeneration: config.skipTitleGeneration,
+	};
+	const gatewayRuntimeFlags = {
+		...envRuntimeFlags,
+		skipRemotePush: config.skipRemotePush ?? envRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: config.skipNonLocalRemoteGit ?? envRuntimeFlags.skipNonLocalRemoteGit,
+		skipMcp: config.skipMcp ?? envRuntimeFlags.skipMcp,
+		skipWorktreePool: config.skipWorktreePool ?? envRuntimeFlags.skipWorktreePool,
+		skipTitleGeneration: config.skipTitleGeneration ?? envRuntimeFlags.skipTitleGeneration,
+	};
+	config = {
+		...config,
+		skipRemotePush: gatewayRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: gatewayRuntimeFlags.skipNonLocalRemoteGit,
+		skipMcp: gatewayRuntimeFlags.skipMcp,
+		skipWorktreePool: gatewayRuntimeFlags.skipWorktreePool,
+		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
+	};
+	const previousLegacyRuntimeFlags = configureLegacyTestRuntimeFlags(configRuntimeOverrides);
 	let rpcBridgeFactoryRestored = false;
 	const restoreExplicitRpcBridgeFactory = () => {
 		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
@@ -1945,6 +1982,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		prStatusStore,
 		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -2433,6 +2472,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		toolManager,
 		orchestrationCore,
+		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
@@ -3019,8 +3059,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			writeOpenAIModelAdditions();
 			await initExtensionChannelsOnce();
 
-			// Initialize MCP servers (skip in test environments)
-			if (!process.env.BOBBIT_SKIP_MCP) {
+			// Initialize MCP servers (skip when disabled by gateway runtime config)
+			if (!gatewayRuntimeFlags.skipMcp) {
 				try {
 					await sessionManager.initMcp(process.cwd());
 				} catch (err) {
@@ -3350,7 +3390,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				})();
 
 				const poolInitTask = (async () => {
-					if (process.env.BOBBIT_SKIP_WORKTREE_POOL) return;
+					if (gatewayRuntimeFlags.skipWorktreePool) return;
 					// Hidden contexts (synthetic system project) must NOT seed a
 					// worktree pool. When bobbit's state dir is nested inside an
 					// unrelated git checkout, `isGitRepo(<state>/system-project)`
@@ -3489,6 +3529,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				await sessionManager.cleanupSandboxNetwork();
 			} finally {
 				restoreExplicitRpcBridgeFactory();
+				configureLegacyTestRuntimeFlags(previousLegacyRuntimeFlags);
 			}
 		},
 	};
@@ -4755,8 +4796,8 @@ async function handleApiRoute(
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
-			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
-			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+			// Respect gateway runtime config for E2E/CI.
+			if (!config.skipWorktreePool) {
 				try {
 					// Multi-repo: rootPath is a container dir, individual repos sit
 					// under <rootPath>/<repo>/. We treat that case as "git-ready" if
@@ -6869,7 +6910,7 @@ async function handleApiRoute(
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
 			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
