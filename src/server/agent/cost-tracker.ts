@@ -15,6 +15,30 @@ export interface RawSessionCost {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	/**
+	 * Subset of `cacheWriteTokens` written with a 1-hour cache TTL (Anthropic
+	 * `cache_creation.ephemeral_1h_input_tokens`). Threaded through so the
+	 * `PI_CACHE_RETENTION=long` default (docs/design/cache-retention-long.md)
+	 * can be A/B'd by cost: a 1h-TTL write costs ~2x a 5-min write, so
+	 * comparing this counter against `cacheWriteTokens` shows how much write
+	 * cost is attributable to the long-TTL choice.
+	 *
+	 * Verified field name: pi-ai's Anthropic provider sets
+	 * `output.usage.cacheWrite1h = event.message.usage.cache_creation
+	 * ?.ephemeral_1h_input_tokens || 0` (`node_modules/@earendil-works/pi-ai/
+	 * dist/providers/anthropic.js:352`), which flows into the `message_end`
+	 * RPC event's `message.usage.cacheWrite1h` that
+	 * `session-manager.ts`'s `trackCostFromEvent` reads. pi-ai does NOT
+	 * surface a matching `ephemeral_5m_input_tokens` counter — there is no
+	 * real "cacheWrite5m" field on the wire — so the 5-minute-TTL portion is
+	 * only available as the derived complement, see `cacheWrite5mTokens` on
+	 * {@link SessionCost}.
+	 *
+	 * Absent on non-Anthropic providers and on entries recorded before this
+	 * field existed; defaults to 0 in that case (never `undefined` once
+	 * loaded/accumulated).
+	 */
+	cacheWrite1hTokens: number;
 	totalCost: number;
 	/**
 	 * Goal this session's cost belongs to. Stamped once at record time so
@@ -45,6 +69,14 @@ export interface RawSessionCost {
  */
 export interface SessionCost extends RawSessionCost {
 	cacheHitRate: number | null;
+	/**
+	 * Derived: `cacheWriteTokens - cacheWrite1hTokens`, floored at 0. NOT
+	 * persisted — recomputed on read, same pattern as `cacheHitRate`. This
+	 * is an inferred 5-minute-TTL bucket, not a directly-reported field: see
+	 * the `cacheWrite1hTokens` doc on {@link RawSessionCost} for why pi-ai
+	 * has no matching `ephemeral_5m_input_tokens` counter to read directly.
+	 */
+	cacheWrite5mTokens: number;
 }
 
 export interface UsageData {
@@ -52,6 +84,8 @@ export interface UsageData {
 	outputTokens?: number;
 	cacheReadTokens?: number;
 	cacheWriteTokens?: number;
+	/** See `cacheWrite1hTokens` doc on {@link RawSessionCost}. */
+	cacheWrite1hTokens?: number;
 	cost?: number;
 }
 
@@ -107,6 +141,7 @@ function emptyRaw(): RawSessionCost {
 		outputTokens: 0,
 		cacheReadTokens: 0,
 		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
 		totalCost: 0,
 	};
 }
@@ -127,9 +162,25 @@ export function deriveCacheHitRate(
 	return (cost.cacheReadTokens ?? 0) / denom;
 }
 
-/** Decorate a raw cost with the derived `cacheHitRate` field. */
+/**
+ * Derive the inferred 5-minute-TTL cache-write bucket: the complement of
+ * `cacheWrite1hTokens` within `cacheWriteTokens`. Floored at 0 defensively
+ * (should never go negative — `cacheWrite1hTokens` is always a subset — but
+ * malformed/legacy persisted data should never render a negative count).
+ */
+export function deriveCacheWrite5mTokens(
+	cost: Pick<RawSessionCost, "cacheWriteTokens" | "cacheWrite1hTokens">,
+): number {
+	return Math.max((cost.cacheWriteTokens ?? 0) - (cost.cacheWrite1hTokens ?? 0), 0);
+}
+
+/** Decorate a raw cost with the derived `cacheHitRate` / `cacheWrite5mTokens` fields. */
 export function withDerivedFields(raw: RawSessionCost): SessionCost {
-	return { ...raw, cacheHitRate: deriveCacheHitRate(raw) };
+	return {
+		...raw,
+		cacheHitRate: deriveCacheHitRate(raw),
+		cacheWrite5mTokens: deriveCacheWrite5mTokens(raw),
+	};
 }
 
 /**
@@ -164,6 +215,7 @@ export class CostTracker {
 								outputTokens: typeof c.outputTokens === "number" ? c.outputTokens : 0,
 								cacheReadTokens: typeof c.cacheReadTokens === "number" ? c.cacheReadTokens : 0,
 								cacheWriteTokens: typeof c.cacheWriteTokens === "number" ? c.cacheWriteTokens : 0,
+								cacheWrite1hTokens: typeof c.cacheWrite1hTokens === "number" ? c.cacheWrite1hTokens : 0,
 								totalCost: typeof c.totalCost === "number" ? c.totalCost : 0,
 							};
 							if (typeof c.goalId === "string" && c.goalId.length > 0) {
@@ -197,6 +249,7 @@ export class CostTracker {
 					outputTokens: cost.outputTokens,
 					cacheReadTokens: cost.cacheReadTokens,
 					cacheWriteTokens: cost.cacheWriteTokens,
+					cacheWrite1hTokens: cost.cacheWrite1hTokens,
 					totalCost: cost.totalCost,
 				};
 				if (cost.goalId) entry.goalId = cost.goalId;
@@ -226,6 +279,7 @@ export class CostTracker {
 		existing.outputTokens += usage.outputTokens ?? 0;
 		existing.cacheReadTokens += usage.cacheReadTokens ?? 0;
 		existing.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+		existing.cacheWrite1hTokens += usage.cacheWrite1hTokens ?? 0;
 		existing.totalCost += usage.cost ?? 0;
 		existing.totalCost = Math.round(existing.totalCost * 1_000_000) / 1_000_000;
 		if (goalId && !existing.goalId) {
@@ -275,6 +329,7 @@ export class CostTracker {
 					total.outputTokens += c.outputTokens;
 					total.cacheReadTokens += c.cacheReadTokens;
 					total.cacheWriteTokens += c.cacheWriteTokens;
+					total.cacheWrite1hTokens += c.cacheWrite1hTokens;
 					total.totalCost += c.totalCost;
 				}
 			}
@@ -287,6 +342,7 @@ export class CostTracker {
 				total.outputTokens += c.outputTokens;
 				total.cacheReadTokens += c.cacheReadTokens;
 				total.cacheWriteTokens += c.cacheWriteTokens;
+				total.cacheWrite1hTokens += c.cacheWrite1hTokens;
 				total.totalCost += c.totalCost;
 			}
 		}
@@ -319,6 +375,7 @@ export class CostTracker {
 			total.outputTokens += c.outputTokens;
 			total.cacheReadTokens += c.cacheReadTokens;
 			total.cacheWriteTokens += c.cacheWriteTokens;
+			total.cacheWrite1hTokens += c.cacheWrite1hTokens;
 			total.totalCost += c.totalCost;
 		}
 		total.totalCost = Math.round(total.totalCost * 1_000_000) / 1_000_000;

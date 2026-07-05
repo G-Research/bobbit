@@ -4796,6 +4796,12 @@ export class SessionManager {
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
+			// pi-ai's Anthropic provider sets `cacheWrite1h` from
+			// `cache_creation.ephemeral_1h_input_tokens` (verified in
+			// node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js:352).
+			// No `cacheWrite5m`-equivalent field exists on the wire — see
+			// cost-tracker.ts's `cacheWrite1hTokens` doc.
+			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? usage.cacheWrite1h,
 			cost: costValue,
 		}, stampGoalId);
 

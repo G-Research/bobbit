@@ -159,6 +159,70 @@ sessions with `BOBBIT_CACHE_RETENTION=short` vs the new default, which is
 noisier but requires no code changes. This doc flags the gap rather than
 filling it — out of scope for this PR.
 
+## Gap closed (W3.17): `cacheWrite1hTokens` now threaded through the cost ledger
+
+Follow-up to the gap above. `RawSessionCost` / `UsageData`
+(`src/server/agent/cost-tracker.ts`) now carry an additive
+`cacheWrite1hTokens: number` counter, accumulated in `recordUsage` alongside
+the existing `cacheReadTokens` / `cacheWriteTokens` totals, persisted to
+`session-costs.json`, and included in every existing aggregation path
+(`getGoalCost`, `getUnattributableLegacyCost`, `getAllCosts`). A derived
+(NOT persisted — same pattern as `cacheHitRate`) `cacheWrite5mTokens` field
+is exposed on `SessionCost` as `cacheWriteTokens - cacheWrite1hTokens`
+(floored at 0).
+
+**Field-name correction vs the parent brief's "cacheWrite5m" example**: re-
+verifying `node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js`
+(lines 350-352 and 489-514) shows pi-ai's Anthropic provider reads
+`event.message.usage.cache_creation?.ephemeral_1h_input_tokens` into
+`output.usage.cacheWrite1h` at `message_start` — but there is **no**
+corresponding `ephemeral_5m_input_tokens` read anywhere in the file, and
+`message_delta` never updates `cacheWrite1h` either (only `cacheWrite`/
+`cacheRead`/`input`/`output` get delta updates). So `cacheWrite1h` is a real,
+verified field on the wire; a literal "cacheWrite5m" is not — Anthropic's 5m
+write cost is only recoverable as the complement of the total write minus
+the 1h subset. Bobbit's new `cacheWrite5mTokens` is therefore modeled as a
+derived field, not a persisted counter, to avoid implying a fidelity that
+doesn't exist upstream.
+
+This field flows automatically to every existing cost surface because those
+surfaces already spread the full `SessionCost`/`RawSessionCost` object
+rather than picking fields: `GET /api/sessions/:id/cost`,
+`GET /api/sessions/:id/cost/breakdown`, `GET /api/goals/:id/cost`,
+`GET /api/goals/:id/cost/breakdown` (`src/server/server.ts`), and the
+`cost_update` WebSocket broadcast (`session-manager.ts`'s
+`trackCostFromEvent` → `broadcast(session.clients, { ..., cost: cumulativeCost })`).
+`src/server/ws/protocol.ts`'s `SessionCostSnapshot` type gained matching
+optional fields, and `src/ui/components/CostPopover.ts`'s cost-breakdown
+popover now renders a "1h TTL" / "5m TTL" sub-split under "Cache write" when
+the server reports `cacheWrite1hTokens` (omitted entirely — no `0` row — on
+older servers/persisted data that predate the field).
+
+### How to run the A/B
+
+1. Pick two comparable sessions/goals (similar task shape, similar total
+   turns) — one that ran under the new `PI_CACHE_RETENTION=long` default,
+   one launched with `BOBBIT_CACHE_RETENTION=short` (or from before this
+   feature shipped).
+2. Fetch `/api/goals/:id/cost/breakdown` (or `/api/sessions/:id/cost`) for
+   each and compare `cacheWrite1hTokens` vs `cacheWrite5mTokens`:
+   - The `short` session should show `cacheWrite1hTokens` at/near 0 (no long-
+     TTL breakpoints requested) and its cache-write cost all attributed to
+     `cacheWrite5mTokens`.
+   - The `long` session's `cacheWrite1hTokens` share of `cacheWriteTokens`
+     tells you how much write volume is riding the ~2x-cost 1h tier.
+3. Compute the write-cost delta directly: 1h writes cost ~2x a 5m write at
+   the same input-token rate, so the *added* cost from the long-TTL default
+   is approximately `cacheWrite1hTokens * (per-token cache-write price)` (the
+   extra half of the 2x sits entirely on the 1h-tagged tokens — the 5m-
+   equivalent tokens would have cost the same either way).
+4. Weigh that added write cost against the **read** savings the long TTL
+   enabled: sum `cacheReadTokens` across the session's turns and compare
+   against what a 5-min-TTL session's read count would likely have been
+   (turns spaced >5 min apart would have missed the cache entirely under
+   `short`, paying a fresh write instead of a read on every such turn — see
+   "Tradeoff" section above for the >2-turns/hour breakeven heuristic).
+
 ## Verification performed
 
 - Read `node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js` (pi-ai

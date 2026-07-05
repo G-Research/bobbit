@@ -20,7 +20,7 @@ fs.mkdirSync(path.join(tmpDir, "state"), { recursive: true });
 const STORE_FILE = path.join(tmpDir, "state", "session-costs.json");
 
 // Dynamic import so BOBBIT_DIR is set before module-level constants are evaluated
-const { CostTracker, deriveCacheHitRate } = await import("../src/server/agent/cost-tracker.ts");
+const { CostTracker, deriveCacheHitRate, deriveCacheWrite5mTokens } = await import("../src/server/agent/cost-tracker.ts");
 
 const stateDir = path.join(tmpDir, "state");
 
@@ -142,6 +142,61 @@ describe("CostTracker", () => {
 			});
 			assert.equal(result.cacheReadTokens, 200);
 			assert.equal(result.cacheWriteTokens, 30);
+		});
+
+		it("records cacheWrite1hTokens when present", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {
+				inputTokens: 100,
+				cacheWriteTokens: 50,
+				cacheWrite1hTokens: 20,
+				cost: 0.01,
+			});
+			assert.equal(result.cacheWriteTokens, 50);
+			assert.equal(result.cacheWrite1hTokens, 20);
+			// Derived complement: 5m-tier write = total write - 1h-tagged write.
+			assert.equal(result.cacheWrite5mTokens, 30);
+		});
+
+		it("defaults cacheWrite1hTokens to 0 when the field is absent (unknown/older-provider usage)", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {
+				inputTokens: 100,
+				cacheWriteTokens: 50,
+				cost: 0.01,
+			});
+			assert.equal(result.cacheWrite1hTokens, 0);
+			// With no 1h-tagged write, the entire write is attributed to the 5m bucket.
+			assert.equal(result.cacheWrite5mTokens, 50);
+		});
+
+		it("defaults cacheWrite1hTokens to 0 for a fully empty usage object", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {});
+			assert.equal(result.cacheWrite1hTokens, 0);
+			assert.equal(result.cacheWrite5mTokens, 0);
+		});
+
+		it("accumulates cacheWrite1hTokens across multiple calls, independent of other fields", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 10, cacheWrite1hTokens: 10 });
+			// Second call carries no cache fields at all (partial usage object) — must not
+			// reset or clobber the accumulated counter.
+			tracker.recordUsage("s1", { inputTokens: 5 });
+			const result = tracker.recordUsage("s1", { cacheWriteTokens: 15, cacheWrite1hTokens: 15 });
+			assert.equal(result.cacheWriteTokens, 25);
+			assert.equal(result.cacheWrite1hTokens, 25);
+			assert.equal(result.cacheWrite5mTokens, 0);
+		});
+
+		it("persists cacheWrite1hTokens to disk after recording", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 40, cacheWrite1hTokens: 12, cost: 0.001 });
+
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"].cacheWrite1hTokens, 12);
+			// Derived field is never persisted (same convention as cacheHitRate).
+			assert.equal(raw["s1"].cacheWrite5mTokens, undefined);
 		});
 
 		it("rounds totalCost to 6 decimal places to avoid floating point drift", () => {
@@ -389,6 +444,119 @@ describe("CostTracker", () => {
 		});
 	});
 
+	describe("cacheWrite1hTokens / cacheWrite5mTokens (derived)", () => {
+		it("deriveCacheWrite5mTokens computes the complement of cacheWrite1hTokens", () => {
+			assert.equal(
+				deriveCacheWrite5mTokens({ cacheWriteTokens: 50, cacheWrite1hTokens: 20 }),
+				30,
+			);
+		});
+
+		it("deriveCacheWrite5mTokens returns the full write when cacheWrite1hTokens is 0", () => {
+			assert.equal(
+				deriveCacheWrite5mTokens({ cacheWriteTokens: 50, cacheWrite1hTokens: 0 }),
+				50,
+			);
+		});
+
+		it("deriveCacheWrite5mTokens returns 0 when there is no write at all", () => {
+			assert.equal(
+				deriveCacheWrite5mTokens({ cacheWriteTokens: 0, cacheWrite1hTokens: 0 }),
+				0,
+			);
+		});
+
+		it("deriveCacheWrite5mTokens floors at 0 (defensive against malformed data where 1h exceeds total)", () => {
+			assert.equal(
+				deriveCacheWrite5mTokens({ cacheWriteTokens: 10, cacheWrite1hTokens: 999 }),
+				0,
+			);
+		});
+
+		it("getSessionCost returns both cacheWrite1hTokens and derived cacheWrite5mTokens", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 80, cacheWrite1hTokens: 50 });
+			const cost = tracker.getSessionCost("s1")!;
+			assert.equal(cost.cacheWrite1hTokens, 50);
+			assert.equal(cost.cacheWrite5mTokens, 30);
+		});
+
+		it("getGoalCost aggregates cacheWrite1hTokens across sessions and derives the 5m complement", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 20, cacheWrite1hTokens: 20 });
+			tracker.recordUsage("s2", { cacheWriteTokens: 10, cacheWrite1hTokens: 0 });
+			const total = tracker.getGoalCost("goal-1", ["s1", "s2"]);
+			assert.equal(total.cacheWriteTokens, 30);
+			assert.equal(total.cacheWrite1hTokens, 20);
+			assert.equal(total.cacheWrite5mTokens, 10);
+		});
+
+		it("getGoalCost (one-arg, stamped-goalId path) aggregates cacheWrite1hTokens", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 20, cacheWrite1hTokens: 20 }, "goal-1");
+			tracker.recordUsage("s2", { cacheWriteTokens: 10, cacheWrite1hTokens: 5 }, "goal-1");
+			const total = tracker.getGoalCost("goal-1");
+			assert.equal(total.cacheWrite1hTokens, 25);
+			assert.equal(total.cacheWrite5mTokens, 5);
+		});
+
+		it("getUnattributableLegacyCost aggregates cacheWrite1hTokens for unstamped entries", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 20, cacheWrite1hTokens: 15 }); // no goalId
+			const total = tracker.getUnattributableLegacyCost();
+			assert.equal(total.cacheWrite1hTokens, 15);
+			assert.equal(total.cacheWrite5mTokens, 5);
+		});
+
+		it("loading an old JSON without cacheWrite1hTokens defaults it to 0 (pre-W3.17 persisted data)", () => {
+			const legacy = {
+				"s1": {
+					inputTokens: 100,
+					outputTokens: 50,
+					cacheReadTokens: 300,
+					cacheWriteTokens: 40,
+					totalCost: 0.001,
+					// cacheWrite1hTokens intentionally absent — simulates data
+					// persisted before this field existed.
+				},
+			};
+			fs.writeFileSync(STORE_FILE, JSON.stringify(legacy), "utf-8");
+			const tracker = new CostTracker(stateDir);
+			const cost = tracker.getSessionCost("s1")!;
+			assert.equal(cost.cacheWrite1hTokens, 0);
+			assert.equal(cost.cacheWrite5mTokens, 40);
+		});
+
+		it("loading a JSON entry where cacheWrite1hTokens has the wrong type defaults it to 0", () => {
+			const legacy = {
+				"s1": {
+					inputTokens: 100,
+					outputTokens: 50,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 40,
+					cacheWrite1hTokens: "not a number",
+					totalCost: 0.001,
+				},
+			};
+			fs.writeFileSync(STORE_FILE, JSON.stringify(legacy), "utf-8");
+			const tracker = new CostTracker(stateDir);
+			const cost = tracker.getSessionCost("s1")!;
+			assert.equal(cost.cacheWrite1hTokens, 0);
+		});
+
+		it("cacheWrite5mTokens is NOT persisted to disk (derived, same convention as cacheHitRate)", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { cacheWriteTokens: 40, cacheWrite1hTokens: 10 });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"].cacheWrite1hTokens, 10);
+			assert.equal(
+				"cacheWrite5mTokens" in raw["s1"],
+				false,
+				"cacheWrite5mTokens must be a derived field, not persisted",
+			);
+		});
+	});
+
 	describe("persistence round-trip", () => {
 		it("survives save and reload", () => {
 			const tracker1 = new CostTracker(stateDir);
@@ -397,6 +565,7 @@ describe("CostTracker", () => {
 				outputTokens: 50,
 				cacheReadTokens: 200,
 				cacheWriteTokens: 30,
+				cacheWrite1hTokens: 18,
 				cost: 0.015,
 			});
 			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
@@ -408,6 +577,8 @@ describe("CostTracker", () => {
 			assert.equal(s1.outputTokens, 50);
 			assert.equal(s1.cacheReadTokens, 200);
 			assert.equal(s1.cacheWriteTokens, 30);
+			assert.equal(s1.cacheWrite1hTokens, 18);
+			assert.equal(s1.cacheWrite5mTokens, 12);
 			assert.equal(s1.totalCost, 0.015);
 
 			const s2 = tracker2.getSessionCost("s2");
