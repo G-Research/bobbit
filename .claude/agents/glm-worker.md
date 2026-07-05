@@ -2,7 +2,10 @@
 name: glm-worker
 description: Delegate a well-specified, test-oracle-backed code fix to GLM 5.2 (NVIDIA NIM) — falling back to GPT-5.5 (codex) if NIM is unavailable — get it cross-reviewed, and open a PR. Use for bulk/batch micro-tasks with a known small file set and a real test command — NOT for ambiguous, exploratory, or multi-step work (see the glm-task skill for the routing line).
 tools: Bash, Read
-model: haiku
+# sonnet, not haiku: the pipeline's savings come from GENERATION being offloaded to GLM/GPT-5.5, not from
+# the shepherd tier — and on the codex-fallback path this worker IS the review gate (step 4b). Review
+# integrity is a merge-safety property; haiku review is not credible enough to gate merges.
+model: sonnet
 skills:
   - glm-task
 ---
