@@ -29,6 +29,10 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 | `GET` | `/api/internal/orient` | Self-description ("whoami") for the calling session — see below |
+| `GET` | `/api/internal/lsp/definition` | Session-scoped TypeScript LSP definition lookup for the `code_definition` tool — see below |
+| `GET` | `/api/internal/lsp/references` | Session-scoped TypeScript LSP references lookup for the `code_references` tool — see below |
+| `GET` | `/api/internal/lsp/hover` | Session-scoped TypeScript LSP hover lookup for the `code_hover` tool — see below |
+| `GET` | `/api/internal/lsp/symbols` | Session-scoped TypeScript LSP symbol lookup for the `code_symbols` tool — see below |
 
 **`GET /api/internal/orient`** backs the `orient` agent tool (Finding W2.15). Requires the same `X-Bobbit-Session-Id` header as `/api/internal/mcp-describe` (403 if missing or unknown). Read-only assembly of state the gateway already holds — no new state, nothing hardcoded that can drift from a live session:
 
@@ -49,6 +53,8 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 ```
 
 `project`/`goal` are `null` when not applicable. `apiRouteFamilies` is a short, hand-curated pointer to top-level route families (pinned against the live route surface by `tests/orient-api-route-families.test.ts`, same idiom as `tests/prompt-api-drift.test.ts`) — **not** a generated OpenAPI catalog; this table remains the authoritative full REST reference. See `src/server/agent/orient.ts` for the assembly logic and design rationale.
+
+**`GET /api/internal/lsp/{definition,references,hover,symbols}`** backs the `code_*` product tool group in `defaults/tools/code/`. These routes require `X-Bobbit-Session-Id` (403 if missing/unknown), resolve the live or persisted session worktree, reject files outside that worktree, and return `200 { available: false, reason }` rather than throwing for unsupported sandboxed sessions. Position routes require `file`, 1-based `line`, and 1-based `col`; `symbols` requires `file` and accepts optional `query`. The implementation lives in `src/server/routes/lsp-routes.ts` and uses the gateway-owned `TsServerSupervisor` in `src/server/lsp/`.
 
 ### Dev harness
 
@@ -671,6 +677,7 @@ Staff records include a persisted `accessory` string as part of the staff identi
 #### Add Project directory helpers
 
 `GET /api/browse-directory` powers the Browse modal and directory-picker typeahead.
+The implementation is registered through `src/server/routes/directory-browser-routes.ts`.
 It accepts optional query parameters:
 
 | Parameter | Meaning |
@@ -926,6 +933,8 @@ interface AgentDirApiState {
 `POST /api/agent-dir/migrate` is the Settings **Copy data** action. It accepts only user-selected sources known from the active or historical configured agent-directory set and destinations equal to the pending next-start directory. It does not auto-discover or special-case `~/.pi/agent`. It copies only `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`; existing files are skipped unless `overwrite:true`. The response is an `AgentDirMigrationReport` with `copied`, `skipped`, `overwritten`, `missing`, `warnings`, `errors`, and `guidance`. Relationship/symlink violations return HTTP 400 with a report-level `error.code`.
 
 ### Models
+
+The model/provider HTTP surface is registered through `src/server/routes/model-provider-routes.ts`.
 
 | Method | Path | Description |
 |---|---|---|
