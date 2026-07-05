@@ -1,0 +1,100 @@
+name: orient
+description: "Return your own session/goal/project identity and gateway facts"
+summary: "Whoami — session, goal, project, gateway version"
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Harness
+docs: |-
+  Returns who and where you are: your session id/status/cwd/worktree, your role and goal (if any, including its git branch), your project, and the gateway's version/URL/token path. No parameters. Call this instead of guessing your own identity from context.
+detail_docs: >-
+  ## Purpose
+
+
+  `orient` answers "what server am I in, what session/goal/role am I, where's
+  my worktree" without guessing or re-deriving it from the transcript. It is
+  a pure read of state the gateway already holds — no side effects, safe to
+  call as often as you like.
+
+
+  ## Parameters
+
+
+  None.
+
+
+  ## Output
+
+
+  ```json
+  {
+    "gateway": { "version": "0.13.0", "url": "https://127.0.0.1:PORT", "tokenPath": "/abs/path/.bobbit/state/token" },
+    "apiRouteFamilies": [{ "family": "sessions", "example": "GET /api/sessions" }, ...],
+    "session": {
+      "id": "...", "title": "...", "status": "streaming", "cwd": "/abs/path",
+      "worktreePath": "/abs/path/worktree-or-null",
+      "role": "coder-or-null", "assistantType": "goal-or-null",
+      "readOnly": false, "delegateOf": null, "parentSessionId": null, "childKind": null,
+      "goalId": "goal-id-or-null", "teamGoalId": "team-goal-id-or-null", "teamLeadSessionId": "session-id-or-null",
+      "runtime": { "sandboxed": false, "containerId": null, "model": "anthropic/claude-...-or-null", "thinkingLevel": "high-or-null" }
+    },
+    "project": { "id": "...", "name": "...", "rootPath": "/abs/path" },
+    "goal": { "id": "...", "title": "...", "state": "in-progress", "branch": "goal/branch-name", "team": true, "teamLeadSessionId": "...", "parentGoalId": null }
+  }
+  ```
+
+  `project` and `goal` are `null` when the session has no registered project /
+  no goal, respectively. `apiRouteFamilies` is a short, curated pointer to
+  top-level REST endpoint families — not an exhaustive spec (there is no
+  generated OpenAPI catalog yet; see `docs/rest-api.md` for the full hand
+  documented surface).
+
+
+  ## When to Use
+
+
+  - **At the start of a session** — establish your session id, goal, role,
+  and worktree instead of assuming.
+
+  - **Before calling gateway REST endpoints** — confirm the gateway URL/token
+  path and a starting point among `apiRouteFamilies`, instead of hardcoding
+  guesses.
+
+  - **Inside a team** — check your own `role`, `teamGoalId`, and
+  `teamLeadSessionId` (for full team roster/status, use `team_list` instead —
+  that is the team-lead-only, whole-roster view; `orient` only ever reports
+  YOUR OWN identity).
+
+
+  ## When NOT to Use
+
+
+  - **Team roster / other agents' status** — use `team_list` (team-lead
+  sessions only).
+
+  - **Full REST API schema** — not available yet; `docs/rest-api.md` is the
+  authoritative hand-written reference.
+
+
+  ## Examples
+
+
+  ```
+
+  # "What session/goal am I in?"
+
+  orient()
+
+  # → session.id, session.goalId, goal.title, goal.branch
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **No parameters, no side effects** — safe to call freely.
+
+  - **`goal.branch`** is the goal's own git branch (from the goal record),
+  not derived by shelling out to `git` — it can be `null` for goals that
+  don't use a worktree.

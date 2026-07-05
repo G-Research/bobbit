@@ -32,6 +32,7 @@ const EXTENSION_FILES = [
 	"agent",
 	"ask",
 	"browser",
+	"harness",
 	"html",
 	"images",
 	"inbox",

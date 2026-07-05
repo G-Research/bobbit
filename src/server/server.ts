@@ -57,6 +57,8 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
+import { buildOrientPayload, type OrientSessionInput } from "./agent/orient.js";
+import { bobbitPackageVersion } from "./agent/aigw-user-agent.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
@@ -16472,6 +16474,106 @@ async function handleApiRoute(
 		} catch (err) {
 			const e = err as Error;
 			console.error(`[mcp] Describe failed:`, e.stack || e);
+			json({ error: e.message, stack: e.stack }, 500);
+		}
+		return;
+	}
+
+	// GET /api/internal/orient — self-description ("whoami") for the `orient`
+	// tool (Finding W2.15). Read-only assembly of state the gateway already
+	// holds; see src/server/agent/orient.ts for the payload shape + rationale.
+	if (url.pathname === "/api/internal/orient" && req.method === "GET") {
+		try {
+			const orientSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
+			if (!orientSessionId) {
+				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+				return;
+			}
+			const liveSession = sessionManager.getSession(orientSessionId);
+			const ctx = projectContextManager.getContextForSession(orientSessionId);
+			const persistedSession = liveSession ? undefined : ctx?.sessionStore.get(orientSessionId);
+			const sessionRecord = liveSession ?? persistedSession;
+			if (!sessionRecord) {
+				json({ error: `Session "${orientSessionId}" not found` }, 403);
+				return;
+			}
+
+			const orientSession: OrientSessionInput = liveSession
+				? {
+						id: liveSession.id,
+						title: liveSession.title,
+						status: liveSession.status,
+						cwd: liveSession.cwd,
+						worktreePath: liveSession.worktreePath,
+						role: liveSession.role,
+						assistantType: liveSession.assistantType,
+						sandboxed: liveSession.sandboxed,
+						containerId: liveSession.containerId,
+						model: liveSession.spawnPinnedModel,
+						thinkingLevel: liveSession.spawnPinnedThinkingLevel,
+						readOnly: liveSession.readOnly,
+						delegateOf: liveSession.delegateOf,
+						parentSessionId: liveSession.parentSessionId,
+						childKind: liveSession.childKind,
+						projectId: liveSession.projectId,
+						goalId: liveSession.goalId,
+						teamGoalId: liveSession.teamGoalId,
+						teamLeadSessionId: liveSession.teamLeadSessionId,
+					}
+				: {
+						id: persistedSession!.id,
+						title: persistedSession!.title,
+						status: "dormant",
+						cwd: persistedSession!.cwd,
+						worktreePath: persistedSession!.worktreePath,
+						role: persistedSession!.role,
+						assistantType: persistedSession!.assistantType,
+						sandboxed: persistedSession!.sandboxed,
+						model: persistedSession!.modelProvider && persistedSession!.modelId
+							? `${persistedSession!.modelProvider}/${persistedSession!.modelId}`
+							: undefined,
+						readOnly: persistedSession!.readOnly,
+						delegateOf: persistedSession!.delegateOf,
+						parentSessionId: persistedSession!.parentSessionId,
+						childKind: persistedSession!.childKind,
+						projectId: persistedSession!.projectId,
+						goalId: persistedSession!.goalId,
+						teamGoalId: persistedSession!.teamGoalId,
+						teamLeadSessionId: persistedSession!.teamLeadSessionId,
+					};
+
+			const goalRecord = orientSession.goalId ? ctx?.goalStore.get(orientSession.goalId) : undefined;
+			const project = orientSession.projectId ? projectRegistry.get(orientSession.projectId) : undefined;
+
+			let gatewayUrl = "";
+			try {
+				gatewayUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+			} catch { /* not started via cli.ts yet (e.g. some test harnesses) */ }
+
+			const payload = buildOrientPayload({
+				gateway: {
+					version: bobbitPackageVersion,
+					url: gatewayUrl,
+					tokenPath: path.join(bobbitStateDir(), "token"),
+				},
+				session: orientSession,
+				goal: goalRecord
+					? {
+							id: goalRecord.id,
+							title: goalRecord.title,
+							state: goalRecord.state,
+							branch: goalRecord.branch,
+							team: goalRecord.team,
+							teamLeadSessionId: goalRecord.teamLeadSessionId,
+							parentGoalId: goalRecord.parentGoalId,
+						}
+					: null,
+				project: project ? { id: project.id, name: project.name, rootPath: project.rootPath } : null,
+			});
+			json(payload);
+		} catch (err) {
+			const e = err as Error;
+			console.error(`[orient] Self-description failed:`, e.stack || e);
 			json({ error: e.message, stack: e.stack }, 500);
 		}
 		return;

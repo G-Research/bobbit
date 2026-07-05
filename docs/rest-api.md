@@ -28,6 +28,27 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 | `GET` | `/api/health` | Health check + session count |
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
+| `GET` | `/api/internal/orient` | Self-description ("whoami") for the calling session — see below |
+
+**`GET /api/internal/orient`** backs the `orient` agent tool (Finding W2.15). Requires the same `X-Bobbit-Session-Id` header as `/api/internal/mcp-describe` (403 if missing or unknown). Read-only assembly of state the gateway already holds — no new state, nothing hardcoded that can drift from a live session:
+
+```json
+{
+  "gateway": { "version": "0.13.0", "url": "https://127.0.0.1:PORT", "tokenPath": "/abs/path/.bobbit/state/token" },
+  "apiRouteFamilies": [{ "family": "sessions", "example": "GET /api/sessions" }, "..."],
+  "session": {
+    "id": "...", "title": "...", "status": "streaming", "cwd": "/abs/path",
+    "worktreePath": null, "role": null, "assistantType": null,
+    "readOnly": false, "delegateOf": null, "parentSessionId": null, "childKind": null,
+    "goalId": null, "teamGoalId": null, "teamLeadSessionId": null,
+    "runtime": { "sandboxed": false, "containerId": null, "model": null, "thinkingLevel": null }
+  },
+  "project": { "id": "...", "name": "...", "rootPath": "/abs/path" },
+  "goal": { "id": "...", "title": "...", "state": "in-progress", "branch": "goal/branch-name", "team": true, "teamLeadSessionId": "...", "parentGoalId": null }
+}
+```
+
+`project`/`goal` are `null` when not applicable. `apiRouteFamilies` is a short, hand-curated pointer to top-level route families (pinned against the live route surface by `tests/orient-api-route-families.test.ts`, same idiom as `tests/prompt-api-drift.test.ts`) — **not** a generated OpenAPI catalog; this table remains the authoritative full REST reference. See `src/server/agent/orient.ts` for the assembly logic and design rationale.
 
 ### Dev harness
 
