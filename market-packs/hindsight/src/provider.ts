@@ -740,7 +740,8 @@ const provider = {
 		const goalId = ctx.goalId ? String(ctx.goalId) : "unknown";
 		const headSha = (ctx.headSha ?? ctx.pullRequest?.headSha) ? String(ctx.headSha ?? ctx.pullRequest?.headSha) : "unknown";
 		const marker = `${GOAL_COMPLETED_PREFIX}${goalId}:${headSha}`;
-		if (store && (await store.get(marker))) return { blocks: [] };
+		const priorMarker = store ? await store.get<{ state?: string }>(marker) : null;
+		if (priorMarker && (priorMarker.state === "retained" || priorMarker.state === "queued")) return { blocks: [] };
 		if (inFlightGoalCompleted.has(marker)) return { blocks: [] };
 		inFlightGoalCompleted.add(marker);
 		try {

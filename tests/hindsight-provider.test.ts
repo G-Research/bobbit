@@ -1748,3 +1748,33 @@ test("goalCompleted queues outcome digest on retain failure without throwing", a
 		__setClientFactory(null);
 	}
 });
+
+test("goalCompleted retries the retain when a prior marker is stuck at non-terminal state \"started\" (mid-flight crash recovery)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		// Simulate a prior process crashing between writing the "started" marker and
+		// completing the retain: the marker exists but never advanced to a terminal state.
+		await store.put("goal-completed:goal-1:abc123", { ts: Date.now(), state: "started" });
+		await provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, projectId: "p", goalId: "goal-1", headSha: "abc123", changedFiles: ["f.ts"] } as never);
+		assert.equal(calls.retain.length, 1);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("goalCompleted stays idempotent when a prior marker is at a terminal state (\"retained\" or \"queued\")", async () => {
+	for (const state of ["retained", "queued"]) {
+		const { client, calls } = makeClient();
+		__setClientFactory(() => client);
+		try {
+			const store = makeStore();
+			await store.put("goal-completed:goal-1:abc123", { ts: Date.now(), state });
+			await provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, projectId: "p", goalId: "goal-1", headSha: "abc123", changedFiles: ["f.ts"] } as never);
+			assert.equal(calls.retain.length, 0, `expected no retain when prior marker state is "${state}"`);
+		} finally {
+			__setClientFactory(null);
+		}
+	}
+});
