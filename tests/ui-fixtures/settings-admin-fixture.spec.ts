@@ -494,7 +494,15 @@ test.describe("Settings/admin UI fixture", () => {
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
 		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
-		await page.keyboard.press("Enter");
+		// UX-03 (merged after this test was written): confirmAction no longer
+		// binds a global Enter-confirms handler — destructive dialogs focus
+		// Cancel, so a bare Enter now cancels. Confirm via the explicit confirm
+		// button (stable class from dialogs.ts). DOM-dispatched click: this
+		// fixture lacks the app's overlay CSS, so the dialog renders in-flow
+		// below a long page and Playwright's viewport actionability check
+		// times out — a fixture-CSS limitation, not a product one (the real
+		// app overlays/centers dialogs).
+		await page.locator(".confirm-action-confirm-btn").evaluate((el) => (el as HTMLElement).click());
 
 		const error = section.locator("[data-testid='claude-code-confirmation-error']");
 		await expect(error).toBeVisible();
@@ -509,7 +517,8 @@ test.describe("Settings/admin UI fixture", () => {
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
 		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
-		await page.keyboard.press("Enter");
+		// UX-03: see above — explicit confirm click replaces the removed global Enter.
+		await page.locator(".confirm-action-confirm-btn").evaluate((el) => (el as HTMLElement).click());
 		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
 		await expect(section.locator("[data-testid='claude-code-confirmation-error']")).not.toBeVisible();
 	});
