@@ -297,3 +297,38 @@ removed, semantic diffing) — this classifier will only ever reason about
 changed-file identity/shape, same as every other rule table in this lane;
 tuning `LARGE_CHANGESET_FILE_THRESHOLD` or the high-risk-surface list against
 real data (that's exactly what this wave's own telemetry is for).
+
+## Evidence tooling — offline report consumer (D6)
+
+Waves 4/5 above each ship telemetry-only with an explicit "this wave builds
+no consumer for that question" disclaimer. `scripts/clf-evidence-report.mjs`
+is that consumer: an offline, read-only script that joins the three
+telemetry producers this lane (plus Wave 2 and cost-tracker.ts) now
+accumulates and emits a markdown report —
+
+- **(a) tool-approve** — confusion matrix + disagreement list between the
+  `tool-call`/`tool-approve` heuristic's `select` verdict (when one is
+  registered — Wave 2 ships harness-only, so real state dirs may show zero
+  `select` rows) and the actual human/system grant-or-deny outcome
+  (`tool-permission-audit-log.ts`).
+- **(b) thinking-router** — select/applied rates and a by-rule breakdown
+  (`session-context-trace`'s `decisions[]`, CLF-W1a/W1b).
+- **(c) model-tier + gate-risk** — proposed-label distributions. **Known
+  limitation:** `DecisionOutcome` never persists the classifier's input
+  `arg`, so a by-role or by-gate breakdown is not derivable from this data
+  source at all — only the aggregate label distribution is reported.
+- **(d) cost** — per-session Tukey-fence spike outliers and compaction-
+  tagged share, over `session-cost-turns.json`'s per-turn rows.
+
+Every section degrades to an explicit "no data yet" line (naming the
+producer and its landing date) when its source is empty, rather than
+crashing or silently omitting the section. Privacy: the script never reads
+or prints prompt text, file contents, or diff content — the thinking-router
+section in particular can't do prompt-based false-positive detection at all,
+because `DecisionOutcome` never carries prompt text in the first place (a
+property of the upstream producer, not a gap here).
+
+Pure parsing/aggregation functions are unit-tested against synthetic
+fixtures in `tests/clf-evidence-report.test.ts`; no test reads a real
+`.bobbit` state dir. See the script's own header comment for state-dir
+resolution and the `CostTracker`-is-per-project-not-headquarters caveat.
