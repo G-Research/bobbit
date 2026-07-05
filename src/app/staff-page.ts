@@ -9,6 +9,7 @@ import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
+import { confirmAction } from "./dialogs.js";
 
 // ============================================================================
 // STATE
@@ -22,6 +23,10 @@ let selectedStaff: StaffAgent | null = null;
 let loading = true;
 let saving = false;
 let deleting = false;
+// UX audit finding 3: deleteStaffAgent() resolving false used to show
+// nothing — inline error state, copying GoalStatusWidget's
+// `_confirmCompletionError` idiom.
+let deleteError: string | null = null;
 
 // Edit form state
 let editName = "";
@@ -63,6 +68,7 @@ export async function loadStaffPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	deleting = false;
+	deleteError = null;
 	renderApp();
 	staffList = await fetchStaff();
 	loading = false;
@@ -107,6 +113,7 @@ function showEdit(agent: StaffAgent): void {
 	wakeFeedback = null;
 	saving = false;
 	deleting = false;
+	deleteError = null;
 	loadSessionAppearance(agent);
 	void ensureRolesLoaded();
 	setHashRoute("staff-edit", agent.id);
@@ -130,6 +137,7 @@ export function navigateToStaffEdit(staffId: string): void {
 		wakeFeedback = null;
 		saving = false;
 		deleting = false;
+		deleteError = null;
 		loadSessionAppearance(agent);
 		void ensureRolesLoaded();
 	} else {
@@ -207,13 +215,20 @@ async function handleSave(): Promise<void> {
 
 async function handleDelete(): Promise<void> {
 	if (!selectedStaff || deleting) return;
-	if (!confirm(`Delete staff agent "${selectedStaff.name}"?`)) return;
+	// UX audit finding 1: native confirm() -> hardened confirmAction.
+	const confirmed = await confirmAction("Delete staff agent?", `Delete staff agent "${selectedStaff.name}"?`, "Delete", true);
+	if (!confirmed) return;
 	deleting = true;
+	deleteError = null;
 	renderApp();
 	const ok = await deleteStaffAgent(selectedStaff.id);
 	if (ok) {
 		staffList = await fetchStaff();
 		showList();
+	} else {
+		// UX audit finding 3: deleteStaffAgent() resolving false used to show
+		// nothing — surface an inline error instead.
+		deleteError = "Failed to delete staff agent";
 	}
 	deleting = false;
 	renderApp();
@@ -583,10 +598,14 @@ function renderEditView(): TemplateResult {
 						size: "sm",
 						onClick: handleDelete,
 						disabled: deleting,
+						loading: deleting,
 						children: html`<span class="inline-flex items-center gap-1 text-destructive">${icon(Trash2, "sm")} Delete</span>`,
 					})}
 				</div>
 			</div>
+			${deleteError ? html`
+				<div class="px-4 pt-2 text-xs text-destructive" data-testid="staff-delete-error" aria-live="assertive">${deleteError}</div>
+			` : ""}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>

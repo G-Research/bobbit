@@ -53,6 +53,22 @@ async function openModelsSettings(page: Parameters<typeof openApp>[0]) {
 	return section;
 }
 
+/** Adds a bare provider (name + base URL only, no Test Connection / discovered
+ * models) — enough to exercise the delete flow without a mock upstream. */
+async function addMinimalProvider(page: Parameters<typeof openApp>[0], name: string): Promise<void> {
+	await page.locator('[data-testid="custom-providers-section"] [role="combobox"]').click();
+	await page.getByRole("option", { name: "OpenAI Completions Compatible" }).click();
+	const dialog = page.locator('[data-testid="custom-provider-dialog-content"]');
+	await expect(dialog).toBeVisible();
+	await dialog.locator("input").first().fill(name);
+	await dialog.locator("input:not([type=password])").nth(1).fill("http://127.0.0.1:9");
+	const savePost = page.waitForResponse((resp) => resp.url().endsWith("/api/custom-providers") && resp.request().method() === "POST");
+	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	await savePost;
+	await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+	await expect(page.locator("custom-provider-card", { hasText: name })).toBeVisible({ timeout: 10_000 });
+}
+
 async function cleanupProvidersByName(name: string): Promise<void> {
 	const res = await apiFetch("/api/custom-providers");
 	if (!res.ok) return;
@@ -148,9 +164,14 @@ test.describe("Settings → Models → Custom Providers (navigation + full lifec
 			expect(stored?.models?.find((m: any) => m.id === "z-ai/glm-5.2")?.contextWindow).toBe(200000);
 
 			// ── Delete / cleanup ──
-			page.once("dialog", (d) => d.accept());
+			// UX audit finding 1: deleteCustomProvider() no longer calls native
+			// confirm() (invisible to Playwright without a dialog handler) — it
+			// now opens the app's hardened confirmAction dialog, confirmed here
+			// via its stable `.confirm-action-confirm-btn` class (dialogs.ts).
 			const deleteReq = page.waitForResponse((resp) => resp.url().includes("/api/custom-providers/") && resp.request().method() === "DELETE");
 			await renamedCard.getByRole("button", { name: "Delete", exact: true }).click();
+			await expect(page.locator(".confirm-action-confirm-btn")).toBeVisible();
+			await page.locator(".confirm-action-confirm-btn").click();
 			await deleteReq;
 			await expect(page.locator("custom-provider-card", { hasText: PROVIDER_NAME })).toHaveCount(0, { timeout: 10_000 });
 		} finally {
@@ -184,6 +205,73 @@ test.describe("Settings → Models → Custom Providers (navigation + full lifec
 			await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
 		} finally {
 			await mock.close();
+			await cleanupProvidersByName(PROVIDER_NAME);
+		}
+	});
+
+	// UX audit findings 1/2/5 (fable/d6-ux-mechanical): deleteCustomProvider()
+	// used to call native confirm() (invisible to Playwright without a
+	// page.on("dialog") handler and unstyled/untrapped for real users) and
+	// swallow DELETE failures with a bare console.error.
+	test("delete requires the app confirm dialog, not native confirm; Escape cancels safely", async ({ page }) => {
+		const PROVIDER_NAME = "Escape-cancel provider (e2e)";
+		await cleanupProvidersByName(PROVIDER_NAME);
+		try {
+			await openApp(page);
+			await openModelsSettings(page);
+			await addMinimalProvider(page, PROVIDER_NAME);
+
+			const card = page.locator("custom-provider-card", { hasText: PROVIDER_NAME });
+			await card.getByRole("button", { name: "Delete", exact: true }).click();
+
+			// A native confirm() would be invisible to Playwright unless a
+			// page.on("dialog") handler is registered (none is, here) — if this
+			// regresses back to confirm(), the test would hang on the next
+			// assertion instead of finding the dialog, not silently pass.
+			const confirmDialog = page.locator(".confirm-action-confirm-btn");
+			await expect(confirmDialog, "delete must open the app's confirmAction dialog, not native confirm()").toBeVisible();
+
+			await page.keyboard.press("Escape");
+			await expect(confirmDialog).toHaveCount(0);
+
+			// Cancelled via Escape: no DELETE fired, provider still present.
+			await expect(card).toBeVisible();
+		} finally {
+			await cleanupProvidersByName(PROVIDER_NAME);
+		}
+	});
+
+	test("provider delete error surfaces inline, not swallowed silently", async ({ page }) => {
+		const PROVIDER_NAME = "Delete-fails provider (e2e)";
+		await cleanupProvidersByName(PROVIDER_NAME);
+		try {
+			await openApp(page);
+			await openModelsSettings(page);
+			await addMinimalProvider(page, PROVIDER_NAME);
+
+			// Force the DELETE request to fail so we can assert the failure is
+			// surfaced on the card instead of only hitting console.error.
+			await page.route("**/api/custom-providers/*", async (route) => {
+				if (route.request().method() === "DELETE") {
+					await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) });
+				} else {
+					await route.continue();
+				}
+			});
+
+			const card = page.locator("custom-provider-card", { hasText: PROVIDER_NAME });
+			await card.getByRole("button", { name: "Delete", exact: true }).click();
+			await page.locator(".confirm-action-confirm-btn").click();
+
+			const error = card.locator('[data-testid="custom-provider-delete-error"]');
+			await expect(error, "a failed delete must surface visibly on the card, not just console.error").toBeVisible({ timeout: 10_000 });
+			await expect(error).toContainText("500");
+
+			// The card must still be there — the failed delete didn't silently succeed.
+			await expect(card).toBeVisible();
+
+			await page.unroute("**/api/custom-providers/*");
+		} finally {
 			await cleanupProvidersByName(PROVIDER_NAME);
 		}
 	});

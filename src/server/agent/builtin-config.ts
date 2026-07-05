@@ -20,6 +20,7 @@ import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import { parseContributions, computeRendererKind } from "./tool-contributions.js";
 import { isIgnoredToolGroupDir } from "./tool-extension-preflight.js";
+import { resolveVerificationPolicy, type VerificationPolicy } from "./verification-logic.js";
 
 // ── Shared parse helpers (single source of truth) ───────────────
 //
@@ -184,6 +185,7 @@ export class BuiltinConfigProvider {
 	private _roles: Role[] | null = null;
 	private _tools: ToolInfo[] | null = null;
 	private _toolGroupPolicies: Record<string, GrantPolicy> | null = null;
+	private _verificationPolicyRaw: Record<string, unknown> | null = null;
 
 	constructor(builtinsDir?: string) {
 		// Default: dist/server/agent/ → ../defaults → dist/server/defaults/
@@ -220,11 +222,31 @@ export class BuiltinConfigProvider {
 		return this._toolGroupPolicies;
 	}
 
+	/**
+	 * Raw (pre-validation) `defaults/verification-policy.yaml` contents — NOT
+	 * run through `resolveVerificationPolicy` here, so a caller composing the
+	 * builtin -> server -> project cascade (`ConfigCascade.resolveVerificationPolicy`)
+	 * can merge this with override layers via `mergeVerificationPolicyRaw`
+	 * before the single, final defaulting/validation pass. Callers that only
+	 * need the pure builtin default (no cascade) can call
+	 * `resolveVerificationPolicy(builtins.getVerificationPolicyRaw())` directly.
+	 */
+	getVerificationPolicyRaw(): Record<string, unknown> {
+		if (!this._verificationPolicyRaw) this._verificationPolicyRaw = this.loadVerificationPolicyRaw();
+		return this._verificationPolicyRaw;
+	}
+
+	/** The pure builtin `VerificationPolicy` (no server/project override layer). */
+	getVerificationPolicy(): VerificationPolicy {
+		return resolveVerificationPolicy(this.getVerificationPolicyRaw());
+	}
+
 	/** Clear all caches so the next getter call re-reads from disk. */
 	reload(): void {
 		this._roles = null;
 		this._tools = null;
 		this._toolGroupPolicies = null;
+		this._verificationPolicyRaw = null;
 	}
 
 	// ── Private loaders (mirror the existing store parsing logic) ─
@@ -251,6 +273,24 @@ export class BuiltinConfigProvider {
 				}
 			}
 			return result;
+		} catch {
+			return {};
+		}
+	}
+
+	/**
+	 * Raw (pre-validation) `verification-policy.yaml` contents. Deliberately
+	 * NOT filtered/typed like `loadToolGroupPolicies` — VerificationPolicy is
+	 * a fixed-shape object whose fields need cross-layer default-filling
+	 * (see `resolveVerificationPolicy`), not a flat map that can be
+	 * item-validated independently.
+	 */
+	private loadVerificationPolicyRaw(): Record<string, unknown> {
+		const filePath = path.join(this.builtinsDir, "verification-policy.yaml");
+		try {
+			const raw = fs.readFileSync(filePath, "utf-8");
+			const data = parse(raw);
+			return data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
 		} catch {
 			return {};
 		}

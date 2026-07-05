@@ -664,13 +664,19 @@ function renderSwarmSiblingRows(swarmGroup: string, status: SwarmGroupStatus | u
 				// reads as a budget/timeout failure — misleading for a deliberate
 				// early-kill. One-word suffix, no new row shape, reuses this exact
 				// existing state span.
-				const killReasonSuffix = artifact?.status === "killed" && artifact.killReason
-					? (artifact.killReason === "superseded" ? " (superseded)" : artifact.killReason === "governor-budget" ? " (budget)" : " (wall-clock)")
-					: "";
+				// UX audit finding 4: the suffix alone doesn't explain the kill
+				// class — a title= tooltip spells out what each one means.
+				const killReasonInfo = artifact?.status === "killed" && artifact.killReason
+					? (artifact.killReason === "superseded"
+						? { suffix: " (superseded)", title: "Killed early because a sibling swarm candidate already passed verification." }
+						: artifact.killReason === "governor-budget"
+							? { suffix: " (budget)", title: "Killed by the swarm governor for exceeding its cost/step budget." }
+							: { suffix: " (wall-clock)", title: "Killed by the swarm governor for exceeding its wall-clock time limit." })
+					: null;
 				return html`
 					<div class="swarm-governor-sibling" data-sibling-goal-id="${sib.id}" data-sibling-state="${stateLabel}">
 						<span class="swarm-governor-sibling-title">${sib.title}</span>
-						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}${killReasonSuffix}</span>
+						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}${killReasonInfo ? html`<span title=${killReasonInfo.title} data-testid="swarm-kill-reason-suffix">${killReasonInfo.suffix}</span>` : ""}</span>
 						${score
 							? html`<span class="swarm-governor-sibling-score">verify: ${score.passed ? "pass" : "fail"}${typeof score.score === "number" ? ` (${score.score})` : ""}</span>`
 							: nothing}

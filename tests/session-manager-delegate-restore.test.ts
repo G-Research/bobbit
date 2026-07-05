@@ -97,18 +97,22 @@ describe("delegate restore — source guards", () => {
 		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
 		"utf-8",
 	);
+	const reviveSrc = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-revive.ts"),
+		"utf-8",
+	);
 
 	it("restoreSession has a delegate branch ordered before the goal/role else branch", () => {
-		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
+		const idx = reviveSrc.indexOf("async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
-		const window = src.slice(idx, idx + 20_000);
+		const window = reviveSrc.slice(idx, idx + 20_000);
 
 		const delegateBranchIdx = window.indexOf("} else if (ps.delegateOf && !ps.goalId) {");
 		assert.ok(delegateBranchIdx > 0, "restoreSession must have an `else if (ps.delegateOf && !ps.goalId)` branch");
 
 		// The delegate branch rebuilds prompt parts from durable instructions + context.
 		const branchWindow = window.slice(delegateBranchIdx, delegateBranchIdx + 1400);
-		assert.match(branchWindow, /this\.buildDelegatePromptParts\(\{/);
+		assert.match(branchWindow, /this\.deps\.host\.buildDelegatePromptParts\(\{/);
 		assert.match(branchWindow, /cwd: ps\.cwd/);
 		assert.match(branchWindow, /projectRoot: ps\.repoPath/);
 		assert.match(branchWindow, /instructions: ps\.instructions \|\| ""/);
@@ -117,7 +121,7 @@ describe("delegate restore — source guards", () => {
 		assert.match(branchWindow, /sectionOrder: restoreSectionOrder/);
 
 		// It must precede the goal/role else branch (which resolves goal?.spec).
-		const goalElseIdx = window.indexOf("const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;");
+		const goalElseIdx = window.indexOf("const goal = ps.goalId ? this.deps.host.resolveGoal(ps.goalId) : undefined;");
 		assert.ok(goalElseIdx > delegateBranchIdx, "delegate branch must come before the goal/role else branch");
 	});
 

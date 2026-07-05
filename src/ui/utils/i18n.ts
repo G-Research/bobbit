@@ -169,6 +169,7 @@ declare module "@mariozechner/mini-lit" {
 		"Load a previous conversation": string;
 		"No sessions yet": string;
 		"Delete this session?": string;
+		"This can't be undone.": string;
 		Today: string;
 		Yesterday: string;
 		"{days} days ago": string;
@@ -427,6 +428,7 @@ export const translations = {
 		"Load a previous conversation": "Load a previous conversation",
 		"No sessions yet": "No sessions yet",
 		"Delete this session?": "Delete this session?",
+		"This can't be undone.": "This can't be undone.",
 		Today: "Today",
 		Yesterday: "Yesterday",
 		"{days} days ago": "{days} days ago",

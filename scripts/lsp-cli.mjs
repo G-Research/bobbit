@@ -3,7 +3,19 @@
 //
 // A minimal LSP client for `typescript-language-server --stdio`, so Bash-only
 // sessions (subagents have no interactive LSP tool) can run one-shot TS LSP
-// queries. Zero new deps — plain Node child_process + JSON-RPC framing.
+// queries. The one-shot spawn/query/shutdown shape here is still what this
+// CLI is actually used for (a rare, one-shot query from a Bash-only subagent
+// session) — the productized, persistent-per-worktree version for chat-turn
+// latency lives in `src/server/lsp/supervisor.ts` as the gateway-owned
+// `TsServerSupervisor` (see `defaults/tools/code/`,
+// docs/design/lsp-product-tools.md).
+//
+// The JSON-RPC framing (`LspClient`) and formatting helpers below are
+// imported from `src/server/lsp/client.ts` (compiled to
+// `dist/server/lsp/client.js`) rather than duplicated here, so this CLI and
+// the gateway supervisor never drift (design doc §4(b)). That means this
+// script needs `npm run build:server` to have run at least once — it fails
+// with a clear message telling you to do that if `dist/` is missing.
 //
 // Usage:
 //   node scripts/lsp-cli.mjs symbols <file>
@@ -25,11 +37,32 @@
 //
 // Prints compact JSON to stdout on success.
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
+const CLIENT_MODULE = path.join(REPO_ROOT, "dist", "server", "lsp", "client.js");
+
+/**
+ * Load the shared LSP client module lazily — only once argument parsing has
+ * confirmed a real LSP query is about to run. `--help`, usage errors, and
+ * unknown-subcommand rejection must stay cheap and buildless (pinned by
+ * tests/lsp-cli-usage.test.ts), so this is NOT a top-level await: importing
+ * eagerly would make even `--help` require `npm run build:server` first.
+ */
+async function loadClientModule() {
+	try {
+		return await import(pathToFileURL(CLIENT_MODULE).href);
+	} catch (err) {
+		fail(
+			`could not load ${CLIENT_MODULE} (${err.message}). ` +
+				`Run "npm run build:server" first — lsp-cli.mjs shares its LSP client with the gateway's TsServerSupervisor.`,
+		);
+	}
+}
 
 const USAGE = `lsp-cli.mjs — one-shot TypeScript LSP queries over stdio
 
@@ -70,14 +103,6 @@ function parseArgs(argv) {
 	return { args, timeoutMs };
 }
 
-function languageIdFor(filePath) {
-	const ext = path.extname(filePath);
-	if (ext === ".tsx") return "typescriptreact";
-	if (ext === ".jsx") return "javascriptreact";
-	if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return "javascript";
-	return "typescript";
-}
-
 function gitToplevel(filePath) {
 	const dir = path.dirname(path.resolve(filePath));
 	try {
@@ -87,156 +112,8 @@ function gitToplevel(filePath) {
 	}
 }
 
-/** Minimal JSON-RPC-over-stdio client for an LSP server. */
-class LspClient {
-	constructor(proc) {
-		this.proc = proc;
-		this.buf = Buffer.alloc(0);
-		this.nextId = 1;
-		this.pending = new Map();
-		this.notifications = [];
-		proc.stdout.on("data", (chunk) => this._onData(chunk));
-		proc.on("error", (err) => this._rejectAll(err));
-	}
-
-	_onData(chunk) {
-		this.buf = Buffer.concat([this.buf, chunk]);
-		for (;;) {
-			const headerEnd = this.buf.indexOf("\r\n\r\n");
-			if (headerEnd === -1) return;
-			const header = this.buf.subarray(0, headerEnd).toString("utf8");
-			const match = /Content-Length: (\d+)/i.exec(header);
-			if (!match) {
-				fail("malformed LSP frame from server (no Content-Length)");
-			}
-			const len = Number(match[1]);
-			const bodyStart = headerEnd + 4;
-			if (this.buf.length < bodyStart + len) return; // wait for more data
-			const body = this.buf.subarray(bodyStart, bodyStart + len).toString("utf8");
-			this.buf = this.buf.subarray(bodyStart + len);
-			this._onMessage(JSON.parse(body));
-		}
-	}
-
-	_onMessage(msg) {
-		if (msg.id !== undefined && this.pending.has(msg.id)) {
-			const { resolve, reject } = this.pending.get(msg.id);
-			this.pending.delete(msg.id);
-			if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-			else resolve(msg.result);
-		}
-		// Notifications (diagnostics, logs, etc.) are ignored — this CLI runs one
-		// query and exits; it does not surface server-side diagnostics.
-	}
-
-	_rejectAll(err) {
-		for (const { reject } of this.pending.values()) reject(err);
-		this.pending.clear();
-	}
-
-	_write(obj) {
-		const json = JSON.stringify(obj);
-		const header = `Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n`;
-		this.proc.stdin.write(header + json);
-	}
-
-	request(method, params) {
-		const id = this.nextId++;
-		return new Promise((resolve, reject) => {
-			this.pending.set(id, { resolve, reject });
-			this._write({ jsonrpc: "2.0", id, method, params });
-		});
-	}
-
-	notify(method, params) {
-		this._write({ jsonrpc: "2.0", method, params });
-	}
-}
-
 function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isEmptyResult(method, result) {
-	if (result === null || result === undefined) return true;
-	if (method === "textDocument/hover") {
-		const value = result.contents?.value ?? result.contents;
-		return !value || (typeof value === "string" && value.trim() === "");
-	}
-	if (Array.isArray(result)) return result.length === 0;
-	return false; // a single Location object from textDocument/definition, etc.
-}
-
-/** Poll `method` with `params` until non-empty or `timeoutMs` elapses. */
-async function pollQuery(client, method, params, timeoutMs) {
-	const start = Date.now();
-	let last;
-	for (;;) {
-		last = await client.request(method, params);
-		if (!isEmptyResult(method, last)) return last;
-		if (Date.now() - start >= timeoutMs) {
-			fail(
-				`timed out after ${timeoutMs}ms waiting for a non-empty ${method} result ` +
-					`(the TS project may still be loading, or the query point is invalid)`,
-			);
-		}
-		await sleep(1000);
-	}
-}
-
-const SYMBOL_KIND_NAMES = [
-	"", "File", "Module", "Namespace", "Package", "Class", "Method", "Property", "Field",
-	"Constructor", "Enum", "Interface", "Function", "Variable", "Constant", "String",
-	"Number", "Boolean", "Array", "Object", "Key", "Null", "EnumMember", "Struct",
-	"Event", "Operator", "TypeParameter",
-];
-
-function symbolKindName(kind) {
-	return SYMBOL_KIND_NAMES[kind] || `Unknown(${kind})`;
-}
-
-/** Flatten a DocumentSymbol tree (or a flat SymbolInformation[] list) to {name, kind, line}. */
-function flattenSymbols(result) {
-	const out = [];
-	const visit = (sym) => {
-		const line = (sym.range ?? sym.location?.range)?.start.line;
-		out.push({ name: sym.name, kind: symbolKindName(sym.kind), line: line + 1 });
-		for (const child of sym.children ?? []) visit(child);
-	};
-	for (const sym of result ?? []) visit(sym);
-	return out;
-}
-
-function uriToPath(uri) {
-	try {
-		return new URL(uri).pathname;
-	} catch {
-		return uri;
-	}
-}
-
-function formatLocation(loc) {
-	const uri = loc.uri ?? loc.targetUri;
-	const range = loc.range ?? loc.targetRange;
-	return { file: uriToPath(uri), line: range.start.line + 1, col: range.start.character + 1 };
-}
-
-function formatLocationWithWorkspace(loc, workspaceRoot) {
-	const formatted = formatLocation(loc);
-	const rel = path.relative(workspaceRoot, formatted.file);
-	return {
-		...formatted,
-		relativeFile: rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : formatted.file,
-	};
-}
-
-function formatWorkspaceSymbol(sym, workspaceRoot) {
-	const loc = formatLocationWithWorkspace(sym.location, workspaceRoot);
-	return {
-		name: sym.name,
-		kind: symbolKindName(sym.kind),
-		...loc,
-	};
 }
 
 async function main() {
@@ -266,6 +143,11 @@ async function main() {
 		}
 	}
 
+	// Only loaded once we know a real query is about to run — see
+	// loadClientModule()'s doc comment for why this isn't a top-level import.
+	const { LspClient, buildInitializeParams, languageIdFor, pollQuery, flattenSymbols, formatLocation, formatLocationWithWorkspace, formatWorkspaceSymbol } =
+		await loadClientModule();
+
 	const workspaceRoot = gitToplevel(filePath);
 	const fileUri = pathToFileURL(filePath).toString();
 	const rootUri = pathToFileURL(workspaceRoot).toString();
@@ -287,20 +169,7 @@ async function main() {
 	proc.on("error", (err) => fail(`failed to spawn typescript-language-server: ${err.message}`));
 
 	try {
-		await client.request("initialize", {
-			processId: process.pid,
-			rootUri,
-			rootPath: workspaceRoot,
-			capabilities: {
-				textDocument: {
-					documentSymbol: { hierarchicalDocumentSymbolSupport: true },
-					hover: { contentFormat: ["markdown", "plaintext"] },
-				},
-			},
-			// Critical: without this, a partialSemantic sidecar answers requests
-			// with single-file results while the full project is still loading.
-			initializationOptions: { tsserver: { useSyntaxServer: "never" } },
-		});
+		await client.request("initialize", buildInitializeParams({ processId: process.pid, rootUri, rootPath: workspaceRoot }));
 		client.notify("initialized", {});
 
 		const text = readFileSync(filePath, "utf8");

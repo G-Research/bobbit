@@ -171,11 +171,13 @@ import {
 	evaluateDocGateSkip,
 	isDocGateFilterEnabled,
 	type DocGateSkipDecision,
+	DEFAULT_VERIFICATION_POLICY,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { SwarmGovernor } from "./swarm-governor.js";
+import type { TurnBudgetGovernor } from "./session-manager-consumer-types.js";
 import { verifyBestOfNGroup } from "./swarm-verifier.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
@@ -1516,6 +1518,25 @@ export class VerificationHarness {
 	readonly swarmGovernor = new SwarmGovernor();
 
 	/**
+	 * S3 (extension-seam audit, P1) — the narrow `TurnBudgetGovernor` seam
+	 * `SessionManager.trackCostFromEvent`'s hot path calls through, instead of
+	 * reaching `swarmGovernor.checkTokenBudget`/`hardKillSwarmNode` directly.
+	 * Adapts this harness's own `swarmGovernor` + `hardKillSwarmNode` to the
+	 * interface; this is the sole production implementation. `hardKill` always
+	 * stamps `killReason: "governor-budget"` — the wall-clock straggler path
+	 * (`swarm-best-of-n.ts`'s `registerNode` `onStraggler` callback) hard-kills
+	 * via `hardKillSwarmNode` directly with `"governor-wallclock"`, unrelated
+	 * to this seam. Built once here (not per message) so the hot path's
+	 * `this._verificationHarness?.turnBudgetGovernor` is a plain property read
+	 * — zero added allocations per message, same cost as the pre-seam
+	 * `.swarmGovernor` property read it replaces.
+	 */
+	readonly turnBudgetGovernor: TurnBudgetGovernor = {
+		check: (goalId, totalTokens) => this.swarmGovernor.checkTokenBudget(goalId, totalTokens),
+		hardKill: (goalId, reason) => this.hardKillSwarmNode(goalId, reason, { killReason: "governor-budget" }),
+	};
+
+	/**
 	 * SWARM-W1 — hard-kill a swarm sibling that breached its token-budget
 	 * hard-kill margin OR its straggler wall-clock deadline. Terminates the
 	 * sibling's team-lead session (reusing `SessionManager.terminateSession`'s
@@ -2769,6 +2790,21 @@ export class VerificationHarness {
 		return this.projectConfigStore;
 	}
 
+	/**
+	 * Resolve the effective `VerificationPolicy` for a goal via the
+	 * builtin -> server -> project `ConfigCascade` (S8 seam, V0 — see
+	 * docs/design/verification-policy-seam.md §2). Falls back to
+	 * `DEFAULT_VERIFICATION_POLICY` (byte-identical to today's hardcoded
+	 * values) when no cascade is wired — e.g. most unit tests construct
+	 * `VerificationHarness` without a `configCascade` argument, same as they
+	 * already do for `projectConfigStore`/`roleStore` fallbacks above.
+	 */
+	private resolveVerificationPolicyForGoal(goalId: string): import("./verification-logic.js").VerificationPolicy {
+		if (!this.configCascade) return DEFAULT_VERIFICATION_POLICY;
+		const projectId = this.projectContextManager?.getContextForGoal(goalId)?.project?.id;
+		return this.configCascade.resolveVerificationPolicy(projectId);
+	}
+
 	private resolveConfiguredBaseBranch(goalId: string): string | undefined {
 		const configured = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
 		const parsed = parseBaseRef(configured);
@@ -3549,7 +3585,16 @@ export class VerificationHarness {
 			// SHA (VER-01: the exact-SHA-only cache invalidates the whole gate suite on
 			// every Ralph-loop fix commit). See docs/design/gate-step-cache.md.
 			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-			const gateCacheMode = resolveGateCacheMode(process.env.BOBBIT_GATE_CACHE);
+			// BOBBIT_GATE_CACHE, when present (any value, including a typo — see
+			// resolveGateCacheMode's own fail-closed contract), is the
+			// highest-precedence override; when absent, the cascade-resolved
+			// VerificationPolicy's gateCacheDefault governs (S8 seam, V0 — see
+			// docs/design/verification-policy-seam.md §2/§6). With no
+			// project/server verification-policy.yaml present, that default is
+			// "sha" — byte-identical to today's hardcoded fallback.
+			const gateCacheMode = process.env.BOBBIT_GATE_CACHE !== undefined
+				? resolveGateCacheMode(process.env.BOBBIT_GATE_CACHE)
+				: this.resolveVerificationPolicyForGoal(signal.goalId).gateCacheDefault;
 			let cachedSteps: Map<string, GateSignalStep>;
 			let cacheDecisions: ContentCacheDecision[];
 			if (gateCacheMode === "content") {
@@ -4181,8 +4226,18 @@ export class VerificationHarness {
 			// and early-starting reviewers just recreates the measured waste
 			// case (discarded reviewer spawns, ~4.4K prompt tokens per failed
 			// gate run for a 3-reviewer phase). See isRetryAfterCommandFailure.
-			const parallelReviewsFlag = isParallelReviewsEnabled(process.env.BOBBIT_PARALLEL_REVIEWS)
-				&& !isRetryAfterCommandFailure(gateState?.signals ?? [], signal.id);
+			// BOBBIT_PARALLEL_REVIEWS, when present, is the highest-precedence
+			// override (any value including "" — only the literal "0" disables,
+			// per isParallelReviewsEnabled); when absent, the cascade-resolved
+			// VerificationPolicy's parallelReviewsDefault governs (S8 seam, V0 —
+			// see docs/design/verification-policy-seam.md §2/§6). With no
+			// project/server verification-policy.yaml present, that default is
+			// `true` — byte-identical to today's hardcoded default-ON fallback.
+			const parallelReviewsFlag = (
+				process.env.BOBBIT_PARALLEL_REVIEWS !== undefined
+					? isParallelReviewsEnabled(process.env.BOBBIT_PARALLEL_REVIEWS)
+					: this.resolveVerificationPolicyForGoal(signal.goalId).parallelReviewsDefault
+			) && !isRetryAfterCommandFailure(gateState?.signals ?? [], signal.id);
 			const earlyReviewPhases = parallelReviewsFlag
 				? computeEarlyReviewPhases(sortedPhases, phaseGroups)
 				: new Set<number>();

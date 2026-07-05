@@ -138,13 +138,17 @@ describe("source pin: restore / respawn / force-abort-respawn route through the 
 		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
 		"utf-8",
 	);
+	const reviveSrc = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-revive.ts"),
+		"utf-8",
+	);
 
 	it("restoreSession falls back to this.resolveInitialModel/resolveInitialThinkingLevel(ps.role, ps.projectId)", () => {
-		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
+		const idx = reviveSrc.indexOf("async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
-		const window = src.slice(idx, idx + 15_000);
-		assert.match(window, /this\.resolveInitialModel\(ps\.role, ps\.projectId\)/);
-		assert.match(window, /this\.resolveInitialThinkingLevel\(ps\.role, ps\.projectId\)/);
+		const window = reviveSrc.slice(idx, idx + 15_000);
+		assert.match(window, /this\.deps\.host\.resolveInitialModel\(ps\.role, ps\.projectId\)/);
+		assert.match(window, /this\.deps\.host\.resolveInitialThinkingLevel\(ps\.role, ps\.projectId\)/);
 	});
 
 	it("assignRole (role-reassignment respawn) falls back to this.resolveInitialModel/resolveInitialThinkingLevel(role.name, session.projectId)", () => {

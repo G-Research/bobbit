@@ -138,14 +138,13 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 		// SWARM-W4.1: opt-in early-kill (design/swarm-orchestration-w4.md §1.3)
 		// — defaults false, byte-identical to pre-W4.1 behavior when omitted.
 		const earlyKill = body.earlyKill === true;
-		// SWARM-W4.2 — goal-create decision seam HARNESS consult (see
+		// SWARM-W4.3 — goal-create swarm-topology classifier consult (see
 		// swarm-topology-classifier.ts's header + design/swarm-orchestration-w4.md
-		// §3.3 step 1). `server.ts` only allow-lists (goal-create,
-		// swarm-topology) and registers NO classifier, so this always abstains
-		// in production today — recorded via `dispatchDecision`'s own
-		// trace/transparency-panel wiring only. The topology created below is
-		// UNCONDITIONALLY the caller-supplied best-of-N shape regardless of
-		// this decision's outcome — nothing here reads or branches on it.
+		// §3.3 step 2). `server.ts` registers the built-in observe-only rule
+		// table, recorded via `dispatchDecision`'s own trace/transparency-panel
+		// wiring. The topology created below is UNCONDITIONALLY the
+		// caller-supplied best-of-N shape regardless of this decision's outcome
+		// — nothing here reads or branches on it.
 		await consultSwarmTopologyHub(deps, req, { goalId: parentId, spec, hasVerifyCommand: true, requestedFanOut: n }, resolveCandidateCwd(parent));
 		try {
 			const result = await createBestOfNSwarm(
@@ -541,11 +540,10 @@ function firstHeader(req: http.IncomingMessage, name: string): string | undefine
 }
 
 /**
- * SWARM-W4.2 — consult the swarm-topology decision seam (harness only, see
- * `swarm-topology-classifier.ts`) for a best-of-N creation. Never throws and
- * never returns anything the caller reads — the whole point this wave is a
- * pure, discarded telemetry consult recorded via `dispatchDecision`'s own
- * trace/transparency-panel wiring. Fail-open, mirroring
+ * SWARM-W4.3 — consult the swarm-topology decision classifier for a best-of-N
+ * creation. Never throws and never returns anything the caller reads — the
+ * whole point this wave is a pure, discarded telemetry consult recorded via
+ * `dispatchDecision`'s own trace/transparency-panel wiring. Fail-open, mirroring
  * `SessionManager.consultToolApproveHub`'s discipline exactly: no hub, an
  * unregistered (point,kind) pair, or the classifier itself erroring must
  * NEVER block or slow swarm creation.

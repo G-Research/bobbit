@@ -80,10 +80,10 @@ test.describe("Settings → Remove Project (first normal position)", () => {
 			await expect(removeBtn).toBeVisible({ timeout: 10_000 });
 			await expect(removeBtn).toBeEnabled();
 
-			// Stub window.confirm so the click proceeds.
-			await page.evaluate(() => { (window as any).confirm = () => true; });
-
 			// Watch for any error dialogs that would indicate a failed delete.
+			// (Unrelated to the confirm-action dialog below — this only fires
+			// for genuine native alert()/confirm() calls, and Remove Project no
+			// longer uses either.)
 			const errorDialogs: string[] = [];
 			page.on("dialog", async d => {
 				if (d.type() === "alert") errorDialogs.push(d.message());
@@ -91,6 +91,12 @@ test.describe("Settings → Remove Project (first normal position)", () => {
 			});
 
 			await removeBtn.click();
+
+			// UX audit finding 1: Remove Project now opens the app's hardened
+			// confirmAction dialog instead of native confirm() — confirm via its
+			// stable class (dialogs.ts), not window.confirm stubbing.
+			await expect(page.locator(".confirm-action-confirm-btn")).toBeVisible({ timeout: 5_000 });
+			await page.locator(".confirm-action-confirm-btn").click();
 
 			// The settings flow navigates away from the deleted project.
 			await expect(page).toHaveURL(/#.*settings.*system/, { timeout: 5_000 });

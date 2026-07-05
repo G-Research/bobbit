@@ -179,11 +179,12 @@ export class ProjectRegistry {
   }
 
   private participatesInVisibleOrder(project: RegisteredProject): boolean {
-    return this.isVisibleListProject(project) && !isHeadquartersProject(project);
+    // Headquarters is a first-class, user-reorderable project like any other
+    // visible project; only hidden/system anchors are excluded.
+    return this.isVisibleListProject(project);
   }
 
   private listSortCategory(project: RegisteredProject): number {
-    if (this.isVisibleListProject(project) && isHeadquartersProject(project)) return 0;
     if (this.participatesInVisibleOrder(project)) return 1;
     return 2;
   }
@@ -420,7 +421,17 @@ export class ProjectRegistry {
       .map(entry => entry.project);
   }
 
-  setVisibleOrder(projectIds: string[]): RegisteredProject[] {
+  /**
+   * Persist a user-controlled ordering of the visible projects.
+   *
+   * `options.excludeIds` lists participating projects that are NOT part of the
+   * caller's reorder scope (e.g. Headquarters when it is hidden from project
+   * lists via preference). Excluded projects are not expected in the payload
+   * and keep their current slot; the received ids fill the remaining slots in
+   * the given order. This keeps strict staleness detection for the ids the
+   * caller actually controls.
+   */
+  setVisibleOrder(projectIds: string[], options?: { excludeIds?: readonly string[] }): RegisteredProject[] {
     if (!Array.isArray(projectIds) || projectIds.some(id => typeof id !== "string")) {
       throw new ProjectOrderError("invalid_project_order", "projectIds must be an array of strings");
     }
@@ -433,14 +444,16 @@ export class ProjectRegistry {
       seen.add(id);
     }
 
-    const expectedProjectIds = this.list()
-      .filter(project => this.participatesInVisibleOrder(project))
+    const excluded = new Set(options?.excludeIds ?? []);
+    const participating = this.list().filter(project => this.participatesInVisibleOrder(project));
+    const expectedProjectIds = participating
+      .filter(project => !excluded.has(project.id))
       .map(project => project.id);
     const receivedProjectIds = [...projectIds];
 
     for (const id of receivedProjectIds) {
       const project = this.projects.get(id);
-      if (!project || !this.participatesInVisibleOrder(project)) {
+      if (!project || !this.participatesInVisibleOrder(project) || excluded.has(id)) {
         throw new ProjectOrderError("invalid_project_order", `Invalid project id in order: ${id}`);
       }
     }
@@ -453,7 +466,13 @@ export class ProjectRegistry {
       });
     }
 
-    receivedProjectIds.forEach((id, position) => {
+    // Rebuild the full participating order: excluded projects keep their slot,
+    // received ids fill the remaining slots in their new order.
+    const receivedQueue = [...receivedProjectIds];
+    const finalOrder = participating.map(project =>
+      excluded.has(project.id) ? project.id : receivedQueue.shift()!,
+    );
+    finalOrder.forEach((id, position) => {
       const project = this.projects.get(id)!;
       project.position = position;
     });
@@ -778,6 +797,10 @@ export class ProjectRegistry {
         kind: "headquarters",
         colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
         colorDark: DEFAULT_PROJECT_COLOR_DARK,
+        // Headquarters is a normal, user-reorderable project: a freshly
+        // registered one appends to the end of the visible order just like any
+        // other new project. Its position persists and can be changed by drag.
+        position: this.nextVisiblePosition(),
       };
     }
 
@@ -789,7 +812,8 @@ export class ProjectRegistry {
     // parentProjectId cleanup below.
     delete project.hidden;
     delete project.provisional;
-    delete project.position;
+    // Headquarters participates in user-controlled ordering; preserve any saved
+    // position and let normalizeVisiblePositions() assign one when missing.
     delete project.parentProjectId;
     project.colorLight = project.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
     project.colorDark = project.colorDark || DEFAULT_PROJECT_COLOR_DARK;

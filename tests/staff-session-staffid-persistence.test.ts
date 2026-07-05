@@ -314,9 +314,9 @@ describe("staff session staffId backfill migration", () => {
 // (persistOnce payload) so a future refactor that drops either line fails
 // loudly.
 describe("staff session staffId persistence source guards", () => {
-	it("session-manager.ts contains the BOBBIT_STAFF_ID env wiring in restoreSession", () => {
+	it("session-revive.ts contains the BOBBIT_STAFF_ID env wiring in restoreSession", () => {
 		const src = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+			path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 			"utf-8",
 		);
 		assert.ok(

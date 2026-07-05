@@ -312,7 +312,11 @@ test.describe("Headquarters browser UX", () => {
 		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
 			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
 		);
-		expect(headerIds.slice(0, 2), "Headquarters should be first and same-root normal project second").toEqual([HEADQUARTERS_PROJECT_ID, sameRootProject.id]);
+		// Headquarters is a normal reorderable project (no longer anchored first),
+		// so a project that was registered before it — here the same-root startup
+		// project seeded ahead of Headquarters — sorts ahead of it by default.
+		expect(new Set(headerIds.slice(0, 2)), "both Headquarters and the same-root project appear at the top").toEqual(new Set([HEADQUARTERS_PROJECT_ID, sameRootProject.id]));
+		expect(headerIds.indexOf(sameRootProject.id), "same-root project registered before Headquarters sorts ahead of it").toBeLessThan(headerIds.indexOf(HEADQUARTERS_PROJECT_ID));
 		await expect(headquartersIcon(hqHeader), "Headquarters row should use TowerControl").toBeVisible({ timeout: 10_000 });
 		await expect(normalProjectIcon(sameRootHeader), "same-root normal project should keep folder identity").toBeVisible({ timeout: 10_000 });
 		await expect(headquartersIcon(sameRootHeader), "same-root normal project must not use TowerControl").toHaveCount(0);
@@ -323,10 +327,12 @@ test.describe("Headquarters browser UX", () => {
 		const picker = page.locator('[data-testid="splash-project-picker"]').first();
 		await expect(picker).toBeVisible({ timeout: 10_000 });
 		const rows = picker.locator('[data-testid="splash-project-picker-item"]');
-		await expect(rows.first()).toContainText(HEADQUARTERS_NAME);
-		await expect(headquartersIcon(rows.first()), "picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
-		await expect(rows.nth(1)).toContainText(sameRootProject.name);
-		await expect(normalProjectIcon(rows.nth(1)), "picker should use folder identity for same-root normal project").toBeVisible({ timeout: 10_000 });
+		const hqRow = rows.filter({ hasText: HEADQUARTERS_NAME }).first();
+		const sameRootRow = rows.filter({ hasText: sameRootProject.name }).first();
+		await expect(hqRow, "picker should list Headquarters").toBeVisible({ timeout: 10_000 });
+		await expect(headquartersIcon(hqRow), "picker should use TowerControl for Headquarters").toBeVisible({ timeout: 10_000 });
+		await expect(sameRootRow, "picker should list the same-root normal project").toBeVisible({ timeout: 10_000 });
+		await expect(normalProjectIcon(sameRootRow), "picker should use folder identity for same-root normal project").toBeVisible({ timeout: 10_000 });
 		await page.keyboard.press("Escape");
 
 		const hqSession = await createSessionViaSplashPicker(page, HEADQUARTERS_NAME);

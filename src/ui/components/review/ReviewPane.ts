@@ -210,12 +210,21 @@ export class ReviewPane extends LitElement {
     }
   }
 
-  private _closeTab(title: string, e: Event): void {
+  private async _closeTab(title: string, e: Event): Promise<void> {
     e.stopPropagation();
     const count = this._unsentCommentCountForDocument(title);
     const displayTitle = this._displayTitle(title);
     if (count > 0) {
-      if (!confirm(`Close "${displayTitle}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+      // UX audit finding 1: native confirm() -> hardened confirmAction
+      // (unsent-comment data loss on close — safe-default-Cancel matters here).
+      const { confirmAction } = await import("../../../app/dialogs-lazy.js");
+      const confirmed = await confirmAction(
+        `Close "${displayTitle}"?`,
+        `${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`,
+        "Close",
+        true,
+      );
+      if (!confirmed) return;
     }
     this._deleteFinalComment(title);
     this.dispatchEvent(
@@ -227,10 +236,18 @@ export class ReviewPane extends LitElement {
     );
   }
 
-  private _dismiss(): void {
+  private async _dismiss(): Promise<void> {
     const totalCount = this._totalUnsentCommentCount();
     if (totalCount > 0) {
-      if (!confirm(`Dismiss review? ${totalCount} unsent comment${totalCount !== 1 ? "s" : ""} will be lost.`)) return;
+      // UX audit finding 1: native confirm() -> hardened confirmAction.
+      const { confirmAction } = await import("../../../app/dialogs-lazy.js");
+      const confirmed = await confirmAction(
+        "Dismiss review?",
+        `${totalCount} unsent comment${totalCount !== 1 ? "s" : ""} will be lost.`,
+        "Dismiss",
+        true,
+      );
+      if (!confirmed) return;
     }
     this._finalCommentsByTitle = new Map();
     this.dispatchEvent(

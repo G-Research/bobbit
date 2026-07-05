@@ -1,5 +1,5 @@
-// SWARM-W4.2: `tryHandleSwarmRoute`'s best-of-N creation wiring for the
-// swarm-topology decision seam (harness only, see
+// SWARM-W4.3: `tryHandleSwarmRoute`'s best-of-N creation wiring for the
+// swarm-topology decision seam/classifier (observe-only, see
 // src/server/agent/swarm-topology-classifier.ts's header for the full
 // design/scope).
 //
@@ -8,8 +8,8 @@
 //      or a throwing classifier must never block or slow swarm creation —
 //      the best-of-N swarm is still created and the REST response is
 //      unaffected in every case.
-//   2. OBSERVE-ONLY, zero classifiers registered: a `select` decision from a
-//      test classifier is recorded via `dispatchDecision`'s own trace, but
+//   2. OBSERVE-ONLY: a `select` decision from either a test classifier or the
+//      real built-in classifier is recorded via `dispatchDecision`'s own trace, but
 //      NEVER changes which topology gets created (`createBestOfNSwarm` runs
 //      exactly as it always has — there is no branch on the decision at
 //      all this wave).
@@ -31,7 +31,7 @@ import { SwarmGroupStore } from "../src/server/agent/swarm-group-store.ts";
 import { SwarmGovernor } from "../src/server/agent/swarm-governor.ts";
 import { LifecycleHub } from "../src/server/agent/lifecycle-hub.ts";
 import { ContextTraceStore } from "../src/server/agent/context-trace-store.ts";
-import { SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND } from "../src/server/agent/swarm-topology-classifier.ts";
+import { SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND, registerSwarmTopologyClassifier } from "../src/server/agent/swarm-topology-classifier.ts";
 import { tryHandleSwarmRoute } from "../src/server/agent/swarm-routes.ts";
 
 let tmpRoot: string;
@@ -117,7 +117,7 @@ function makeReq(): any {
 
 const BASE_BODY = { spec: "Reproduce and fix the reported bug.", n: 2, verifyCommand: "npm test" };
 
-describe("tryHandleSwarmRoute — swarm-topology decision seam (SWARM-W4.2)", () => {
+describe("tryHandleSwarmRoute — swarm-topology decision seam/classifier (SWARM-W4.3)", () => {
 	it("creates the swarm normally when no lifecycleHub is attached at all (fail-open)", async () => {
 		const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
 		const { deps, jsonCalls, jsonErrorCalls, setBody } = makeDeps();
@@ -182,6 +182,32 @@ describe("tryHandleSwarmRoute — swarm-topology decision seam (SWARM-W4.2)", ()
 		const ring = hub.getDecisionTrace();
 		assert.equal(ring.length, 1);
 		assert.deepEqual(ring[0].decision, { kind: "select", choice: { topology: "solo" }, rationale: "would have picked solo" });
+	});
+
+	it("records the real built-in best-of-N select but still uses the caller-supplied route options", async () => {
+		const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
+		const hub = makeHub();
+		registerSwarmTopologyClassifier(hub);
+		const { deps, jsonCalls, setBody } = makeDeps({ hub });
+		setBody({ ...BASE_BODY, n: 3, earlyKill: true });
+		const url = new URL(`http://localhost/api/goals/${parent.id}/swarm/best-of-n`);
+		await tryHandleSwarmRoute(makeReq(), url, deps);
+
+		assert.equal(jsonCalls.length, 1);
+		const body = jsonCalls[0].body as any;
+		assert.equal(body.siblingGoalIds.length, 3);
+		const group = swarmGroupStore.get(body.swarmGroup);
+		assert.equal(group?.config.earlyKill, true, "route must keep the caller-supplied earlyKill:true even though the classifier's observe-only choice says earlyKill:false");
+
+		const ring = hub.getDecisionTrace();
+		assert.equal(ring.length, 1);
+		assert.equal(ring[0].consulted.length, 1);
+		assert.deepEqual(ring[0].decision, {
+			kind: "select",
+			choice: { topology: "best-of-n", fanOut: 3, earlyKill: false },
+			confidence: 1,
+			rationale: "matched deterministic rule 'best-of-n-with-verifier': caller already wants fan-out and a deterministic verifier exists",
+		});
 	});
 
 	it("is fail-open when the registered classifier itself throws", async () => {
