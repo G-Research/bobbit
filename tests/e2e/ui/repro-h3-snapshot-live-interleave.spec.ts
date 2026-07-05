@@ -256,13 +256,56 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				await yieldToClient(page);
 			}
 
-			// Now wait for every prompt to settle.
-			await page.waitForFunction(
-				() => (window as any).__bobbitState.remoteAgent.state.isStreaming === false,
-				undefined,
-				{ timeout: 60_000 },
-			).catch(() => {});
-			// Final resync to make sure server view is reflected.
+			// Wait for the actual expected condition (cumulative OK-row count),
+			// not a single-shot `isStreaming === false` read. The server's
+			// queue drain intentionally broadcasts `session_status: idle`
+			// (session-manager.ts `handleAgentLifecycle` agent_end) BEFORE
+			// `drainQueue()` re-marks the session streaming for the next queued
+			// item (`markPromptDispatchStreaming`) — so `isStreaming` legitimately
+			// pulses false between each of the N sequentially-drained prompts.
+			// A single `waitForFunction(isStreaming === false)` can resolve on
+			// one of those transient inter-item blips, well before all N replies
+			// have landed, and an immediate one-shot count right after reads a
+			// partial state (this is the exact anti-pattern called out in
+			// docs/testing-strategy.md: "poll exact counts ... rather than
+			// reading a count once right after an async mutation"). (C) and (D)
+			// already avoid this by polling the real expected condition; bring
+			// (B) in line with them.
+			const expectedAfter = before + N;
+			try {
+				await page.waitForFunction(
+					(expected) => {
+						const ra = (window as any).__bobbitState?.remoteAgent;
+						if (!ra) return false;
+						const msgs = ra._state.messages as any[];
+						let n = 0;
+						for (const m of msgs) {
+							if (m.role !== "assistant") continue;
+							let text = "";
+							if (typeof m.content === "string") text = m.content;
+							else if (Array.isArray(m.content)) {
+								text = m.content
+									.filter((c: any) => c?.type === "text")
+									.map((c: any) => c.text || "")
+									.join(" ");
+							}
+							if (/(^|\s)OK(\s|$)/.test(text.trim())) n++;
+						}
+						return n >= expected;
+					},
+					expectedAfter,
+					{ timeout: 60_000 },
+				);
+			} catch (e) {
+				failures.push(
+					`outer ${outer}: OK-row count never reached ${expectedAfter} within timeout (${(e as Error).message})`,
+				);
+				continue;
+			}
+
+			// Final resync to make sure server view is reflected, then re-count
+			// exactly — this still catches genuine duplication (surplus rows),
+			// since the poll above only guarantees "at least", not "exactly".
 			await requestMessagesAndWaitForSnapshot(page);
 
 			const after = await countOkRows(page);

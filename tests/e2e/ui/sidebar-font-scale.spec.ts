@@ -68,6 +68,19 @@ async function readScale(page: Page): Promise<number> {
 
 async function waitForScale(page: Page, expected: number, precision = 2): Promise<void> {
 	await expect.poll(() => readScale(page), { timeout: 5_000 }).toBeCloseTo(expected, precision);
+	// The CSS var polled above is set synchronously inside the app's change
+	// handler (applySidebarFontScaleVar), but the <input>'s own DOM value is
+	// only reconciled (via lit's `live()` directive) when the coalesced
+	// `renderApp()` (state.ts) fires — throttled to a single, later
+	// `requestAnimationFrame`. Without waiting for that frame here, a
+	// still-pending render from THIS step can fire after a later step's
+	// `.fill()` already wrote a newer raw value directly to the input
+	// (bypassing lit's tracking), silently reverting it back to the earlier
+	// state. Confirmed via console tracing: the pending render's `live()`
+	// re-assertion stomped a same-frame `.fill("1")` back to the prior "32".
+	// Waiting one frame here — after every state-changing action in this
+	// test — ensures the DOM has fully settled before the next interaction.
+	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 }
 
 async function persistedScale(page: Page): Promise<number> {

@@ -69,6 +69,27 @@ async function openSession(page: Page, sessionId: string): Promise<Locator> {
 	return row;
 }
 
+function goalRow(page: Page, goalId: string): Locator {
+	return page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+}
+
+/**
+ * Goals default to collapsed in the sidebar (persisted via the
+ * `bobbit-expanded-goals` localStorage key), so a team lead session nested
+ * under a freshly-created goal has no rendered `[data-session-id]` row until
+ * the goal is explicitly expanded — deep-linking to the session shows it in
+ * the main pane but does NOT auto-expand its ancestor in the sidebar tree.
+ * Mirrors the pattern already used by sidebar-actions-menu.spec.ts.
+ */
+async function ensureGoalExpanded(page: Page, goalId: string): Promise<void> {
+	const row = goalRow(page, goalId);
+	await expect(row).toBeVisible({ timeout: 10_000 });
+	await page.evaluate((id) => {
+		(window as any).__bobbitExpandedGoals?.add(id);
+		(window as any).__bobbitRenderApp?.();
+	}, goalId);
+}
+
 async function openSidebarActions(page: Page, sessionId: string): Promise<void> {
 	const row = sessionRow(page, sessionId);
 	await expect(row).toBeVisible({ timeout: 10_000 });
@@ -333,7 +354,11 @@ test.describe("unified session actions", () => {
 		teamsToTeardown.add(goal.id as string);
 		sessionsToDelete.add(teamLeadId);
 		await waitForSessionStatus(teamLeadId, "idle", 30_000);
-		await openSession(page, teamLeadId);
+		await openSessionView(page, teamLeadId);
+		// The team lead session is nested under `goal`, which the sidebar
+		// renders collapsed by default — expand it so the session's row exists.
+		await ensureGoalExpanded(page, goal.id as string);
+		await expect(sessionRow(page, teamLeadId)).toBeVisible({ timeout: 10_000 });
 
 		expect(await actionLabel(page, "terminate")).toContain("End team");
 		const teamHeaderIds = await headerActionIds(page);
