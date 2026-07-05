@@ -43,6 +43,17 @@ export interface SwarmArtifact {
 	commitSha?: string;
 	/** Terminal status that triggered capture. */
 	status: SwarmTerminalStatus;
+	/**
+	 * SWARM-W4.1: WHY a `"killed"` artifact was killed, when known — purely
+	 * informational (never read by any reconciler/barrier logic). Absent for
+	 * an operator-initiated archive/kill (today's only other `"killed"`
+	 * source) and for every non-`"killed"` status. `"superseded"` is the
+	 * early-kill case: a sibling still in flight when another candidate
+	 * already verified `passed: true` — see `swarm-verifier.ts` /
+	 * `docs/design/swarm-orchestration-w4.md` §1.3. Lets the UI say "killed
+	 * (superseded)" instead of implying a budget/timeout failure.
+	 */
+	killReason?: "governor-budget" | "governor-wallclock" | "superseded";
 	/** Placeholder — no reconciler/verifier exists yet (SWARM-W1+). */
 	verifierScore: null;
 	/** Epoch ms when this artifact was captured. */

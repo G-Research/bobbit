@@ -62,6 +62,23 @@ export interface BestOfNSwarmOptions {
 	wallClockMsPerNode: number;
 	/** Deterministic verifier command (test/tool/grep — NEVER an LLM), run in each candidate's worktree once the barrier fires. Stored on the group record for `swarm-verifier.ts` to read later. */
 	verifyCommand: string;
+	/**
+	 * SWARM-W4.1 (design/swarm-orchestration-w4.md §1.3) — opt-in early-kill:
+	 * the instant one sibling goes terminal `"done"`, run `verifyCommand`
+	 * against JUST that candidate; on a pass, hard-kill every still-running
+	 * sibling rather than let them run to completion for nothing. Strictly
+	 * dominant over plain best-of-N on cost, identical on pick quality and
+	 * wall-clock (§1.3's "no real when-to-choose tradeoff" framing).
+	 *
+	 * Default `false` — the design doc argues this should eventually become
+	 * the unconditional default (no opt-in) once it has real mileage; this
+	 * wave keeps it caller-opt-in as the conservative choice, since flipping
+	 * the default here would change behavior for every existing best-of-N
+	 * caller (including the pinned `api-swarm-best-of-n.spec.ts` /
+	 * `api-swarm-restart-resume.spec.ts` flows) with no prior production
+	 * signal on the early-kill path itself. See the PR's "Judgment calls".
+	 */
+	earlyKill?: boolean;
 }
 
 export interface BestOfNSwarmResult {
@@ -84,7 +101,7 @@ export interface BestOfNSwarmDeps {
  * other child-spawn path uses.
  */
 export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSwarmOptions): Promise<BestOfNSwarmResult> {
-	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand } = opts;
+	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand, earlyKill } = opts;
 	if (!Array.isArray(siblings) || siblings.length < 2) {
 		throw new Error("createBestOfNSwarm requires at least 2 siblings (N>=2) — one candidate is `solo`, not best-of-N");
 	}
@@ -147,6 +164,7 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 		hardKillMarginMultiplier,
 		wallClockMsPerNode,
 		verifyCommand,
+		earlyKill: earlyKill === true,
 	});
 
 	// Route the start through the SAME per-root scheduler every other
@@ -172,7 +190,7 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 				goalId,
 				{ tokenBudget: tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMs: wallClockMsPerNode },
 				(reason) => {
-					deps.harness.hardKillSwarmNode(goalId, reason)
+					deps.harness.hardKillSwarmNode(goalId, reason, { killReason: "governor-wallclock" })
 						.catch((err) => console.warn(`[swarm-best-of-n] straggler hard-kill failed for ${goalId} (non-fatal):`, err));
 				},
 			);

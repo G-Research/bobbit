@@ -50,17 +50,31 @@ const SCORE_LINE_RE = /^\s*SCORE:\s*(-?\d+(?:\.\d+)?)\s*$/m;
  * Returns `not-ready` (barrier hasn't fired yet) or `all-failed` (barrier
  * fired but the group's `allFailed` flag is set — SWARM-W0's escalate-only
  * contract) WITHOUT running any command in either case.
+ *
+ * SWARM-W4.1 (design/swarm-orchestration-w4.md §1.3): `opts.onlyGoalId` scopes
+ * verification to exactly ONE `done` candidate and bypasses the barrier/
+ * all-failed gates above — this is what lets an early-kill trigger verify a
+ * single sibling the instant it lands, without waiting for every other
+ * sibling to also go terminal. It is a purely ADDITIVE opt-in: omitted (the
+ * only way the REST `/verify` route ever calls this today), behavior is
+ * byte-identical to before this wave. `onlyGoalId` is for the internal
+ * early-kill signal ONLY — it is never wired to the REST `/verify` endpoint,
+ * never persisted via `SwarmGroupStore.recordVerifyResult`, and never mints
+ * an operator-confirmation token; the human-gated pick-a-winner verify
+ * remains exactly the unmodified full-barrier call it always was.
  */
 export async function verifyBestOfNGroup(
 	group: SwarmGroupRecord,
 	resolveCwd: (goalId: string) => string | undefined,
 	verifyCommand: string,
-	opts?: { timeoutMs?: number },
+	opts?: { timeoutMs?: number; onlyGoalId?: string },
 ): Promise<SwarmVerifyResult> {
-	if (!group.barrierFired) return { outcome: "not-ready", scores: [] };
-	if (group.allFailed) return { outcome: "all-failed", scores: [] };
+	if (!opts?.onlyGoalId) {
+		if (!group.barrierFired) return { outcome: "not-ready", scores: [] };
+		if (group.allFailed) return { outcome: "all-failed", scores: [] };
+	}
 
-	const candidates = group.artifacts.filter(a => a.status === "done");
+	const candidates = group.artifacts.filter(a => a.status === "done" && (!opts?.onlyGoalId || a.goalId === opts.onlyGoalId));
 	const scores: SwarmCandidateScore[] = [];
 	for (const candidate of candidates) {
 		const cwd = resolveCwd(candidate.goalId);
