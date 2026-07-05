@@ -1,7 +1,7 @@
 name: generate_image
 description: "Generate images via configured provider; uses session image model"
 summary: "Generate images via GPT Image, DALL-E, Gemini, etc."
-params: [prompt, n?, size?, imageSize?, aspectRatio?, quality?, format?, background?, outputPath?]
+params: [prompt, n?, size?, imageSize?, aspectRatio?, quality?, format?, background?, outputPath?, returnInline?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -19,6 +19,7 @@ detail_docs: |-
   |------|------|----------|-------------|
   | `prompt` | string | Yes | Detailed prompt describing the desired image. |
   | `outputPath` | string | No | File path (relative to the session worktree) to save the image. Multiple images add `-1`, `-2`, etc. Paths that escape the worktree are rejected. |
+  | `returnInline` | boolean | No | Return base64 image bytes inline in the tool result even when `outputPath` is set (defaults to false -- omitted by default once the file is saved to disk, to save tokens). Ignored when `outputPath` is not set (bytes are always returned inline in that case). |
   | `size` | string | No | OpenAI image size, e.g. `1024x1024`, `1536x1024`, `1024x1536`, or `auto`. |
   | `quality` | string | No | OpenAI quality, e.g. `auto`, `low`, `medium`, `high`, `standard`, or `hd`. |
   | `background` | string | No | GPT Image background: `auto`, `transparent`, or `opaque`. |

@@ -67,6 +67,7 @@ const extension: ExtensionFactory = (pi) => {
 		parameters: Type.Object({
 			prompt: Type.String(),
 			outputPath: Type.Optional(Type.String({ description: "Path to save the image." })),
+			returnInline: Type.Optional(Type.Boolean({ description: "Return the base64 image bytes inline in the tool result even when outputPath is set. Defaults to false. Ignored (bytes are always returned inline) when outputPath is not set." })),
 			size: Type.Optional(Type.String({ description: "OpenAI size, e.g. 1024x1024 or auto." })),
 			quality: Type.Optional(Type.String({ description: "OpenAI quality, e.g. auto, low, high, hd." })),
 			background: Type.Optional(Type.Union([
@@ -158,14 +159,16 @@ const extension: ExtensionFactory = (pi) => {
 				...savedPaths.map((p) => `Saved: ${p}`),
 			].join("\n");
 
+			const includeInline = !params.outputPath || params.returnInline === true;
+
 			return {
 				content: [
 					{ type: "text" as const, text },
-					...images.map((image: any) => ({
+					...(includeInline ? images.map((image: any) => ({
 						type: "image" as const,
 						data: image.data,
 						mimeType: image.mimeType || "image/png",
-					})),
+					})) : []),
 				],
 				details: { model: data.model, savedPaths },
 			};
