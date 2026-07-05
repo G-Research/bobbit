@@ -11,7 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeUnitSummary, formatUnitSummaryLine } from "../scripts/unit-summary.mjs";
+import { computeUnitSummary, detectMaskedFailureCount, formatUnitSummaryLine } from "../scripts/unit-summary.mjs";
 
 test("both phases pass", () => {
 	const results = [{ label: "node-logic", code: 0 }, { label: "browser-fixtures", code: 0 }];
@@ -52,4 +52,44 @@ test("the summary line contains no ANSI escape sequences", () => {
 	// eslint-disable-next-line no-control-regex
 	assert.doesNotMatch(line, /\x1b\[/);
 	assert.match(line, /^\[unit-summary\] node=(pass|fail|skip) browser=(pass|fail|skip)$/);
+});
+
+// detectMaskedFailureCount — the masked-failure cross-check run-unit.mjs
+// applies before trusting a reported-0 exit code (see its doc comment for
+// the real incident this guards against: 13 browser-fixture failures
+// alongside a 0 exit code on a loaded shared machine).
+test("detects a nonzero Playwright 'N failed' summary line", () => {
+	const output = [
+		"  ✓  1 tests/foo.spec.ts:1:1 › passes (10ms)",
+		"  ✘  2 tests/bar.spec.ts:5:2 › breaks (12ms)",
+		"",
+		"  13 failed",
+		"    tests/bar.spec.ts:5:2 › breaks",
+		"  31 passed (30.0s)",
+	].join("\n");
+	assert.equal(detectMaskedFailureCount("browser-fixtures", output), 13);
+});
+
+test("detects a nonzero node TAP '# fail N' summary line", () => {
+	const output = ["# tests 6720", "# pass 6710", "# fail 5", "# duration_ms 1234"].join("\n");
+	assert.equal(detectMaskedFailureCount("node-logic", output), 5);
+});
+
+test("a clean Playwright run with zero failures is not flagged", () => {
+	const output = ["  ✓  1 tests/foo.spec.ts:1:1 › passes (10ms)", "", "  31 passed (30.0s)"].join("\n");
+	assert.equal(detectMaskedFailureCount("browser-fixtures", output), 0);
+});
+
+test("a clean node run with zero failures is not flagged", () => {
+	const output = ["# tests 6720", "# pass 6720", "# fail 0"].join("\n");
+	assert.equal(detectMaskedFailureCount("node-logic", output), 0);
+});
+
+test("an unrecognized label never flags a failure", () => {
+	assert.equal(detectMaskedFailureCount("some-other-runner", "13 failed"), 0);
+});
+
+test("no signature present in the output is not flagged", () => {
+	assert.equal(detectMaskedFailureCount("browser-fixtures", "no summary line here"), 0);
+	assert.equal(detectMaskedFailureCount("node-logic", "no summary line here"), 0);
 });
