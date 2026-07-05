@@ -118,7 +118,8 @@ import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
 import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
-import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
+import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder } from "./orchestration-core.js";
+import type { OrchestrationCoreView, InboxNudgerView, StaffRecordSource } from "./session-manager-consumer-types.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
@@ -1067,7 +1068,7 @@ export class SessionManager {
 	 * `rolePrompt` isn't persisted. Typed structurally to avoid a circular
 	 * import on `StaffManager`.
 	 */
-	staffRecordSource?: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined };
+	staffRecordSource?: StaffRecordSource;
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
@@ -1150,7 +1151,7 @@ export class SessionManager {
 	 * per-staff `nudgePending` flag when a staff session begins streaming
 	 * a turn. Stays null on test paths that don't construct a nudger.
 	 */
-	private _inboxNudger: import("./inbox-nudger.js").InboxNudger | null = null;
+	private _inboxNudger: InboxNudgerView | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
@@ -1297,16 +1298,16 @@ export class SessionManager {
 	 * a ref back to this manager's narrow view). Used by `restoreSessions` to
 	 * rebuild the in-memory child index + remind owners of live children on boot.
 	 */
-	private orchestrationCore: OrchestrationCore | null = null;
-	setOrchestrationCore(core: OrchestrationCore | null): void {
+	private orchestrationCore: OrchestrationCoreView | null = null;
+	setOrchestrationCore(core: OrchestrationCoreView | null): void {
 		this.orchestrationCore = core;
 	}
 
-	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
+	setInboxNudger(nudger: InboxNudgerView | null): void {
 		this._inboxNudger = nudger;
 	}
 
-	setStaffManager(sm: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined }): void {
+	setStaffManager(sm: StaffRecordSource): void {
 		this.staffRecordSource = sm;
 	}
 
