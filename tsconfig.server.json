@@ -12,13 +12,13 @@
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "declaration": true,
-    "declarationMap": true,
     "sourceMap": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "incremental": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo/server.tsbuildinfo"
   },
   "include": [
     "src/server/**/*.ts",
