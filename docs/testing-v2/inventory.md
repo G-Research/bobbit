@@ -21,13 +21,13 @@ node scripts/testing-v2/check-inventory.mjs   # must exit 0
 | Bucket | Count | Runner (target) | Migration method(s) |
 |---|---:|---|---|
 | `v2-core` | 499 | vitest, node env, `pool=forks`, `isolate:false` | codemod |
-| `v2-dom` | 146 | vitest, happy-dom env | rewrite |
-| `v2-integration` | 187 | vitest, node env, gateway-per-worker | adapter, codemod |
-| `v2-browser` | 220 | Playwright, Chromium, `retries:0` | adapter, retire-with-mapping |
-| `daily` | 53 | tier-3 daily lane (`npm run test:daily`) | relocate |
+| `v2-dom` | 151 | vitest, happy-dom env | rewrite |
+| `v2-integration` | 198 | vitest, node env, gateway-per-worker | adapter, codemod |
+| `v2-browser` | 215 | Playwright, Chromium, `retries:0` | adapter, retire-with-mapping |
+| `daily` | 42 | tier-3 daily lane (`npm run test:daily`) | relocate |
 | **Total** | **1105** | | |
 
-Per-method: `codemod` 500, `adapter` 267, `rewrite` 146, `retire-with-mapping` 139, `relocate` 53.
+Per-method: `codemod` 500, `adapter` 259, `rewrite` 151, `retire-with-mapping` 153, `relocate` 42.
 
 ## Bucket boundaries & rationale
 
@@ -43,10 +43,10 @@ override set (see "Manual overrides" below).
    `gate-verification.test.ts` boots a gateway; `gateway-fixture.test.ts` is a
    pure-helper test.
 4. **`tests/e2e/ui/*.spec.ts`** (184 browser E2E journeys):
-   - Uses a geometry/interaction API (regex below) → **stays in Chromium** as
-     `v2-browser` / `adapter` (45 specs).
+   - Uses a precise geometry/interaction API (detector below) → **stays in
+     Chromium** as `v2-browser` / `adapter` (31 specs).
    - Otherwise → `v2-browser` / **`retire-with-mapping`**, consolidated into one
-     or more smoke journeys (139 specs).
+     or more smoke journeys (153 specs).
 5. **`tests/e2e/*.spec.ts`** (top-level API/integration) → `v2-integration` /
    `adapter` (gateway-per-worker).
 6. **`tests/*.test.ts`** and any other `.test.ts` (node logic) → `v2-core` /
@@ -58,23 +58,30 @@ override set (see "Manual overrides" below).
 ### Geometry / interaction-API criteria
 
 A `.spec.ts` fixture or an `e2e/ui` spec stays in a real browser (Chromium)
-when its source references any of these — they need a real layout engine and
-cannot render faithfully under happy-dom:
+when the spec itself, its sibling `.html` fixture, or an explicitly referenced
+`tests/**-entry.ts` / `tests/**.html` fixture uses an API-shaped real-browser
+signal:
 
 ```
-getBoundingClientRect | scroll(Top|Left|Into|Height|Width|Y|X|By|To)? |
-ResizeObserver | IntersectionObserver | visualViewport | mouse.wheel |
-getAnimations | requestAnimationFrame | canvas | getContext | matchMedia |
-IME | compositionstart | dragstart | drag(over|end|enter)
+getBoundingClientRect() | .boundingBox() |
+scrollTop / scrollLeft / scrollHeight / scrollWidth |
+.scrollIntoView() / .scrollBy() / .scrollTo() / .scroll() |
+ResizeObserver | IntersectionObserver | visualViewport | matchMedia |
+getAnimations() | <canvas> / createElement("canvas") / HTMLCanvasElement |
+CanvasRenderingContext2D / getContext() / toDataURL() / drawImage() |
+mouse.wheel() | dataTransfer / dragstart / dragover / dragend / drop |
+IME / compositionstart / compositionend / compositionupdate
 ```
 
+Bare substrings such as `scroll` in prose, `canvas` in an unrelated identifier,
+or `requestAnimationFrame` used only as a render-flush helper do **not** match.
 Everything else is assertable against a rendered DOM without geometry, so it
 moves to the far cheaper happy-dom (`v2-dom`) tier or is consolidated into a
 journey.
 
 ## Smoke-journey catalogue (retired browser E2E → journeys)
 
-The 139 non-geometry `e2e/ui` specs are consolidated into the following
+The 153 non-geometry `e2e/ui` specs are consolidated into the following
 multi-feature journeys. Journey assignment is deterministic (first-match keyword
 rules in the generator); a spec may be reassigned by hand later. Every retired
 spec names at least one journey — the validator enforces this and that each
@@ -84,31 +91,31 @@ and stay in Chromium — it is retained for the consolidated PR-walkthrough smok
 
 | Journey ID | Domain | Retired specs |
 |---|---|---|
-| `journey-sidebar-nav-search-keyboard` | Sidebar nav/filters/search/keyboard/resize | 20 |
+| `journey-sidebar-nav-search-keyboard` | Sidebar nav/filters/search/keyboard/resize | 21 |
 | `journey-project-onboarding` | Add-project, project management, splash | 13 |
 | `journey-prompt-interaction` | Prompt send, at-mention, queue, steer/abort, tool/skill policy | 11 |
-| `journey-proposals` | Goal/project proposal panel flows, revisions | 9 |
+| `journey-proposals` | Goal/project proposal panel flows, revisions | 12 |
 | `journey-stories-registry` | Story-registry driven UI stories | 7 |
-| `journey-marketplace-packs` | Marketplace, packs, skills, extension host | 6 |
-| `journey-staff` | Staff sidebar/roles/triggers/inbox/indicators | 6 |
+| `journey-marketplace-packs` | Marketplace, packs, skills, extension host | 8 |
+| `journey-staff` | Staff sidebar/roles/triggers/inbox/indicators | 5 |
 | `journey-app-smoke` | Cross-cutting catch-all | 6 |
 | `journey-goal-editing` | Goal create/edit/form/tabs/metadata | 5 |
 | `journey-project-settings` | Settings cascade, system-prompt, agent-dir, maintenance | 5 |
 | `journey-bg-wait-steer` | Background-process wait/steer flows | 4 |
-| `journey-session-sharing` | Copy/open session link, new window/tab, page title | 4 |
+| `journey-session-sharing` | Copy/open session link, new window/tab, page title | 5 |
 | `journey-dashboard-fanout` | Dashboard fanout, mutation-pending, status widgets | 4 |
-| `journey-crash-restart` | Restart/reconnect/resilience/persistence-across-reload | 4 |
+| `journey-crash-restart` | Restart/reconnect/resilience/persistence-across-reload | 5 |
 | `journey-project-assistant` | Project/role assistant, reattempt/binding recovery | 4 |
 | `journey-subgoals` | Subgoal create/nesting/parent-picker/toggle | 4 |
-| `journey-notification-policy` | Notification policy, unseen activity, auto-retry, error modal | 3 |
-| `journey-team-delegate` | Team delegate, child cascade, archived children | 3 |
-| `journey-debug-tools` | Debug-mode, instant loader, tool renderers | 3 |
-| `journey-workflow-editor` | Workflow editor/page, optional steps, gate status/bypass | 3 |
+| `journey-notification-policy` | Notification policy, unseen activity, auto-retry, error modal | 4 |
+| `journey-team-delegate` | Team delegate, child cascade, archived children | 4 |
+| `journey-debug-tools` | Debug-mode, instant loader, tool renderers | 4 |
+| `journey-workflow-editor` | Workflow editor/page, optional steps, gate status/bypass | 4 |
 | `journey-preview-artifacts` | Preview panel, artifacts, image attach/model | 3 |
 | `journey-compaction` | Compaction, pre-compaction history, persistence | 2 |
-| `journey-cost-tracking` | Cost popover/cache, tree cost rollup, prompt stats | 2 |
-| `journey-multi-repo` | Multi-repo flow and per-repo git status | 2 |
-| `journey-session-lifecycle` | Session create/actions/status/fork/navigate | 1 |
+| `journey-cost-tracking` | Cost popover/cache, tree cost rollup, prompt stats | 3 |
+| `journey-multi-repo` | Multi-repo flow and per-repo git status | 3 |
+| `journey-session-lifecycle` | Session create/actions/status/fork/navigate | 2 |
 | `journey-dynamic-panels` | Side/dynamic panel tabs, tab wiring | 1 |
 | `journey-headquarters` | Headquarters view and staff inbox | 1 |
 | `journey-mobile-layout` | Mobile layout smoke, mobile tabs, PWA lifecycle | 1 |
@@ -121,8 +128,8 @@ The exact spec→journey assignment for every retired file lives in each entry's
 
 ## Tier-3 daily lane (real fidelity)
 
-53 files run in the once-daily tier-3 lane: 13 existing `manual-integration`
-specs plus 40 curated real-fidelity relocations. These genuinely require real
+42 files run in the once-daily tier-3 lane: 13 existing `manual-integration`
+specs plus 29 curated real-fidelity relocations. These genuinely require real
 subprocess / container / OS fidelity that **cannot** be faked in tier-1/tier-2,
 and each was confirmed by reading the file:
 
@@ -145,10 +152,7 @@ real `git init` / worktree add/remove against real repos.
 `goal-archive-branch-cleanup` (real bare-repo branch cleanup),
 `port-auto-increment` (real port race), `remove-boot-respawn-restart`.
 
-**Real Docker container runtime (e2e):** `sandbox.spec.ts`, `sandbox-archive`,
-`sandbox-branch-reconcile`, `sandbox-delegate`, `sandbox-pentest`,
-`sandbox-persistence`, `sandbox-recovery`, `sandbox-restore`, `sandbox-security`,
-`sandbox-token`, `host-agents-sandbox-inheritance`, `bg-process-sandbox-guard`.
+**Real Docker container runtime (e2e):** `sandbox-recovery.spec.ts` (container health monitor, forced `docker rm -f`, recovery, and worktree/container validation).
 
 **Real MCP subprocess (e2e):** `mcp-integration.spec.ts`, `marketplace-mcp.spec.ts`,
 `mcp-tool-permission.spec.ts` (all spawn `process.execPath` MCP servers).
@@ -182,10 +186,26 @@ pure functions rather than real subprocesses:
   `marketplace-mcp-contributions.test.ts`** → `v2-core` (parse YAML, no spawn).
 - **`gateway-fixture.test.ts`** → `v2-core` (pure polling-helper test), while
   **`gate-verification.test.ts`** → `v2-integration` (boots a gateway).
+- **Former daily sandbox-keyword files moved to `v2-integration`:**
+  `bg-process-sandbox-guard`, `host-agents-sandbox-inheritance`,
+  `sandbox`, `sandbox-archive`, `sandbox-branch-reconcile`,
+  `sandbox-delegate`, `sandbox-pentest`, `sandbox-persistence`,
+  `sandbox-restore`, `sandbox-security`, and `sandbox-token`. Their headers or
+  bodies state they use the in-process harness, mocks, REST/config/status checks,
+  or Docker-unavailable/intercepted paths — not a real Docker runtime.
+- **Re-audited browser false positives:** `bg-wait-timer.spec.ts` moved to
+  `v2-dom` because it is a LiveTimer text fixture; `context-cost-stats.spec.ts`
+  moved to `v2-dom` because `getContextTotalCostText` is a helper name, not
+  canvas `getContext()`; requestAnimationFrame-only fixtures such as
+  `render-debounce.spec.ts` and `streaming-message-container-set-message.spec.ts`
+  moved to `v2-dom`. Non-geometry `e2e/ui` entries from the re-audit list now
+  retire into their smoke journeys instead of staying as standalone Chromium
+  specs.
 
 To reclassify a file, edit the override maps at the top of
-`scripts/testing-v2/gen-inventory.mjs` (`DAILY_OVERRIDES`, `CONTRACT_INTEGRATION`,
-or the `JOURNEY_RULES`) and re-run the generator — never hand-edit the JSON.
+`scripts/testing-v2/gen-inventory.mjs` (`CLASSIFICATION_OVERRIDES`,
+`DAILY_OVERRIDES`, `CONTRACT_INTEGRATION`, or the `JOURNEY_RULES`) and re-run
+the generator — never hand-edit the JSON.
 
 ## Baselines
 

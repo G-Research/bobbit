@@ -19,13 +19,12 @@
  * Buckets:  v2-core | v2-dom | v2-integration | v2-browser | daily
  * Methods:  codemod | adapter | rewrite | retire-with-mapping | relocate
  */
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	census,
 	readRepoFile,
 	REPO_ROOT,
-	GEOMETRY_REGEX,
 } from "./lib-census.mjs";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +112,126 @@ function journeyFor(basename) {
 }
 
 // ---------------------------------------------------------------------------
+// Precise content-based real-browser detector.
+//
+// Scan the spec plus explicitly associated file:// fixture assets: sibling
+// .html / *-entry.ts files, and any tests/** .html or *-entry.ts path literal
+// referenced by the spec. Deliberately DO NOT match bare words like "scroll",
+// "canvas", or requestAnimationFrame-only render flushing.
+// ---------------------------------------------------------------------------
+const GEOMETRY_PATTERNS = [
+	["getBoundingClientRect()", /\bgetBoundingClientRect\s*\(/],
+	["Playwright boundingBox()", /\.boundingBox\s*\(/],
+	["scroll geometry", /(?:\bscroll(?:Top|Left|Height|Width)\b|\.(?:scrollIntoView|scrollBy|scrollTo|scroll)\s*\()/],
+	["ResizeObserver", /\bResizeObserver\b/],
+	["IntersectionObserver", /\bIntersectionObserver\b/],
+	["visualViewport", /\bvisualViewport\b/],
+	["matchMedia", /\bmatchMedia\b/],
+	["getAnimations()", /\bgetAnimations\s*\(/],
+	["canvas element/API", /(?:<canvas\b|\b(?:document\.)?createElement\s*\(\s*["']canvas["']|\bHTMLCanvasElement\b|\bCanvasRenderingContext2D\b|\b(?:getContext|toDataURL|drawImage)\s*\()/i],
+	["mouse.wheel()", /\bmouse\.wheel\s*\(/],
+	["drag-and-drop/DataTransfer", /(?:\bdataTransfer\b|["'](?:dragstart|dragover|dragend|drop)["'])/],
+	["IME composition", /(?:\bIME\b|\bcomposition(?:start|end|update)\b)/],
+];
+
+function candidateFixtureFiles(file, content) {
+	const candidates = new Set();
+	const dir = dirname(file);
+	const base = basename(file).replace(/\.(?:spec|test)\.ts$/, "");
+	for (const rel of [
+		join(dir, `${base}.html`),
+		join(dir, `${base}-entry.ts`),
+		join("tests", "fixtures", `${base}.html`),
+		join("tests", "fixtures", `${base}-entry.ts`),
+	]) {
+		candidates.add(rel.replace(/\\/g, "/"));
+	}
+	for (const match of content.matchAll(/["'`](tests\/[^"'`]+?(?:\.html|-entry\.ts))["'`]/g)) {
+		candidates.add(match[1].replace(/\\/g, "/"));
+	}
+	return [...candidates].filter((rel) => existsSync(join(REPO_ROOT, rel)));
+}
+
+function geometryEvidence(file) {
+	const primary = readRepoFile(file);
+	const sources = [[file, primary]];
+	for (const rel of candidateFixtureFiles(file, primary)) {
+		sources.push([rel, readRepoFile(rel)]);
+	}
+	for (const [source, content] of sources) {
+		const lines = content.split(/\r?\n/);
+		for (let i = 0; i < lines.length; i++) {
+			for (const [label, re] of GEOMETRY_PATTERNS) {
+				if (re.test(lines[i])) return { label, source, line: i + 1 };
+			}
+		}
+	}
+	return null;
+}
+
+function browserRationale(evidence, prefix = "Browser fixture") {
+	return `${prefix} uses ${evidence.label} at ${evidence.source}:${evidence.line} — needs Chromium real-browser fidelity.`;
+}
+
+function override(bucket, method, rationale, replacement = []) {
+	return { bucket, method, replacement, rationale };
+}
+
+// ---------------------------------------------------------------------------
+// Manual classification overrides from the failed gate-1 re-audit.
+//
+// These are explicit so the generator remains idempotent and the JSON keeps a
+// cited rationale for every v2-browser/daily re-audit decision that keyword or
+// broad-regex heuristics previously got wrong.
+// ---------------------------------------------------------------------------
+export const CLASSIFICATION_OVERRIDES = new Map([
+	// --- Re-audited v2-browser/adapter candidates with no narrow real-browser need ---
+	["tests/bg-process-states.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: dropdown/status fixture uses clicks and text assertions only; no geometry APIs (tests/bg-process-states.spec.ts:207-218).")],
+	["tests/bg-wait-timer.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: LiveTimer elapsed-text fixture only; no geometry/interaction API (tests/bg-wait-timer.spec.ts:18-21).")],
+	["tests/context-cost-stats.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: getContextTotalCostText is a fixture helper name, not getContext/canvas (tests/context-cost-stats.spec.ts:169-182).")],
+	["tests/e2e/ui/git-status-untracked-race.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: requestAnimationFrame is only a flush helper; consolidate git-status race into multi-repo/git journey (tests/e2e/ui/git-status-untracked-race.spec.ts:32).", ["journey-multi-repo"])],
+	["tests/e2e/ui/goal-metadata.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: form/tab metadata flow with no geometry API; consolidate into goal-editing journey (tests/e2e/ui/goal-metadata.spec.ts:118-154).", ["journey-goal-editing"])],
+	["tests/e2e/ui/goal-proposal-offscreen-return.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: off-screen proposal guard uses app state and rAF flush only; consolidate into proposals journey (tests/e2e/ui/goal-proposal-offscreen-return.spec.ts:122-193).", ["journey-proposals"])],
+	["tests/e2e/ui/marketplace-mcp.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: marketplace MCP UI tabs/keyboard only, no real MCP subprocess or geometry (tests/e2e/ui/marketplace-mcp.spec.ts:229-350).", ["journey-marketplace-packs"])],
+	["tests/e2e/ui/marketplace.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: marketplace tabs/search/keyboard flows only; no geometry API (tests/e2e/ui/marketplace.spec.ts:374-448).", ["journey-marketplace-packs"])],
+	["tests/e2e/ui/mid-session-project-proposal.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: project proposal tab lifecycle with no geometry API; consolidate into proposals journey (tests/e2e/ui/mid-session-project-proposal.spec.ts:80-107).", ["journey-proposals"])],
+	["tests/e2e/ui/notification-policy.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: notification policy assertions; rAF is only a flush helper (tests/e2e/ui/notification-policy.spec.ts:44).", ["journey-notification-policy"])],
+	["tests/e2e/ui/plan-archived-children.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: archived-child plan tab flow with no geometry API (tests/e2e/ui/plan-archived-children.spec.ts:122-124).", ["journey-team-delegate"])],
+	["tests/e2e/ui/replace-bobbit-text.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: asserts canvas element is replaced/restored but never exercises canvas API/drawing; consolidate into debug-tools journey (tests/e2e/ui/replace-bobbit-text.spec.ts:30-94).", ["journey-debug-tools"])],
+	["tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: websocket/live-row ordering with rAF flush only; consolidate into crash/restart journey (tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts:134).", ["journey-crash-restart"])],
+	["tests/e2e/ui/sidebar-keyboard-nav.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: Ctrl+Arrow navigation smoke with no geometry API; consolidate into sidebar keyboard journey (tests/e2e/ui/sidebar-keyboard-nav.spec.ts:275-291).", ["journey-sidebar-nav-search-keyboard"])],
+	["tests/e2e/ui/tail-chat-session-navigate.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: navigation/persistence smoke, no geometry API; consolidate into session-lifecycle journey (tests/e2e/ui/tail-chat-session-navigate.spec.ts:1-57).", ["journey-session-lifecycle"])],
+	["tests/e2e/ui/tree-cost-rollup.spec.ts", override("v2-browser", "retire-with-mapping", "Read in re-audit: tree cost rollup data/UI assertions with no geometry API (tests/e2e/ui/tree-cost-rollup.spec.ts:1-443).", ["journey-cost-tracking"])],
+	["tests/gate-verification-reconcile.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: verification reconciliation fixture has DOM/state assertions only; no geometry API (tests/gate-verification-reconcile.spec.ts:1-349).")],
+	["tests/git-status-interactions.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: dropdown interactions use rAF only for portal flush; no geometry API (tests/git-status-interactions.spec.ts:19-23).")],
+	["tests/markdown-dollar-template.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: markdown rendering fixture uses rAF only as render flush; no geometry API (tests/markdown-dollar-template.spec.ts:102).")],
+	["tests/render-debounce.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: debounce fixture exercises requestAnimationFrame scheduling only; no real layout API (tests/render-debounce.spec.ts:24-58).")],
+	["tests/settings-models-tab-redesign.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: models-tab fixture resets state and asserts text/form UI; no geometry API (tests/settings-models-tab-redesign.spec.ts:132-286).")],
+	["tests/streaming-message-container-set-message.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: streaming-message fixture uses rAF only to flush batched updates; no geometry API (tests/streaming-message-container-set-message.spec.ts:65-83).")],
+	["tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts", override("v2-dom", "rewrite", "Read in re-audit: lightweight keyboard-nav fixture uses DOM order and Ctrl+Arrow events only; no geometry API (tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts:242-286).")],
+
+	// --- Re-audited v2-browser/adapter candidates that genuinely need Chromium ---
+	["tests/e2e/ui/add-project-footer-stability.spec.ts", override("v2-browser", "adapter", "Read in re-audit: measures footer Playwright boundingBox() stability at tests/e2e/ui/add-project-footer-stability.spec.ts:28-32.")],
+	["tests/message-editor-ime.spec.ts", override("v2-browser", "adapter", "Read in re-audit: IME composition guard is the test contract (tests/message-editor-ime.spec.ts:2,28).")],
+	["tests/mobile-goal-preview.spec.ts", override("v2-browser", "adapter", "Read in re-audit: compares Playwright element boundingBox() positions for mobile header overlap (tests/mobile-goal-preview.spec.ts:16-27).")],
+	["tests/sidebar-bobbit-datauri-cache.spec.ts", override("v2-browser", "adapter", "Read in re-audit: spies on HTMLCanvasElement.toDataURL() and canvas-derived image output (tests/sidebar-bobbit-datauri-cache.spec.ts:51-55).")],
+	["tests/streaming-bobbit-canvas-ref.spec.ts", override("v2-browser", "adapter", "Read in re-audit: spies on CanvasRenderingContext2D.drawImage and canvas element persistence (tests/streaming-bobbit-canvas-ref.spec.ts:47-55,83-86).")],
+
+	// --- Re-audited filename-keyword daily candidates that are fast integration tests ---
+	["tests/e2e/bg-process-sandbox-guard.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says Docker-dependent coverage lives in manual integration; this file mutates session flags in the in-process harness only (tests/e2e/bg-process-sandbox-guard.spec.ts:3-8).")],
+	["tests/e2e/host-agents-sandbox-inheritance.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: deterministic real gateway + mock agent, explicitly never test:manual (tests/e2e/host-agents-sandbox-inheritance.spec.ts:1-11).")],
+	["tests/e2e/sandbox.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header states this does not require Docker; tests REST/config/status behavior (tests/e2e/sandbox.spec.ts:3-5,32-80).")],
+	["tests/e2e/sandbox-archive.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: archived-message path uses mock agent jsonl and host fs; no Docker/container runtime (tests/e2e/sandbox-archive.spec.ts:3-7,48-59).")],
+	["tests/e2e/sandbox-branch-reconcile.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says tests run without Docker and manual integration covers Docker reconciliation (tests/e2e/sandbox-branch-reconcile.spec.ts:7-14).")],
+	["tests/e2e/sandbox-delegate.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says these tests do NOT require Docker and use mock-agent REST API coverage (tests/e2e/sandbox-delegate.spec.ts:7-12).")],
+	["tests/e2e/sandbox-pentest.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says no Docker; verifies docker-arg builder/config structure directly (tests/e2e/sandbox-pentest.spec.ts:6-12).")],
+	["tests/e2e/sandbox-persistence.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: persists sandbox metadata and accepts Docker-unavailable failure path; no real container required (tests/e2e/sandbox-persistence.spec.ts:3-7,42-73).")],
+	["tests/e2e/sandbox-restore.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says no Docker; intercepts applySandboxWiring boundary (tests/e2e/sandbox-restore.spec.ts:3-8,61-67).")],
+	["tests/e2e/sandbox-security.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: header says no Docker; registers SandboxTokenStore tokens and makes HTTP requests only (tests/e2e/sandbox-security.spec.ts:3-9).")],
+	["tests/e2e/sandbox-token.spec.ts", override("v2-integration", "adapter", "Read in daily re-audit: scoped-token store/guard and health endpoint assertions only; no Docker runtime (tests/e2e/sandbox-token.spec.ts:1-4,34-139).")],
+]);
+
+// ---------------------------------------------------------------------------
 // Curated real-fidelity overrides -> tier-3 daily lane.
 //
 // These genuinely require real subprocess/container/OS fidelity that CANNOT be
@@ -154,18 +273,7 @@ export const DAILY_OVERRIDES = new Map([
 	["tests/e2e/port-auto-increment.spec.ts", "Real port-binding race / auto-increment."],
 	["tests/e2e/remove-boot-respawn-restart.spec.ts", "Real boot-respawn across a real gateway restart."],
 	// --- real docker container runtime (e2e) ---
-	["tests/e2e/sandbox.spec.ts", "Sets sandbox=docker; real Docker container runtime."],
-	["tests/e2e/sandbox-archive.spec.ts", "Real Docker sandbox archive lifecycle."],
-	["tests/e2e/sandbox-branch-reconcile.spec.ts", "Real Docker sandbox branch reconcile."],
-	["tests/e2e/sandbox-delegate.spec.ts", "Real Docker sandbox delegate."],
-	["tests/e2e/sandbox-pentest.spec.ts", "Real Docker sandbox escape/pen-test."],
-	["tests/e2e/sandbox-persistence.spec.ts", "Real Docker sandbox persistence across restart."],
 	["tests/e2e/sandbox-recovery.spec.ts", "Real Docker sandbox container recovery."],
-	["tests/e2e/sandbox-restore.spec.ts", "Real Docker sandbox restore."],
-	["tests/e2e/sandbox-security.spec.ts", "Real Docker sandbox security boundaries."],
-	["tests/e2e/sandbox-token.spec.ts", "Real Docker sandbox scoped-token exec."],
-	["tests/e2e/host-agents-sandbox-inheritance.spec.ts", "Real Docker sandbox inheritance for host agents."],
-	["tests/e2e/bg-process-sandbox-guard.spec.ts", "Real Docker sandbox bg-process guard."],
 	// --- real MCP subprocess (e2e) ---
 	["tests/e2e/mcp-integration.spec.ts", "Spawns a real MCP server subprocess (process.execPath)."],
 	["tests/e2e/marketplace-mcp.spec.ts", "Spawns a real MCP server subprocess for marketplace MCP."],
@@ -178,11 +286,15 @@ const CONTRACT_INTEGRATION = new Set([
 ]);
 
 function classify(file) {
-	// 1. Curated real-fidelity daily overrides win first.
+	// 1. Explicit audit overrides win first.
+	if (CLASSIFICATION_OVERRIDES.has(file)) {
+		return CLASSIFICATION_OVERRIDES.get(file);
+	}
+	// 2. Curated real-fidelity daily overrides.
 	if (DAILY_OVERRIDES.has(file)) {
 		return { bucket: "daily", method: "relocate", replacement: [], rationale: DAILY_OVERRIDES.get(file) };
 	}
-	// 2. manual-integration is already the isolated real-fidelity tier.
+	// 3. manual-integration is already the isolated real-fidelity tier.
 	if (file.startsWith("tests/manual-integration/")) {
 		return {
 			bucket: "daily",
@@ -191,7 +303,7 @@ function classify(file) {
 			rationale: "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged.",
 		};
 	}
-	// 3. Contract tests.
+	// 4. Contract tests.
 	if (file.startsWith("tests/contract/")) {
 		if (CONTRACT_INTEGRATION.has(file)) {
 			return {
@@ -208,15 +320,15 @@ function classify(file) {
 			rationale: "Contract test of pure helpers (no gateway boot) — node logic tier.",
 		};
 	}
-	// 4. Browser E2E journeys under tests/e2e/ui/.
+	// 5. Browser E2E journeys under tests/e2e/ui/.
 	if (file.startsWith("tests/e2e/ui/")) {
-		const content = readRepoFile(file);
-		if (GEOMETRY_REGEX.test(content)) {
+		const evidence = geometryEvidence(file);
+		if (evidence) {
 			return {
 				bucket: "v2-browser",
 				method: "adapter",
 				replacement: [],
-				rationale: "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke).",
+				rationale: browserRationale(evidence, "Browser E2E"),
 			};
 		}
 		const base = file.slice("tests/e2e/ui/".length).replace(/\.spec\.ts$/, "");
@@ -228,7 +340,7 @@ function classify(file) {
 			rationale: `Non-geometry browser E2E — consolidate into ${journey}.`,
 		};
 	}
-	// 5. Top-level API E2E under tests/e2e/.
+	// 6. Top-level API E2E under tests/e2e/.
 	if (file.startsWith("tests/e2e/")) {
 		return {
 			bucket: "v2-integration",
@@ -237,7 +349,7 @@ function classify(file) {
 			rationale: "API/integration E2E against a real gateway — gateway-per-worker integration tier.",
 		};
 	}
-	// 6. Node logic suite: top-level tests/*.test.ts (and any other .test.ts).
+	// 7. Node logic suite: top-level tests/*.test.ts (and any other .test.ts).
 	if (file.endsWith(".test.ts")) {
 		return {
 			bucket: "v2-core",
@@ -246,15 +358,15 @@ function classify(file) {
 			rationale: "node:test logic suite — codemod to vitest (node env, pool=forks).",
 		};
 	}
-	// 7. Browser fixtures: .spec.ts under tests/ (top-level, search/, ui-fixtures/).
+	// 8. Browser fixtures: .spec.ts under tests/ (top-level, search/, ui-fixtures/).
 	if (file.endsWith(".spec.ts")) {
-		const content = readRepoFile(file);
-		if (GEOMETRY_REGEX.test(content)) {
+		const evidence = geometryEvidence(file);
+		if (evidence) {
 			return {
 				bucket: "v2-browser",
 				method: "adapter",
 				replacement: [],
-				rationale: "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium).",
+				rationale: browserRationale(evidence),
 			};
 		}
 		return {
@@ -274,7 +386,7 @@ function main() {
 	const out = {
 		$schema: "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, journeys, entries[] }",
 		generatedBy: "scripts/testing-v2/gen-inventory.mjs",
-		note: "DO NOT hand-edit blindly — re-run `node scripts/testing-v2/gen-inventory.mjs`. Curated overrides live in the generator (DAILY_OVERRIDES / CONTRACT_INTEGRATION / JOURNEY_RULES).",
+		note: "DO NOT hand-edit blindly — re-run `node scripts/testing-v2/gen-inventory.mjs`. Curated overrides live in the generator (CLASSIFICATION_OVERRIDES / DAILY_OVERRIDES / CONTRACT_INTEGRATION / JOURNEY_RULES).",
 		censusTotal: entries.length,
 		buckets: countBy(entries, "bucket"),
 		methods: countBy(entries, "method"),
