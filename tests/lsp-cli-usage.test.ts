@@ -9,7 +9,7 @@
  * cheap, fast-to-verify contract:
  *   - the script exists and parses as valid ESM (`node --check`),
  *   - `--help` (one fast process spawn, no LSP server involved) exits 0 and
- *     documents all four subcommands.
+ *     documents all five subcommands.
  *
  * If a future change breaks the actual LSP handshake/query logic, that's a
  * job for a manual/e2e smoke test, not this unit test.
@@ -35,9 +35,9 @@ test("scripts/lsp-cli.mjs parses as valid ESM (node --check)", () => {
 	execFileSync(process.execPath, ["--check", SCRIPT_PATH], { encoding: "utf8" });
 });
 
-test("scripts/lsp-cli.mjs --help documents all four subcommands", () => {
+test("scripts/lsp-cli.mjs --help documents all subcommands", () => {
 	const out = execFileSync(process.execPath, [SCRIPT_PATH, "--help"], { encoding: "utf8" });
-	for (const subcommand of ["symbols", "refs", "def", "hover"]) {
+	for (const subcommand of ["symbols", "workspace", "refs", "def", "hover"]) {
 		assert.ok(out.includes(subcommand), `--help output missing subcommand "${subcommand}"`);
 	}
 });

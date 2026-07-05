@@ -7,6 +7,7 @@
 //
 // Usage:
 //   node scripts/lsp-cli.mjs symbols <file>
+//   node scripts/lsp-cli.mjs workspace <file> <query>
 //   node scripts/lsp-cli.mjs refs <file> <line> <col>
 //   node scripts/lsp-cli.mjs def <file> <line> <col>
 //   node scripts/lsp-cli.mjs hover <file> <line> <col>
@@ -34,6 +35,7 @@ const USAGE = `lsp-cli.mjs — one-shot TypeScript LSP queries over stdio
 
 Usage:
   node scripts/lsp-cli.mjs symbols <file>
+  node scripts/lsp-cli.mjs workspace <file> <query>
   node scripts/lsp-cli.mjs refs <file> <line> <col>
   node scripts/lsp-cli.mjs def <file> <line> <col>
   node scripts/lsp-cli.mjs hover <file> <line> <col>
@@ -219,6 +221,24 @@ function formatLocation(loc) {
 	return { file: uriToPath(uri), line: range.start.line + 1, col: range.start.character + 1 };
 }
 
+function formatLocationWithWorkspace(loc, workspaceRoot) {
+	const formatted = formatLocation(loc);
+	const rel = path.relative(workspaceRoot, formatted.file);
+	return {
+		...formatted,
+		relativeFile: rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : formatted.file,
+	};
+}
+
+function formatWorkspaceSymbol(sym, workspaceRoot) {
+	const loc = formatLocationWithWorkspace(sym.location, workspaceRoot);
+	return {
+		name: sym.name,
+		kind: symbolKindName(sym.kind),
+		...loc,
+	};
+}
+
 async function main() {
 	const { args, timeoutMs } = parseArgs(process.argv.slice(2));
 	const [cmd, fileArg, lineArg, colArg] = args;
@@ -227,7 +247,7 @@ async function main() {
 		process.stderr.write(USAGE);
 		process.exit(1);
 	}
-	if (!["symbols", "refs", "def", "hover"].includes(cmd)) {
+	if (!["symbols", "workspace", "refs", "def", "hover"].includes(cmd)) {
 		fail(`unknown subcommand "${cmd}". Run with --help for usage.`);
 	}
 	if (!fileArg) fail(`missing <file> argument for "${cmd}"`);
@@ -235,7 +255,9 @@ async function main() {
 	if (!existsSync(filePath)) fail(`file not found: ${filePath}`);
 
 	let line, col;
-	if (cmd !== "symbols") {
+	if (cmd === "workspace") {
+		if (!lineArg) fail('"workspace" requires <query>');
+	} else if (cmd !== "symbols") {
 		if (lineArg === undefined || colArg === undefined) fail(`"${cmd}" requires <line> and <col>`);
 		line = Number(lineArg);
 		col = Number(colArg);
@@ -290,6 +312,15 @@ async function main() {
 		if (cmd === "symbols") {
 			const result = await pollQuery(client, "textDocument/documentSymbol", { textDocument: { uri: fileUri } }, timeoutMs);
 			output = flattenSymbols(result);
+		} else if (cmd === "workspace") {
+			// Warm the file/project first. workspace/symbol depends on tsserver's
+			// project-wide nav index; under load it can initially answer [] even
+			// after the LSP server accepts requests, while documentSymbol succeeds.
+			await pollQuery(client, "textDocument/documentSymbol", { textDocument: { uri: fileUri } }, Math.min(timeoutMs, 30000));
+			const result = await pollQuery(client, "workspace/symbol", { query: lineArg }, timeoutMs);
+			output = result
+				.filter((sym) => sym?.location?.uri)
+				.map((sym) => formatWorkspaceSymbol(sym, workspaceRoot));
 		} else {
 			const position = { line: line - 1, character: col - 1 };
 			if (cmd === "refs") {
