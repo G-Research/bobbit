@@ -59,7 +59,10 @@ protocol future cohorts should follow, and what's left after cohort 1.
   status routes, plus the E2E replay hook
   (`src/server/routes/server-system-routes.ts`) — see
   [Cohort 9: server/system routes](#cohort-9-serversystem-routes) below.
-- Everything else in `handleApiRoute` (~315 remaining routes) is unchanged,
+- **Cohort 11: OAuth account routes** — the five `/api/oauth/*` account
+  endpoints (`src/server/routes/oauth-account-routes.ts`) — see
+  [Cohort 11: OAuth account routes](#cohort-11-oauth-account-routes) below.
+- Everything else in `handleApiRoute` (~310 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -699,6 +702,37 @@ Parity evidence to run: `tests/e2e/harness-restart-api.spec.ts`,
 `tests/e2e/per-project-worktree-pool.spec.ts`, and the browser replay
 coverage in `tests/e2e/ui/stories-streaming.spec.ts`.
 
+## Cohort 11: OAuth account routes
+
+`src/server/routes/oauth-account-routes.ts`.
+
+This cohort moved the cohesive OAuth account surface used by Settings account
+login/logout and OAuth callback polling. No `CoreRouteCtx` fields were needed:
+the route module imports the leaf OAuth helpers directly and uses only the
+existing per-request `url`, `req`, `json`, `jsonError`, and `readBody`
+helpers.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+| Method | Path |
+|---|---|
+| GET | `/api/oauth/status` |
+| GET | `/api/oauth/flow-status` |
+| POST | `/api/oauth/start` |
+| POST | `/api/oauth/complete` |
+| POST | `/api/oauth/logout` |
+
+Registry count reconciliation: cohort 9 left ~315 remaining legacy routes.
+Moving these 5 routes leaves ~310 routes in the legacy chain.
+
+Pinning coverage: OAuth helper behavior is covered by `tests/oauth-google.test.ts`,
+`tests/oauth-complete-empty-code.test.ts`, and `tests/oauth-external-callbacks.test.ts`.
+Route-level E2E coverage is `tests/e2e/oauth-flow-status.spec.ts` and
+`tests/e2e/oauth-google-logout.spec.ts`.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -779,13 +813,14 @@ coverage in `tests/e2e/ui/stories-streaming.spec.ts`.
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~315 routes, including the largest/highest-traffic families
+- The other ~310 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
   the workflows + review-annotation families in cohort 6, and the session
   utility cluster in cohort 7, the maintenance + search-admin cluster in
-  cohort 8, and the server/system cluster in cohort 9 (all above).
+  cohort 8, the server/system cluster in cohort 9, and the OAuth account
+  family in cohort 11 (all above).
   Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see
