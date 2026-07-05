@@ -11,6 +11,7 @@ import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamSta
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
+import { createVisibilityAwarePoller, hasPollDiff, type VisibilityAwarePoller } from "./visibility-poller.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -113,7 +114,7 @@ let commits: CommitInfo[] = [];
 let gates: GateState[] = [];
 let expandedGateIds: Set<string> = new Set();
 let expandedSignalIds: Set<string> = new Set();
-let gatePollTimer: ReturnType<typeof setInterval> | null = null;
+let gatePoller: VisibilityAwarePoller | null = null;
 let teamActive = false;
 let teamStarting = false;
 let teamStopping = false;
@@ -253,10 +254,10 @@ interface GoalCost {
 	cacheHitRate?: number | null;
 }
 let goalCost: GoalCost | null = null;
-let costPollTimer: ReturnType<typeof setInterval> | null = null;
+let costPoller: VisibilityAwarePoller | null = null;
 let costPopoverOpen = false;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
-let setupPollTimer: ReturnType<typeof setInterval> | null = null;
+let setupPoller: VisibilityAwarePoller | null = null;
 
 /** Live verification tracking */
 interface LiveVerification {
@@ -990,8 +991,8 @@ export interface TeamAgent {
 }
 
 let agents: TeamAgent[] = [];
-let agentPollTimer: ReturnType<typeof setInterval> | null = null;
-let taskPollTimer: ReturnType<typeof setInterval> | null = null;
+let agentPoller: VisibilityAwarePoller | null = null;
+let taskPoller: VisibilityAwarePoller | null = null;
 
 async function fetchAgents(goalId: string): Promise<TeamAgent[]> {
 	try {
@@ -1006,14 +1007,14 @@ async function fetchAgents(goalId: string): Promise<TeamAgent[]> {
 
 function startTaskPolling(goalId: string): void {
 	stopTaskPolling();
-	taskPollTimer = setInterval(async () => {
+	taskPoller = createVisibilityAwarePoller(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		try {
 			const res = await gatewayFetch(`/api/goals/${goalId}/tasks`);
 			if (res.ok) {
 				const data = await res.json();
 				const newTasks: Task[] = data.tasks || [];
-				if (JSON.stringify(newTasks) !== JSON.stringify(tasks)) {
+				if (hasPollDiff(tasks, newTasks)) {
 					tasks = newTasks;
 					renderApp();
 				}
@@ -1023,13 +1024,14 @@ function startTaskPolling(goalId: string): void {
 }
 
 function stopTaskPolling(): void {
-	if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
+	taskPoller?.stop();
+	taskPoller = null;
 }
 
 function startAgentPolling(goalId: string): void {
 	stopAgentPolling();
 	fetchAgents(goalId).then((a) => { agents = a; renderApp(); });
-	agentPollTimer = setInterval(async () => {
+	agentPoller = createVisibilityAwarePoller(async () => {
 		// QA-2: archived goals don't have a team - polling /team produces a
 		// 404-spam loop that's visible in network logs and burns the goal's
 		// next-render budget. Stop the interval the moment we observe the
@@ -1042,15 +1044,22 @@ function startAgentPolling(goalId: string): void {
 			renderApp();
 			return;
 		}
-		agents = await fetchAgents(goalId);
+		const newAgents = await fetchAgents(goalId);
 		const teamState = await getTeamState(goalId);
-		teamActive = teamState != null;
-		renderApp();
+		const newTeamActive = teamState != null;
+		// PERF-04: agentPoll used to renderApp() unconditionally every tick,
+		// unlike the task/gate/cost pollers which all diff first. Match them.
+		if (newTeamActive !== teamActive || hasPollDiff(agents, newAgents)) {
+			agents = newAgents;
+			teamActive = newTeamActive;
+			renderApp();
+		}
 	}, 5000);
 }
 
 function stopAgentPolling(): void {
-	if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
+	agentPoller?.stop();
+	agentPoller = null;
 	agents = [];
 }
 
@@ -1073,11 +1082,11 @@ function refreshGatesFromWsEvent(goalId: string): void {
 
 function startGatePolling(goalId: string): void {
 	stopGatePolling();
-	gatePollTimer = setInterval(async () => {
+	gatePoller = createVisibilityAwarePoller(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		try {
 			const newGates = await fetchGoalGates(goalId);
-			if (JSON.stringify(newGates) !== JSON.stringify(gates)) {
+			if (hasPollDiff(gates, newGates)) {
 				applyGateState(goalId, newGates);
 				renderApp();
 			}
@@ -1088,7 +1097,8 @@ function startGatePolling(goalId: string): void {
 }
 
 function stopGatePolling(): void {
-	if (gatePollTimer) { clearInterval(gatePollTimer); gatePollTimer = null; }
+	gatePoller?.stop();
+	gatePoller = null;
 }
 
 // ── Live verification event handling ──
@@ -1215,7 +1225,7 @@ function stopLiveVerifTimer() {
 
 function startCostPolling(goalId: string): void {
 	stopCostPolling();
-	costPollTimer = setInterval(async () => {
+	costPoller = createVisibilityAwarePoller(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		try {
 			const res = await gatewayFetch(`/api/goals/${goalId}/cost`);
@@ -1231,7 +1241,8 @@ function startCostPolling(goalId: string): void {
 }
 
 function stopCostPolling(): void {
-	if (costPollTimer) { clearInterval(costPollTimer); costPollTimer = null; }
+	costPoller?.stop();
+	costPoller = null;
 }
 
 /** Retry-with-backoff refresh for the dashboard git widget. Shares the same
@@ -1322,7 +1333,7 @@ function stopGitStatusPolling(): void {
 
 function startSetupStatusPoll(goalId: string): void {
 	stopSetupStatusPoll();
-	setupPollTimer = setInterval(async () => {
+	setupPoller = createVisibilityAwarePoller(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		await refreshDashboardGoal();
 		// Stop polling once status changes away from "preparing"
@@ -1333,7 +1344,8 @@ function startSetupStatusPoll(goalId: string): void {
 }
 
 function stopSetupStatusPoll(): void {
-	if (setupPollTimer) { clearInterval(setupPollTimer); setupPollTimer = null; }
+	setupPoller?.stop();
+	setupPoller = null;
 }
 
 // ============================================================================
