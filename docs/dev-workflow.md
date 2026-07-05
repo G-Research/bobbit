@@ -401,6 +401,8 @@ graphify (installed as a CLI + optional MCP server) extracts an AST/import graph
 
 **It is not installed on PATH by default.** Install the CLI yourself (`pipx install graphify` or `uv tool install graphify`, see graphify's own docs) — this repo only wires the *result* of having it installed.
 
+The `LSP` tool itself is interactive-session-only; subagents run the same queries via `scripts/lsp-cli.mjs` (`symbols`/`refs`/`def`/`hover`) — see [`.claude/skills/orient/SKILL.md`](../.claude/skills/orient/SKILL.md).
+
 ### The graph is a snapshot, not live
 
 `src/graphify-out/` is gitignored (an 11MB+ generated artifact) and does **not** auto-update as code changes. Three ways it gets refreshed, in increasing order of automation:
