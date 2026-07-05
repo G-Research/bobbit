@@ -2,9 +2,9 @@
  * Proposal tool extensions for Bobbit.
  *
  * Registers one tool per proposal type (goal, role, tool, staff,
- * workflow, project), plus view_proposal / edit_proposal. The propose_*
- * tools acknowledge the call AND seed a proposal file on disk via the
- * gateway REST endpoint (docs/design/editable-proposals.md §6.5).
+ * workflow, skill, project), plus view_proposal / edit_proposal. The
+ * propose_* tools acknowledge the call AND seed a proposal file on disk via
+ * the gateway REST endpoint (docs/design/editable-proposals.md §6.5).
  *
  * Loaded automatically via --extension for sessions with an assistantType.
  */
@@ -12,7 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
-type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
+type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff" | "skill";
 
 // Stable project ids (mirrors ./agent/project-registry). The hidden internal
 // `system` project is compatibility-only and never a user-facing config scope;
@@ -149,6 +149,7 @@ const PROPOSAL_TYPE_ENUM = Type.Union([
 	Type.Literal("role"),
 	Type.Literal("tool"),
 	Type.Literal("staff"),
+	Type.Literal("skill"),
 ]);
 
 export default function (pi: ExtensionAPI) {
@@ -308,6 +309,50 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, args) { const r = await seedProposal("project", args); return ack(r.rev); },
 	});
 
+	// ── propose_workflow ──────────────────────────────────────────────
+	pi.registerTool({
+		name: "propose_workflow",
+		label: "Propose Workflow",
+		description: "Submit a standalone workflow proposal (create or update) for an existing project. Use when there is no in-flight project proposal to attach it to.",
+		promptSnippet: "Propose a workflow with id, name, and gates for the current project.",
+		parameters: Type.Object({
+			id: Type.String({ description: "Stable kebab-case workflow id; existing id updates, new id creates one." }),
+			name: Type.String({ description: "Human-readable workflow name." }),
+			description: Type.Optional(Type.String()),
+			gates: Type.Array(Type.Any(), { description: "Gate objects: id, name, dependsOn[], verify[]. See workflow-authoring-guide.md." }),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to session (workflows are project-scoped only)." })),
+		}),
+		async execute(_id, args) {
+			// Distinct from propose_project's `workflows[]` field: this proposes
+			// exactly ONE workflow and accepts into the existing /api/workflows
+			// resource (create-or-update by id), not the whole project record.
+			// Prefer propose_project when several workflows or other project
+			// fields need to change together.
+			const r = await seedProposal("workflow", args);
+			if (r.errorMessage) {
+				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;
+			}
+			return ack(r.rev);
+		},
+	});
+
+	// ── propose_skill ─────────────────────────────────────────────────
+	pi.registerTool({
+		name: "propose_skill",
+		label: "Propose Skill",
+		description: "Submit a reusable skill (SKILL.md) proposal for user review.",
+		promptSnippet: "Propose a skill with name, description, and content (the SKILL.md body).",
+		parameters: Type.Object({
+			name: Type.String({ description: "Skill id, lowercase+hyphens — becomes /name and skills/<name>/ dir." }),
+			description: Type.String({ description: "One-line summary shown in skill listings and autocomplete." }),
+			content: Type.String({ description: "Skill's markdown body — becomes SKILL.md content below the frontmatter." }),
+			argumentHint: Type.Optional(Type.String({ description: "Hint shown during autocomplete for expected arguments." })),
+			tools: Type.Optional(Type.String({ description: "Comma-separated allowed-tools list; omit to allow all." })),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to session. Headquarters is server/global scope." })),
+		}),
+		async execute(_id, args) { const r = await seedProposal("skill", args); return ack(r.rev); },
+	});
+
 	// ── view_proposal ─────────────────────────────────────────────────
 	pi.registerTool({
 		name: "view_proposal",
@@ -457,5 +502,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (process.env.BOBBIT_DEBUG) console.log("[proposal-tools] Registered 9 proposal tools");
+	if (process.env.BOBBIT_DEBUG) console.log("[proposal-tools] Registered 11 proposal tools");
 }

@@ -909,6 +909,34 @@ Pinning coverage: route surface extraction is covered by `tests/route-table*`,
 Config-directory behavior is covered by `tests/config-directories.test.ts` and
 `tests/e2e/per-project-config-dirs.spec.ts`.
 
+## STR-06: explicit route deps
+
+STR-06 caps the STR-01..05 route-handler extraction work by replacing
+`handleApiRoute`'s long positional dependency list with a single typed
+`HandleApiRouteDeps` object in `src/server/server.ts`. The route registry is
+still module-scope and handler-pure; per-request handlers still receive
+`CoreRouteCtx`. The change is only at the remaining server wiring boundary:
+`requestHandler` now names every gateway dependency it hands to the core API
+router, and `handleApiRoute` destructures that object once before the legacy
+inline chain and registry dispatch.
+
+Remaining closure inventory after this slice:
+
+- Core route registry ctx construction consumes the explicit deps object plus
+  request-local helpers (`json`, `jsonError`, `noContent`) and shared
+  handle-local helper closures (`resolveProjectConfigStore`,
+  `invalidateResolverCaches`, `reloadMcpAfterMarketplaceMutation`,
+  `resolveRequiredConfigProjectScope`, etc.) that are still used by inline
+  legacy handlers.
+- Inline legacy families still in `server.ts` include session create/prompt/
+  continue/output/git/PR helpers, goals/tasks/gates/team endpoints,
+  tools/skills/model/provider/agent-directory settings, extension-host
+  store/action/route/channel endpoints, preview routes, cost routes, and
+  internal verification/user-question routes.
+- Gateway-lifetime mutable handles remain explicit deps: `routeRegistry`,
+  `extensionChannelServices`, `packRuntimeSupervisor`, `sandboxManager`, and
+  per-request `sandboxScope`.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry

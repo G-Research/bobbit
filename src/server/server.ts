@@ -97,6 +97,9 @@ import { registerPreferencesRoutes } from "./routes/preferences-routes.js";
 import { registerConfigDirectoriesRoutes } from "./routes/config-directories-routes.js";
 // STR-05: roles route-handler hoist.
 import { registerRolesRoutes } from "./routes/roles-routes.js";
+// F26: propose_skill acceptance endpoint — new route, registered directly
+// rather than added to the legacy if/else chain.
+import { registerSkillsRoutes } from "./routes/skills-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -2304,7 +2307,44 @@ export function createGateway(config: GatewayConfig) {
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
 			try {
-				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, getActivePackRuntimeSupervisor(), lspSupervisor);
+				await handleApiRoute(url, req, res, {
+					sessionManager,
+					config,
+					colorStore,
+					prStatusStore,
+					teamManager,
+					orchestrationCore,
+					roleManager,
+					toolManager,
+					projectContextManager,
+					bgProcessManager,
+					staffManager,
+					verificationHarness,
+					preferencesStore,
+					projectConfigStore,
+					groupPolicyStore,
+					broadcastToGoal,
+					broadcastToAll,
+					sandboxManager,
+					projectRegistry,
+					configCascade,
+					sandboxScope,
+					sandboxTokenStore,
+					reviewAnnotationStore,
+					broadcastToSession,
+					roleStore,
+					inboxManager,
+					marketplaceSourceStore,
+					marketplaceInstaller,
+					cookieStore,
+					actionDispatcher,
+					routeDispatcher,
+					routeRegistry,
+					packContributionRegistry,
+					extensionChannelServices,
+					packRuntimeSupervisor: getActivePackRuntimeSupervisor(),
+					lspSupervisor,
+				});
 			} catch (err) {
 				// Central backstop: a route handler that throws (e.g. a durable
 				// store refusing to save over a corrupt file — ProjectConfigStore's
@@ -3287,6 +3327,7 @@ export function createGateway(config: GatewayConfig) {
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
 			}
+			await sessionManager.getPiProcessPool().drain();
 			await sessionManager.shutdown();
 			await projectContextManager.closeAll();
 			if (sandboxManager) {
@@ -3398,59 +3439,91 @@ registerPreferencesRoutes(coreRouteTable);
 registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
 registerLspRoutes(coreRouteTable);
+registerSkillsRoutes(coreRouteTable);
+
+interface HandleApiRouteDeps {
+	sessionManager: SessionManager;
+	config: GatewayConfig;
+	colorStore: ColorStore;
+	prStatusStore: PrStatusStore;
+	teamManager: TeamManager;
+	orchestrationCore: OrchestrationCore;
+	roleManager: RoleManager;
+	toolManager: ToolManager;
+	projectContextManager: ProjectContextManager;
+	bgProcessManager: BgProcessManager;
+	staffManager: StaffManager;
+	verificationHarness: VerificationHarness;
+	preferencesStore: PreferencesStore;
+	projectConfigStore: ProjectConfigStore;
+	groupPolicyStore: ToolGroupPolicyStore;
+	broadcastToGoal(goalId: string, event: any): void;
+	broadcastToAll(event: any): void;
+	sandboxManager: SandboxManager | null;
+	projectRegistry: ProjectRegistry;
+	configCascade: ConfigCascade;
+	sandboxScope?: SandboxScope;
+	sandboxTokenStore: SandboxTokenStore;
+	reviewAnnotationStore?: ReviewAnnotationStore;
+	broadcastToSession?(sessionId: string, event: any): void;
+	roleStore: RoleStore;
+	inboxManager: InboxManager;
+	marketplaceSourceStore: MarketplaceSourceStore;
+	marketplaceInstaller: MarketplaceInstaller;
+	cookieStore: CookieStore;
+	actionDispatcher: ActionDispatcher;
+	routeDispatcher: RouteDispatcher;
+	routeRegistry: RouteRegistry;
+	packContributionRegistry: PackContributionRegistry;
+	extensionChannelServices?: ExtensionChannelServices;
+	packRuntimeSupervisor?: PackRuntimeSupervisorLike;
+	lspSupervisor?: TsServerSupervisor;
+}
 
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
-	sessionManager: SessionManager,
-	config: GatewayConfig,
-	colorStore: ColorStore,
-	prStatusStore: PrStatusStore,
-	teamManager: TeamManager,
-	orchestrationCore: OrchestrationCore,
-	roleManager: RoleManager,
-	toolManager: ToolManager,
-	projectContextManager: ProjectContextManager,
-	bgProcessManager: BgProcessManager,
-	staffManager: StaffManager,
-	verificationHarness: VerificationHarness,
-	preferencesStore: PreferencesStore,
-	projectConfigStore: ProjectConfigStore,
-	groupPolicyStore: ToolGroupPolicyStore,
-	broadcastToGoal: (goalId: string, event: any) => void,
-	broadcastToAll: (event: any) => void,
-	sandboxManager: SandboxManager | null,
-	projectRegistry: ProjectRegistry,
-	configCascade: ConfigCascade,
-	sandboxScope?: SandboxScope,
-	sandboxTokenStore?: SandboxTokenStore,
-	reviewAnnotationStore?: ReviewAnnotationStore,
-	_broadcastToSession?: (sessionId: string, event: any) => void,
-	roleStore?: RoleStore,
-	inboxManager?: InboxManager,
-	marketplaceSourceStore?: MarketplaceSourceStore,
-	marketplaceInstaller?: MarketplaceInstaller,
-	cookieStore?: CookieStore,
-	actionDispatcher?: ActionDispatcher,
-	routeDispatcherArg?: RouteDispatcher,
-	routeRegistryArg?: RouteRegistry,
-	packContributionRegistryArg?: PackContributionRegistry,
-	extensionChannelServices?: ExtensionChannelServices,
-	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
-	lspSupervisor?: TsServerSupervisor,
+	deps: HandleApiRouteDeps,
 ) {
-	// These are always wired by the sole caller; the optional markers are only to avoid
-	// touching every existing signature site.
-	const serverRoleStore = roleStore!;
-	const dispatcher = actionDispatcher!;
-	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
-	// sole caller alongside actionDispatcher).
-	const routeDispatcher = routeDispatcherArg!;
-	const routeRegistry = routeRegistryArg!;
-	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
-	// entrypoints / routes), always wired by the sole caller.
-	const packContributionRegistry = packContributionRegistryArg!;
+	const {
+		sessionManager,
+		config,
+		colorStore,
+		prStatusStore,
+		teamManager,
+		orchestrationCore,
+		roleManager,
+		toolManager,
+		projectContextManager,
+		bgProcessManager,
+		staffManager,
+		verificationHarness,
+		preferencesStore,
+		projectConfigStore,
+		groupPolicyStore,
+		broadcastToGoal,
+		broadcastToAll,
+		sandboxManager,
+		projectRegistry,
+		configCascade,
+		sandboxScope,
+		sandboxTokenStore,
+		reviewAnnotationStore,
+		broadcastToSession: _broadcastToSession,
+		roleStore: serverRoleStore,
+		inboxManager,
+		marketplaceSourceStore,
+		marketplaceInstaller,
+		cookieStore,
+		actionDispatcher: dispatcher,
+		routeDispatcher,
+		routeRegistry,
+		packContributionRegistry,
+		extensionChannelServices,
+		packRuntimeSupervisor,
+		lspSupervisor,
+	} = deps;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -10886,7 +10959,10 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
-			if (proposalType === "goal" || proposalType === "staff") {
+			// Workflows are project-scoped only (no Headquarters/system-scope
+			// workflow store — see workflows-routes.ts), so a workflow proposal
+			// needs the same resolvable-project guard as goal/staff.
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "workflow") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
 				if (!sessionProjectId) {

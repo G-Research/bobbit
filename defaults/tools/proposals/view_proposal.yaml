@@ -7,7 +7,8 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: type (required) — one of goal, project, role, tool, staff.
-  Note: there is NO "workflow" proposal type — workflows live inside a
-  `project` proposal under the `workflows:` field. To view or edit
-  workflows mid-session, use type="project".
+  Parameters: type (required) — one of goal, project, role, tool, staff,
+  workflow, skill. A workflow may be in flight as either a standalone
+  `propose_workflow` draft (type="workflow") or nested inside a
+  `propose_project` draft under its `workflows:` field (type="project") —
+  view whichever one you actually seeded.

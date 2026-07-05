@@ -1196,3 +1196,29 @@ function findAgentCli(): string {
 		);
 	}
 }
+
+/**
+ * Resolve the installed `@earendil-works/pi-coding-agent` package version.
+ *
+ * Warm-pool staleness detection (docs/design/warm-pi-process-pool.md §4
+ * point 1) needs this: a pool entry spawned against one install is pinned to
+ * that install's code, and must be discarded — not reused — once `npm
+ * install`/a deploy swaps the package underneath a long-idle pool entry.
+ * Reuses the SAME package resolution `findAgentCli()` performs for every
+ * cold spawn (per the doc: "no new version-detection logic needed").
+ * Never throws — returns "unknown" on any resolution failure (a consistent
+ * sentinel, not a random per-call value, so entries spawned and compared
+ * under a persistent resolution failure still compare equal to each other
+ * rather than being spuriously evicted every time).
+ */
+export function resolveAgentCliVersion(): string {
+	try {
+		const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
+		const mainPath = fileURLToPath(mainUrl);
+		const pkgPath = path.join(path.dirname(mainPath), "..", "package.json");
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+		return typeof pkg.version === "string" ? pkg.version : "unknown";
+	} catch {
+		return "unknown";
+	}
+}

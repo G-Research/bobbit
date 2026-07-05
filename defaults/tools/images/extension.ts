@@ -67,7 +67,7 @@ const extension: ExtensionFactory = (pi) => {
 		parameters: Type.Object({
 			prompt: Type.String(),
 			outputPath: Type.Optional(Type.String({ description: "Path to save the image." })),
-			returnInline: Type.Optional(Type.Boolean({ description: "Return the base64 image bytes inline in the tool result even when outputPath is set. Defaults to false. Ignored (bytes are always returned inline) when outputPath is not set." })),
+			returnInline: Type.Optional(Type.Boolean({ description: "Also return base64 inline with outputPath (default false; ignored without it)." })),
 			size: Type.Optional(Type.String({ description: "OpenAI size, e.g. 1024x1024 or auto." })),
 			quality: Type.Optional(Type.String({ description: "OpenAI quality, e.g. auto, low, high, hd." })),
 			background: Type.Optional(Type.Union([

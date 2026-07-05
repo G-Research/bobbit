@@ -15,7 +15,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { getProposalTypePlugin, type ProposalTypePlugin } from "./proposal-types.js";
 
-export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "role" | "tool" | "staff" | "workflow" | "skill";
 
 export interface TypedProposal {
 	type: ProposalType;
@@ -78,6 +78,8 @@ export const PROPOSAL_TYPES: readonly ProposalType[] = [
 	"role",
 	"tool",
 	"staff",
+	"workflow",
+	"skill",
 ] as const;
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
