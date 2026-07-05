@@ -368,4 +368,60 @@ describe("Source pin — merge-loss invariants", () => {
 			"pin — restore the dropped filtering logic instead.",
 		);
 	});
+
+	it("server-host-api.ts exposes host.agents.spawnGoal, the experiment-runner seam (restored by W2.G)", () => {
+		const text = read("src/server/extension-host/server-host-api.ts");
+		assertTextInOrder(
+			text,
+			[
+				"import type { SpawnChildGoalOpts } from \"../agent/experiment-spawn-goal.js\";",
+				"spawnGoal(opts: {",
+				"spawnChildGoal?: (ownerSessionId: string, opts: SpawnChildGoalOpts) => Promise<{ goalId: string }>;",
+				"spawnGoal: async (goalOpts) => {",
+			],
+			"src/server/extension-host/server-host-api.ts must declare the `spawnGoal`\n" +
+			"verb on ServerHostAgentsApi, the `spawnChildGoal` injection seam on\n" +
+			"CreateServerHostApiOptions, and implement `spawnGoal` on the `agents`\n" +
+			"namespace (recursion denial via assertCanSpawn, backend-unavailable,\n" +
+			"spec/title/runKey validation, forwarding to the injected closure).\n" +
+			"Originally added by ebf72707 \"feat(extension-host): add\n" +
+			"host.agents.spawnGoal experiment-runner seam\"; silently dropped by merge\n" +
+			"b687d93d (first parent had 7 references to spawnChildGoal, the merge\n" +
+			"result had 0) while the implementation (experiment-spawn-goal.ts), its\n" +
+			"unit tests, and the experiment-runner pack all survived — a pure wiring\n" +
+			"drop. Restored by finding W2.G. DO NOT delete this pin — restore the\n" +
+			"dropped surface instead. Independently pinned behaviourally by\n" +
+			"tests/host-agents-spawn-goal.test.ts and tests/host-agents-scope.test.ts.",
+		);
+	});
+
+	it("server.ts injects spawnChildGoal into the route/action host.agents surface (restored by W2.G)", () => {
+		const text = read("src/server/server.ts");
+		assert.ok(
+			text.includes('import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";'),
+			"src/server/server.ts must import spawnExperimentChildGoal.",
+		);
+		const injectionCount = (text.match(/spawnChildGoal: \(ownerSessionId: string, spawnOpts\) => spawnExperimentChildGoal\(\{/g) ?? []).length;
+		assert.equal(
+			injectionCount,
+			2,
+			"src/server/server.ts must inject `spawnChildGoal` (backed by\n" +
+			"spawnExperimentChildGoal) into BOTH the action and route\n" +
+			"createServerHostApi() call sites, so host.agents.spawnGoal has a live\n" +
+			"backend wherever a pack handler can reach it. Originally added by\n" +
+			"ebf72707; silently dropped by merge b687d93d alongside the\n" +
+			"server-host-api.ts surface; restored by finding W2.G. DO NOT delete this\n" +
+			"pin — restore the dropped injection instead.",
+		);
+		// Least privilege: the masked provider-hook host (capabilities.store-only)\n" +
+		// must NEVER receive the spawnGoal backend — pinned by the masked-namespace\n" +
+		// denial test in tests/host-agents-spawn-goal.test.ts.
+		const providerHostMatch = text.match(/providerHostApi: \(\{ sessionId, packId \}\) => createServerHostApi\(\{[\s\S]*?\}\),/);
+		assert.ok(providerHostMatch, "src/server/server.ts must still define providerHostApi via createServerHostApi.");
+		assert.ok(
+			!providerHostMatch[0].includes("spawnChildGoal"),
+			"the masked provider-hook host must NOT inject spawnChildGoal — it stays\n" +
+			"least-privilege (capabilityMask: { store: true }) with agents denied.",
+		);
+	});
 });
