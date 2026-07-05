@@ -75,7 +75,12 @@ protocol future cohorts should follow, and what's left after cohort 1.
   customize/override routes (`src/server/routes/roles-routes.ts`) — see
   [STR-05: roles route-handler hoist](#str-05-roles-route-handler-hoist)
   below.
-- Everything else in `handleApiRoute` (~286 remaining routes) is unchanged,
+- **Cohort 13: config-directories routes** — `GET`/`DELETE`
+  `/api/config-directories` and `POST /api/config-directories/reset`
+  (`src/server/routes/config-directories-routes.ts`) — see
+  [Cohort 13: config-directories routes](#cohort-13-config-directories-routes)
+  below.
+- Everything else in `handleApiRoute` (~283 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -870,6 +875,39 @@ Pinning coverage: route surface extraction is covered by `tests/route-table*`,
 Role behavior is covered by `tests/e2e/role-manager-api.spec.ts`,
 `tests/e2e/config-cascade-api.spec.ts`, `tests/e2e/tool-policy.spec.ts`,
 `tests/e2e/mcp-tool-permission.spec.ts`, and role-manager UI specs.
+
+## Cohort 13: config-directories routes
+
+`src/server/routes/config-directories-routes.ts`.
+
+This cohort moved the small back-compat config-directory surface used by
+project-scoped Settings directory management. It deliberately avoids the
+nearby model/provider settings routes and the gate-verification/gate-signal
+regions being edited concurrently.
+
+| Method | Path |
+|---|---|
+| GET | `/api/config-directories` |
+| DELETE | `/api/config-directories` |
+| POST | `/api/config-directories/reset` |
+
+No new `CoreRouteCtx` fields were needed. The handlers reuse existing
+`resolveProjectConfigStore` and `writeProjectResolutionError` ctx fields, and
+import the leaf config-directory helpers directly.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+Registry count reconciliation: STR-05 left ~286 remaining legacy routes.
+Moving these 3 routes leaves ~283 routes in the legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/orient-api-route-families.test.ts`,
+`tests/client-api-orphan-pinning.test.ts`, and `tests/prompt-api-drift.test.ts`.
+Config-directory behavior is covered by `tests/config-directories.test.ts` and
+`tests/e2e/per-project-config-dirs.spec.ts`.
 
 ## Pins
 

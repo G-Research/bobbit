@@ -87,6 +87,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/oauth-account-routes.ts",
 	// STR-01 cohort 12 (preferences routes).
 	"src/server/routes/preferences-routes.ts",
+	// STR-01 cohort 13 (config-directories routes).
+	"src/server/routes/config-directories-routes.ts",
 	// STR-05 route-handler hoist (roles routes).
 	"src/server/routes/roles-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
