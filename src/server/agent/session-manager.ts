@@ -4993,6 +4993,7 @@ export class SessionManager {
 
 		const sessionCostTracker = this.resolveCostTracker(session);
 		const stampGoalId = session.goalId ?? session.teamGoalId;
+		const trigger = this.costTriggerFromEvent(session, event);
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
@@ -5005,7 +5006,7 @@ export class SessionManager {
 			// cost-tracker.ts's `cacheWrite1hTokens` doc.
 			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? usage.cacheWrite1h,
 			cost: costValue,
-		}, stampGoalId);
+		}, stampGoalId, trigger);
 
 		// SWARM-W1 — hard per-node token-budget governor (design/swarm-orchestration.md
 		// §6, must-fix #1): this `message_end` hook is the ONE place cumulative
@@ -5045,6 +5046,16 @@ export class SessionManager {
 			taskId,
 			cost: cumulativeCost,
 		});
+	}
+
+	private costTriggerFromEvent(session: SessionInfo, event: any): string | undefined {
+		if (event.type !== "message_end") return undefined;
+		if (!session.isCompacting) return undefined;
+		const pending = (session as any)._pendingCompactionStart as
+			| { trigger?: "auto" | "overflow" }
+			| undefined;
+		const trigger = pending?.trigger ?? ((session as any)._manualCompactionId ? "manual" : undefined);
+		return trigger ? `compaction:${trigger}` : undefined;
 	}
 
 	/**
