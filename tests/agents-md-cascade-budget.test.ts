@@ -37,6 +37,7 @@ const {
 	AGENTS_MD_BUDGET_MIN_TOKENS,
 	AGENTS_MD_BUDGET_MAX_TOKENS,
 	AGENTS_MD_BUDGET_CHARS_PER_TOKEN,
+	AGENTS_MD_BUDGET_CONFIG_KEY,
 	initPromptDirs,
 } = await import("../src/server/agent/system-prompt.ts");
 
@@ -50,6 +51,10 @@ function setup() {
 function cleanup() {
 	try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
 	delete process.env.BOBBIT_AGENTSMD_BUDGET;
+}
+
+function scalarStore(data: Record<string, string>) {
+	return { get: (key: string) => data[key] };
 }
 
 // ── resolveAgentsMdBudgetTokens ─────────────────────────────────────────────
@@ -79,6 +84,43 @@ describe("resolveAgentsMdBudgetTokens", () => {
 	it("reads a valid value from the env var", () => {
 		process.env.BOBBIT_AGENTSMD_BUDGET = "8000";
 		assert.equal(resolveAgentsMdBudgetTokens(), 8000);
+	});
+
+	it("unset everywhere is OFF (byte-identical default)", () => {
+		assert.equal(resolveAgentsMdBudgetTokens(undefined, {
+			projectConfigStore: scalarStore({}),
+			serverConfigStore: scalarStore({}),
+		}), undefined);
+	});
+
+	it("reads a valid value from project config when env is unset", () => {
+		assert.equal(resolveAgentsMdBudgetTokens(undefined, {
+			projectConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "7000" }),
+			serverConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "6000" }),
+		}), 7000);
+	});
+
+	it("falls through to server config when project config is unset", () => {
+		assert.equal(resolveAgentsMdBudgetTokens(undefined, {
+			projectConfigStore: scalarStore({}),
+			serverConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "6000" }),
+		}), 6000);
+	});
+
+	it("env var wins over project/server config", () => {
+		process.env.BOBBIT_AGENTSMD_BUDGET = "8000";
+		assert.equal(resolveAgentsMdBudgetTokens(undefined, {
+			projectConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "7000" }),
+			serverConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "6000" }),
+		}), 8000);
+	});
+
+	it("an invalid env var still wins over project/server config and disables the cap", () => {
+		process.env.BOBBIT_AGENTSMD_BUDGET = "not-a-number";
+		assert.equal(resolveAgentsMdBudgetTokens(undefined, {
+			projectConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "7000" }),
+			serverConfigStore: scalarStore({ [AGENTS_MD_BUDGET_CONFIG_KEY]: "6000" }),
+		}), undefined);
 	});
 
 	it("an explicit override wins over the env var", () => {

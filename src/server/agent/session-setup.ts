@@ -30,6 +30,7 @@ import type { CostTracker } from "./cost-tracker.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import type { ProjectConfigStore } from "./project-config-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext, PromptProfile } from "./system-prompt.js";
@@ -335,6 +336,8 @@ export interface PipelineContext {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
+	/** Server/HQ store for scalar project.yaml key fallback in prompt assembly. */
+	serverProjectConfigStore?: ProjectConfigStore | null;
 	preferencesStore?: import("./preferences-store.js").PreferencesStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
@@ -849,6 +852,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			goalState: "active",
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			serverConfigStore: ctx.serverProjectConfigStore ?? undefined,
 			sectionOrder,
 			promptProfile: plan.promptProfile,
 		});
@@ -874,6 +878,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			taskSpec,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			serverConfigStore: ctx.serverProjectConfigStore ?? undefined,
 			sectionOrder,
 			promptProfile: plan.promptProfile,
 		});
@@ -931,6 +936,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			serverConfigStore: ctx.serverProjectConfigStore ?? undefined,
 			nestingContext,
 			sectionOrder,
 			// F2: reviewer-class sessions can request the reviewer profile

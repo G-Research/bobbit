@@ -343,6 +343,8 @@ const DEFAULTS: Record<string, string> = {
 	sandbox_host_token_overrides: "",   // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	worktree_pool_size: "2",            // Pre-built worktrees for instant session startup (0 = disable)
+	agents_md_budget: "",              // Empty = uncapped AGENTS.md cascade; env BOBBIT_AGENTSMD_BUDGET overrides config.
+	tools_md: "full",                  // "full" | "index"; env BOBBIT_TOOLS_MD overrides config.
 	sandbox_tokens: "",                 // Native YAML array; flat get() returns JSON-stringified form.
 	// config_directories has no string default — empty array.
 };
