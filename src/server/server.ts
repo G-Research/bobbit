@@ -36,7 +36,6 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -87,6 +86,8 @@ import { registerReviewAnnotationRoutes } from "./routes/review-annotations-rout
 import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
 // STR-01 cohort 8: maintenance and search-admin routes.
 import { registerMaintenanceRoutes } from "./routes/maintenance-routes.js";
+// STR-01 cohort 11: OAuth account routes.
+import { registerOauthAccountRoutes } from "./routes/oauth-account-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3335,6 +3336,7 @@ registerWorkflowsRoutes(coreRouteTable);
 registerReviewAnnotationRoutes(coreRouteTable);
 registerSessionUtilityRoutes(coreRouteTable);
 registerMaintenanceRoutes(coreRouteTable);
+registerOauthAccountRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3581,7 +3583,8 @@ async function handleApiRoute(
 	// review-annotation family (src/server/routes/review-annotations-routes.ts);
 	// cohort 7, session utility routes
 	// (src/server/routes/session-utility-routes.ts); cohort 8, maintenance and
-	// search-admin routes (src/server/routes/maintenance-routes.ts).
+	// search-admin routes (src/server/routes/maintenance-routes.ts); cohort 11,
+	// OAuth account routes (src/server/routes/oauth-account-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -11609,74 +11612,8 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/oauth/status
-	if (url.pathname === "/api/oauth/status" && req.method === "GET") {
-		try {
-			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// GET /api/oauth/flow-status?flowId=<id>[&provider=…] — callback-based OAuth progress
-	if (url.pathname === "/api/oauth/flow-status" && req.method === "GET") {
-		const flowId = url.searchParams.get("flowId");
-		if (!flowId) {
-			json({ error: "Missing flowId" }, 400);
-			return;
-		}
-		const provider = url.searchParams.get("provider") || undefined;
-		const status = oauthFlowStatus(flowId, provider);
-		if (status.error === "flow not found") {
-			json(status, 404);
-			return;
-		}
-		json(status);
-		return;
-	}
-
-	// POST /api/oauth/start — begin OAuth flow, returns auth URL
-	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
-		try {
-			const body = await readBody(req).catch(() => ({}));
-			const result = await oauthStart(body?.provider);
-			json(result);
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/oauth/complete — exchange code for tokens
-	if (url.pathname === "/api/oauth/complete" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body?.flowId || !body?.code) {
-			json({ error: "Missing flowId or code" }, 400);
-			return;
-		}
-		try {
-			const result = await oauthComplete(body.flowId, body.code);
-			json(result, result.success ? 200 : 400);
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/oauth/logout — clear/revoke a single provider's OAuth credential.
-	// Provider-partitioned: never touches other providers or API-key entries,
-	// and never echoes token material back to the client.
-	if (url.pathname === "/api/oauth/logout" && req.method === "POST") {
-		try {
-			const body = await readBody(req).catch(() => ({}));
-			const result = await oauthLogout(body?.provider);
-			json(result);
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
+	// STR-01 cohort 11: OAuth account routes moved to
+	// src/server/routes/oauth-account-routes.ts.
 
 	// GET /api/sessions/:id/file-content?path=<relative-or-absolute>&snapshotId=<id>
 	// Reads a text file for inline preview. When snapshotId is provided:
