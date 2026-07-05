@@ -146,6 +146,32 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
+	it("never bind-mounts /tools-builtin from a builtinToolsDir that doesn't exist on disk", () => {
+		// Regression guard: docker-args.ts used to mount `/tools-builtin` from
+		// `builtinToolsDir` unconditionally (no fs.statSync guard), unlike every
+		// other optional mount root in this file. `docker run -v <missing>:...:ro`
+		// silently auto-creates an empty directory with no error — so a
+		// builtinToolsDir that's momentarily or permanently absent (fresh
+		// checkout, or a build's atomic dist/server/defaults swap not having run
+		// yet) produced an unresolvable /tools-builtin/* inside the sandbox for
+		// the container's whole lifetime instead of a clean "mount omitted".
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-missing-builtin-tools-"));
+		try {
+			const builtinToolsDir = path.join(root, "defaults", "tools"); // deliberately never created
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test",
+				toolManager: { getBuiltinToolsDir: () => builtinToolsDir } as any,
+			});
+			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			assert.ok(
+				!mounts.some((m) => m.endsWith(":/tools-builtin:ro")),
+				`expected no /tools-builtin mount when builtinToolsDir is absent, got: ${JSON.stringify(mounts)}`,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("mounts the configured active agent sessions and models but never host auth.json", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-agent-dir-"));
 		const agentDir = path.join(root, "active-agent");
