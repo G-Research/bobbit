@@ -603,7 +603,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -7510,26 +7510,49 @@ async function handleApiRoute(
 
 	// ── Custom Providers ──
 
-	// GET /api/custom-providers — list all custom provider configs
+	// GET /api/custom-providers — list all custom provider configs.
+	// SECURITY: stored API keys are write-only — every read path serializes
+	// through redactCustomProviderConfig() (apiKey omitted, hasApiKey flag
+	// added). Never return raw keys here; this leaked cleartext keys to the
+	// browser/network tab once already (key-rotation incident, 2026-07-05).
 	if (url.pathname === "/api/custom-providers" && req.method === "GET") {
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
-		json(configs);
+		json(configs.map(redactCustomProviderConfig));
 		return;
 	}
 
-	// POST /api/custom-providers/test — discover models without persisting
+	// POST /api/custom-providers/test — discover models without persisting.
+	// Accepts an in-progress (possibly unsaved) apiKey from the client; when
+	// the client omits the key but references an existing provider id (edit
+	// flow — the dialog never receives the stored key back), fall back to the
+	// stored key server-side so "Test Connection" keeps working.
+	// SECURITY: the fallback ONLY applies when the requested baseUrl matches
+	// the stored provider's configured baseUrl (baseUrlsMatchForStoredKey) —
+	// otherwise a caller-chosen baseUrl would make the server export the
+	// stored key as a bearer token to an arbitrary destination. A changed URL
+	// is a new destination: the test runs with NO key unless the caller
+	// supplies one.
 	if (url.pathname === "/api/custom-providers/test" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body || !body.type || !body.baseUrl) {
 			json({ error: "Missing required fields: type, baseUrl" }, 400);
 			return;
 		}
+		let testApiKey: string | undefined = typeof body.apiKey === "string" && body.apiKey ? body.apiKey : undefined;
+		if (!testApiKey && body.id) {
+			const stored = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined)?.find(
+				(c: CustomProviderConfig) => c.id === body.id,
+			);
+			if (stored?.apiKey && baseUrlsMatchForStoredKey(stored.baseUrl, body.baseUrl)) {
+				testApiKey = stored.apiKey;
+			}
+		}
 		const config: CustomProviderConfig = {
 			id: body.id || "test-" + Date.now(),
 			name: body.name || body.type,
 			type: body.type,
 			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
+			...(testApiKey ? { apiKey: testApiKey } : {}),
 		};
 		try {
 			const models = await discoverModelsForConfig(config);
@@ -7549,12 +7572,22 @@ async function handleApiRoute(
 		}
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 		const existing = configs.findIndex((c: CustomProviderConfig) => c.id === body.id);
+		// apiKey write semantics (pinned by tests/e2e/custom-provider-key-redaction.spec.ts):
+		//   - non-empty string → set/replace the stored key
+		//   - explicit null    → clear the stored key
+		//   - omitted or ""    → PRESERVE the previously stored key. The read
+		//     path never returns the key, so the edit dialog resubmits without
+		//     it — an unrelated edit (rename, baseUrl change) must not wipe or
+		//     mask-overwrite the secret. Never reintroduce blind overwrite here.
+		const priorApiKey = existing >= 0 ? configs[existing].apiKey : undefined;
+		const nextApiKey: string | undefined =
+			typeof body.apiKey === "string" && body.apiKey !== "" ? body.apiKey : body.apiKey === null ? undefined : priorApiKey;
 		const config: CustomProviderConfig = {
 			id: body.id,
 			name: body.name || body.id,
 			type: body.type,
 			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
+			...(nextApiKey ? { apiKey: nextApiKey } : {}),
 			...(body.models ? { models: body.models } : {}),
 		};
 		if (existing >= 0) {
@@ -7575,7 +7608,9 @@ async function handleApiRoute(
 		} catch (err) {
 			console.error(`[custom-providers] Failed to sync "${config.name}" to models.json:`, err);
 		}
-		json({ ok: true, config });
+		// Echo redacted — the raw key must never ride any response, including
+		// the save acknowledgement.
+		json({ ok: true, config: redactCustomProviderConfig(config) });
 		return;
 	}
 

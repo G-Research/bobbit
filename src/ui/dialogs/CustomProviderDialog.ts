@@ -19,7 +19,14 @@ export class CustomProviderDialog extends DialogBase {
 	@state() private name = "";
 	@state() private type: CustomProviderType = "openai-completions";
 	@state() private baseUrl = "";
+	// The dialog NEVER receives the stored key from the server (read paths are
+	// redacted — see redactCustomProviderConfig). `apiKey` holds only what the
+	// user types in this dialog session; `hasStoredKey` mirrors the server's
+	// `hasApiKey` flag; `clearStoredKey` marks an explicit user request to
+	// remove the stored key on save.
 	@state() private apiKey = "";
+	@state() private hasStoredKey = false;
+	@state() private clearStoredKey = false;
 	@state() private testing = false;
 	@state() private testError = "";
 	@state() private discoveredModels: Model<any>[] = [];
@@ -48,7 +55,11 @@ export class CustomProviderDialog extends DialogBase {
 			this.name = this.provider.name;
 			this.type = this.provider.type;
 			this.baseUrl = this.provider.baseUrl;
-			this.apiKey = this.provider.apiKey || "";
+			// Never prefill the key — the server redacts it on read, so all we
+			// know is whether one is stored. Leaving the field blank keeps it.
+			this.apiKey = "";
+			this.hasStoredKey = Boolean(this.provider.hasApiKey);
+			this.clearStoredKey = false;
 			this.discoveredModels = this.provider.models || [];
 			this.manualModelsText = (this.provider.models || []).map((m) => m.name && m.name !== m.id ? `${m.id} | ${m.name}` : m.id).join("\n");
 		} else {
@@ -57,6 +68,8 @@ export class CustomProviderDialog extends DialogBase {
 			this.baseUrl = "";
 			this.updateDefaultBaseUrl();
 			this.apiKey = "";
+			this.hasStoredKey = false;
+			this.clearStoredKey = false;
 			this.discoveredModels = [];
 			this.manualModelsText = "";
 		}
@@ -131,12 +144,16 @@ export class CustomProviderDialog extends DialogBase {
 
 		try {
 			const manualModels = this.isAutoDiscoveryType() ? undefined : this.parseManualModels();
+			// apiKey is write-only: send it only when the user typed a new key
+			// (replace) or explicitly asked to clear the stored one (null).
+			// Omitting the field preserves the stored key server-side — never
+			// send an empty string or a masked placeholder.
 			const provider = {
 				id: this.provider?.id || crypto.randomUUID(),
 				name: this.name,
 				type: this.type,
 				baseUrl: this.baseUrl,
-				apiKey: this.apiKey || undefined,
+				...(this.apiKey ? { apiKey: this.apiKey } : this.clearStoredKey ? { apiKey: null } : {}),
 				models: manualModels,
 			};
 
@@ -234,17 +251,51 @@ export class CustomProviderDialog extends DialogBase {
 							})}
 						</div>
 
-						<div class="flex flex-col gap-2">
+						<div class="flex flex-col gap-2" data-testid="api-key-field">
 							${Label({ htmlFor: "api-key", children: i18n("API Key (Optional)") })}
 							${Input({
 								type: "password",
 								value: this.apiKey,
-								placeholder: i18n("Leave empty if not required"),
+								placeholder:
+									this.hasStoredKey && !this.clearStoredKey
+										? i18n("Key set — leave blank to keep")
+										: i18n("Leave empty if not required"),
 								onInput: (e: Event) => {
 									this.apiKey = (e.target as HTMLInputElement).value;
 									this.requestUpdate();
 								},
 							})}
+							${
+								this.hasStoredKey
+									? html`
+										<div class="flex items-center gap-2 text-sm text-muted-foreground" data-testid="stored-key-hint">
+											${
+												this.clearStoredKey
+													? html`<span>${i18n("Stored key will be removed on save.")}</span>
+														${Button({
+															onClick: () => {
+																this.clearStoredKey = false;
+																this.requestUpdate();
+															},
+															variant: "ghost",
+															size: "sm",
+															children: i18n("Keep stored key"),
+														})}`
+													: html`<span>${i18n("An API key is stored for this provider.")}</span>
+														${Button({
+															onClick: () => {
+																this.clearStoredKey = true;
+																this.requestUpdate();
+															},
+															variant: "ghost",
+															size: "sm",
+															children: i18n("Clear stored key"),
+														})}`
+											}
+										</div>
+									`
+									: ""
+							}
 						</div>
 
 						${
@@ -257,6 +308,16 @@ export class CustomProviderDialog extends DialogBase {
 											disabled: this.testing || !this.baseUrl,
 											children: this.testing ? i18n("Testing...") : i18n("Test Connection"),
 										})}
+										${
+											// The server only falls back to the stored key when the
+											// baseUrl still matches the saved one (anti-exfiltration
+											// guard) — testing a CHANGED URL needs the key typed in.
+											this.hasStoredKey && !this.apiKey && this.provider && this.baseUrl !== this.provider.baseUrl
+												? html`<div class="text-sm text-muted-foreground" data-testid="changed-url-key-hint">
+														${i18n("Key required to test a changed URL")}
+													</div>`
+												: ""
+										}
 										${this.testError ? html` <error-details .message=${this.testError}></error-details> ` : ""}
 										${
 											this.discoveredModels.length > 0

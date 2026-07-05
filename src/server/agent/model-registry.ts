@@ -74,6 +74,51 @@ export interface CustomProviderConfig {
 	models?: Array<{ id: string; name: string }>;
 }
 
+/**
+ * Wire shape of a custom provider config as serialized to clients.
+ *
+ * Secrets are write-only: stored API keys are NEVER echoed back to the
+ * client (same convention as the hindsight pack's `apiKeySet` and
+ * project-config sandbox-secret redaction). Any route that serializes a
+ * CustomProviderConfig to the browser MUST go through
+ * redactCustomProviderConfig() — never reintroduce raw `apiKey` on a read
+ * path. Pinned by tests/e2e/custom-provider-key-redaction.spec.ts.
+ */
+export type RedactedCustomProviderConfig = Omit<CustomProviderConfig, "apiKey"> & { hasApiKey: boolean };
+
+export function redactCustomProviderConfig(config: CustomProviderConfig): RedactedCustomProviderConfig {
+	const { apiKey, ...rest } = config;
+	return { ...rest, hasApiKey: Boolean(apiKey) };
+}
+
+/**
+ * SECURITY GUARD for the /api/custom-providers/test stored-key fallback.
+ *
+ * The caller controls `baseUrl` while `id` selects a STORED provider — if the
+ * server blindly attached the stored key, any caller with gateway API access
+ * could make the server EXPORT the key as an Authorization bearer to an
+ * arbitrary caller-chosen URL (key-exfiltration vector). The stored key may
+ * therefore only be used when the requested baseUrl is the SAME destination
+ * the key was saved for: same origin + same path after the trailing-slash
+ * normalization the discovery/sync paths apply (they strip trailing slashes
+ * before appending /v1). A changed URL is a new destination — the caller must
+ * supply the key. Never reintroduce an unconditional fallback. Pinned by
+ * tests/e2e/custom-provider-key-redaction.spec.ts.
+ */
+export function baseUrlsMatchForStoredKey(storedBaseUrl: string, requestedBaseUrl: string): boolean {
+	const normalize = (s: string): string | null => {
+		try {
+			const u = new URL(s.replace(/\/+$/, ""));
+			return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+		} catch {
+			return null;
+		}
+	};
+	const stored = normalize(storedBaseUrl);
+	const requested = normalize(requestedBaseUrl);
+	return stored !== null && stored === requested;
+}
+
 // ── Cache ──────────────────────────────────────────────────────────
 
 let cachedModels: ApiModel[] | null = null;
