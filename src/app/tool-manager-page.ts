@@ -10,7 +10,7 @@ import { showConnectionError } from "./dialogs.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 
 // ============================================================================
@@ -566,13 +566,14 @@ async function handleSave(): Promise<void> {
 	saving = true;
 	renderApp();
 
+	const scopedProjectId = getConfigApiProjectId();
 	const ok = await updateTool(selectedTool.name, {
 		description: editDescription,
 		group: editGroup,
 		docs: editDocs,
 		detail_docs: editDetailDocs,
 		grantPolicy: editGrantPolicy || null,
-	});
+	}, scopedProjectId);
 
 	if (ok) {
 		// Refresh tools list and update selectedTool
@@ -1179,8 +1180,9 @@ function renderAccessTab(): TemplateResult {
 							async (val) => {
 								const updated = { ...(role.toolPolicies || {}) };
 								if (val) { updated[toolName] = val; } else { delete updated[toolName]; }
-								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-								roles = await fetchRoles(getConfigApiProjectId());
+								const scopedProjectId = getConfigApiProjectId();
+								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} }, scopedProjectId);
+								roles = await fetchRoles(scopedProjectId);
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,
@@ -1347,12 +1349,12 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!origin) return "";
 
 	const scope = getConfigScope();
-	const projectId = getConfigProjectId();
+	const projectId = getConfigApiProjectId();
 
 	if (scope === "system") {
 		if (origin === "builtin") {
 			return html`<button class="config-action-btn" @click=${async () => {
-				if (await customizeItem("tools", selectedTool!.name, "server")) {
+				if (await customizeItem("tools", selectedTool!.name, "server", projectId)) {
 					tools = await fetchToolsScoped();
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();
@@ -1361,7 +1363,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 		}
 		if (origin === "server") {
 			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
-				if (await revertOverride("tools", selectedTool!.name, "server")) {
+				if (await revertOverride("tools", selectedTool!.name, "server", projectId)) {
 					tools = await fetchToolsScoped();
 					const updated = tools.find(t => t.name === selectedTool!.name);
 					if (updated) showEdit(updated); else showList();

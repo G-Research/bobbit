@@ -2719,9 +2719,10 @@ export async function fetchToolDetail(name: string, projectId?: string): Promise
 	}
 }
 
-export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string | null }): Promise<boolean> {
+export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string | null }, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`, {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}${qs}`, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
@@ -2802,6 +2803,17 @@ export async function createRole(role: {
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create role", message, { code, stack });
+		return null;
+	}
+}
+
+export async function fetchRoleDetail(name: string, projectId?: string): Promise<RoleData | null> {
+	try {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}${qs}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
 		return null;
 	}
 }
