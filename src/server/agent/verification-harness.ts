@@ -946,6 +946,117 @@ function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: b
 }
 
 /**
+ * A branch diff, computed ONCE per verification run and shared across every
+ * `llm-review` reviewer the run's phase fan-out spawns.
+ *
+ * Without this, each of the 3-4 concurrent reviewer sessions independently
+ * shelled out to `git diff` against the same baseline and re-ingested the
+ * identical output into its own context (finding VER-04/W3.2 — "Shared diff
+ * artifact across reviewers"). Computing it once and threading it into every
+ * `buildReviewPrompt` call eliminates that redundant re-derivation.
+ */
+export interface ReviewDiffArtifact {
+	/** Short (12-char) SHA of the resolved `origin/<baseBranch>` ref, or null if unresolved. */
+	baselineSha: string | null;
+	/** `git diff --stat` output. */
+	stat: string;
+	/** Full `git diff -M` output (bounded only by `REVIEW_DIFF_ARTIFACT_CAP_BYTES`) —
+	 * this is what gets persisted to `diff.patch`. Prompt embedding applies the
+	 * separate, much smaller `REVIEW_DIFF_INLINE_CAP_BYTES` at embed time in
+	 * `buildReviewPrompt`. */
+	diff: string;
+	/** True if even the full `diff` was truncated to fit `REVIEW_DIFF_ARTIFACT_CAP_BYTES`. */
+	truncated: boolean;
+	/** Absolute path to the persisted full-diff artifact file, when written. */
+	path?: string;
+}
+
+/**
+ * TWO caps, two purposes:
+ *
+ * 1. `REVIEW_DIFF_ARTIFACT_CAP_BYTES` (10 MB) — buffer-scale. Bounds execFile's
+ *    maxBuffer and the persisted `diff.patch` file. Matches the existing 10 MB
+ *    convention used elsewhere in this file for retained review artifacts
+ *    (MAX_ARTIFACT_SIZE, QA_MAX_ARTIFACT).
+ *
+ * 2. `REVIEW_DIFF_INLINE_CAP_BYTES` (128 KB) — prompt-scale. Bounds what gets
+ *    EMBEDDED into each reviewer's prompt. The embedded diff bypasses the
+ *    tool-result truncation layer (`truncateLargeToolContent`, threshold
+ *    `LARGE_CONTENT_THRESHOLD` = 32 KB in truncate-large-content.ts) that
+ *    bounded an oversized diff when reviewers shelled out to `git diff`
+ *    themselves — so the embed needs its own bound, or a multi-MB branch diff
+ *    would be pasted verbatim into 3-4 concurrent reviewer prompts: a token
+ *    blow-up on exactly the runs where reviews are most expensive. 128 KB =
+ *    4x the tool-content threshold: the diff is the reviewer's primary work
+ *    object (worth more budget than a generic tool result) while staying
+ *    prompt-scale (~32k tokens). No other canonical prompt-embedding cap
+ *    exists in this file — the nearby 512 KB / 1 MB values are retained-log
+ *    tails, not prompt embeds.
+ *
+ * When the inline cap truncates, the prompt still embeds the full `--stat`
+ * (always small) plus the diff head, and points the reviewer at the persisted
+ * `diff.patch` and targeted `git diff <base>...HEAD -- <paths>` commands for
+ * anything beyond the excerpt (pinned by
+ * tests/verification-harness-shared-diff.test.ts T5).
+ */
+const REVIEW_DIFF_ARTIFACT_CAP_BYTES = 10 * 1024 * 1024;
+export const REVIEW_DIFF_INLINE_CAP_BYTES = 128 * 1024;
+
+/**
+ * Compute the branch diff (`git diff --stat` + `git diff -M`, both against
+ * `origin/<reviewBaselineBranch>...HEAD`) ONCE, using the exact same commands
+ * reviewer prompts previously instructed each reviewer to run individually.
+ * Returns null (non-fatal) on any git failure — callers fall back to the
+ * legacy self-derive instructions in `buildReviewPrompt` so behavior degrades
+ * gracefully (e.g. no `origin` remote, detached worktree, offline).
+ */
+export async function computeReviewDiffArtifact(
+	cwd: string,
+	reviewBaselineBranch: string,
+): Promise<ReviewDiffArtifact | null> {
+	try {
+		const { execFile: execFileCb } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const execFileAsync = promisify(execFileCb);
+		const baseRef = `origin/${reviewBaselineBranch}`;
+		const [shaResult, statResult, diffResult] = await Promise.all([
+			execFileAsync("git", ["rev-parse", baseRef], { cwd, timeout: 5_000 }),
+			execFileAsync("git", ["diff", "--stat", `${baseRef}...HEAD`, "--", ".", ":!package-lock.json"], { cwd, timeout: 30_000, maxBuffer: REVIEW_DIFF_ARTIFACT_CAP_BYTES }),
+			execFileAsync("git", ["diff", `${baseRef}...HEAD`, "-M", "--", ".", ":!package-lock.json"], { cwd, timeout: 60_000, maxBuffer: REVIEW_DIFF_ARTIFACT_CAP_BYTES }),
+		]);
+		const baselineSha = shaResult.stdout.toString().trim().slice(0, 12) || null;
+		const stat = statResult.stdout.toString();
+		const fullDiff = diffResult.stdout.toString();
+		const truncated = fullDiff.length > REVIEW_DIFF_ARTIFACT_CAP_BYTES;
+		const diff = truncated ? fullDiff.slice(0, REVIEW_DIFF_ARTIFACT_CAP_BYTES) : fullDiff;
+		return { baselineSha, stat, diff, truncated };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Persist a computed diff artifact to `<stateDir>/verifications/<signalId>/diff.patch`
+ * — mirroring the existing per-signal artifact directory convention used for
+ * command-step stdout/stderr (see the `stepDir` usage in `runCommandStep`).
+ * Best-effort: failures are logged and non-fatal, since the artifact's
+ * primary purpose (the in-memory diff text threaded into reviewer prompts)
+ * already works without it.
+ */
+function persistReviewDiffArtifact(stateDir: string, signalId: string, artifact: ReviewDiffArtifact): string | undefined {
+	try {
+		const dir = path.join(stateDir, "verifications", signalId);
+		fs.mkdirSync(dir, { recursive: true });
+		const filePath = path.join(dir, "diff.patch");
+		fs.writeFileSync(filePath, artifact.diff);
+		return filePath;
+	} catch (err) {
+		console.warn(`[verification] Failed to persist shared diff artifact for signal ${signalId} (non-fatal):`, err);
+		return undefined;
+	}
+}
+
+/**
  * Build the combined system prompt for a review step.
  *
  * Exported at module scope so unit tests can import it directly without
@@ -958,6 +1069,16 @@ function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: b
  * - Implementation and later: `git diff origin/<base>...HEAD` forms; the
  *   `Baseline` line records the resolved origin SHA so failures are trivial
  *   to diagnose.
+ *
+ * `diffArtifact`, when provided (see `computeReviewDiffArtifact`), is a branch
+ * diff computed ONCE per verification run and shared across every reviewer.
+ * When present, the prompt embeds that diff directly instead of instructing
+ * the reviewer to derive it itself — the embedded text is byte-identical to
+ * what a fresh `git diff` would produce for the same tree state, just
+ * computed once instead of once per reviewer. When absent (undefined, or
+ * null because computation failed), the legacy self-derive instructions are
+ * used unchanged — this keeps existing callers (e.g. `_rerunLlmReviewStep`,
+ * which reruns a single reviewer outside the phase fan-out) working as before.
  */
 export async function buildReviewPrompt(
 	role: { promptTemplate: string; name?: string },
@@ -969,6 +1090,7 @@ export async function buildReviewPrompt(
 	goalSpec?: string,
 	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
+	diffArtifact?: ReviewDiffArtifact | null,
 ): Promise<string> {
 	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
 	const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master || "master";
@@ -982,6 +1104,19 @@ export async function buildReviewPrompt(
 			"Your working directory is the goal's worktree. **This is a pre-implementation",
 			"design gate — there is no code on the branch yet.** Do NOT run `git diff` or",
 			"`git log`. Evaluate the design content (provided in your prompt) only.",
+		].join("\n")
+		: diffArtifact
+		? [
+			"## Working Directory",
+			`Your working directory is already set to the goal's worktree, checked out on`,
+			`branch \`${branch}\` at the correct commit. **Do NOT run \`git checkout\` or`,
+			"`git pull`** — the directory is already in the right state.",
+			"",
+			"The branch diff has already been computed once for this verification run —",
+			"see the \"## Branch Diff\" section below. You do NOT need to run `git diff`",
+			"yourself.",
+			`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch (if you need commit messages)`,
+			"- Read files directly with `read` — they are already at the correct version",
 		].join("\n")
 		: [
 			"## Working Directory",
@@ -1042,6 +1177,12 @@ export async function buildReviewPrompt(
 	let baselineLine: string;
 	if (isDesignGate) {
 		baselineLine = "- Baseline: none (design gate — no implementation expected)";
+	} else if (diffArtifact) {
+		// Already resolved once by computeReviewDiffArtifact — reuse it instead
+		// of every reviewer re-running `git rev-parse` for the same ref.
+		baselineLine = diffArtifact.baselineSha
+			? `- Baseline: diffed against origin/${reviewBaselineBranch}@${diffArtifact.baselineSha}`
+			: `- Baseline: origin/${reviewBaselineBranch} (sha unresolved)`;
 	} else {
 		let baselineSha: string | null = null;
 		try {
@@ -1085,12 +1226,21 @@ export async function buildReviewPrompt(
 			"**Do NOT run `git checkout`, `git pull`, `git fetch`, or any command that modifies the working tree.**",
 			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
 			"",
-			"To see what changed (read-only, safe for concurrent use):",
-			`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
-			`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
-			`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
-			`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
-			"- Use `read` to view files directly — they are already at the correct version",
+			...(diffArtifact
+				? [
+					"The branch diff has already been computed once for this verification run",
+					"— see the \"## Branch Diff\" section below instead of re-deriving it:",
+					`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch (if you need commit messages)`,
+					"- Use `read` to view files directly — they are already at the correct version",
+				]
+				: [
+					"To see what changed (read-only, safe for concurrent use):",
+					`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
+					`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
+					`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
+					`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
+					"- Use `read` to view files directly — they are already at the correct version",
+				]),
 			"",
 			"## Signal Context",
 			`- Branch: ${branch}`,
@@ -1111,6 +1261,42 @@ export async function buildReviewPrompt(
 		}
 	}
 	sections.push(contextLines.join("\n"));
+
+	if (!isDesignGate && diffArtifact) {
+		// Prompt-scale inline cap — the full diff (buffer-scale cap) lives in the
+		// persisted diff.patch; only up to REVIEW_DIFF_INLINE_CAP_BYTES of it is
+		// embedded in each reviewer's prompt. See the two-caps comment above
+		// REVIEW_DIFF_INLINE_CAP_BYTES.
+		const inlineTruncated = diffArtifact.truncated || diffArtifact.diff.length > REVIEW_DIFF_INLINE_CAP_BYTES;
+		const inlineDiff = inlineTruncated ? diffArtifact.diff.slice(0, REVIEW_DIFF_INLINE_CAP_BYTES) : diffArtifact.diff;
+		const diffSection: string[] = [
+			"\n## Branch Diff",
+			"",
+			"Computed once for this verification run and shared across every reviewer —",
+			"identical to what `git diff` would produce right now for the same tree state.",
+			"",
+			"### Diffstat",
+			"```",
+			diffArtifact.stat.trim() || "(no changes)",
+			"```",
+			"",
+			"### Diff" + (inlineTruncated ? " (truncated — head only)" : ""),
+			"```diff",
+			inlineDiff,
+			"```",
+		];
+		if (inlineTruncated) {
+			diffSection.push(
+				"",
+				`_Inline diff truncated at ${REVIEW_DIFF_INLINE_CAP_BYTES} bytes (full diff is ${diffArtifact.diff.length}${diffArtifact.truncated ? "+" : ""} bytes). The diffstat above is complete._`,
+				diffArtifact.path
+					? `_The full diff is persisted at \`${diffArtifact.path}\` — read it (or sections of it) directly._`
+					: "_Read changed files directly with `read` for anything beyond this excerpt._",
+				`_For specific files you may also run targeted diffs: \`git diff origin/${reviewBaselineBranch}...HEAD -- <paths>\` (read-only, safe for concurrent use)._`,
+			);
+		}
+		sections.push(diffSection.join("\n"));
+	}
 
 	return sections.join("\n");
 }
@@ -3268,6 +3454,20 @@ export class VerificationHarness {
 				}
 			}
 
+			// Pre-compute the branch diff ONCE for this verification run, shared by
+			// every `llm-review` reviewer the phase fan-out below spawns — instead of
+			// each of the 3-4 concurrent reviewers independently shelling out to
+			// `git diff` against the same baseline (finding VER-04/W3.2). Skipped for
+			// design/pre-implementation gates (no diff to show) and when there are no
+			// llm-review steps to hand it to.
+			const hasLlmReviewStep = remainingActiveSteps.some(s => s.type === "llm-review");
+			const diffArtifact = (hasLlmReviewStep && !isPreImplementationGate(gate))
+				? await computeReviewDiffArtifact(cwd, builtinVars.baseBranch || builtinVars.master || "master")
+				: null;
+			if (diffArtifact) {
+				diffArtifact.path = persistReviewDiffArtifact(this._stateDir, signal.id, diffArtifact);
+			}
+
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
 			const earliestPreResolvedFailedPhase = allResults.reduce<number | undefined>((earliest, result) => {
 				if (!result || result.passed || result.skipped) return earliest;
@@ -3629,7 +3829,7 @@ export class VerificationHarness {
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, stepSessionId,
-										gate,
+										gate, diffArtifact,
 									);
 									const decision = shouldRetryVerificationStep({
 										passed: result.passed, output: result.output,
@@ -3791,6 +3991,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
+		diffArtifact?: ReviewDiffArtifact | null,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The fallback to
@@ -3809,8 +4010,11 @@ export class VerificationHarness {
 
 		const timeoutMs = (step.timeout || 600) * 1000;
 
-		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths)
-		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate);
+		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths).
+		// diffArtifact, when supplied by the caller, is the once-per-verification-run
+		// shared branch diff (see computeReviewDiffArtifact / VER-04 W3.2) — every
+		// reviewer in the same phase fan-out receives the identical precomputed text.
+		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, diffArtifact);
 
 		// Build the kickoff message (shared between both paths)
 		const kickoff = [
