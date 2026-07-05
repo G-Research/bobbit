@@ -44,6 +44,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SOURCE = fs.readFileSync(SOURCE_PATH, "utf-8");
+const REVIVE_SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
+const REVIVE_SOURCE = fs.readFileSync(REVIVE_SOURCE_PATH, "utf-8");
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-last-activity-test-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -114,9 +116,9 @@ describe("session-manager.ts has the isUserVisibleActivity filter wired in", () 
 	});
 
 	it("restoreSession's onEvent handler uses isUserVisibleActivity to gate lastActivity", () => {
-		const idx = SOURCE.indexOf("const restoreStore = this.getSessionStore(ps.projectId);");
+		const idx = REVIVE_SOURCE.indexOf("const restoreStore = this.deps.host.getSessionStore(ps.projectId);");
 		assert.ok(idx > 0, "restoreStore declaration not found — restoreSession scope changed");
-		const window = SOURCE.slice(idx, idx + 1500);
+		const window = REVIVE_SOURCE.slice(idx, idx + 1500);
 		assert.ok(
 			/isUserVisibleActivity\s*\(/.test(window),
 			"restoreSession handler must call isUserVisibleActivity before bumping lastActivity",

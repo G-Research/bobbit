@@ -144,14 +144,14 @@ describe("restoreSession lastActivity gating", () => {
 // its `if (!restoring)` gate around the `session.lastActivity = Date.now()`
 // write. If a future refactor drops it, this test fails loudly.
 describe("restoreSession source guard", () => {
-	it("session-manager.ts contains the restoring gate", async () => {
+	it("session-revive.ts contains the restoring gate", async () => {
 		const src = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+			path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 			"utf-8",
 		);
 		// Find the rpcClient.onEvent callback inside restoreSession by anchoring on
 		// the restoreStore variable which is unique to that scope.
-		const idx = src.indexOf("const restoreStore = this.getSessionStore(ps.projectId);");
+		const idx = src.indexOf("const restoreStore = this.deps.host.getSessionStore(ps.projectId);");
 		assert.ok(idx > 0, "restoreStore declaration not found");
 		const window = src.slice(idx, idx + 1500);
 		assert.ok(
@@ -166,15 +166,15 @@ describe("restoreSession source guard", () => {
 
 	it("restoreSession spawn-pins a persisted model before role or preference fallback", async () => {
 		const src = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+			path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 			"utf-8",
 		);
-		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
+		const idx = src.indexOf("async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
 		const window = src.slice(idx, idx + 15_000);
 		const persistedIdx = window.indexOf("if (ps.modelProvider && ps.modelId)");
 		const initialModelIdx = window.indexOf("bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`", persistedIdx);
-		const fallbackIdx = window.indexOf("this.resolveInitialModel(ps.role, ps.projectId)", persistedIdx);
+		const fallbackIdx = window.indexOf("this.deps.host.resolveInitialModel(ps.role, ps.projectId)", persistedIdx);
 		assert.ok(persistedIdx >= 0, "restoreSession must check persisted modelProvider/modelId");
 		assert.ok(initialModelIdx > persistedIdx, "restoreSession must pass persisted anthropic/claude-opus-4-8 as bridgeOptions.initialModel");
 		assert.ok(fallbackIdx > initialModelIdx, "restoreSession must fall back to role/default model resolution only after the persisted model branch");
