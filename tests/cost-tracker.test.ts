@@ -18,6 +18,7 @@ process.env.BOBBIT_DIR = tmpDir;
 fs.mkdirSync(path.join(tmpDir, "state"), { recursive: true });
 
 const STORE_FILE = path.join(tmpDir, "state", "session-costs.json");
+const TURN_STORE_FILE = path.join(tmpDir, "state", "session-cost-turns.json");
 
 // Dynamic import so BOBBIT_DIR is set before module-level constants are evaluated
 const { CostTracker, deriveCacheHitRate, deriveCacheWrite5mTokens } = await import("../src/server/agent/cost-tracker.ts");
@@ -27,6 +28,7 @@ const stateDir = path.join(tmpDir, "state");
 describe("CostTracker", () => {
 	beforeEach(() => {
 		try { fs.unlinkSync(STORE_FILE); } catch { /* ok */ }
+		try { fs.unlinkSync(TURN_STORE_FILE); } catch { /* ok */ }
 	});
 
 	after(() => {
@@ -170,6 +172,127 @@ describe("CostTracker", () => {
 		});
 	});
 
+	describe("turn cost rows", () => {
+		it("appends one per-turn row for each recordUsage call with the usage fields", () => {
+			const tracker = new CostTracker(stateDir);
+			const before = Date.now();
+			tracker.recordUsage("s1", {
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: 3,
+				cacheWriteTokens: 2,
+				cacheWrite1hTokens: 1,
+				cost: 0.001,
+			}, "goal-1");
+			tracker.recordUsage("s1", { inputTokens: 20, outputTokens: 7, cost: 0.002 }, "goal-1");
+			const after = Date.now();
+
+			const rows = tracker.getTurnCosts("s1");
+			assert.equal(rows.length, 2);
+			assert.deepEqual(
+				rows.map((row) => row.seq),
+				[1, 2],
+			);
+			assert.equal(rows[0]!.sessionId, "s1");
+			assert.equal(rows[0]!.goalId, "goal-1");
+			assert.equal(rows[0]!.inputTokens, 10);
+			assert.equal(rows[0]!.outputTokens, 5);
+			assert.equal(rows[0]!.cacheReadTokens, 3);
+			assert.equal(rows[0]!.cacheWriteTokens, 2);
+			assert.equal(rows[0]!.cacheWrite1hTokens, 1);
+			assert.equal(rows[0]!.totalCost, 0.001);
+			assert.ok(rows[0]!.ts >= before && rows[0]!.ts <= after);
+			tracker.flush();
+		});
+
+		it("keeps cumulative totals equal to the sum of the per-turn rows", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", {
+				inputTokens: 100,
+				outputTokens: 50,
+				cacheReadTokens: 10,
+				cacheWriteTokens: 5,
+				cacheWrite1hTokens: 2,
+				cost: 0.001111,
+			}, "goal-1");
+			tracker.recordUsage("s1", {
+				inputTokens: 200,
+				outputTokens: 75,
+				cacheReadTokens: 20,
+				cacheWriteTokens: 8,
+				cacheWrite1hTokens: 3,
+				cost: 0.002222,
+			}, "goal-1");
+			tracker.recordUsage("s1", { inputTokens: 50, cost: 0.003333 }, "goal-1");
+
+			const cumulative = tracker.getSessionCost("s1")!;
+			const sum = tracker.getTurnCosts("s1").reduce((acc, row) => {
+				acc.inputTokens += row.inputTokens;
+				acc.outputTokens += row.outputTokens;
+				acc.cacheReadTokens += row.cacheReadTokens;
+				acc.cacheWriteTokens += row.cacheWriteTokens;
+				acc.cacheWrite1hTokens += row.cacheWrite1hTokens;
+				acc.totalCost = Math.round((acc.totalCost + row.totalCost) * 1_000_000) / 1_000_000;
+				return acc;
+			}, {
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				cacheWrite1hTokens: 0,
+				totalCost: 0,
+			});
+
+			assert.deepEqual(sum, {
+				inputTokens: cumulative.inputTokens,
+				outputTokens: cumulative.outputTokens,
+				cacheReadTokens: cumulative.cacheReadTokens,
+				cacheWriteTokens: cumulative.cacheWriteTokens,
+				cacheWrite1hTokens: cumulative.cacheWrite1hTokens,
+				totalCost: cumulative.totalCost,
+			});
+			tracker.flush();
+		});
+
+		it("records an optional trigger tag on the per-turn row", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 10, cost: 0.001 }, "goal-1", "compaction:auto");
+			const rows = tracker.getTurnCosts("s1");
+			assert.equal(rows.length, 1);
+			assert.equal(rows[0]!.trigger, "compaction:auto");
+			tracker.flush();
+		});
+
+		it("persists per-turn rows through the same debounced flush path", () => {
+			const tracker1 = new CostTracker(stateDir);
+			tracker1.recordUsage("s1", { inputTokens: 10, cost: 0.001 }, "goal-1", "compaction:manual");
+			tracker1.flush();
+
+			const tracker2 = new CostTracker(stateDir);
+			const rows = tracker2.getTurnCosts("s1");
+			assert.equal(rows.length, 1);
+			assert.equal(rows[0]!.seq, 1);
+			assert.equal(rows[0]!.goalId, "goal-1");
+			assert.equal(rows[0]!.trigger, "compaction:manual");
+			assert.equal(rows[0]!.inputTokens, 10);
+			assert.equal(rows[0]!.totalCost, 0.001);
+		});
+
+		it("keeps only the last 500 per-turn rows per session", () => {
+			const tracker = new CostTracker(stateDir);
+			for (let i = 1; i <= 505; i++) {
+				tracker.recordUsage("s1", { inputTokens: i, cost: 0.000001 });
+			}
+			const rows = tracker.getTurnCosts("s1");
+			assert.equal(rows.length, 500);
+			assert.equal(rows[0]!.seq, 6);
+			assert.equal(rows[0]!.inputTokens, 6);
+			assert.equal(rows[499]!.seq, 505);
+			assert.equal(rows[499]!.inputTokens, 505);
+			tracker.flush();
+		});
+	});
+
 	describe("getSessionCost", () => {
 		it("returns undefined for unknown session", () => {
 			const tracker = new CostTracker(stateDir);
@@ -256,6 +379,13 @@ describe("CostTracker", () => {
 
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"], undefined);
+		});
+
+		it("removes a session's per-turn rows", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 100 });
+			tracker.removeSession("s1");
+			assert.deepEqual(tracker.getTurnCosts("s1"), []);
 		});
 
 		it("is a no-op for nonexistent session (no crash)", () => {
@@ -393,7 +523,7 @@ describe("CostTracker", () => {
 	});
 
 	describe("debounced save (PERF-01)", () => {
-		it("coalesces multiple recordUsage calls within the debounce window into a single disk write", () => {
+		it("coalesces multiple recordUsage calls within the debounce window into one flush", () => {
 			const tracker = new CostTracker(stateDir);
 			let renameCount = 0;
 			const originalRename = fs.renameSync;
@@ -410,8 +540,8 @@ describe("CostTracker", () => {
 				tracker.flush();
 				assert.equal(
 					renameCount,
-					1,
-					"three recordUsage calls within the debounce window must coalesce into one write",
+					2,
+					"three recordUsage calls within the debounce window must coalesce into one flush of both cost files",
 				);
 			} finally {
 				fs.renameSync = originalRename;
