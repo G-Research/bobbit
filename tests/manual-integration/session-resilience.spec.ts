@@ -1218,6 +1218,23 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 							expect(gitStatus.branch).not.toBe("master");
 							expect(gitStatus.isOnPrimary).toBe(false);
 						} else {
+							// Forensic capture for primary-checkout branch pollution (E-1's
+							// pre-existing real-agent flake: something mutated the shared
+							// primary checkout's HEAD off "master" — once to "feature-y",
+							// once to "main"). No server code path does this (see
+							// docs investigation), so it's a real agent's bash tool. The
+							// fixture dir is deleted by afterAll before a human can inspect
+							// it, so dump the reflog with timestamps here — they can be
+							// correlated against the phase timings already logged above to
+							// narrow down which phase's agent ran the stray `git checkout`.
+							if (gitStatus.branch !== "master") {
+								try {
+									const reflog = execFileSync("git", ["reflog", "show", "--date=iso", "-n", "8", "HEAD"], { cwd: dir, encoding: "utf-8" });
+									console.log(`    POLLUTION DIAGNOSTIC: primary checkout HEAD reflog:\n${reflog}`);
+								} catch (err) {
+									console.log(`    POLLUTION DIAGNOSTIC: reflog capture failed: ${err instanceof Error ? err.message : String(err)}`);
+								}
+							}
 							expect(gitStatus.branch).toBe("master");
 							expect(gitStatus.isOnPrimary).toBe(true);
 						}
