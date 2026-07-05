@@ -1119,6 +1119,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 						</div>`}
 				</div>
 			`; })}</div>` : ""}
+		</div>
 	`;
 }
 
