@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SESSION_MANAGER = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+const SESSION_REVIVE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-revive.ts"), "utf-8");
 const RPC_BRIDGE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/rpc-bridge.ts"), "utf-8");
 
 function methodBody(name: string): string {
@@ -38,7 +39,7 @@ describe("session-manager sandbox scope regressions", () => {
 		assert.match(SESSION_MANAGER, /import \{ isSandboxExemptProject, type SandboxManager \} from "\.\/sandbox-manager\.js";/);
 		assert.match(methodBody("applySandboxWiring"), /if \(isSandboxExemptProject\(projectId\)\) \{[\s\S]*?bridgeOptions\.sandboxed = false;[\s\S]*?return false;/);
 		assert.match(SESSION_MANAGER, /const effectiveSandboxed = opts\?\.sandboxed && !sandboxExemptScope \? true : undefined;/);
-		assert.match(SESSION_MANAGER, /let restoredSandboxed = ps\.sandboxed === true && !\(ps\.projectId && isSandboxExemptProject\(ps\.projectId\)\);/);
+		assert.match(SESSION_REVIVE, /let restoredSandboxed = ps\.sandboxed === true && !\(ps\.projectId && isSandboxExemptProject\(ps\.projectId\)\);/);
 	});
 
 	it("force-abort respawn honors a false sandbox wiring result", () => {
