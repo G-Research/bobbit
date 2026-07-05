@@ -65,4 +65,47 @@ describe("buildDefaultWorkflows", () => {
 		const impl = findGate(wfs["quick-fix"], "implementation");
 		assert.ok(impl.description && impl.description.toLowerCase().includes("ralph loop"));
 	});
+
+	// VER-05/W3.3 — deterministic solo/fast workflow path (see
+	// defaults/workflow-authoring-guide.md §6.5). Automatic diff-based
+	// selection of this workflow is explicitly out of scope here (CLF-W3
+	// classifier territory) — this only makes the path *available*.
+	describe("solo-fast (VER-05/W3.3)", () => {
+		it("exists as a selectable workflow", () => {
+			assert.ok(wfs["solo-fast"], "solo-fast workflow should exist");
+		});
+
+		it("has no design-doc or documentation gate", () => {
+			const sf = wfs["solo-fast"];
+			const gateIds = sf.gates.map((g) => g.id);
+			assert.deepEqual(gateIds, ["implementation", "ready-to-merge"]);
+		});
+
+		it("implementation gate runs build+check+unit and skips e2e", () => {
+			const impl = findGate(wfs["solo-fast"], "implementation");
+			const stepNames = (impl.verify ?? []).map((s) => s.name);
+			assert.deepEqual(stepNames, ["Build", "Type check passes", "Unit tests", "Solo review"]);
+			assert.ok(!stepNames.includes("E2E tests"), "solo-fast should not run e2e");
+		});
+
+		it("runs exactly one consolidated review, not a reviewer fan-out", () => {
+			const impl = findGate(wfs["solo-fast"], "implementation");
+			const reviews = (impl.verify ?? []).filter((s) => s.type === "llm-review");
+			assert.equal(reviews.length, 1, "solo-fast should run exactly one review step");
+			assert.equal(reviews[0]!.role, "reviewer");
+			assert.equal(reviews[0]!.phase, 2);
+		});
+
+		it("ready-to-merge depends directly on implementation (mirrors quick-fix)", () => {
+			const gate = findGate(wfs["solo-fast"], "ready-to-merge");
+			assert.deepEqual(gate.depends_on, ["implementation"]);
+		});
+	});
+
+	it("default workflow set is unchanged aside from the new opt-in solo-fast entry", () => {
+		assert.deepEqual(
+			Object.keys(wfs).sort(),
+			["bug-fix", "feature", "general", "parent", "quick-fix", "solo-fast"].sort(),
+		);
+	});
 });
