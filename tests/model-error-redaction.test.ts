@@ -96,30 +96,39 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const isSessionSelectableModelString = (value: unknown) => typeof value === "string" && /^[^/]+\/.+/.test(value);
 	const getAigwUrl = () => undefined;
 	const discoverAigwModels = async () => [];
-	const modelRecencyRank = () => 1;
+	const selectAigwModelForRoleTier = (models: { id: string }[]) => models[0];
 	const inferMeta = () => ({ reasoning: false });
 	const broadcast = () => {};
+	// Minimal stand-in for session-runtime.ts::resolveSessionRuntime — every
+	// fixture here uses a role/fallback model failure path, never a
+	// "claude-code"-provider model, so this only needs the non-"claude-code"
+	// default.
+	const resolveSessionRuntime = (opts: { runtime?: string; modelProvider?: string }) => (
+		opts.runtime ?? (opts.modelProvider === "claude-code" ? "claude-code" : "pi")
+	);
 	return new Function(
 		"applyModelString",
 		"isSessionSelectableModelString",
 		"getAigwUrl",
 		"discoverAigwModels",
-		"modelRecencyRank",
+		"selectAigwModelForRoleTier",
 		"inferMeta",
 		"sanitizeModelErrorText",
 		"sanitizeModelErrorForLog",
 		"broadcast",
+		"resolveSessionRuntime",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
 		applyModelString,
 		isSessionSelectableModelString,
 		getAigwUrl,
 		discoverAigwModels,
-		modelRecencyRank,
+		selectAigwModelForRoleTier,
 		inferMeta,
 		sanitizeModelErrorText,
 		sanitizeModelErrorForLog,
 		broadcast,
+		resolveSessionRuntime,
 	);
 }
 
@@ -180,7 +189,8 @@ describe("model setup error redaction", () => {
 					},
 				},
 				resolveRoleModel: () => "anthropic/dead-role",
-				resolveStoreForSession: () => ({ update: () => {} }),
+				resolveRoleThinkingLevel: () => undefined,
+				resolveStoreForSession: () => ({ get: () => undefined, update: () => {} }),
 				_writeModelNameFile: () => {},
 			}, {
 				id: "session-manager-redaction",

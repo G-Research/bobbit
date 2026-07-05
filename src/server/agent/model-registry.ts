@@ -813,3 +813,32 @@ export function modelRecencyRank(id: string): number {
 
 	return 0;
 }
+
+/**
+ * Select which AI-Gateway-discovered model to auto-bind for a session,
+ * factoring in the spawning role's thinking/cost tier (Finding
+ * F5-model-aigw, Fable audit).
+ *
+ * Historically the aigw auto-select branch picked the single highest
+ * `modelRecencyRank` model for EVERY session regardless of role — a
+ * mechanical docs-only task burned the same newest/priciest model as an
+ * architect. This is availability-safe by construction: it only ever
+ * chooses among `models`, the set the gateway already reports as
+ * discovered/configured, so it can never turn a working session into a
+ * hard spawn failure the way binding a hardcoded literal `<provider>/<id>`
+ * role.model default could on an install without that specific model.
+ *
+ * Only the `"low"` thinking tier (currently only `docs-writer`, see
+ * `defaults/roles/docs-writer.yaml`) changes behavior: it gets the
+ * lowest-ranked (oldest/cheapest) discovered model. Every other tier —
+ * `"medium"`, `"high"`, and unset — keeps today's "always pick the
+ * newest/best" behavior unchanged, to keep this fix's blast radius to the
+ * one case the finding called out as unambiguously safe.
+ */
+export function selectAigwModelForRoleTier<T extends { id: string }>(
+	models: readonly T[],
+	roleThinkingLevel: string | undefined,
+): T {
+	const sorted = [...models].sort((a, b) => modelRecencyRank(a.id) - modelRecencyRank(b.id));
+	return roleThinkingLevel === "low" ? sorted[0]! : sorted[sorted.length - 1]!;
+}

@@ -110,6 +110,33 @@ generic call site at line 60.
 > in [docs/internals.md § Per-role model & thinking-level overrides](../internals.md#per-role-model--thinking-level-overrides)
 > and is pinned by `tests/builtin-role-thinking-tiers.test.ts`.
 
+> **Evaluated and deliberately not applied to `model` (VER-02, Fable audit):**
+> VER-02 asked for the same treatment on `model` that F5 gave `thinkingLevel`.
+> The recommended tiers (frontier: team-lead/architect/security-reviewer/
+> spec-auditor/bug-hunter; mid: coder/reviewer/code-reviewer/test-engineer/
+> qa-tester; cheap: docs-writer) are documented in
+> [docs/internals.md § Recommended model tiers (VER-02)](../internals.md#recommended-model-tiers-ver-02---guidance-not-a-shipped-default)
+> as operator guidance, but **no built-in role sets `model:`** and that stays
+> pinned by `tests/builtin-role-model-tiers.test.ts`. Reason: unlike
+> `thinkingLevel` (soft-fail, `console.warn` and fall through, §2.3 above),
+> `role.model` binding is a hard contract (§2.2) — a `setModel` failure or
+> read-back mismatch throws, and only falls back to `default.sessionModel`
+> when `allowSessionModelFallback` is separately opted into (off by default,
+> see [session-model-fallback.md](../session-model-fallback.md)). A literal
+> `<provider>/<modelId>` string is provider-specific, so shipping one as a
+> built-in default would hard-fail every spawn of that role on any install
+> without that exact model configured — confirmed by tracing
+> `tryAutoSelectModel` in `session-manager.ts` and pinned by the "off/absent
+> setting: failing explicit role.model rejects..." case added to
+> `tests/controlled-model-fallback.test.ts`. The one model-side change VER-02
+> did ship is availability-safe by construction: `selectAigwModelForRoleTier()`
+> makes the AI-Gateway auto-select fallback (§2.2, only reached when neither
+> `role.model` nor `default.sessionModel` is set) pick the cheapest
+> *already-discovered* model for `thinkingLevel: "low"` roles instead of
+> always picking the newest one (finding F5-model-aigw) — it can only steer
+> among models the gateway reports as available, never introduce a hardcoded
+> literal that could be unavailable.
+
 ---
 
 ## 2. Server: model binding at session start

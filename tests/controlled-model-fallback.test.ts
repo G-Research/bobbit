@@ -20,6 +20,7 @@ import { applyRuntimeSessionModelSelection } from "../src/server/ws/runtime-mode
 import { generateImage } from "../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
+import { selectAigwModelForRoleTier } from "../src/server/agent/model-registry.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -30,6 +31,13 @@ const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
+
+// Mutable fixture consumed by the `discoverAigwModels` mock inside
+// loadTryAutoSelectModel(). Set per-test via exerciseAutoSelect's
+// `aigwModels` option (defaults to a single frontier model, matching the
+// pre-existing fixture used by every test that doesn't care about the
+// aigw rank-tier fix).
+let currentMockAigwModels: { id: string }[] = [{ id: "us.anthropic.claude-opus-4-5" }];
 
 function extractRouteSlice(src: string, startMarker: string, endMarker: string): string {
 	const start = src.indexOf(startMarker);
@@ -79,14 +87,19 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		typeof value === "string" && /^[^/]+\/.+/.test(value) && !value.startsWith("image-only/")
 	);
 	const getAigwUrl = (prefs: { get: (key: string) => unknown }) => prefs.get("aigw.baseUrl") as string | undefined;
-	const discoverAigwModels = async () => ([{ id: "us.anthropic.claude-opus-4-5" }]);
-	const modelRecencyRank = () => 1;
+	const discoverAigwModels = async () => currentMockAigwModels;
 	const inferMeta = () => ({ reasoning: false });
 	const sanitizeModelErrorText = (err: unknown) => err instanceof Error ? err.message : String(err);
 	const sanitizeModelErrorForLog = sanitizeModelErrorText;
 	const broadcast = (clients: Set<any>, message: any) => {
 		for (const client of clients) client.messages.push(message);
 	};
+	// Minimal stand-in for session-runtime.ts::resolveSessionRuntime — the
+	// fixture's persisted store always reports no prior runtime/model, so this
+	// only ever needs to resolve to the non-"claude-code" default.
+	const resolveSessionRuntime = (opts: { runtime?: string; modelProvider?: string }) => (
+		opts.runtime ?? (opts.modelProvider === "claude-code" ? "claude-code" : "pi")
+	);
 
 	// eslint-disable-next-line no-new-func
 	return new Function(
@@ -94,22 +107,24 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"isSessionSelectableModelString",
 		"getAigwUrl",
 		"discoverAigwModels",
-		"modelRecencyRank",
+		"selectAigwModelForRoleTier",
 		"inferMeta",
 		"sanitizeModelErrorText",
 		"sanitizeModelErrorForLog",
 		"broadcast",
+		"resolveSessionRuntime",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
 		applyModelString,
 		isSessionSelectableModelString,
 		getAigwUrl,
 		discoverAigwModels,
-		modelRecencyRank,
+		selectAigwModelForRoleTier,
 		inferMeta,
 		sanitizeModelErrorText,
 		sanitizeModelErrorForLog,
 		broadcast,
+		resolveSessionRuntime,
 	);
 }
 
@@ -118,6 +133,8 @@ const tryAutoSelectModel = loadTryAutoSelectModel();
 async function exerciseAutoSelect(options: {
 	prefs: Prefs;
 	roleModel?: string;
+	roleThinkingLevel?: string;
+	aigwModels?: { id: string }[];
 	failModels?: string[];
 	spawnPinnedModel?: string;
 	initialBound?: { provider: string; id: string };
@@ -134,10 +151,13 @@ async function exerciseAutoSelect(options: {
 	let bound: { provider: string; id: string } | undefined = options.initialBound;
 	const failModels = new Set(options.failModels ?? []);
 	const client = { messages: [] as any[] };
+	currentMockAigwModels = options.aigwModels ?? [{ id: "us.anthropic.claude-opus-4-5" }];
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
 		resolveRoleModel: () => options.roleModel,
+		resolveRoleThinkingLevel: () => options.roleThinkingLevel,
 		resolveStoreForSession: () => ({
+			get: () => undefined,
 			update: (_sessionId: string, update: Record<string, unknown>) => persisted.push(update),
 		}),
 		_writeModelNameFile: (_sessionId: string, model: string) => modelFiles.push(model),
@@ -282,6 +302,35 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.equal(result.broadcastModels.length, 0, "controlled model fallback policy: failed explicit model must not broadcast a fallback model");
 	});
 
+	it("off/absent setting: failing explicit role.model rejects and never falls through to AIGW — the exact risk that keeps built-in role.model unset", async () => {
+		// This is the load-bearing evidence for VER-02 / F5-model-aigw: shipping
+		// a hardcoded literal role.model default (e.g. a specific Anthropic
+		// model string) on a built-in role would hard-fail every spawn of that
+		// role on any install where that literal model isn't configured/
+		// available, because role.model failures do NOT gracefully degrade
+		// unless the operator has separately opted into
+		// allowSessionModelFallback AND configured a working
+		// default.sessionModel. Both are off by default.
+		const result = await exerciseAutoSelect({
+			prefs: { "aigw.baseUrl": "https://aigw.test" },
+			roleModel: "anthropic/not-actually-configured",
+			failModels: ["anthropic/not-actually-configured"],
+		});
+
+		assert.ok(
+			result.error,
+			"controlled model fallback policy: an unavailable role.model must reject instead of silently falling through to AIGW best-ranked",
+		);
+		assert.deepEqual(
+			result.setModelCalls,
+			[["anthropic", "not-actually-configured"]],
+			"controlled model fallback policy: no AIGW setModel call is allowed after an explicit role.model fails with fallback off",
+		);
+		assert.equal(result.persisted.length, 0);
+		assert.equal(result.modelFiles.length, 0);
+		assert.equal(result.broadcastModels.length, 0);
+	});
+
 	it("enabled setting: failing explicit role model falls back exactly once to default.sessionModel and persists the actual fallback", async () => {
 		const result = await exerciseAutoSelect({
 			prefs: {
@@ -391,6 +440,57 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.deepEqual(result.setModelCalls, [["openai", "fallback-session"]]);
 		assert.deepEqual(result.persisted, [{ modelProvider: "openai", modelId: "fallback-session" }]);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
+	});
+});
+
+describe("F5-model-aigw: aigw auto-select is role-tier aware", () => {
+	// No role.model and no default.sessionModel — this is the "Fall back to
+	// aigw best-ranked model" branch in tryAutoSelectModel. Before this fix it
+	// always picked the single highest-modelRecencyRank discovered model for
+	// EVERY session regardless of role, so a mechanical docs-only task burned
+	// the same frontier-priced model as an architect (finding F5-model-aigw).
+	const aigwModels = [
+		{ id: "claude-opus-4-8" }, // highest rank
+		{ id: "claude-3-5-haiku" }, // lowest rank
+		{ id: "claude-sonnet-4-6" }, // mid
+	];
+
+	it("low-tier role (docs-writer today) auto-selects the cheapest discovered aigw model", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "aigw.baseUrl": "https://aigw.test" },
+			roleThinkingLevel: "low",
+			aigwModels,
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["aigw", "claude-3-5-haiku"]]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "claude-3-5-haiku" }]);
+		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "claude-3-5-haiku" }]);
+	});
+
+	for (const tier of ["high", "medium", undefined] as const) {
+		it(`${tier ?? "unset"}-tier role keeps today's behavior: auto-selects the highest-ranked discovered aigw model`, async () => {
+			const result = await exerciseAutoSelect({
+				prefs: { "aigw.baseUrl": "https://aigw.test" },
+				roleThinkingLevel: tier,
+				aigwModels,
+			});
+
+			assert.equal(result.error, undefined);
+			assert.deepEqual(result.setModelCalls, [["aigw", "claude-opus-4-8"]]);
+			assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "claude-opus-4-8" }]);
+		});
+	}
+
+	it("a single discovered model is picked regardless of role tier", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "aigw.baseUrl": "https://aigw.test" },
+			roleThinkingLevel: "low",
+			aigwModels: [{ id: "claude-sonnet-4-6" }],
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["aigw", "claude-sonnet-4-6"]]);
 	});
 });
 

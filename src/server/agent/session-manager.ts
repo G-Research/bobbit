@@ -71,7 +71,7 @@ import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgent
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { modelRecencyRank } from "./model-registry.js";
+import { selectAigwModelForRoleTier } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -6748,12 +6748,18 @@ export class SessionManager {
 		if (aigwModels.length === 0) return;
 
 		try {
-			const modelToUse = [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
+			// F5-model-aigw: role-tier-aware pick — "low" tier roles (docs-writer)
+			// get the cheapest discovered model instead of the newest/priciest one
+			// every session got before. See selectAigwModelForRoleTier() for why
+			// this is availability-safe (always picks among already-discovered
+			// models, never a hardcoded literal).
+			const roleTierForAigw = this.resolveRoleThinkingLevel(session);
+			const modelToUse = selectAigwModelForRoleTier(aigwModels, roleTierForAigw);
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
 			this._writeModelNameFile(session.id, modelToUse.id);
 			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
-			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
+			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}${roleTierForAigw === "low" ? " (low-tier role: cheapest discovered model)" : ""}`);
 
 			broadcast(session.clients, {
 				type: "state",
