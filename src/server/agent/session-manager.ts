@@ -7566,7 +7566,16 @@ export class SessionManager {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
 		}
-		const initThinking = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(role.name, session.projectId);
+		// Always re-resolve fresh against the NEWLY assigned role (mirrors the
+		// model resolution above and `_respawnAgentInPlace`'s equivalent step).
+		// A stale `session.spawnPinnedThinkingLevel` from BEFORE this role
+		// assignment must never short-circuit here — there is no persisted
+		// "explicitly pinned" marker for thinking level (unlike modelProvider/
+		// modelId above), so falling back to the in-memory value from the
+		// session's PRIOR role/spawn would silently skip the clamp this function
+		// exists to apply (e.g. a non-reasoning model's role pins "low" but the
+		// stale pin from a roleless prior spawn was the unclamped "medium").
+		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 		const runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, initialModel: bridgeOptions.initialModel, modelProvider: respawnPersisted?.modelProvider });
