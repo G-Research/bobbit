@@ -46,6 +46,7 @@ import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { tryHandleSwarmRoute } from "./agent/swarm-routes.js";
+import { reArmSwarmGovernorsOnBoot } from "./agent/swarm-restart-resume.js";
 import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -2553,6 +2554,21 @@ export function createGateway(config: GatewayConfig) {
 		}
 	});
 
+	// SWARM-W2 (design/swarm-orchestration.md §11 Wave 2 "restart-resume"):
+	// the SwarmGovernor above is a fresh, empty, in-memory instance every
+	// boot — re-arm it now for any swarm-sibling goal that was still
+	// in-flight (expected but not yet terminal) when the gateway last
+	// stopped, so token-budget/straggler enforcement resumes rather than
+	// silently lapsing for the rest of that sibling's life. Best-effort,
+	// synchronous, cheap (bounded by live swarm-group count) — every store
+	// it reads was already loaded from disk by `projectContextManager.initAll()`
+	// earlier in boot.
+	try {
+		reArmSwarmGovernorsOnBoot(projectContextManager, verificationHarness);
+	} catch (err) {
+		console.warn("[swarm-restart-resume] boot re-arm sweep failed (non-fatal):", err);
+	}
+
 	const isLocalhostServer = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 	server.on("upgrade", (req, socket, head) => {
@@ -2588,6 +2604,16 @@ export function createGateway(config: GatewayConfig) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/**
+		 * @internal Exposed for in-process E2E tests to drive the SWARM-W2
+		 * restart-resume boot sweep (`reArmSwarmGovernorsOnBoot`) directly — an
+		 * in-process gateway can't literally kill+restart its own Node process,
+		 * so the restart-resume E2E re-invokes the exact same boot-time
+		 * function against this live `verificationHarness`/`projectContextManager`
+		 * pair to simulate "gateway restarted" deterministically (see
+		 * tests/e2e/api-swarm-restart-resume.spec.ts).
+		 */
+		verificationHarness,
 		/** @internal Exposed for in-process E2E tests to seed/read preferences directly (see tests/e2e/in-process-harness.ts GatewayInfo.preferencesStore). */
 		preferencesStore,
 		get extensionChannels() { return extensionChannelServices; },

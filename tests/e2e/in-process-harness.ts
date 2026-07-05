@@ -58,6 +58,7 @@ export interface GatewayInfo {
 	orchestrationCore: any; // Exposed for orchestration restart-survival tests
 	projectContextManager: any; // Exposed for restart-survival (persisted-session list)
 	preferencesStore: any; // Exposed for direct preference seeding in auth-sensitive API tests
+	verificationHarness: any; // Exposed for SWARM-W2 restart-resume boot-sweep tests (reArmSwarmGovernorsOnBoot)
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -330,6 +331,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			orchestrationCore: (gw as any).orchestrationCore,
 			projectContextManager: (gw as any).projectContextManager,
 			preferencesStore: (gw as any).preferencesStore,
+			verificationHarness: (gw as any).verificationHarness,
 		};
 
 		// Orchestration routes require caller→owner auth via the per-session
