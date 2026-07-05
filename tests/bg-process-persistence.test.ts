@@ -390,6 +390,48 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		h.mgr.cleanup(S);
 	});
 
+	it("CON-03: hard-kill in the projection/offset debounce seam does not duplicate re-attached output", async (t) => {
+		// Reproduces the finding directly: drive the TWO REAL independent debounce
+		// timers (writeProjection's 300ms vs BgProcessStore's 1000ms offset save)
+		// instead of hand-constructing an already byte-aligned fixture, then
+		// simulate a hard kill in the ~700ms seam between them.
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "run.sh", h.stateDir);
+		const rec = h.store().get(S, info.id)!;
+		const spec = h.specs[0];
+
+		// The real child appends to the spool; simulate that directly, and make the
+		// pidfile match so restore re-attaches without the pidfile-retry sleep loop.
+		fs.writeFileSync(rec.outSpool, "line1\n");
+		fs.writeFileSync(rec.pidFile, `${rec.processPid}\n${rec.nonce}\n`);
+
+		// Feed the chunk the tailer would have reported — schedules BOTH the 300ms
+		// projection debounce and the 1000ms store-offset debounce.
+		spec.onChunk("stdout", "line1\n", 6);
+
+		// Advance PAST the projection debounce but NOT the store debounce.
+		t.mock.timers.tick(300);
+
+		// Sanity: the durable projection already covers "line1" on disk, while the
+		// on-disk metadata store (not the live in-memory map, which store.update()
+		// mutates synchronously regardless of the debounce) has NOT yet flushed the
+		// offset advance — this is the skew the finding describes.
+		assert.ok(fs.readFileSync(rec.logFile, "utf-8").includes("line1"), "projection flushed at the 300ms mark");
+		const onDisk = JSON.parse(fs.readFileSync(path.join(h.stateDir, "bg-processes.json"), "utf-8"));
+		const onDiskRec = onDisk.processes.find((p: any) => p.id === info.id);
+		assert.equal(onDiskRec.outOffset, 0, "offset not yet flushed to disk at the 300ms mark (pre-fix sanity)");
+
+		// Hard kill: no graceful flush(). Restart — a fresh manager/store re-reads
+		// only what actually made it to disk.
+		const h2 = h.reload({ isHostPidAlive: () => true });
+		await h2.mgr.restoreSession(S);
+		const texts = h2.mgr.getLogs(S, info.id)!.log.map(l => l.text);
+		assert.deepEqual(texts, ["line1"], "byte-aligned restore must not re-append output the projection already holds");
+		h2.mgr.cleanup(S);
+	});
+
 	it("Fix 3: genuinely repeated output across the restore boundary is PRESERVED (not dropped)", async () => {
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
@@ -767,6 +809,27 @@ describe("BgProcessManager — disk caps", () => {
 		const rec = h.store().get(S, info.id)!;
 		const stat = fs.statSync(rec.logFile);
 		assert.ok(stat.size <= MAX_LOG_BYTES, `multibyte projection ${stat.size} ≤ ${MAX_LOG_BYTES} bytes`);
+		h.mgr.cleanup(S);
+	});
+
+	it("CON-03: the offset header itself never pushes the projection file past MAX_LOG_BYTES", () => {
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "chatty.sh", h.stateDir);
+		const spec = h.specs[0];
+		// A large, many-digit offset makes the header as big as it realistically
+		// gets, while short lines pack the body close to its (reserved) cap.
+		let off = 10_000_000_000;
+		for (let i = 0; i < 20000; i++) {
+			const line = `${i}\n`;
+			off += Buffer.byteLength(line, "utf8");
+			spec.onChunk("stdout", line, off);
+		}
+		h.mgr.flush(S);
+		const rec = h.store().get(S, info.id)!;
+		const stat = fs.statSync(rec.logFile);
+		assert.ok(stat.size <= MAX_LOG_BYTES, `header + body projection ${stat.size} ≤ ${MAX_LOG_BYTES} bytes`);
+		assert.ok(fs.readFileSync(rec.logFile, "utf-8").startsWith("#OFF\t10000"), "header line present with the large offset");
 		h.mgr.cleanup(S);
 	});
 });

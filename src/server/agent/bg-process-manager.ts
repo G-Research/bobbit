@@ -31,6 +31,37 @@ const KEEP_BYTES = MAX_LOG_BYTES;
 const STATUS_POLL_MS = 150;
 /** Debounce for the durable combined-projection rewrite. */
 const PROJECTION_DEBOUNCE_MS = 300;
+/**
+ * CON-03 fix: the durable projection (<bgId>.log, {@link PROJECTION_DEBOUNCE_MS}
+ * = 300ms) and the persisted read offset (bg-processes.json, `BgProcessStore`'s
+ * SAVE_DEBOUNCE_MS = 1000ms) are flushed to disk on two INDEPENDENT debounces.
+ * During steady output the projection is routinely ahead of the persisted
+ * offset on disk, so a hard kill (no graceful `flush()`) can leave the two
+ * artifacts out of byte-alignment: restoreLoadOutput's splice point must be
+ * EXACTLY the offset the loaded projection covers, or it re-appends (or, more
+ * rarely, drops) the seam between them.
+ *
+ * Fix: embed the offsets the projection body actually covers in a leading
+ * header line, written atomically together with the body on every
+ * `writeProjection()` call (so header and body can never disagree with each
+ * other, only with the separately-debounced store). `loadProjection()` then
+ * uses the header — not the possibly-stale store-persisted offset — as the
+ * splice point, making [projection == consumed-up-to-header-offset] atomic
+ * across a crash without adding any extra store writes. Legacy projection
+ * files written before this fix (or hand-built fixtures) have no header line
+ * and fall back to whatever offset the caller already set (unchanged
+ * behavior).
+ */
+const PROJECTION_HEADER_PREFIX = "#OFF\t";
+/**
+ * Generous upper bound on the header line's serialised size ("#OFF\t" + two
+ * offsets + separators — offsets are spool byte counts, never anywhere near
+ * this many digits). Reserved out of the in-memory body budget (see
+ * `appendLog`) so `header + "\n" + body` can never exceed MAX_LOG_BYTES —
+ * preserving the "bounded at every instant" projection-file cap with the
+ * header now included in the file.
+ */
+const PROJECTION_HEADER_RESERVED_BYTES = 64;
 /** Grace period after an explicit kill before we mark `terminalReason="killed"`. */
 const KILL_GRACE_MS = 1500;
 /**
@@ -689,9 +720,12 @@ export class BgProcessManager {
 	private appendLog(bg: BgProcess, stream: "stdout" | "stderr", line: string, ts: number): void {
 		bg.log.push({ ts, text: line, stream });
 		// Count the SERIALISED line size ("<ts>\t<tag>\t<text>\n") so the durable
-		// combined projection — not just the raw text — stays within the cap.
+		// combined projection — not just the raw text — stays within the cap. The
+		// body budget reserves PROJECTION_HEADER_RESERVED_BYTES so that adding the
+		// CON-03 offset header in writeProjection() can never push the total file
+		// past MAX_LOG_BYTES.
 		bg._logBytes += projectedLineSize(ts, line);
-		while (bg.log.length > MAX_LOG_LINES || bg._logBytes > MAX_LOG_BYTES) {
+		while (bg.log.length > MAX_LOG_LINES || bg._logBytes > MAX_LOG_BYTES - PROJECTION_HEADER_RESERVED_BYTES) {
 			const removed = bg.log.shift();
 			if (removed) bg._logBytes -= projectedLineSize(removed.ts, removed.text);
 		}
@@ -704,22 +738,53 @@ export class BgProcessManager {
 		bg._projectionTimer = t;
 	}
 
-	/** Atomic (tmp+rename) full rewrite of the durable combined projection from the capped buffer. */
+	/**
+	 * Atomic (tmp+rename) full rewrite of the durable combined projection from the
+	 * capped buffer. CON-03: prefixes a header line recording the EXACT
+	 * out/errOffset the body-below covers — always bg.outOffset/errOffset AT THIS
+	 * CALL, which `onChunk`/`finalFlush`/`restoreLoadOutput` keep mutated in
+	 * lockstep with `bg.log` — so header and body are written atomically together
+	 * and can never drift from each other, only from the independently-debounced
+	 * store offset. See {@link PROJECTION_HEADER_PREFIX}.
+	 */
 	private writeProjection(bg: BgProcess): void {
 		try {
 			fs.mkdirSync(path.dirname(bg.paths.logFile), { recursive: true });
+			const header = `${PROJECTION_HEADER_PREFIX}${bg.outOffset}\t${bg.errOffset}`;
 			const body = bg.log.map(e => `${e.ts}\t${e.stream === "stderr" ? "err" : "out"}\t${e.text}`).join("\n");
+			const content = body.length > 0 ? `${header}\n${body}` : header;
 			const tmp = `${bg.paths.logFile}.tmp`;
-			fs.writeFileSync(tmp, body, "utf-8");
+			fs.writeFileSync(tmp, content, "utf-8");
 			fs.renameSync(tmp, bg.paths.logFile);
 		} catch { /* best-effort */ }
 	}
 
+	/**
+	 * Load the durable projection. CON-03: when the file carries the offset
+	 * header (see {@link writeProjection}), bg.outOffset/errOffset are set to the
+	 * EXACT offsets that projection body covers — overriding whatever the caller
+	 * (typically the store-persisted, possibly stale, offset via `rehydrate`)
+	 * had set — so a subsequent spool splice by the caller is always byte-aligned
+	 * with what was just loaded, independent of the store's own debounce. Legacy
+	 * header-less files (written before this fix, or hand-built fixtures) leave
+	 * the caller's offsets untouched.
+	 */
 	private loadProjection(bg: BgProcess): boolean {
 		let raw: string;
 		try { raw = fs.readFileSync(bg.paths.logFile, "utf-8"); } catch { return false; }
 		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
-		for (const line of raw.split("\n")) {
+		const lines = raw.split("\n");
+		let start = 0;
+		if (lines.length > 0 && lines[0].startsWith(PROJECTION_HEADER_PREFIX)) {
+			const [outStr, errStr] = lines[0].slice(PROJECTION_HEADER_PREFIX.length).split("\t");
+			const outOff = parseInt(outStr, 10);
+			const errOff = parseInt(errStr, 10);
+			if (Number.isFinite(outOff) && outOff >= 0) bg.outOffset = outOff;
+			if (Number.isFinite(errOff) && errOff >= 0) bg.errOffset = errOff;
+			start = 1;
+		}
+		for (let i = start; i < lines.length; i++) {
+			const line = lines[i];
 			if (!line) continue;
 			const t1 = line.indexOf("\t");
 			const t2 = line.indexOf("\t", t1 + 1);
