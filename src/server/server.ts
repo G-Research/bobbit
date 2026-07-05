@@ -25,8 +25,6 @@ import {
 	buildAgentDirRestartGuidance,
 	normalizeAgentDirInput,
 } from "./bobbit-dir.js";
-import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
-import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -40,7 +38,6 @@ import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
-import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -86,6 +83,8 @@ import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
 import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
 // STR-01 cohort 7: background-process, draft, abort, and prompt-section routes.
 import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
+// STR-01 cohort 9: early server/system status routes.
+import { registerServerSystemRoutes } from "./routes/server-system-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -581,7 +580,7 @@ import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./ag
 import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -623,7 +622,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
+import { resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
@@ -3333,6 +3332,7 @@ registerServerProjectConfigRoutes(coreRouteTable);
 registerWorkflowsRoutes(coreRouteTable);
 registerReviewAnnotationRoutes(coreRouteTable);
 registerSessionUtilityRoutes(coreRouteTable);
+registerServerSystemRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3578,7 +3578,8 @@ async function handleApiRoute(
 	// workflows family (src/server/routes/workflows-routes.ts) and the
 	// review-annotation family (src/server/routes/review-annotations-routes.ts);
 	// cohort 7, session utility routes
-	// (src/server/routes/session-utility-routes.ts).
+	// (src/server/routes/session-utility-routes.ts); cohort 9, server/system
+	// routes (src/server/routes/server-system-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3608,6 +3609,8 @@ async function handleApiRoute(
 				reviewAnnotationStore,
 				// Cohort 7 (session utility routes) additions — append-only.
 				bgProcessManager, noContent, toolManager,
+				// Cohort 9 (server/system routes) additions — append-only.
+				config, preferencesStore, sandboxManager: sandboxManager ?? undefined, getAigwUrl, writeProjectResolutionError,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -3844,292 +3847,15 @@ async function handleApiRoute(
 		return false;
 	}
 
-	// GET /api/harness-status — report whether the dev restart harness is active
-	if (url.pathname === "/api/harness-status" && req.method === "GET") {
-		json({ restartAvailable: process.env.BOBBIT_DEV_HARNESS === "1" });
-		return;
-	}
-
-	// POST /api/harness/restart — request a dev harness rebuild/restart
-	if (url.pathname === "/api/harness/restart" && req.method === "POST") {
-		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
-			json({ error: "Restart is only available under the dev harness" }, 403);
-			return;
-		}
-		touchGatewayRestartSentinel();
-		json({ ok: true, restartRequested: true }, 202);
-		return;
-	}
-
-	// POST /api/dev/boot-timing — append one client reload-timing sample to
-	// <stateDir>/boot-timing.jsonl. Harness-only (same gate as restart): the
-	// perf-instrumentation toggle that drives these POSTs is only shown under
-	// the dev harness, and we reject here too as defense-in-depth.
-	if (url.pathname === "/api/dev/boot-timing" && req.method === "POST") {
-		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
-			json({ error: "Perf instrumentation is only available under the dev harness" }, 403);
-			return;
-		}
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const written = recordBootTiming(body);
-		if (!written) { json({ error: "Sample rejected" }, 422); return; }
-		json({ ok: true, path: path.join(bobbitStateDir(), BOOT_TIMING_FILE) }, 201);
-		return;
-	}
-
-	// GET /api/dev/boot-timing — read recent reload-timing samples (newest last)
-	// for inspection from the UI or tooling. Harness-only. `?limit=N` caps rows.
-	if (url.pathname === "/api/dev/boot-timing" && req.method === "GET") {
-		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
-			json({ error: "Perf instrumentation is only available under the dev harness" }, 403);
-			return;
-		}
-		const limitParamRaw = url.searchParams.get("limit");
-		const limit = limitParamRaw ? Math.max(1, Math.min(500, parseInt(limitParamRaw, 10) || 50)) : 50;
-		json({ path: path.join(bobbitStateDir(), BOOT_TIMING_FILE), samples: readBootTimings(limit) });
-		return;
-	}
-
-	// GET /api/health — unauthenticated so the client can probe localhost mode
-	if (url.pathname === "/api/health" && req.method === "GET") {
-		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
-		json({
-			status: "ok",
-			sessions: sessionManager.listSessions().length,
-			localhost: isLocalhost,
-			aigw: !!getAigwUrl(preferencesStore),
-			setupComplete: isSetupComplete(),
-			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
-			// CON-05: stale-snapshot-guard status, so a merge-recovery event
-			// (session-store self-healed after an external rewrite) stays
-			// visible to the UI/operator instead of only appearing once in
-			// the server log. `tripped` is only true in the rare unrecoverable
-			// case (see session-store.ts saveNow()).
-			sessionStoreStaleRecovery: sessionManager.getStaleSessionStoreStatus(),
-		});
-		return;
-	}
-
-	// POST /api/internal/test/replay-buffered-events/:sessionId — BOBBIT_E2E-only hook
-	// used by ST-DEDUP-01 to reproduce live-streaming duplication. Iterates the
-	// session's EventBuffer and re-broadcasts each buffered entry on the SAME
-	// wire path production uses, so when the fix adds `seq`/`ts` to the
-	// broadcast envelope the endpoint will naturally carry them too (because it
-	// inspects the buffer's stored entries — which upgrade from raw events to
-	// {seq,ts,event} tuples post-fix). Pre-fix: clients receive duplicate
-	// events and dupe-append assistant/toolResult messages. Post-fix: clients
-	// dedupe by seq and the message list stays stable.
-	const replayMatch = url.pathname.match(/^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/);
-	if (replayMatch && req.method === "POST") {
-		if (process.env.BOBBIT_E2E !== "1") { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
-		const sessionId = replayMatch[1];
-		const session = sessionManager.getSession(sessionId);
-		if (!session) { json({ error: "session not found" }, 404); return; }
-		const entries = session.eventBuffer.getAll() as any[];
-		let replayed = 0;
-		const deadline = Date.now() + PACE_TIMEOUT_MS;
-		for (const entry of entries) {
-			// Accept both raw-event shape (pre-fix) and {seq,ts,event} (post-fix).
-			const isWrapped = entry && typeof entry === "object" && "event" in entry && ("seq" in entry || "ts" in entry);
-			const framePayload = isWrapped
-				? { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts }
-				: { type: "event" as const, data: entry };
-			const data = JSON.stringify(framePayload);
-			for (const client of session.clients) {
-				await paceAndSend(client as any, data, deadline);
-			}
-			replayed++;
-		}
-		json({ replayed, bufferSize: session.eventBuffer.size });
-		return;
-	}
-
-	// GET /api/setup-status — check if project setup has been completed
-	if (url.pathname === "/api/setup-status" && req.method === "GET") {
-		json({ complete: isSetupComplete() });
-		return;
-	}
-
-	// POST /api/setup-status/dismiss — mark setup as dismissed (writes sentinel file)
-	if (url.pathname === "/api/setup-status/dismiss" && req.method === "POST") {
-		const stateDir = bobbitStateDir();
-		fs.mkdirSync(stateDir, { recursive: true });
-		fs.writeFileSync(path.join(stateDir, "setup-complete"), "dismissed\n");
-		json({ ok: true });
-		return;
-	}
-
-	// GET /api/system-prompt-context — read the project context section from system-prompt.md
-	if (url.pathname === "/api/system-prompt-context" && req.method === "GET") {
-		const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
-		if (!fs.existsSync(systemPromptPath)) { json({ context: "" }); return; }
-		try {
-			const content = fs.readFileSync(systemPromptPath, "utf-8");
-			// Extract everything after the last "# Project Context" heading, or return empty
-			const marker = "# Project Context";
-			const idx = content.lastIndexOf(marker);
-			if (idx === -1) { json({ context: "" }); return; }
-			const context = content.slice(idx + marker.length).trim();
-			json({ context });
-		} catch { json({ context: "" }); }
-		return;
-	}
-
-	// PUT /api/system-prompt-context — append/replace the project context section in system-prompt.md
-	if (url.pathname === "/api/system-prompt-context" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body.context !== "string") { json({ error: "Missing context" }, 400); return; }
-		const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
-		try {
-			let existing = "";
-			if (fs.existsSync(systemPromptPath)) {
-				existing = fs.readFileSync(systemPromptPath, "utf-8");
-			}
-			const marker = "# Project Context";
-			const idx = existing.lastIndexOf(marker);
-			const base = idx !== -1 ? existing.slice(0, idx).trimEnd() : existing.trimEnd();
-			const newContent = base + "\n\n" + marker + "\n\n" + body.context.trim() + "\n";
-			fs.mkdirSync(path.dirname(systemPromptPath), { recursive: true });
-			fs.writeFileSync(systemPromptPath, newContent);
-			json({ ok: true });
-		} catch (err: any) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/system-prompt/customise — copy shipped default to .bobbit/config/system-prompt.md
-	//   so the user can edit it. If the file already exists it is left unchanged.
-	//   Returns { path, created, content }.
-	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
-		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
-		const defaultPath = path.join(
-			path.dirname(fileURLToPath(import.meta.url)),
-			"defaults",
-			"system-prompt.md",
-		);
-		let created = false;
-		try {
-			if (!fs.existsSync(userPath)) {
-				if (!fs.existsSync(defaultPath)) {
-					json({ error: "Default system-prompt.md not found in install" }, 500);
-					return;
-				}
-				fs.mkdirSync(path.dirname(userPath), { recursive: true });
-				fs.copyFileSync(defaultPath, userPath);
-				created = true;
-			}
-			const content = fs.readFileSync(userPath, "utf-8");
-			json({ path: userPath, created, content });
-		} catch (err: any) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage)
-	if (url.pathname === "/api/shutdown" && req.method === "POST") {
-		json({ status: "shutting down" });
-		// Defer exit to allow the response to be sent
-		setTimeout(() => process.exit(0), 500);
-		return;
-	}
-
-	// GET /api/ca-cert — download the Bobbit CA certificate for device trust
-	if (url.pathname === "/api/ca-cert" && req.method === "GET") {
-		const caCertPath = config.tls?.caCert;
-		if (!caCertPath || !fs.existsSync(caCertPath)) {
-			json({ error: "No CA certificate available. Server is using a self-signed certificate." }, 404);
-			return;
-		}
-		const certData = fs.readFileSync(caCertPath);
-		res.writeHead(200, {
-			// iOS Safari needs this MIME type to offer the profile-install flow.
-			"Content-Type": "application/x-x509-ca-cert",
-			"Content-Disposition": "attachment; filename=\"bobbit-ca.crt\"",
-			"Content-Length": certData.length,
-		});
-		res.end(certData);
-		return;
-	}
-
-	// GET /api/sandbox-pool (deprecated — no longer a real pool, returns basic stats)
-	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
-		if (sandboxManager) {
-			const stats = sandboxManager.getStats();
-			json({ ...stats, type: "sandbox" });
-		} else {
-			json({ enabled: false });
-		}
-		return;
-	}
-
-	// GET /api/worktree-pool
-	if (url.pathname === "/api/worktree-pool" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId");
-		if (projectId) {
-			const pool = sessionManager.getWorktreePool(projectId);
-			json(pool ? pool.getStatus() : { enabled: false, ready: 0, target: 0, filling: false });
-		} else {
-			const pools: Record<string, any> = {};
-			for (const [pid, pool] of sessionManager.getAllWorktreePools()) {
-				pools[pid] = pool.getStatus();
-			}
-			json({ pools });
-		}
-		return;
-	}
-
-	// GET /api/sandbox-status
-	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
-		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
-		const configured = sandboxConfig === "docker";
-		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
-		json({ ...status, configured });
-		return;
-	}
-
-	// POST /api/sandbox-image/build
-	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
-		const body = await readBody(req).catch(() => null);
-		const projectId = (body && typeof body === "object" && typeof (body as any).projectId === "string")
-			? (body as any).projectId
-			: url.searchParams.get("projectId") || undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
-		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
-		if (!dockerContextRoot) {
-			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
-			return;
-		}
-		if (isBuildingImage()) {
-			json({ error: "Build already in progress" }, 409);
-			return;
-		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot);
-		if (result.success) {
-			json({ success: true });
-		} else {
-			json({ success: false, error: result.error }, 500);
-		}
-		return;
-	}
-
-	// GET /api/sandbox/host-tokens
-	if (url.pathname === "/api/sandbox/host-tokens" && req.method === "GET") {
-		const tokens = detectHostTokens(preferencesStore);
-		json(tokens);
-		return;
-	}
+	// GET /api/harness-status, POST /api/harness/restart,
+	// GET/POST /api/dev/boot-timing, GET /api/health,
+	// POST /api/internal/test/replay-buffered-events/:sessionId,
+	// GET/POST /api/setup-status*, GET/PUT /api/system-prompt-context,
+	// POST /api/system-prompt/customise, POST /api/shutdown,
+	// GET /api/ca-cert, GET /api/sandbox-pool, GET /api/worktree-pool,
+	// GET /api/sandbox-status, POST /api/sandbox-image/build, and
+	// GET /api/sandbox/host-tokens moved to the core route registry
+	// (STR-01 cohort 9) — see src/server/routes/server-system-routes.ts.
 	// ── Project Detection & Browse ────────────────────────────────────
 
 	// GET /api/projects/preflight, POST /api/projects/archive-bobbit,
