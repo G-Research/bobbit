@@ -38,7 +38,15 @@ test.describe("AgentInterface usage hydration hardening", () => {
 		const errors = await loadFixture(page, { clearStorage: true });
 
 		await expect(page.locator("agent-interface").getByText("The file contains Bobbit project notes.").first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator("agent-interface").getByText("Bobbit project notes").first()).toBeVisible({ timeout: 10_000 });
+		// Scoped to visible matches only: the raw "Read" tool output also contains
+		// this substring, but it renders inside a collapsed (`max-h-0`,
+		// collapsed-by-default) disclosure per DefaultRenderer/ReadRenderer — a
+		// contract that predates this fixture (see src/ui/tools/renderers/DefaultRenderer.ts,
+		// "(collapsed; expand to inspect)", present since commit 94770a5b / 0ea446a3,
+		// 2026-03-13). An unscoped `.first()` picks that hidden node by DOM order
+		// and was never reliably testing anything; assert against the visible
+		// assistant text instead.
+		await expect(page.locator("agent-interface").getByText("Bobbit project notes").filter({ visible: true }).first()).toBeVisible({ timeout: 10_000 });
 
 		await page.evaluate(async () => {
 			const el = (window as any).__agentInterfaceUsageEl;
