@@ -72,6 +72,9 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	// STR-01 cohort 4 (pack-runtimes; server-scope project-config trio).
 	"src/server/routes/pack-runtimes-routes.ts",
 	"src/server/routes/project-config-server-routes.ts",
+	// STR-01 cohort 6 (workflows; review-annotations).
+	"src/server/routes/workflows-routes.ts",
+	"src/server/routes/review-annotations-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

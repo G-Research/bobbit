@@ -31,6 +31,7 @@ import type { ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "../
 import type { StaffManager } from "../agent/staff-manager.js";
 import type { InboxManager } from "../agent/inbox-manager.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
+import type { ReviewAnnotationStore } from "../review-annotation-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -170,4 +171,9 @@ export interface CoreRouteCtx {
 	 *  `/api/ext/pack-route/:packId/:routeName` route, so it stays defined once
 	 *  in server.ts and is threaded through here rather than duplicated. */
 	readBodyText(req: http.IncomingMessage, maxBytes?: number): Promise<string | null>;
+
+	// ── Cohort 6 (workflows + review-annotations) additions — append-only
+	// from here down. Never reorder the fields above.
+	/** handleApiRoute's own `reviewAnnotationStore` param — optional exactly as it is there (a pre-existing gateway-wiring detail, not request-shaped). Workflows needed no new fields: configCascade + projectContextManager were already threaded through by cohort 1/2. */
+	reviewAnnotationStore?: ReviewAnnotationStore;
 }
