@@ -1764,6 +1764,43 @@ These boundaries are why the same Bobbit process can talk to an AI Gateway and p
 
 ---
 
+## Custom local providers (Ollama / LM Studio / vLLM / llama.cpp / manual)
+
+Distinct from the AI Gateway path above, Bobbit also supports pointing directly at a local model server — no gateway needed. Config-only: `POST /api/custom-providers` (or the Settings UI) persists an entry to the `customProviders` preference:
+
+```json
+{
+  "id": "local-ollama",
+  "name": "local-ollama",
+  "type": "vllm",
+  "baseUrl": "http://localhost:11434"
+}
+```
+
+`type` is one of `"ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual"` (plus the image-only `"openai-images" | "gemini-images" | "google-imagen"`, wired separately in `image-generation.ts`). `"ollama"` discovers via Ollama's native client (to read tool/thinking capabilities and context length); `"lmstudio"` uses the LM Studio SDK; `"llama.cpp"`, `"vllm"`, and any other OpenAI-compatible local server (including Ollama's own `/v1` surface) discover via a plain `GET <baseUrl>/v1/models`. All of them ultimately run inference through the OpenAI-completions API at `<baseUrl>/v1`.
+
+**models.json bridge.** `getAvailableModels()` (`src/server/agent/model-registry.ts`) reads `customProviders` directly, so a configured local provider is immediately visible and marked `authenticated: true` in `GET /api/models`, in the browser model picker, and in server-side one-shot completions (title-gen, image-gen). The spawned `pi-coding-agent` subprocess that actually runs a session does **not** read that preference — it has its own model registry sourced from the active agent directory's `models.json` (the same file `writeAigwModelsJson()` above writes into). `syncCustomProviderModelsJson()` bridges the two: it discovers each configured custom provider's models and writes them into `models.json` under a per-provider key (`config.name || config.id`), with conservative OpenAI-compat flags (no developer role, no strict mode, `max_tokens` field) matching what `writeAigwModelsJson()` already assumes for non-Claude models. Without this bridge, a configured provider looks selectable everywhere but every session that selects it fails at spawn with `Model "<provider>/<id>" not found. Use --list-models to see available models.` — the model existed only in Bobbit's registry, never in the file the agent binary consults.
+
+The sync runs:
+- once at server startup (mirrors `startupAigwCheck`'s re-discovery-on-boot; best-effort, guarded by `BOBBIT_SKIP_CUSTOM_PROVIDER_SYNC` for test environments),
+- after `POST /api/custom-providers` (add/update — a rename correctly prunes the old key on the next sync),
+- immediately on `DELETE /api/custom-providers/:id` via `removeCustomProviderModelsJsonEntry()` (no need to wait for a full re-discovery pass).
+
+A provider whose config still exists but is temporarily unreachable is left untouched (its stale `models.json` entry self-heals on the next successful sync) — deletion is the only path that removes an entry outright.
+
+**Recipe: point Bobbit at a local Ollama server.**
+
+```bash
+curl -X POST http://localhost:3001/api/custom-providers \
+  -H "Authorization: Bearer $(bobbit --show-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"local-ollama","name":"local-ollama","type":"vllm","baseUrl":"http://localhost:11434"}'
+```
+
+Then set `default.sessionModel` to `"local-ollama/<model>"` (e.g. `local-ollama/qwen3:0.6b`) via `PUT /api/preferences`, or select it from the model picker per-session. See [docs/testing-strategy.md](testing-strategy.md) ("Testing with local/cheap models") for the full manual-testing recipe and when to reach for this vs. `test:manual`/`qa-spot`.
+
+**Anthropic is not required to use Bobbit.** There is no code path that blocks session creation, the setup flow, or model selection on the absence of an Anthropic credential — `isSetupComplete()` (`src/server/setup-status.ts`) only checks a dismissal sentinel / customized `system-prompt.md`, unrelated to any provider. Anthropic is simply one of several built-in providers (alongside OpenAI, Google, xAI, Groq, Mistral, OpenRouter, Bedrock) plus the AI Gateway and custom-local paths above; the only Anthropic-specific behavior is that Claude models rank first in `modelRecencyRank()`'s auto-selection heuristic when nothing else is configured — a default, not a gate.
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.

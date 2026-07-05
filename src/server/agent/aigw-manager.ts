@@ -207,11 +207,17 @@ export function deriveName(modelId: string): string {
 
 // ── models.json management ─────────────────────────────────────────
 
-function getModelsJsonPath(): string {
+/**
+ * Path to `~/.bobbit/agent/models.json` — the file pi-coding-agent subprocesses
+ * read at spawn to resolve `provider/modelId` strings. Exported so other
+ * models.json writers (e.g. custom local providers in model-registry.ts) share
+ * one canonical path/read/write implementation instead of re-deriving it.
+ */
+export function getModelsJsonPath(): string {
 	return path.join(globalAgentDir(), "models.json");
 }
 
-function readModelsJson(): Record<string, any> {
+export function readModelsJson(): Record<string, any> {
 	const p = getModelsJsonPath();
 	try {
 		if (fs.existsSync(p)) {
@@ -223,7 +229,7 @@ function readModelsJson(): Record<string, any> {
 	return { providers: {} };
 }
 
-function writeModelsJson(data: Record<string, any>): void {
+export function writeModelsJson(data: Record<string, any>): void {
 	const p = getModelsJsonPath();
 	let tmp = "";
 	try {
