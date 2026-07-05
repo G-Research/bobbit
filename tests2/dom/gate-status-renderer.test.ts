@@ -7,6 +7,10 @@ import { GateStatusRenderer } from "../../src/ui/tools/renderers/GateToolRendere
 // Static import of the real element — see gate-signal-renderer.test.ts for why
 // (avoids the lazy loader's unhandled async import racing env teardown).
 import "../../src/ui/tools/renderers/GateVerificationLive.js";
+// Pre-import the markdown chunk GateVerificationLive lazy-loads (see the
+// gate-signal-renderer test for the full rationale) to avoid a post-teardown
+// unhandled rejection from mini-lit's async decorator evaluation.
+import "../../src/ui/lazy/safe-markdown-block.js";
 
 const toolResult = (data: any) => ({ isError: false, content: [{ type: "text", text: JSON.stringify(data) }] });
 

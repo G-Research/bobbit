@@ -11,6 +11,12 @@ import { GateSignalRenderer } from "../../src/ui/tools/renderers/GateToolRendere
 // then hits the cached module instead of firing an unhandled async import whose
 // top-level define would race teardown.
 import "../../src/ui/tools/renderers/GateVerificationLive.js";
+// GateVerificationLive.render() fires ensureMarkdownBlock() (a fire-and-forget
+// dynamic import of the KaTeX/marked/mini-lit graph). Pre-import it statically so
+// that chunk's top-level @customElement decorators run now (while happy-dom's
+// customElements is live) instead of racing env teardown as an unhandled
+// "customElements is not defined" rejection.
+import "../../src/ui/lazy/safe-markdown-block.js";
 
 const AGENT_REMINDER =
 	"Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
