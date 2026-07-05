@@ -66,6 +66,15 @@ ${SKILL_MARKER}
 	expect(putResp.status).toBe(200);
 });
 
+test.afterAll(async () => {
+	// The second project is created in this FILE-level beforeAll (before the
+	// describe's fileBaseline snapshot), so the harness per-file sweep treats it
+	// as baseline and never deletes it. Without this cleanup it leaks into the
+	// next file's baseline on the shared fork and trips the leak detector there
+	// (e.g. project-reorder-api's clearVisibleProjects removes it → projects:-1).
+	if (secondProjectId) await apiFetch(`/api/projects/${secondProjectId}`, { method: "DELETE" }).catch(() => {});
+});
+
 test.describe("Slash skill expansion mismatch", () => {
 	test("autocomplete requires projectId to find non-default project skills", async () => {
 		// Create a session in the second project
