@@ -219,7 +219,7 @@ function isExpectedTempPrimaryBranchFallbackPath(cwd: string): boolean {
 		if (hasExpectedTempHarnessComponent(resolved)) return true;
 	}
 
-	const e2eRoot = path.resolve(process.env.BOBBIT_E2E_TMP_ROOT || defaultE2eTempRoot());
+	const e2eRoot = path.resolve(getLegacyTestRuntimeFlags().e2eTmpRoot || defaultE2eTempRoot());
 	return sameOrInsidePath(resolved, e2eRoot);
 }
 

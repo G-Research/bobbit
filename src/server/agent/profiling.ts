@@ -27,9 +27,10 @@
 
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
-const PROFILE = process.env.BOBBIT_E2E_PROFILE === "1";
-const FLUSH_INTERVAL_MS = Number(process.env.BOBBIT_E2E_PROFILE_FLUSH_MS) || 5000;
+const PROFILE = getLegacyTestRuntimeFlags().e2eProfile;
+const FLUSH_INTERVAL_MS = Number(getLegacyTestRuntimeFlags().e2eProfileFlushMs) || 5000;
 
 interface Bucket {
 	samples: number[];

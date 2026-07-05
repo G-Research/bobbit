@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -2054,7 +2055,7 @@ export class VerificationHarness {
 	private async _rerunLlmReviewStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+		if (getLegacyTestRuntimeFlags().skipLlmReview) {
 			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -2130,7 +2131,7 @@ export class VerificationHarness {
 	private async _rerunAgentQaStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+		if (getLegacyTestRuntimeFlags().skipLlmReview) {
 			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -3421,7 +3422,7 @@ export class VerificationHarness {
 							result = await this.runSubgoalStep(step, signal, active, index);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+							if (getLegacyTestRuntimeFlags().skipLlmReview) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
@@ -3521,7 +3522,7 @@ export class VerificationHarness {
 							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+							if (getLegacyTestRuntimeFlags().skipLlmReview) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);

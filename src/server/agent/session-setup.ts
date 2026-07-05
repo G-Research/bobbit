@@ -38,6 +38,7 @@ import type { ContextBlock } from "./context-blocks.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
@@ -1115,8 +1116,9 @@ export async function executeWorktreeAsync(
 	// "preparing" by SessionManager.createSession before this fn is invoked, so
 	// sleeping here keeps the session visibly preparing without changing
 	// production behaviour (gated on the env var being set).
-	if (process.env.BOBBIT_TEST_PREPARING_DELAY_MS) {
-		const delayMs = Number(process.env.BOBBIT_TEST_PREPARING_DELAY_MS);
+	const preparingDelayMs = getLegacyTestRuntimeFlags().testPreparingDelayMs;
+	if (preparingDelayMs) {
+		const delayMs = Number(preparingDelayMs);
 		if (Number.isFinite(delayMs) && delayMs > 0) {
 			await new Promise(resolve => setTimeout(resolve, delayMs));
 		}

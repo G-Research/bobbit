@@ -1,6 +1,7 @@
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
 export type GithubDiffLineKind = "context" | "add" | "del";
@@ -178,7 +179,8 @@ const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
 const DEFAULT_MAX_LINES_PER_FILE = 2_000;
 
 function externalNetworkBlockedForTests(): boolean {
-	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
+	const flags = getLegacyTestRuntimeFlags();
+	return flags.testNoExternal || flags.e2e;
 }
 
 function isLocalHttpUrl(raw: string): boolean {
