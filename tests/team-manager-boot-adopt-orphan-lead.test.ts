@@ -189,4 +189,86 @@ describe("TeamManager boot-time untracked team-lead adoption (CON-06)", () => {
 			"CON_06_DUPLICATE_SPAWN: sessionManager.createSession was called — a duplicate team-lead was spawned",
 		);
 	});
+
+	it("does NOT adopt an ARCHIVED team-lead session — a dismissed team stays restartable after restart", async () => {
+		// Post-teardownTeam state (review finding on PR #34): teardownTeam
+		// archives the lead via terminateSession (the record STAYS in
+		// sessions.json with archived=true — session-manager.ts ends
+		// terminateSession with terminateStore.archive(id)) and then removes
+		// the team-store entry. Goal remains team+unarchived. This is a
+		// DELIBERATE teardown, not a crash orphan: the sweep must adopt
+		// nothing, and a subsequent startTeam() must proceed to
+		// createSession so the user can restart the team.
+		const goal = makeCrashWindowGoal();
+		goal.id = "goal-torn-down";
+		const session = makeOrphanedTeamLeadSession(goal.id);
+		session.id = "sess-team-lead-archived";
+		(session as any).archived = true;
+		(session as any).archivedAt = Date.now();
+		const ctx = makeProjectContext(goal, session);
+		const projectContextManager = {
+			all: () => [ctx],
+			getContextForGoal: (goalId: string) => (goalId === goal.id ? ctx : undefined),
+		};
+		// Sentinel: proves startTeam got PAST the "Team already active" guard
+		// all the way to the actual spawn, without stubbing the entire
+		// post-spawn flow (title/meta/kickoff).
+		const SENTINEL = "SENTINEL_CREATE_SESSION_REACHED";
+		const createSession = mock.fn(async () => {
+			throw new Error(SENTINEL);
+		});
+		const sessionManager = {
+			getSession: () => undefined,
+			goalManager: ctx.goalManager,
+			createSession,
+			isSandboxEnabled: false,
+			isSubgoalsEnabled: false,
+		};
+		const tm = new TeamManager(sessionManager as any, {
+			projectContextManager,
+			taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+			colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+			roleStore: {
+				get: (name: string) => (name === "team-lead"
+					? { name: "team-lead", label: "Team Lead", promptTemplate: "lead {{AGENT_ID}}", toolPolicies: {}, accessory: "crown", createdAt: 0, updatedAt: 0 }
+					: undefined),
+				getAll: () => [{ name: "team-lead", label: "Team Lead", promptTemplate: "lead", toolPolicies: {}, accessory: "crown", createdAt: 0, updatedAt: 0 }],
+				put: () => {}, remove: () => {}, reload: () => {}, update: () => true,
+			},
+			toolManager: { getExtensionPath: () => "/tmp/fake-team-extension.ts" },
+		} as any);
+		createdManagers.push(tm);
+
+		// 1) The sweep must not have resurrected a team entry for the goal.
+		assert.equal(
+			ctx.teamStore.put.mock.callCount(),
+			0,
+			"CON_06_ARCHIVED_RESURRECTED: boot sweep adopted an ARCHIVED team-lead — a torn-down team came back from the dead",
+		);
+		assert.equal(
+			(tm as any).teams.has(goal.id),
+			false,
+			"CON_06_ARCHIVED_RESURRECTED: this.teams has an entry for a deliberately torn-down team",
+		);
+
+		// 2) startTeam() must proceed to the actual spawn (createSession), not
+		//    throw "Team already active".
+		await assert.rejects(
+			() => tm.startTeam(goal.id),
+			(err: any) => {
+				assert.doesNotMatch(
+					String(err?.message),
+					/Team already active/,
+					"CON_06_ARCHIVED_RESURRECTED: startTeam() threw 'Team already active' — a dismissed team can never be restarted",
+				);
+				assert.match(String(err?.message), new RegExp(SENTINEL));
+				return true;
+			},
+		);
+		assert.equal(
+			createSession.mock.callCount(),
+			1,
+			"CON_06_ARCHIVED_RESURRECTED: startTeam() never reached createSession for the torn-down goal",
+		);
+	});
 });

@@ -73,4 +73,17 @@ describe("findUntrackedTeamLeadSessions", () => {
 		);
 		assert.deepEqual(result, []);
 	});
+
+	it("skips ARCHIVED lead sessions — teardownTeam archives the lead then removes the entry; adopting it would resurrect a dismissed team", () => {
+		// Post-teardownTeam state: goal still team+unarchived, no team-store
+		// entry, lead session archived=true. NOT a crash orphan — must not
+		// be adopted even if the caller forgot to pre-filter archived leads.
+		const goals = [{ id: "goal-1", team: true, archived: false }];
+		const result = findUntrackedTeamLeadSessions(
+			goals,
+			() => false,
+			(goalId) => ({ id: "sess-lead-1", role: "team-lead", teamGoalId: goalId, archived: true }),
+		);
+		assert.deepEqual(result, []);
+	});
 });

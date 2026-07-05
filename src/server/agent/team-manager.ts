@@ -730,13 +730,25 @@ export class TeamManager {
 			// Idempotent: once adopted, `ctx.teamStore.get(goalId)` is truthy, so
 			// re-running this pass (or the third pass's own guard at its top) is a
 			// no-op on subsequent boots.
+			//
+			// ARCHIVED leads are explicitly excluded (both in the lookup below
+			// and inside the pure helper): `teardownTeam()` archives the lead
+			// via `terminateSession()` (the record stays in sessions.json with
+			// archived=true) and then removes the team-store entry, so
+			// "team goal + no entry + ARCHIVED lead" is a deliberate teardown,
+			// not a crash orphan. Adopting it would resurrect the team entry
+			// and make startTeam() throw "Team already active" forever — the
+			// user could never restart a dismissed team.
 			let adoptedUntrackedLeads = 0;
 			for (const ctx of this.config.projectContextManager.all()) {
 				const untracked = findUntrackedTeamLeadSessions(
 					ctx.goalStore.getAll(),
 					(goalId) => ctx.teamStore.get(goalId) !== undefined,
+					// Filter to non-archived here (not just in the helper) so an
+					// archived ex-lead from a previous teardown can't shadow a
+					// genuine live crash-orphan lead in the .find().
 					(goalId) => ctx.sessionStore.getAll()
-						.find(s => s.teamGoalId === goalId && s.role === "team-lead"),
+						.find(s => s.teamGoalId === goalId && s.role === "team-lead" && !s.archived),
 				);
 				for (const { goalId, teamLeadSessionId } of untracked) {
 					try {

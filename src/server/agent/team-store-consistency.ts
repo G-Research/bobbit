@@ -75,22 +75,37 @@ export interface UntrackedTeamLeadSession {
 	id: string;
 	role?: string;
 	teamGoalId?: string;
+	/**
+	 * Archived leads are NOT crash-window orphans and must never be adopted.
+	 * `teardownTeam()` archives the lead via `terminateSession()` (the record
+	 * stays in sessions.json with `archived: true` — see the trailing
+	 * `terminateStore.archive(id)` in session-manager.ts) and THEN removes the
+	 * team-store entry. The resulting state — team-mode unarchived goal, no
+	 * team entry, archived role=team-lead session — is a DELIBERATE teardown.
+	 * Adopting it would resurrect the team entry on next boot, making
+	 * `startTeam()` throw "Team already active" forever: a dismissed team
+	 * could never be restarted. The guard lives here (not only in the caller)
+	 * so every future call site inherits it.
+	 */
+	archived?: boolean;
 }
 
 /**
  * Identify team-mode, non-archived goals that have no team-store entry but DO
- * have a session record already claiming to be their team-lead
- * (`role === "team-lead"`, `teamGoalId === goal.id`). These are CON-06
- * crash-window orphans: the session write landed, the team-store write never
- * did.
+ * have a LIVE (non-archived) session record already claiming to be their
+ * team-lead (`role === "team-lead"`, `teamGoalId === goal.id`). These are
+ * CON-06 crash-window orphans: the session write landed, the team-store write
+ * never did.
  *
  * @param goals Every goal known to the owning project.
  * @param hasTeamEntry Predicate — true when the team-store already has an
  *   entry for this goal id (caller is responsible for the live read).
  * @param findTeamLeadSession Given a goal id, return the session record
- *   claiming to be its team-lead, if any (caller is responsible for the live
- *   lookup — mirrors the `.find(s => s.teamGoalId === goal.id && s.role ===
- *   "team-lead")` scans already used elsewhere in `restoreTeams`).
+ *   claiming to be its team-lead, if any. Callers SHOULD already filter to
+ *   non-archived sessions (`!s.archived`) so an archived ex-lead from a
+ *   previous teardown can't shadow a genuine live orphan in the lookup; this
+ *   function additionally rejects archived leads itself as a final guard
+ *   (see `UntrackedTeamLeadSession.archived`).
  * @returns `{ goalId, teamLeadSessionId }` pairs to re-adopt into the
  *   team-store. Caller performs the actual write (we stay pure for
  *   testability, matching `findOrphanTeamEntries`).
@@ -105,7 +120,7 @@ export function findUntrackedTeamLeadSessions(
 		if (!goal.team || goal.archived) continue;
 		if (hasTeamEntry(goal.id)) continue;
 		const lead = findTeamLeadSession(goal.id);
-		if (!lead) continue;
+		if (!lead || lead.archived) continue;
 		out.push({ goalId: goal.id, teamLeadSessionId: lead.id });
 	}
 	return out;
