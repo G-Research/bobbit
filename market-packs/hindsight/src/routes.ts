@@ -39,6 +39,7 @@ import {
 	loadEffectiveConfig,
 	loadProjectOverride,
 	loadQueue,
+	loadQueueEvictions,
 	makeClient,
 	projectConfigKey,
 	recallTagFilter,
@@ -180,6 +181,13 @@ async function queueDepth(store: StoreLike): Promise<number> {
 	return (await loadQueue(store)).length;
 }
 
+/** MEM-3 visibility: the durable count of retry-queue entries dropped on the
+ *  floor (tail-dropped once the queue hit its cap), so a sustained outage's loss
+ *  is observable in the panel/marketplace status row instead of silent. */
+async function queueEvictions(store: StoreLike): Promise<number> {
+	return (await loadQueueEvictions(store)).count;
+}
+
 async function lastError(store: StoreLike): Promise<unknown> {
 	try {
 		return await store.get(LAST_ERROR_KEY);
@@ -270,6 +278,7 @@ export const routes = {
 		const cfg = await loadEffectiveConfig(store, projectId);
 		const projectOverride = projectId ? await loadProjectOverride(store, projectId) : undefined;
 		const depth = await queueDepth(store);
+		const evictions = await queueEvictions(store);
 		const err = await lastError(store);
 		const base = {
 			configured: isConfigured(cfg),
@@ -286,6 +295,9 @@ export const routes = {
 			// Per-project override indicator for the panel/marketplace status row.
 			projectOverrideActive: !!projectOverride,
 			queueDepth: depth,
+			// MEM-3: durable count of retry-queue entries dropped on the floor (tail-
+			// dropped once the queue hit QUEUE_CAP) — visible instead of silent loss.
+			queueEvictions: evictions,
 			// Additive (UX surfacing — existing keys unchanged): the active configured
 			// values both the panel and marketplace render without a second round-trip.
 			// Both URLs are NON-secret; secrets are never echoed here.
