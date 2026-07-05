@@ -284,13 +284,12 @@ test("config discovery APIs require explicit projectId", async (t) => {
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
-	// Config-cascade reads (tools/roles) default a missing projectId to the
-	// server (Headquarters) scope — server == Headquarters — rather than 400.
-	// First-party UI still passes an explicit projectId; this is the boring
-	// server-scope default, not cwd inference.
-	for (const pathname of ["/api/tools", "/api/roles"]) {
+	// Config/discovery reads also require an explicit projectId. First-party UI
+	// passes `headquarters` for server scope; missing scope must fail closed.
+	for (const pathname of ["/api/tools", "/api/roles", "/api/workflows"]) {
 		const missing = await api(baseUrl, pathname);
-		assert.equal(missing.status, 200, `${pathname} missing projectId should default to server scope: ${JSON.stringify(missing.body)}`);
+		assert.equal(missing.status, 400, `${pathname} should require projectId`);
+		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
 	const mcp = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
@@ -304,6 +303,10 @@ test("config discovery APIs require explicit projectId", async (t) => {
 	const roles = await api(baseUrl, "/api/roles?projectId=headquarters");
 	assert.equal(roles.status, 200, JSON.stringify(roles.body));
 	assert.ok(Array.isArray(roles.body.roles));
+
+	const workflows = await api(baseUrl, "/api/workflows?projectId=headquarters");
+	assert.equal(workflows.status, 200, JSON.stringify(workflows.body));
+	assert.ok(Array.isArray(workflows.body.workflows));
 });
 
 test("session MCP manager resolution fails closed for projectless sessions", async () => {

@@ -7232,19 +7232,15 @@ async function handleApiRoute(
 
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
-		// Require an explicit projectId (400 on missing), matching the other
-		// config/discovery routes; first-party UI passes `headquarters` for the
-		// server scope. `headquarters` resolves to the server/global cascade via
-		// normalizeConfigProjectId (→ undefined) — use that normalized id for ALL
-		// downstream config/toolManager/marketplace lookups so the synthetic HQ id
-		// never leaks into project-context calls.
-		// Config-cascade read: a missing projectId defaults to the server/global
-		// (Headquarters) scope — server == Headquarters — which is an explicit
-		// default, not cwd inference. `headquarters` also normalizes to the server
-		// cascade (→ undefined). Use the normalized id for ALL downstream
-		// config/toolManager/marketplace lookups so the synthetic HQ id never leaks
-		// into project-context calls. (First-party UI passes an explicit projectId.)
+		// Require an explicit projectId. First-party UI/test helpers pass
+		// `headquarters` for the server scope; normalize it before any downstream
+		// config/toolManager/marketplace lookup so the synthetic HQ id never leaks
+		// into project-context calls.
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) {
+			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
+			return;
+		}
 		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
 		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
@@ -9638,12 +9634,15 @@ async function handleApiRoute(
 
 	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
-		// Require an explicit projectId (400 on missing); `headquarters` resolves to
-		// the server/global scope via normalizeConfigProjectId (→ undefined).
-		// Config-cascade read: missing projectId defaults to the server (Headquarters)
-		// scope; `headquarters` also normalizes to the server cascade (→ undefined).
+		// Require an explicit projectId. `headquarters` aliases the server/global
+		// scope via normalizeConfigProjectId; use only the normalized value below.
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveRoles(normalizeConfigProjectId(projectId));
+		if (!projectId) {
+			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
+			return;
+		}
+		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
+		const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
 		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}
@@ -14004,11 +14003,16 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows — project-scoped only. Without projectId returns [].
+	// GET /api/workflows — requires explicit projectId.
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveWorkflows(projectId);
+		if (!projectId) {
+			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
+			return;
+		}
+		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
+		const resolved = configCascade.resolveWorkflows(effectiveConfigProjectId);
 		json({ workflows: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}
