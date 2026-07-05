@@ -29,6 +29,19 @@
  * that test misreport them as new orphans. `grep -rl 'url\.pathname\.match(\|
  * url\.pathname === "\|url\.pathname\.startsWith('  src/server/` is how
  * these were found; re-run that if a future refactor adds another delegate.
+ *
+ * REGISTRY MODULES (STR-01, docs/design/route-registry.md): routes migrated
+ * into the core route registry (src/server/routes/route-table.ts) don't use
+ * ANY of the three idioms above — they're declared as data via
+ * `table.register("METHOD", "pattern", handler)` calls in a dedicated route
+ * module (e.g. src/server/routes/projects-routes.ts). Those calls are
+ * scanned by `extractRegistryRoutes` below and merged into the same route
+ * list; `:param` pattern segments compile to a "regex" ServerRoute (reusing
+ * the existing regex matcher) so the rest of this module — and every
+ * consumer of `getServerRoutes()` — needs no changes to understand them.
+ * Add a new module here whenever a future cohort's routes are registered in
+ * a new file (existing cohorts extend `projects-routes.ts` in place and need
+ * no change here).
  */
 
 import fs from "node:fs";
@@ -44,6 +57,12 @@ export const DELEGATE_ROUTE_MODULE_PATHS = [
 	"src/server/pr-walkthrough/routes.ts",
 	// SWARM-W1: the fixed best-of-N REST surface (create/status/verify/confirm).
 	"src/server/agent/swarm-routes.ts",
+].map((rel) => path.join(REPO_ROOT, rel));
+
+/** Modules that register core routes via `RouteTable.register(...)` (see REGISTRY MODULES above). */
+export const REGISTRY_ROUTE_MODULE_PATHS = [
+	// STR-01 cohort 1.
+	"src/server/routes/projects-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
@@ -209,6 +228,47 @@ export function extractServerRoutes(src: string): ServerRoute[] {
 	return routes;
 }
 
+/** Escape a literal `RouteTable` pattern segment for embedding in a `RegExp` (mirrors src/server/routes/route-table.ts's own escaper). */
+function escapeRegexLiteral(segment: string): string {
+	return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Extract routes declared via the core route registry's data-driven
+ * `table.register("METHOD", "pattern", handler)` calls (STR-01 — see the
+ * REGISTRY MODULES module-header note). Unlike the legacy idioms above,
+ * method attribution here is exact (the method is the call's first
+ * argument), not a heuristic.
+ *
+ * A `:param` pattern segment compiles to a "regex" `ServerRoute` (`[^/]+`),
+ * and a `/*` suffix compiles to a "prefix" route — matching
+ * src/server/routes/route-table.ts's own `register()` semantics exactly, so
+ * a pattern that would be rejected or misrouted there is represented
+ * identically here.
+ */
+export function extractRegistryRoutes(src: string): ServerRoute[] {
+	const routes: ServerRoute[] = [];
+	const registerRe = /\.register\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"/g;
+	let m: RegExpExecArray | null;
+	while ((m = registerRe.exec(src))) {
+		const [, method, pattern] = m;
+		if (pattern.endsWith("/*")) {
+			routes.push({ kind: "prefix", value: pattern.slice(0, -1), methods: [method] });
+			continue;
+		}
+		if (pattern.includes(":")) {
+			const regexBody = pattern
+				.split("/")
+				.map((seg) => (seg.startsWith(":") ? "([^/]+)" : escapeRegexLiteral(seg)))
+				.join("/");
+			routes.push({ kind: "regex", value: new RegExp(`^${regexBody}$`), methods: [method] });
+			continue;
+		}
+		routes.push({ kind: "exact", value: pattern, methods: [method] });
+	}
+	return routes;
+}
+
 /**
  * Turn a path template containing `:param` / `{param}` placeholders (or
  * already-substituted `${...}` client template-literal segments normalized
@@ -256,12 +316,16 @@ let cachedRoutes: ServerRoute[] | null = null;
  * server.ts with every DELEGATE_ROUTE_MODULE_PATHS file (joined by blank
  * lines, which is harmless for the line/statement-window-relative regexes
  * above) so routes registered in those sibling modules are part of the same
- * surface — see the DELEGATE MODULES module-header note.
+ * surface — see the DELEGATE MODULES module-header note. Registry-module
+ * routes (STR-01 — see REGISTRY MODULES above) are extracted separately
+ * (their own idiom, not the three legacy ones) and appended.
  */
 export function getServerRoutes(): ServerRoute[] {
 	if (!cachedRoutes) {
 		const parts = [SERVER_SRC_PATH, ...DELEGATE_ROUTE_MODULE_PATHS].map((p) => fs.readFileSync(p, "utf8"));
-		cachedRoutes = extractServerRoutes(parts.join("\n\n"));
+		const legacyRoutes = extractServerRoutes(parts.join("\n\n"));
+		const registryRoutes = REGISTRY_ROUTE_MODULE_PATHS.flatMap((p) => extractRegistryRoutes(fs.readFileSync(p, "utf8")));
+		cachedRoutes = [...legacyRoutes, ...registryRoutes];
 	}
 	return cachedRoutes;
 }
