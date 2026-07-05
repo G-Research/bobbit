@@ -1,0 +1,45 @@
+# Verification-policy builtin defaults (S8 seam design,
+# docs/design/verification-policy-seam.md). Parsed by
+# resolveVerificationPolicy() in src/server/agent/verification-logic.ts.
+# These values are byte-identical to today's hardcoded behavior — shipping
+# this file changes nothing until a project overrides a field via
+# .bobbit/config/verification-policy.yaml (same cascade precedence
+# tool-group-policies.yaml already uses: builtin -> server -> project).
+#
+# gateCacheDefault: fallback used by verifyGateSignal when BOBBIT_GATE_CACHE
+# is unset. "sha" requires an exact commit-SHA match to reuse a cached step
+# result (conservative, today's default); "content" opts a project into
+# reusing a step across commits when its declared cacheInputGlobs are
+# byte-identical (see docs/design/gate-step-cache.md).
+gateCacheDefault: sha
+
+# parallelReviewsDefault: fallback used by verifyGateSignal when
+# BOBBIT_PARALLEL_REVIEWS is unset. Default is ON (today's behavior — the
+# flag flipped from opt-in to opt-out after the dark-flags A/B measured
+# -42.8% pass-path wall-clock; see isParallelReviewsEnabled's doc comment in
+# verification-logic.ts). The retry-aware early-start guard
+# (isRetryAfterCommandFailure) still applies regardless of how this
+# resolves.
+parallelReviewsDefault: true
+
+# gateRoles: declarative replacement for the `gate.id === "ready-to-merge"`
+# magic-string dispatch scattered across verification-harness.ts,
+# verification-logic.ts, and child-ready-to-merge.ts. NOT YET wired to any
+# call site (that is V1 — see docs/design/verification-policy-seam.md §5) —
+# this section only pins the default value ahead of time so V1's parity
+# test has a byte-identical baseline to diff against.
+gateRoles:
+  ready-to-merge:
+    childRewrite: adapt-ready-to-merge
+    requiredBuiltins:
+      - branch
+      - baseBranch
+      - master
+      - cwd
+      - goal_spec
+      - commit
+
+# reviewVerdictRubric: today's hardcoded severity bar baked into every
+# buildReviewPrompt wrapper in verification-harness.ts. NOT YET wired to any
+# call site (that is V3 — see docs/design/verification-policy-seam.md §5).
+reviewVerdictRubric: '"pass" if no critical or high severity findings, "fail" otherwise'

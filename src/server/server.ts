@@ -595,6 +595,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
 import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
+import { VerificationPolicyStore } from "./agent/verification-policy-store.js";
 import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
@@ -1489,6 +1490,7 @@ export function createGateway(config: GatewayConfig) {
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
+	const verificationPolicyStore = new VerificationPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
@@ -1523,6 +1525,7 @@ export function createGateway(config: GatewayConfig) {
 	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+	verificationPolicyStore.setBuiltinRaw(builtinConfigProvider.getVerificationPolicyRaw());
 	// Wire the system-scope Subgoals feature gate into the policy cascade.
 	// Without this, getSubgoalsEnabled() returns false unconditionally and
 	// every tool in the `Children` group (goal_spawn_child, goal_merge_child,
@@ -1537,6 +1540,7 @@ export function createGateway(config: GatewayConfig) {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
+		getVerificationPolicyRaw: () => verificationPolicyStore.getMergedRaw(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {

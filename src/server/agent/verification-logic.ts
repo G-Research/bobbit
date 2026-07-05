@@ -905,6 +905,151 @@ export function resolveGateCacheMode(raw: string | undefined): GateCacheMode {
 	return raw === "content" ? "content" : "sha";
 }
 
+// ---------------------------------------------------------------------------
+// Verification policy (S8 seam, V0) — typed, cascade-sourced replacement for
+// the harness's inline env-flag reads. See
+// docs/design/verification-policy-seam.md §2. This slice lands the typed
+// object + a pure resolver/merge pair and wires ONLY the two fields that
+// already have an env-flag equivalent today (`gateCacheDefault`,
+// `parallelReviewsDefault`, consumed by `verification-harness.ts`'s
+// `verifyGateSignal`). `gateRoles`/`reviewVerdictRubric` round-trip through
+// this resolver (so their defaults are pinned byte-identical to today's
+// hardcoded `READY_TO_MERGE_REQUIRED_BUILTINS`/verdict-rubric literals ahead
+// of time) but are NOT yet read by any call site — that is V1
+// (`gate.id === "ready-to-merge"` generalization) and V3 (verdict-rubric
+// extraction from `buildReviewPrompt`), deliberately out of scope here.
+// ---------------------------------------------------------------------------
+
+/** Declarative replacement for the `gate.id === "ready-to-merge"` magic-string
+ *  family (not yet wired to any call site — see the section banner above). */
+export interface VerificationGateRole {
+	/** Verify-step rewrite rule applied when the owning goal is a child. */
+	childRewrite?: "adapt-ready-to-merge" | "none";
+	/** Required built-in template vars whose non-substitution fails (not skips) the step. */
+	requiredBuiltins?: string[];
+}
+
+export interface VerificationPolicy {
+	/** Default gate-cache strategy when `BOBBIT_GATE_CACHE` is unset. Wired into
+	 *  `verifyGateSignal` — see `verification-harness.ts:resolveGateCacheMode` call site. */
+	gateCacheDefault: GateCacheMode;
+	/** Default parallel-reviews mode when `BOBBIT_PARALLEL_REVIEWS` is unset.
+	 *  Wired into `verifyGateSignal` alongside the retry-aware early-start guard. */
+	parallelReviewsDefault: boolean;
+	/** Not yet wired to any call site (V1). Keyed by gate id today. */
+	gateRoles: Record<string, VerificationGateRole>;
+	/** Not yet wired to any call site (V3). */
+	reviewVerdictRubric: string;
+}
+
+/**
+ * Byte-identical-to-today hardcoded values — the ultimate fallback when no
+ * builtin/project YAML is present or parseable, and the value every existing
+ * deployment already gets today with zero config and no env vars set. Mirrors
+ * `resolveGateCacheMode`'s `"sha"` default, `isParallelReviewsEnabled`'s
+ * default-ON semantics, `READY_TO_MERGE_REQUIRED_BUILTINS`
+ * (`readyToMergeUnresolvedBuiltinFailure` above), and the verdict-rubric
+ * fragment hardcoded in `verification-harness.ts`'s `buildReviewPrompt`
+ * (`'"pass" if no critical or high severity findings, "fail" otherwise'`).
+ */
+export const DEFAULT_VERIFICATION_POLICY: VerificationPolicy = {
+	gateCacheDefault: "sha",
+	parallelReviewsDefault: true,
+	gateRoles: {
+		"ready-to-merge": {
+			childRewrite: "adapt-ready-to-merge",
+			requiredBuiltins: ["branch", "baseBranch", "master", "cwd", "goal_spec", "commit"],
+		},
+	},
+	reviewVerdictRubric: '"pass" if no critical or high severity findings, "fail" otherwise',
+};
+
+/** Deep-clone helper so callers never share mutable references into
+ *  {@link DEFAULT_VERIFICATION_POLICY} (a shared module-level constant). */
+function cloneVerificationPolicy(policy: VerificationPolicy): VerificationPolicy {
+	return {
+		...policy,
+		gateRoles: Object.fromEntries(
+			Object.entries(policy.gateRoles).map(([id, role]) => [id, { ...role, requiredBuiltins: role.requiredBuiltins ? [...role.requiredBuiltins] : undefined }]),
+		),
+	};
+}
+
+const VALID_GATE_CACHE_STRATEGIES = new Set<string>(["sha", "content"]);
+const VALID_CHILD_REWRITES = new Set<string>(["adapt-ready-to-merge", "none"]);
+
+/**
+ * Shallow-merge two raw (pre-validation) verification-policy YAML objects,
+ * with `gateRoles` merged by key rather than replaced wholesale, so a higher
+ * cascade layer can add/override one gate role without discarding others
+ * defined by a lower layer. `override` wins per top-level key (and per
+ * `gateRoles` sub-key) when both define it. Used to compose the
+ * builtin → server → project cascade before the single
+ * {@link resolveVerificationPolicy} validation pass runs once at the end —
+ * exported so `VerificationPolicyStore`/`ConfigCascade` share one merge
+ * implementation instead of forking the semantics.
+ */
+export function mergeVerificationPolicyRaw(base: unknown, override: unknown): Record<string, unknown> {
+	const b = base && typeof base === "object" && !Array.isArray(base) ? base as Record<string, unknown> : {};
+	const o = override && typeof override === "object" && !Array.isArray(override) ? override as Record<string, unknown> : {};
+	const merged: Record<string, unknown> = { ...b, ...o };
+	const bRoles = b.gateRoles && typeof b.gateRoles === "object" && !Array.isArray(b.gateRoles) ? b.gateRoles as Record<string, unknown> : undefined;
+	const oRoles = o.gateRoles && typeof o.gateRoles === "object" && !Array.isArray(o.gateRoles) ? o.gateRoles as Record<string, unknown> : undefined;
+	if (bRoles || oRoles) merged.gateRoles = { ...(bRoles ?? {}), ...(oRoles ?? {}) };
+	return merged;
+}
+
+/**
+ * Parse an arbitrary YAML-parsed object (builtin defaults merged with any
+ * project/server override, via {@link mergeVerificationPolicyRaw}) into a
+ * fully-defaulted {@link VerificationPolicy}. Fails closed field-by-field:
+ * anything missing, malformed, or wrong-typed falls back to
+ * {@link DEFAULT_VERIFICATION_POLICY}'s value for that field rather than
+ * throwing or producing partial data — the same "a misconfigured value can
+ * only ever be more conservative, never silently widen behavior" contract
+ * `resolveGateCacheMode` already documents.
+ */
+export function resolveVerificationPolicy(raw: unknown): VerificationPolicy {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return cloneVerificationPolicy(DEFAULT_VERIFICATION_POLICY);
+	const r = raw as Record<string, unknown>;
+
+	const gateCacheDefault: GateCacheMode =
+		typeof r.gateCacheDefault === "string" && VALID_GATE_CACHE_STRATEGIES.has(r.gateCacheDefault)
+			? r.gateCacheDefault as GateCacheMode
+			: DEFAULT_VERIFICATION_POLICY.gateCacheDefault;
+
+	const parallelReviewsDefault: boolean =
+		typeof r.parallelReviewsDefault === "boolean"
+			? r.parallelReviewsDefault
+			: DEFAULT_VERIFICATION_POLICY.parallelReviewsDefault;
+
+	let gateRoles: Record<string, VerificationGateRole>;
+	if (r.gateRoles && typeof r.gateRoles === "object" && !Array.isArray(r.gateRoles)) {
+		gateRoles = {};
+		for (const [gateId, value] of Object.entries(r.gateRoles as Record<string, unknown>)) {
+			if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+			const v = value as Record<string, unknown>;
+			const role: VerificationGateRole = {};
+			if (typeof v.childRewrite === "string" && VALID_CHILD_REWRITES.has(v.childRewrite)) {
+				role.childRewrite = v.childRewrite as VerificationGateRole["childRewrite"];
+			}
+			if (Array.isArray(v.requiredBuiltins) && v.requiredBuiltins.every(x => typeof x === "string")) {
+				role.requiredBuiltins = [...v.requiredBuiltins as string[]];
+			}
+			if (Object.keys(role).length > 0) gateRoles[gateId] = role;
+		}
+	} else {
+		gateRoles = cloneVerificationPolicy(DEFAULT_VERIFICATION_POLICY).gateRoles;
+	}
+
+	const reviewVerdictRubric: string =
+		typeof r.reviewVerdictRubric === "string" && r.reviewVerdictRubric.trim().length > 0
+			? r.reviewVerdictRubric
+			: DEFAULT_VERIFICATION_POLICY.reviewVerdictRubric;
+
+	return { gateCacheDefault, parallelReviewsDefault, gateRoles, reviewVerdictRubric };
+}
+
 /**
  * Convert a simple glob (`*` matches within a path segment, `**` matches
  * across segments, everything else is literal) into an anchored RegExp.

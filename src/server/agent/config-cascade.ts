@@ -19,6 +19,7 @@ import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { mergeVerificationPolicyRaw, resolveVerificationPolicy as resolveVerificationPolicyPure, type VerificationPolicy } from "./verification-logic.js";
 
 /**
  * `user` corresponds to the global-user scope. It is additive: global-user is
@@ -144,6 +145,15 @@ export interface ServerStores {
 	getRoles(): Role[];
 	getTools(): ToolInfo[];
 	getToolGroupPolicies(): Record<string, GrantPolicy>;
+	/**
+	 * Raw (pre-validation) server-scope verification-policy override, merged
+	 * with the builtin layer by the caller (e.g.
+	 * `groupPolicyStore`-style: `verificationPolicyStore.getMergedRaw()`).
+	 * Optional so existing `ServerStores` fakes across the test suite don't
+	 * need updating for a field they never exercise — omitted ⇒ no
+	 * server-scope override (system scope falls straight through to builtin).
+	 */
+	getVerificationPolicyRaw?(): Record<string, unknown>;
 }
 
 /**
@@ -506,6 +516,38 @@ export class ConfigCascade {
 		}
 
 		return Object.fromEntries(merged);
+	}
+
+	// ── Verification policy (S8 seam, V0) ────────────────────────
+	//
+	// Deliberately NOT routed through PackResolver — VerificationPolicy is a
+	// fixed-shape object (not a name-keyed entity list), and the doc explicitly
+	// stages it as a ConfigCascade-loaded sibling of tool-group-policies.yaml.
+	// See docs/design/verification-policy-seam.md §2/§4.
+
+	/**
+	 * Resolve the effective `VerificationPolicy`: builtin ->
+	 * server-scope override -> project-scope override, merged raw (per-field,
+	 * `gateRoles` merged by key) and defaulted/validated in a single final
+	 * `resolveVerificationPolicy` pass. Headquarters normalizes to system
+	 * scope (no project layer), same as `resolveToolGroupPolicies`.
+	 */
+	resolveVerificationPolicy(projectId?: string): VerificationPolicy {
+		const normalizedProjectId = normalizeConfigProjectId(projectId);
+
+		let merged = mergeVerificationPolicyRaw(
+			this.builtins.getVerificationPolicyRaw(),
+			this.serverStores.getVerificationPolicyRaw?.() ?? {},
+		);
+
+		if (normalizedProjectId) {
+			const projectCtx = this.projectContextManager.getOrCreate(normalizedProjectId);
+			if (projectCtx) {
+				merged = mergeVerificationPolicyRaw(merged, projectCtx.verificationPolicyStore.getMergedRaw());
+			}
+		}
+
+		return resolveVerificationPolicyPure(merged);
 	}
 
 	// ── Generic resolution adapter (over the single PackResolver) ──
