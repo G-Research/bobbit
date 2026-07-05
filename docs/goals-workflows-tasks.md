@@ -629,6 +629,24 @@ verify:
       You are performing QA testing for this goal...
 ```
 
+#### Documentation gate diff filter (`docGate`)
+
+The built-in `documentation` gate's `llm-review` step (the seeded "Documentation coverage" step in `general`/`feature`/`bug-fix`) is marked `docGate: true` in `seed-default-workflows.ts`. This is a narrow marker consumed only by `verification-harness.ts` — it is not a general-purpose "skip this review" escape hatch, and no other `llm-review` step should set it.
+
+Before spawning the reviewer, the harness runs a cheap **deterministic** pre-filter (`evaluateDocGateSkip` in `verification-logic.ts`) over the changed paths between `origin/{{baseBranch}}` and `{{branch}}` (same range + `:!package-lock.json` pathspec DOC_PROMPT itself uses):
+
+| Diff shape | Skip? | Rule logged |
+|---|---|---|
+| No changed paths (e.g. lockfile-only bump) | Skip | `empty-diff` |
+| Every changed path matches `tests/**`, `__tests__/**`, `fixtures/**`, `__fixtures__/**`, or `*.test.*`/`*.spec.*` | Skip | `test-fixture-only` |
+| Any changed path outside those patterns — **including a docs-only diff** | Full review runs | `review-required` |
+
+A docs-only diff is deliberately **never** skipped: the gate's job (DOC_PROMPT checks 3–4) is to review doc placement/quality and AGENTS.md edit discipline, which only applies when docs actually changed. The rule fails toward reviewing on anything ambiguous — any `src/`, `defaults/`, or `market-packs/` change forces the full review regardless of what else is in the diff.
+
+Skipped steps resolve the same way an optional-step skip does: `passed: true, skipped: true`, output `"Skipped — <rule>"`, logged to the server console for auditability. The skip decision is re-evaluated identically on the crash-recovery re-run path (`_rerunLlmReviewStep`).
+
+**Flag:** `BOBBIT_DOC_GATE_FILTER=off` disables the filter, forcing every documentation gate back to an unconditional full review (e.g. to validate the rule against a new repo's conventions before trusting it). Default is enabled — the rule is narrow, fails toward reviewing, and the finding that motivated it (VER-06) assessed it as low-risk.
+
 #### `agent-qa` step type
 
 The `agent-qa` verification step type spawns a test-engineer agent session that performs automated QA testing. It is designed for browser-based validation of user-facing changes, using the `/qa-test` skill to manage an ephemeral environment.

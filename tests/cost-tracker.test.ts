@@ -144,61 +144,6 @@ describe("CostTracker", () => {
 			assert.equal(result.cacheWriteTokens, 30);
 		});
 
-		it("records cacheWrite1hTokens when present", () => {
-			const tracker = new CostTracker(stateDir);
-			const result = tracker.recordUsage("s1", {
-				inputTokens: 100,
-				cacheWriteTokens: 50,
-				cacheWrite1hTokens: 20,
-				cost: 0.01,
-			});
-			assert.equal(result.cacheWriteTokens, 50);
-			assert.equal(result.cacheWrite1hTokens, 20);
-			// Derived complement: 5m-tier write = total write - 1h-tagged write.
-			assert.equal(result.cacheWrite5mTokens, 30);
-		});
-
-		it("defaults cacheWrite1hTokens to 0 when the field is absent (unknown/older-provider usage)", () => {
-			const tracker = new CostTracker(stateDir);
-			const result = tracker.recordUsage("s1", {
-				inputTokens: 100,
-				cacheWriteTokens: 50,
-				cost: 0.01,
-			});
-			assert.equal(result.cacheWrite1hTokens, 0);
-			// With no 1h-tagged write, the entire write is attributed to the 5m bucket.
-			assert.equal(result.cacheWrite5mTokens, 50);
-		});
-
-		it("defaults cacheWrite1hTokens to 0 for a fully empty usage object", () => {
-			const tracker = new CostTracker(stateDir);
-			const result = tracker.recordUsage("s1", {});
-			assert.equal(result.cacheWrite1hTokens, 0);
-			assert.equal(result.cacheWrite5mTokens, 0);
-		});
-
-		it("accumulates cacheWrite1hTokens across multiple calls, independent of other fields", () => {
-			const tracker = new CostTracker(stateDir);
-			tracker.recordUsage("s1", { cacheWriteTokens: 10, cacheWrite1hTokens: 10 });
-			// Second call carries no cache fields at all (partial usage object) — must not
-			// reset or clobber the accumulated counter.
-			tracker.recordUsage("s1", { inputTokens: 5 });
-			const result = tracker.recordUsage("s1", { cacheWriteTokens: 15, cacheWrite1hTokens: 15 });
-			assert.equal(result.cacheWriteTokens, 25);
-			assert.equal(result.cacheWrite1hTokens, 25);
-			assert.equal(result.cacheWrite5mTokens, 0);
-		});
-
-		it("persists cacheWrite1hTokens to disk after recording", () => {
-			const tracker = new CostTracker(stateDir);
-			tracker.recordUsage("s1", { cacheWriteTokens: 40, cacheWrite1hTokens: 12, cost: 0.001 });
-
-			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
-			assert.equal(raw["s1"].cacheWrite1hTokens, 12);
-			// Derived field is never persisted (same convention as cacheHitRate).
-			assert.equal(raw["s1"].cacheWrite5mTokens, undefined);
-		});
-
 		it("rounds totalCost to 6 decimal places to avoid floating point drift", () => {
 			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { cost: 0.1 });
@@ -447,7 +392,6 @@ describe("CostTracker", () => {
 		});
 	});
 
-<<<<<<< HEAD
 	describe("debounced save (PERF-01)", () => {
 		it("coalesces multiple recordUsage calls within the debounce window into a single disk write", () => {
 			const tracker = new CostTracker(stateDir);
@@ -497,7 +441,39 @@ describe("CostTracker", () => {
 			tracker.removeSession("s1");
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"], undefined);
-=======
+		});
+	});
+
+	describe("persistence round-trip", () => {
+		it("survives save and reload", () => {
+			const tracker1 = new CostTracker(stateDir);
+			tracker1.recordUsage("s1", {
+				inputTokens: 100,
+				outputTokens: 50,
+				cacheReadTokens: 200,
+				cacheWriteTokens: 30,
+				cost: 0.015,
+			});
+			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
+			// recordUsage() debounces the disk write (PERF-01) — flush() before
+			// constructing a second tracker that reloads from disk.
+			tracker1.flush();
+
+			const tracker2 = new CostTracker(stateDir);
+			const s1 = tracker2.getSessionCost("s1");
+			assert.ok(s1);
+			assert.equal(s1.inputTokens, 100);
+			assert.equal(s1.outputTokens, 50);
+			assert.equal(s1.cacheReadTokens, 200);
+			assert.equal(s1.cacheWriteTokens, 30);
+			assert.equal(s1.totalCost, 0.015);
+
+			const s2 = tracker2.getSessionCost("s2");
+			assert.ok(s2);
+			assert.equal(s2.inputTokens, 500);
+			assert.equal(s2.totalCost, 0.05);
+		});
+	});
 	describe("cacheWrite1hTokens / cacheWrite5mTokens (derived)", () => {
 		it("deriveCacheWrite5mTokens computes the complement of cacheWrite1hTokens", () => {
 			assert.equal(
@@ -601,6 +577,10 @@ describe("CostTracker", () => {
 		it("cacheWrite5mTokens is NOT persisted to disk (derived, same convention as cacheHitRate)", () => {
 			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { cacheWriteTokens: 40, cacheWrite1hTokens: 10 });
+			// PERF-01 (merged after this test was written): recordUsage is debounced -
+			// flush before reading the store file, same adaptation as the older
+			// disk-assertion tests in this file.
+			tracker.flush();
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"].cacheWrite1hTokens, 10);
 			assert.equal(
@@ -608,7 +588,6 @@ describe("CostTracker", () => {
 				false,
 				"cacheWrite5mTokens must be a derived field, not persisted",
 			);
->>>>>>> origin/fable/w3-cachewrite1h-telemetry
 		});
 	});
 
@@ -624,8 +603,8 @@ describe("CostTracker", () => {
 				cost: 0.015,
 			});
 			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
-			// recordUsage() debounces the disk write (PERF-01) — flush() before
-			// constructing a second tracker that reloads from disk.
+			// PERF-01 (merged after this test was written): flush the debounced save
+			// so the second tracker instance sees the persisted state.
 			tracker1.flush();
 
 			const tracker2 = new CostTracker(stateDir);

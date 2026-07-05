@@ -65,4 +65,33 @@ describe("buildDefaultWorkflows", () => {
 		const impl = findGate(wfs["quick-fix"], "implementation");
 		assert.ok(impl.description && impl.description.toLowerCase().includes("ralph loop"));
 	});
+
+	// VER-06 / W3.4 — the documentation gate's review step must be marked
+	// docGate so the deterministic diff-based skip filter in
+	// verification-harness.ts applies to it (and ONLY it).
+	it("general/feature/bug-fix documentation gate is marked docGate", () => {
+		for (const id of ["general", "feature", "bug-fix"]) {
+			const doc = findGate(wfs[id], "documentation");
+			const step = doc.verify?.find((s) => s.name === "Documentation coverage");
+			assert.ok(step, `${id}.documentation should have a Documentation coverage step`);
+			assert.equal(step!.type, "llm-review");
+			assert.equal(step!.docGate, true, `${id}.documentation Documentation coverage step should be docGate: true`);
+		}
+	});
+
+	it("quick-fix has no documentation gate (unaffected by the doc-gate filter)", () => {
+		const qf = wfs["quick-fix"];
+		assert.equal(qf.gates.some((g) => g.id === "documentation"), false);
+	});
+
+	it("no non-documentation llm-review step is marked docGate", () => {
+		for (const id of ["general", "feature", "bug-fix", "quick-fix"]) {
+			for (const g of wfs[id].gates) {
+				for (const s of g.verify ?? []) {
+					if (s.name === "Documentation coverage") continue;
+					assert.notEqual(s.docGate, true, `${id}.${g.id}."${s.name}" should not be docGate`);
+				}
+			}
+		}
+	});
 });

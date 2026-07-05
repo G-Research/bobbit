@@ -888,6 +888,10 @@ function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]):
 	if (newType === "human-signoff") delete next.timeout;
 	if (newType !== "human-signoff") delete next.label;
 	if (next.optional !== true) delete next.optionalLabel;
+	// docGate only means something on an llm-review step (VER-06 / W3.4) —
+	// don't let it survive a type change into something the harness never
+	// checks it against.
+	if (newType !== "llm-review") delete next.docGate;
 
 	if (newType === "human-signoff") {
 		if (next.label === undefined) next.label = "";

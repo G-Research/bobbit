@@ -163,6 +163,9 @@ import {
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
 	isRestartInterruptedStep,
+	evaluateDocGateSkip,
+	isDocGateFilterEnabled,
+	type DocGateSkipDecision,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
@@ -1797,6 +1800,47 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Changed paths for the doc-gate diff filter (VER-06 / W3.4), viewed
+	 * through the same range + pathspec DOC_PROMPT itself uses
+	 * (`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'`)
+	 * so a lockfile-only bump reduces to an empty diff here too.
+	 */
+	private async _getDocGateChangedPaths(cwd: string, baseBranch: string, branch: string): Promise<string[]> {
+		const { execFile: execFileCb } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const execFileAsync = promisify(execFileCb);
+		const range = `origin/${baseBranch}...${branch}`;
+		const { stdout } = await execFileAsync(
+			"git", ["diff", "--name-only", range, "--", ".", ":!package-lock.json"],
+			{ cwd, timeout: 15_000, maxBuffer: 10 * 1024 * 1024 },
+		);
+		return stdout.split("\n").map(s => s.trim()).filter(Boolean);
+	}
+
+	/**
+	 * Evaluate the VER-06 deterministic doc-gate skip filter for a single
+	 * `llm-review` step. Returns null when the step isn't a doc-gate step,
+	 * the flag is off, or the diff lookup fails — all of which fall through
+	 * to running the full review (fail toward reviewing).
+	 */
+	private async _maybeSkipDocGateReview(
+		step: Pick<VerifyStep, "docGate" | "name">,
+		cwd: string,
+		baseBranch: string,
+		branch: string,
+	): Promise<DocGateSkipDecision | null> {
+		if (!step.docGate || !isDocGateFilterEnabled()) return null;
+		try {
+			const changedPaths = await this._getDocGateChangedPaths(cwd, baseBranch, branch);
+			const decision = evaluateDocGateSkip(changedPaths);
+			return decision.skip ? decision : null;
+		} catch (err) {
+			console.warn(`[verification] Doc gate diff lookup failed for step "${step.name}" — falling back to full review:`, err);
+			return null;
+		}
+	}
+
+	/**
 	 * Look up the original VerifyStep definition from the goal's snapshotted workflow.
 	 * Returns undefined if not found (goal deleted, workflow missing, etc.).
 	 */
@@ -2309,6 +2353,16 @@ export class VerificationHarness {
 		if (!ctx) {
 			console.warn(`[verification] Cannot re-run "${stepName}" — goal/signal context unavailable`);
 			return null;
+		}
+
+		// VER-06 / W3.4 — a doc-gate step being re-run from scratch after a
+		// transient resume failure gets the same deterministic skip filter as
+		// the primary path, so crash-recovery doesn't force a review the
+		// original run would have skipped.
+		const docGateSkip = await this._maybeSkipDocGateReview(stepDef, ctx.cwd, ctx.builtinVars.baseBranch, ctx.builtinVars.branch);
+		if (docGateSkip) {
+			console.log(`[verification] Documentation gate re-run "${stepName}" auto-skipped for goal ${goalId} — rule: ${docGateSkip.rule}`);
+			return { name: stepName, type: "llm-review", passed: true, output: `Skipped — ${docGateSkip.rule}`, duration_ms: 0 };
 		}
 
 		const startedAt = Date.now();
@@ -3815,36 +3869,47 @@ export class VerificationHarness {
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
-								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								// See agent-qa branch above for the bounded vs. unbounded
-								// retry rationale — kept symmetric so both review paths
-								// survive a long provider rate-limit / overload window.
-								const maxBoundedAttempts = 3;
-								let finalAttempt = 0;
-								for (let attempt = 1; ; attempt++) {
-									finalAttempt = attempt;
-									if (active.cancelled) break;
-									result = await this.runLlmReviewStep(
-										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-										cwd, builtinVars,
-										signal.content, signal.metadata,
-										goalSpec, allGateStates, signal.goalId, stepSessionId,
-										gate, diffArtifact,
-									);
-									const decision = shouldRetryVerificationStep({
-										passed: result.passed, output: result.output,
-										attempt, maxBoundedAttempts,
-										isTransient: isTransientReviewError,
-									});
-									if (decision === "break") break;
-									const isBackoff = isProviderBackoffError(result.output);
-									const delayMs = verificationRetryDelayMs(attempt, isBackoff);
-									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
-									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
-									await this._sleepCancellable(delayMs, () => !!active.cancelled);
-								}
-								if (!result.passed && !active.cancelled) {
-									result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
+								// VER-06 / W3.4 — deterministic diff-based skip for the
+								// documentation gate only (step.docGate). See
+								// `evaluateDocGateSkip` for the rule and
+								// `_maybeSkipDocGateReview` for why this always fails
+								// toward running the full review.
+								const docGateSkip = await this._maybeSkipDocGateReview(step, cwd, builtinVars.baseBranch, builtinVars.branch);
+								if (docGateSkip) {
+									console.log(`[verification] Documentation gate step "${step.name}" auto-skipped for goal ${signal.goalId} — rule: ${docGateSkip.rule}`);
+									result = { passed: true, skipped: true, output: `Skipped — ${docGateSkip.rule}`, sessionId: stepSessionId };
+								} else {
+									const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+									// See agent-qa branch above for the bounded vs. unbounded
+									// retry rationale — kept symmetric so both review paths
+									// survive a long provider rate-limit / overload window.
+									const maxBoundedAttempts = 3;
+									let finalAttempt = 0;
+									for (let attempt = 1; ; attempt++) {
+										finalAttempt = attempt;
+										if (active.cancelled) break;
+										result = await this.runLlmReviewStep(
+											{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+											cwd, builtinVars,
+											signal.content, signal.metadata,
+											goalSpec, allGateStates, signal.goalId, stepSessionId,
+											gate, diffArtifact,
+										);
+										const decision = shouldRetryVerificationStep({
+											passed: result.passed, output: result.output,
+											attempt, maxBoundedAttempts,
+											isTransient: isTransientReviewError,
+										});
+										if (decision === "break") break;
+										const isBackoff = isProviderBackoffError(result.output);
+										const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+										const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+										console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+										await this._sleepCancellable(delayMs, () => !!active.cancelled);
+									}
+									if (!result.passed && !active.cancelled) {
+										result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
+									}
 								}
 							}
 						}

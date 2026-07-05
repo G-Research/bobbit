@@ -36,6 +36,10 @@ import {
 	isRestartInterruptError,
 	isRetryableGenericAgentError,
 	shouldRetryVerificationStep,
+	// VER-06 / W3.4 — deterministic doc-gate diff-based skip filter.
+	isTestOrFixtureOnlyPath,
+	evaluateDocGateSkip,
+	isDocGateFilterEnabled,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -1260,5 +1264,117 @@ describe("isRestartInterruptError", () => {
 		assert.equal(isRestartInterruptError(""), false);
 		assert.equal(isRestartInterruptError("Review found a real bug: missing null check"), false);
 		assert.equal(isRestartInterruptError("TypeError: cannot read property foo of undefined"), false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// evaluateDocGateSkip / isTestOrFixtureOnlyPath — VER-06 / W3.4 deterministic
+// doc-gate diff filter. Must fail toward reviewing on anything ambiguous.
+// ---------------------------------------------------------------------------
+
+describe("isTestOrFixtureOnlyPath", () => {
+	it("matches paths under a tests/ directory anywhere in the tree", () => {
+		assert.equal(isTestOrFixtureOnlyPath("tests/verification-logic.test.ts"), true);
+		assert.equal(isTestOrFixtureOnlyPath("tests/e2e/gates-api.spec.ts"), true);
+		assert.equal(isTestOrFixtureOnlyPath("tests/fixtures/sample-repo/file.txt"), true);
+		assert.equal(isTestOrFixtureOnlyPath("tests/contract/fixtures/response.json"), true);
+		assert.equal(isTestOrFixtureOnlyPath("packages/foo/tests/helper.ts"), true);
+	});
+
+	it("matches *.test.* / *.spec.* files regardless of directory", () => {
+		assert.equal(isTestOrFixtureOnlyPath("src/server/agent/verification-harness.test.ts"), true);
+		assert.equal(isTestOrFixtureOnlyPath("src/ui/components/widget.spec.tsx"), true);
+	});
+
+	it("matches __tests__ / __fixtures__ / fixtures directories", () => {
+		assert.equal(isTestOrFixtureOnlyPath("src/foo/__tests__/thing.ts"), true);
+		assert.equal(isTestOrFixtureOnlyPath("src/foo/__fixtures__/thing.json"), true);
+		assert.equal(isTestOrFixtureOnlyPath("component/fixtures/thing.json"), true);
+	});
+
+	it("does not match src/, defaults/, market-packs/, or docs/ paths", () => {
+		assert.equal(isTestOrFixtureOnlyPath("src/server/agent/verification-harness.ts"), false);
+		assert.equal(isTestOrFixtureOnlyPath("defaults/roles/team-lead.yaml"), false);
+		assert.equal(isTestOrFixtureOnlyPath("market-packs/hindsight/providers/memory.yaml"), false);
+		assert.equal(isTestOrFixtureOnlyPath("docs/testing-strategy.md"), false);
+		assert.equal(isTestOrFixtureOnlyPath("AGENTS.md"), false);
+		assert.equal(isTestOrFixtureOnlyPath("README.md"), false);
+	});
+});
+
+describe("evaluateDocGateSkip", () => {
+	it("skips on an empty diff", () => {
+		const decision = evaluateDocGateSkip([]);
+		assert.equal(decision.skip, true);
+		assert.ok(decision.rule.includes("empty-diff"));
+	});
+
+	it("skips when every changed path is test/fixture-only", () => {
+		const decision = evaluateDocGateSkip([
+			"tests/verification-logic.test.ts",
+			"tests/e2e/gates-api.spec.ts",
+			"tests/fixtures/sample.json",
+		]);
+		assert.equal(decision.skip, true);
+		assert.ok(decision.rule.includes("test-fixture-only"));
+	});
+
+	it("does NOT skip when the diff touches any src/ file (fail toward reviewing)", () => {
+		const decision = evaluateDocGateSkip([
+			"tests/verification-logic.test.ts",
+			"src/server/agent/verification-harness.ts",
+		]);
+		assert.equal(decision.skip, false);
+		assert.ok(decision.rule.includes("src/server/agent/verification-harness.ts"));
+	});
+
+	it("does NOT skip a docs-only diff — the doc gate exists to review exactly this case", () => {
+		const decision = evaluateDocGateSkip(["docs/testing-strategy.md", "AGENTS.md"]);
+		assert.equal(decision.skip, false);
+	});
+
+	it("does NOT skip a mixed test + docs diff", () => {
+		const decision = evaluateDocGateSkip(["tests/foo.test.ts", "docs/foo.md"]);
+		assert.equal(decision.skip, false);
+	});
+
+	it("does NOT skip an unrelated non-test file (e.g. config, lockfile-adjacent)", () => {
+		const decision = evaluateDocGateSkip([".github/workflows/ci.yml"]);
+		assert.equal(decision.skip, false);
+	});
+});
+
+describe("isDocGateFilterEnabled", () => {
+	const original = process.env.BOBBIT_DOC_GATE_FILTER;
+	function restore() {
+		if (original === undefined) delete process.env.BOBBIT_DOC_GATE_FILTER;
+		else process.env.BOBBIT_DOC_GATE_FILTER = original;
+	}
+
+	it("defaults to enabled when unset", () => {
+		delete process.env.BOBBIT_DOC_GATE_FILTER;
+		try {
+			assert.equal(isDocGateFilterEnabled(), true);
+		} finally {
+			restore();
+		}
+	});
+
+	it("is disabled only when explicitly set to 'off'", () => {
+		process.env.BOBBIT_DOC_GATE_FILTER = "off";
+		try {
+			assert.equal(isDocGateFilterEnabled(), false);
+		} finally {
+			restore();
+		}
+	});
+
+	it("stays enabled for any other value (e.g. 'on')", () => {
+		process.env.BOBBIT_DOC_GATE_FILTER = "on";
+		try {
+			assert.equal(isDocGateFilterEnabled(), true);
+		} finally {
+			restore();
+		}
 	});
 });
