@@ -203,7 +203,8 @@ async function sweepTo(gw: GatewayFixture, baseline: IdSnapshot): Promise<void> 
 	// Only HEAL the default project when a test actually removed it. Calling
 	// restoreDefaultProject() unconditionally re-seeds the default workflows and
 	// would clobber workflows a test registered mid-file (e.g. a custom
-	// per-goal workflow), breaking later tests in the same describe.
+	// per-goal workflow via POST /api/workflows, which lives in a separate store
+	// from the project config), breaking later tests in the same describe.
 	if (!hasVisibleDefaultProject(gw)) await gw.restoreDefaultProject();
 }
 
