@@ -2001,6 +2001,18 @@ Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additi
 
 **Agents type:** entries point at individual files, not directories. Concatenated into system prompt in order. `@ref` resolved relative to file's parent dir.
 
+**AGENTS.md cascade budget (`BOBBIT_AGENTSMD_BUDGET`, F19).** The Agents cascade (root `AGENTS.md`/`CLAUDE.md` plus any additional `agents`-typed custom config directories, each with recursive `@ref` inlining up to 5 hops) is **uncapped by default** — every byte is inlined into the system prompt, at full price on every uncached turn. Measured on a real managed project this reached ~21K tokens = 56% of a code-reviewer prompt (see `docs/design/agents-md-cascade-budget.md` for the measurement and reproduction). This repo's own `AGENTS.md` is small and separately pinned (`tests/agents-md-budget.test.ts`, 6KB) — the blowup is data-driven (a project's own `@ref`-heavy docs), not a fixed-overhead problem.
+
+Set `BOBBIT_AGENTSMD_BUDGET=<tokens>` (e.g. `BOBBIT_AGENTSMD_BUDGET=6000`) to cap the cascade. Default is unset = OFF = today's uncapped, byte-identical behavior. When set:
+- The **nearest/most-specific** agents file (the first discovered entry — normally the project's own root `AGENTS.md`/`CLAUDE.md`) is **always kept whole**: its own literal prose is never truncated.
+- Everything it (or any additional agents-type entry) pulls in via `@ref`, and any additional agents-type entries themselves, are budgeted from the first byte.
+- Once the shared budget is exhausted, the remainder is replaced with an explicit `<!-- [AGENTS.md cascade budget: truncated/omitted — see <path> …] -->` marker naming the source file — never a silent drop; the agent can still `Read` the file directly.
+- The cut point is always a line boundary (deterministic, no mid-line truncation, no LLM summarization).
+- Values are clamped to `[500, 500000]` tokens (`AGENTS_MD_BUDGET_MIN_TOKENS`/`MAX_TOKENS` in `system-prompt.ts`); non-numeric/zero/negative ⇒ disabled.
+- Per-section `truncated: true` is recorded in the persisted `<sessionId>-prompt.json` breakdown (`PromptSection.truncated`) and surfaced as a "truncated" badge in the System Prompt inspector dialog, so an A/B can measure the before/after token delta per session.
+
+**Key file:** `src/server/agent/system-prompt.ts` (`resolveAgentsMdBudgetTokens`, `createAgentsMdBudget`, `readAllAgentFiles`, `resolveMarkdownRefs`).
+
 **Key file:** `src/server/agent/config-directories.ts`
 
 ### Skill chip rendering & autonomous activation
