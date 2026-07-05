@@ -667,6 +667,79 @@ describe("Headquarters per-project migration repair", () => {
 		assert.equal(readJson(path.join(root, ".bobbit", "state", "goals.json"))[0].projectId, oldId);
 	});
 
+	it("leaves missing-projectId records ambiguous during per-project migration when same-root evidence exists", () => {
+		const root = tmpRoot();
+		const stateDir = path.join(root, ".bobbit", "headquarters", "state");
+		const hqDir = path.dirname(stateDir);
+		fs.mkdirSync(stateDir, { recursive: true });
+		const normalId = "server-root-project";
+		seedProject(stateDir, hqProject(hqDir));
+		writeJson(path.join(stateDir, "projects.json.pre-headquarters-id-migration"), [hqProject(root), normalProject(normalId, root)]);
+		writeJson(path.join(stateDir, "goals.json"), [
+			{ id: "ambiguous-goal", title: "Ambiguous", cwd: root, state: "todo", spec: "", createdAt: 1, updatedAt: 1 },
+			{ id: "normal-goal", title: "Normal", cwd: root, state: "todo", spec: "", projectId: normalId, createdAt: 1, updatedAt: 1 },
+		]);
+		writeJson(path.join(stateDir, "sessions.json"), {
+			version: 2,
+			epoch: 9,
+			sessions: [
+				{ id: "ambiguous-session", title: "Ambiguous", cwd: root, agentSessionFile: "a.jsonl", createdAt: 1, lastActivity: 1 },
+				{ id: "normal-session", title: "Normal", cwd: root, agentSessionFile: "b.jsonl", projectId: normalId, createdAt: 1, lastActivity: 1 },
+			],
+		});
+		writeJson(path.join(stateDir, "staff.json"), [
+			{ id: "ambiguous-staff", name: "Ambiguous", prompt: "keep", cwd: root, createdAt: 1, updatedAt: 1 },
+			{ id: "normal-staff", name: "Normal", prompt: "move", cwd: root, projectId: normalId, createdAt: 1, updatedAt: 1 },
+		]);
+		writeJson(path.join(stateDir, "tasks.json"), [{ id: "ambiguous-task", goalId: "ambiguous-goal", title: "T", state: "todo", createdAt: 1, updatedAt: 1 }]);
+		writeJson(path.join(stateDir, "gates.json"), [{ goalId: "ambiguous-goal", gateId: "design-doc", status: "pending", updatedAt: 1 }]);
+
+		migrateToPerProjectState(stateDir, new ProjectRegistry(stateDir), root, { centralConfigDir: path.join(hqDir, "config") });
+
+		const hqGoals = readJson<Array<Record<string, unknown>>>(path.join(stateDir, "goals.json"));
+		assert.equal(hqGoals.find(goal => goal.id === "ambiguous-goal")?.projectId, undefined, "ambiguous goal must not be stamped as Headquarters");
+		assert.equal(hqGoals.some(goal => goal.id === "normal-goal"), false, "deterministic normal goal must be moved out of the Headquarters store");
+		const hqSessions = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(path.join(stateDir, "sessions.json"));
+		assert.equal(hqSessions.version, 2);
+		assert.equal(hqSessions.epoch, 9);
+		assert.equal(hqSessions.sessions.find(session => session.id === "ambiguous-session")?.projectId, undefined, "ambiguous session must not be stamped as Headquarters");
+		assert.equal(hqSessions.sessions.some(session => session.id === "normal-session"), false, "deterministic normal session must be moved out of the Headquarters store");
+		const hqStaff = readJson<Array<Record<string, unknown>>>(path.join(stateDir, "staff.json"));
+		assert.equal(hqStaff.find(staff => staff.id === "ambiguous-staff")?.projectId, undefined, "ambiguous staff must not be stamped as Headquarters");
+		assert.equal(hqStaff.some(staff => staff.id === "normal-staff"), false, "deterministic normal staff must be moved out of the Headquarters store");
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(stateDir, "tasks.json"))[0].projectId, undefined);
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(stateDir, "gates.json"))[0].projectId, undefined);
+
+		const projects = readJson<Array<Record<string, unknown>>>(path.join(stateDir, "projects.json"));
+		assert.ok(projects.some(project => project.id === normalId), "same-root backup evidence should restore the normal project");
+		const normalGoals = readJson<Array<Record<string, unknown>>>(path.join(root, ".bobbit", "state", "goals.json"));
+		assert.equal(normalGoals[0].id, "normal-goal");
+		assert.equal(normalGoals[0].projectId, normalId);
+		const diagnostics = readJson<{ sameRootNormalProjectIds: string[]; ambiguousRecords: Array<{ file: string; key: string; reason: string }> }>(path.join(stateDir, "per-project-state-migration-diagnostics.json"));
+		assert.deepEqual(diagnostics.sameRootNormalProjectIds, [normalId]);
+		assert.ok(diagnostics.ambiguousRecords.some(record => record.file === "goals.json" && record.key === "ambiguous-goal"));
+		assert.ok(diagnostics.ambiguousRecords.some(record => record.file === "sessions.json" && record.key === "ambiguous-session"));
+		assert.ok(diagnostics.ambiguousRecords.some(record => record.file === "staff.json" && record.key === "ambiguous-staff"));
+	});
+
+	it("keeps missing-projectId records assigned to the default project when no same-root evidence exists", () => {
+		const root = tmpRoot();
+		const stateDir = path.join(root, ".bobbit", "headquarters", "state");
+		const hqDir = path.dirname(stateDir);
+		fs.mkdirSync(stateDir, { recursive: true });
+		seedProject(stateDir, hqProject(hqDir));
+		writeJson(path.join(stateDir, "goals.json"), [{ id: "g1", title: "G", cwd: root, state: "todo", spec: "", createdAt: 1, updatedAt: 1 }]);
+		writeJson(path.join(stateDir, "sessions.json"), { version: 2, epoch: 3, sessions: [{ id: "s1", title: "S", cwd: root, agentSessionFile: "a.jsonl", createdAt: 1, lastActivity: 1 }] });
+		writeJson(path.join(stateDir, "staff.json"), [{ id: "staff1", name: "Staff", prompt: "keep", cwd: root, createdAt: 1, updatedAt: 1 }]);
+
+		migrateToPerProjectState(stateDir, new ProjectRegistry(stateDir), root, { centralConfigDir: path.join(hqDir, "config") });
+
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(stateDir, "goals.json"))[0].projectId, HEADQUARTERS_PROJECT_ID);
+		assert.equal(readJson<{ sessions: Array<Record<string, unknown>> }>(path.join(stateDir, "sessions.json")).sessions[0].projectId, HEADQUARTERS_PROJECT_ID);
+		assert.equal(readJson<Array<Record<string, unknown>>>(path.join(stateDir, "staff.json"))[0].projectId, HEADQUARTERS_PROJECT_ID);
+		assert.equal(fs.existsSync(path.join(stateDir, "per-project-state-migration-diagnostics.json")), false);
+	});
+
 	// Regression: sessions.json is a v2 envelope `{ version, epoch, sessions: [...] }`,
 	// not a bare array. Reading it with readJsonArray returned [] → the central bucket
 	// looked empty → clearCentralBucketIfDefaultMissing overwrote it with `[]`, silently

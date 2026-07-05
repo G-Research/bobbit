@@ -20,6 +20,7 @@ const RECOVERY_MARKER = ".pre-migration-recovered";
 const HEADQUARTERS_ID_MIGRATION_MARKER = ".headquarters-project-id-migrated";
 const HEADQUARTERS_DIR_MIGRATION_MARKER = ".headquarters-dir-migrated";
 const HEADQUARTERS_MIGRATION_DIAGNOSTICS = "headquarters-migration-diagnostics.json";
+const PER_PROJECT_MIGRATION_DIAGNOSTICS = "per-project-state-migration-diagnostics.json";
 const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
@@ -118,6 +119,17 @@ interface HeadquartersDirectoryMigrationInput {
 	headquartersStateDir: string;
 	headquartersConfigDir: string;
 	legacyServerBobbitDir: string;
+}
+
+interface PerProjectMigrationDiagnostics {
+	version: 1;
+	runAt: string;
+	paths: {
+		centralStateDir: string;
+		serverCwd: string;
+	};
+	sameRootNormalProjectIds: string[];
+	ambiguousRecords: Array<{ file: string; key: string; reason: string }>;
 }
 
 interface HeadquartersMigrationDiagnostics {
@@ -224,6 +236,16 @@ function writeHeadquartersDiagnostics(stateDir: string, diagnostics: Headquarter
 		fs.writeFileSync(path.join(stateDir, HEADQUARTERS_MIGRATION_DIAGNOSTICS), stableStringify(diagnostics), "utf-8");
 	} catch (err) {
 		console.log(`[migration] Warning: could not write Headquarters migration diagnostics: ${err}`);
+	}
+}
+
+function writePerProjectDiagnostics(stateDir: string, diagnostics: PerProjectMigrationDiagnostics): void {
+	if (diagnostics.ambiguousRecords.length === 0) return;
+	try {
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, PER_PROJECT_MIGRATION_DIAGNOSTICS), stableStringify(diagnostics), "utf-8");
+	} catch (err) {
+		console.log(`[migration] Warning: could not write per-project migration diagnostics: ${err}`);
 	}
 }
 
@@ -1162,19 +1184,42 @@ export function migrateToPerProjectState(
 		projectRegistry.getByPath(serverCwd) ??
 		projects[0];
 
+	const legacyDefaultStateDir = path.join(serverCwd, ".bobbit", "state");
+	const projectEvidence = collectProjectEvidence(centralStateDir, legacyDefaultStateDir, serverCwd);
+	for (const project of sameRootNormalProjectsFrom(projects as unknown as Record<string, unknown>[], serverCwd)) {
+		projectEvidence.sameRootIds.add(String(project.id));
+	}
+	const sameRootEvidence = projectEvidence.sameRootIds.size > 0;
+	const perProjectDiagnostics: PerProjectMigrationDiagnostics = {
+		version: 1,
+		runAt: new Date().toISOString(),
+		paths: {
+			centralStateDir: path.resolve(centralStateDir),
+			serverCwd: path.resolve(serverCwd),
+		},
+		sameRootNormalProjectIds: [...projectEvidence.sameRootIds].sort(),
+		ambiguousRecords: [],
+	};
+	const markAmbiguous = (file: string, key: string, reason: string): void => {
+		perProjectDiagnostics.ambiguousRecords.push({ file, key, reason });
+		console.log(`[migration] Ambiguous ${file} record ${key || "<unknown>"}: ${reason}`);
+	};
+
 	console.log(
-		`[migration] Starting per-project state migration. Default project: "${defaultProject.name}" (${defaultProject.id})`,
+		`[migration] Starting per-project state migration. Default project: "${defaultProject.name}" (${defaultProject.id})${sameRootEvidence ? `; same-root evidence: ${perProjectDiagnostics.sameRootNormalProjectIds.join(", ")}` : ""}`,
 	);
 
 	// Helper: resolve project for a given projectId.
-	const resolveProject = (projectId?: string): RegisteredProject => {
+	const resolveProject = (projectId?: string): RegisteredProject | undefined => {
 		if (projectId) {
 			if (headquartersAliasMigration.oldProjectIds.has(projectId)) {
 				return projectRegistry.get(HEADQUARTERS_PROJECT_ID) ?? defaultProject;
 			}
 			const p = projectRegistry.get(projectId);
 			if (p) return p;
+			if (sameRootEvidence) return undefined;
 		}
+		if (sameRootEvidence) return undefined;
 		return defaultProject;
 	};
 
@@ -1316,6 +1361,16 @@ export function migrateToPerProjectState(
 
 	for (const goal of centralGoals) {
 		const project = resolveProject(goal.projectId);
+		if (!project) {
+			markAmbiguous("goals.json", String(goal.id ?? ""), goal.projectId ? `unknown projectId ${goal.projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = goalsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				goalsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(goal);
+			continue;
+		}
 		goal.projectId = project.id;
 		goalProjectMap.set(goal.id, project);
 		let bucket = goalsByProject.get(project.id);
@@ -1342,7 +1397,18 @@ export function migrateToPerProjectState(
 	const sessionsByProject = new Map<string, Record<string, unknown>[]>();
 
 	for (const session of centralSessions) {
-		const project = resolveProject(typeof session.projectId === "string" ? session.projectId : undefined);
+		const projectId = typeof session.projectId === "string" ? session.projectId : undefined;
+		const project = resolveProject(projectId);
+		if (!project) {
+			markAmbiguous("sessions.json", String(session.id ?? ""), projectId ? `unknown projectId ${projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = sessionsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				sessionsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(session);
+			continue;
+		}
 		session.projectId = project.id;
 		let bucket = sessionsByProject.get(project.id);
 		if (!bucket) {
@@ -1365,11 +1431,22 @@ export function migrateToPerProjectState(
 	const tasksByProject = new Map<string, PersistedTask[]>();
 
 	for (const task of centralTasks) {
-		const project = goalProjectMap.get(task.goalId) ?? defaultProject;
-		let bucket = tasksByProject.get(project.id);
+		const project = goalProjectMap.get(task.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous("tasks.json", String(task.id ?? ""), `goalId ${task.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = tasksByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				tasksByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(task);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = tasksByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			tasksByProject.set(project.id, bucket);
+			tasksByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(task);
 	}
@@ -1391,11 +1468,22 @@ export function migrateToPerProjectState(
 	const teamsByProject = new Map<string, PersistedTeamEntry[]>();
 
 	for (const team of centralTeams) {
-		const project = goalProjectMap.get(team.goalId) ?? defaultProject;
-		let bucket = teamsByProject.get(project.id);
+		const project = goalProjectMap.get(team.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous(path.basename(centralTeamsFile), String(team.goalId ?? ""), `goalId ${team.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = teamsByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				teamsByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(team);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = teamsByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			teamsByProject.set(project.id, bucket);
+			teamsByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(team);
 	}
@@ -1413,11 +1501,22 @@ export function migrateToPerProjectState(
 	const gatesByProject = new Map<string, GateState[]>();
 
 	for (const gate of centralGates) {
-		const project = goalProjectMap.get(gate.goalId) ?? defaultProject;
-		let bucket = gatesByProject.get(project.id);
+		const project = goalProjectMap.get(gate.goalId);
+		if (!project && sameRootEvidence) {
+			markAmbiguous("gates.json", `${String(gate.goalId ?? "")}::${String(gate.gateId ?? "")}`, `goalId ${gate.goalId || "<missing>"} has no deterministic project while same-root normal project evidence exists`);
+			let bucket = gatesByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				gatesByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(gate);
+			continue;
+		}
+		const targetProject = project ?? defaultProject;
+		let bucket = gatesByProject.get(targetProject.id);
 		if (!bucket) {
 			bucket = [];
-			gatesByProject.set(project.id, bucket);
+			gatesByProject.set(targetProject.id, bucket);
 		}
 		bucket.push(gate);
 	}
@@ -1457,6 +1556,17 @@ export function migrateToPerProjectState(
 	const staffByProject = new Map<string, PersistedStaff[]>();
 	for (const staff of centralStaff) {
 		const project = resolveProject(staff.projectId);
+		if (!project) {
+			const staffKey = String(staff.id ?? (staff as unknown as Record<string, unknown>).staffId ?? "");
+			markAmbiguous("staff.json", staffKey, staff.projectId ? `unknown projectId ${staff.projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+			let bucket = staffByProject.get(defaultProject.id);
+			if (!bucket) {
+				bucket = [];
+				staffByProject.set(defaultProject.id, bucket);
+			}
+			bucket.push(staff);
+			continue;
+		}
 		staff.projectId = project.id;
 		let bucket = staffByProject.get(project.id);
 		if (!bucket) {
@@ -1499,6 +1609,7 @@ export function migrateToPerProjectState(
 	}
 
 	// ── 9. Write migration marker ──
+	writePerProjectDiagnostics(centralStateDir, perProjectDiagnostics);
 	try {
 		fs.writeFileSync(markerPath, new Date().toISOString(), "utf-8");
 		console.log("[migration] Per-project state migration complete. Marker written.");
