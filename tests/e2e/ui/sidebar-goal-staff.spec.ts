@@ -78,7 +78,14 @@ test.describe("Sidebar goal actions & staff", () => {
 		await expect(trigger).toBeVisible({ timeout: 5_000 });
 		await trigger.click();
 
-		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		// openSidebarActionsPopover cold-imports SidebarActionsPopover.js on first
+		// use (src/app/render-helpers.ts) — it is not eagerly bundled/preloaded.
+		// Under heavy full-suite load (many concurrent gateway processes serving
+		// static chunks, not raw CPU spin) that fetch+parse+upgrade chain can
+		// exceed a tight 5s window well before the popover itself is slow to
+		// react. Widened to match the other generous, real-signal waits in this
+		// spec (e.g. the 20s textarea wait below).
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 15_000 });
 		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		// Should open a goal assistant session with a textarea
@@ -119,7 +126,8 @@ test.describe("Sidebar goal actions & staff", () => {
 		await expect(trigger).toBeVisible({ timeout: 5_000 });
 		await trigger.click();
 
-		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		// See the matching comment in SB-22 above — same cold dynamic-import path.
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 15_000 });
 		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
