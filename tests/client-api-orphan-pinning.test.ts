@@ -255,7 +255,10 @@ const ALLOWLIST = new Set<string>(["/api/0/0/customize", "/api/0/0/override"]);
  * `/api/preferences/claude-code/confirmation` (the W2 forensic finding's
  * headline orphans). Their restoring PRs (#16/#18) merged into aj-current
  * mid-flight — and this test's burn-down assertion failed on rebase exactly
- * as designed, forcing their removal here.
+ * as designed, forcing their removal here. `/api/sessions/0/notify`
+ * (W2.G(a) — src/app/api.ts's `notifyProposalDecision()`) was the next entry;
+ * its restoring PR added the missing `POST /api/sessions/:id/notify` route
+ * to server.ts, so it's removed here too.
  *
  * `/api/pack-runtimes` and its `/:id/start|stop|restart|logs|capabilities|down`
  * family (restoration W2.E, not yet started) are NOT listed here: as of this
@@ -265,15 +268,7 @@ const ALLOWLIST = new Set<string>(["/api/0/0/customize", "/api/0/0/override"]);
  * runtimes lands, add its call sites' paths here (or, if the route is
  * restored first, they'll simply pass with no burn-down entry needed).
  */
-const KNOWN_ORPHANS = [
-	// Newly discovered by this test (not yet linked to a restoring PR as of
-	// this writing): src/app/api.ts's `notifyProposalDecision()` — a
-	// fire-and-forget POST documented in its own JSDoc as hitting
-	// `/api/sessions/:id/notify` — has no matching server route in
-	// server.ts or any delegate route module. Flagged in this PR's body for
-	// follow-up triage; not this branch's finding to restore.
-	"/api/sessions/0/notify",
-];
+const KNOWN_ORPHANS: string[] = [];
 
 // ── 4. Assertions ──
 
