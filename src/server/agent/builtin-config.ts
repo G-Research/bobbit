@@ -26,6 +26,32 @@ import { isIgnoredToolGroupDir } from "./tool-extension-preflight.js";
 // Extracted so BOTH BuiltinConfigProvider and the pack-resolver loaders
 // (RoleLoader / ToolLoader) parse byte-identically. Do NOT fork these.
 
+/**
+ * VER-03/F8 (W3.9): the team-lead persona's `promptTemplate` is resident as
+ * the session system prompt on every lead turn (spawn, idle-nudge,
+ * worker-idle notify, gate pass/fail) for the two most expensive session
+ * classes. `defaults/roles/team-lead.yaml` ships an opt-in, byte-disjoint
+ * `promptTemplateLean` field — same hard invariants/guardrails, with
+ * recipe-style elaboration moved to on-demand `activate_skill` skills (the
+ * `team-lead-tools`/`team-lead-gates`/`team-lead-orchestration`/
+ * `team-lead-completion` SKILL.md files under `defaults/skills/`). Selected ONLY when
+ * `BOBBIT_LEAN_TEAM_LEAD=1`; default OFF leaves `data.promptTemplate` as the
+ * effective template, byte-identical to today. Scoped to `role: team-lead`
+ * only — no other role defines `promptTemplateLean`, so this is a no-op for
+ * every other role regardless of the flag.
+ */
+function resolveEffectivePromptTemplate(data: { name?: string; promptTemplate?: string; promptTemplateLean?: string }): string {
+	if (
+		data.name === "team-lead" &&
+		process.env.BOBBIT_LEAN_TEAM_LEAD === "1" &&
+		typeof data.promptTemplateLean === "string" &&
+		data.promptTemplateLean.length > 0
+	) {
+		return data.promptTemplateLean;
+	}
+	return data.promptTemplate ?? "";
+}
+
 /** Parse a single role YAML document into a Role, or null if it has no name. */
 export function parseRoleYaml(content: string): Role | null {
 	const data = parse(content);
@@ -43,7 +69,7 @@ export function parseRoleYaml(content: string): Role | null {
 	return {
 		name: data.name,
 		label: data.label ?? data.name,
-		promptTemplate: data.promptTemplate ?? "",
+		promptTemplate: resolveEffectivePromptTemplate(data),
 		accessory: data.accessory ?? "none",
 		toolPolicies,
 		model: validateModelString(data.model),
