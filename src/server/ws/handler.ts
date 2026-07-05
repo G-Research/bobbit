@@ -35,6 +35,7 @@ import type { PackContributionResolver } from "../extension-host/pack-contributi
 import { handleSessionPost } from "../extension-host/session-write.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { applyRuntimeSessionModelSelection } from "./runtime-model-selection.js";
+import { isRuntimeSwitchError } from "../agent/session-runtime.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 
@@ -96,6 +97,15 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 			reasoning: meta.reasoning,
 		};
 	}
+	// Carry runtime metadata alongside the fallback model so the client's
+	// footer/capability-notice know this is a Claude Code local-runtime
+	// session even when the live bridge's getState() was unavailable (e.g.
+	// right after a gateway restart, before the lazy bridge has attached).
+	if (persisted?.runtime === "claude-code") {
+		data.runtime = persisted.runtime;
+		if (persisted.claudeCodeSessionId) data.claudeCodeSessionId = persisted.claudeCodeSessionId;
+		if (persisted.claudeCodeModelAlias) data.claudeCodeModelAlias = persisted.claudeCodeModelAlias;
+	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) {
 		data.imageGenerationModel = imageModel;
@@ -128,7 +138,7 @@ function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, se
  * `getState()` push.
  */
 function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string },
+	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string; runtime?: string; claudeCodeSessionId?: string; claudeCodeModelAlias?: string },
 	sessionManager: SessionManager,
 	sessionId: string,
 ): Record<string, unknown> {
@@ -148,6 +158,13 @@ function buildArchivedStateData(
 			maxTokens: meta.maxTokens,
 			reasoning: meta.reasoning,
 		};
+	}
+	// See sendFallbackModelState() above — same rationale for archived sessions,
+	// which never get a live getState() push at all.
+	if (archived.runtime === "claude-code") {
+		data.runtime = archived.runtime;
+		if (archived.claudeCodeSessionId) data.claudeCodeSessionId = archived.claudeCodeSessionId;
+		if (archived.claudeCodeModelAlias) data.claudeCodeModelAlias = archived.claudeCodeModelAlias;
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
@@ -879,6 +896,14 @@ export function handleWebSocketConnection(
 					try {
 						await applyRuntimeSessionModelSelection(sessionManager, session, msg.provider, msg.modelId, preferencesStore, broadcast);
 					} catch (err: any) {
+						// Runtime-boundary rejections (Pi <-> Claude Code) get their own
+						// stable code so the client can roll back optimistic state instead
+						// of treating this like a generic/retryable model failure.
+						if (isRuntimeSwitchError(err)) {
+							console.error(`[ws-handler] set_model rejected for session ${session.id} (${msg.provider}/${msg.modelId}): ${err.message}`);
+							send(ws, { type: "error", message: err.message, code: err.code });
+							break;
+						}
 						// Surface set_model failures to the UI instead of silently swallowing
 						// them — otherwise the client keeps showing the new model while the
 						// agent stays bound to the previous one and subsequent prompts go

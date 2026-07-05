@@ -131,3 +131,98 @@ describe("WebSocket Claude Code snapshot hydration", () => {
 		assert.equal(hydrate.mock.callCount(), 1);
 	});
 });
+
+describe("WebSocket Claude Code runtime metadata on state fallback/archived paths", () => {
+	// CC-841 reconcile: sendFallbackModelState() and buildArchivedStateData()
+	// previously only carried `model`, never `runtime`/`claudeCodeSessionId`.
+	// A client attaching to a Claude Code session whose live getState() is
+	// unavailable (fresh gateway restart, lazy bridge not yet attached) or an
+	// archived Claude Code session (which never gets a live getState() push at
+	// all) would silently look like a Pi session in the `state` frame — the
+	// footer/capability-notice have no other way to learn otherwise on these
+	// two paths. See docs/design/claude-code-runtime-reconcile.md.
+	it("archived Claude Code session's attach-time state carries runtime + claudeCodeSessionId", async () => {
+		const archived = {
+			id: "session-1",
+			title: "Archived Claude Code session",
+			archivedAt: 12345,
+			modelProvider: "claude-code",
+			modelId: "local-claude-opus-4-8",
+			runtime: "claude-code",
+			claudeCodeSessionId: "fake-claude-session",
+			claudeCodeModelAlias: "local-claude-opus-4-8",
+		};
+		const manager: any = {
+			getSession: mock.fn(() => undefined),
+			getArchivedSession: mock.fn(() => archived),
+			getSessionCostUpdate: mock.fn(() => undefined),
+			getImageModelForSession: mock.fn(() => undefined),
+			withSessionCostInState: mock.fn((_id: string, data: unknown) => data),
+		};
+		const ws = new FakeWs();
+
+		await connect(ws, manager);
+
+		const stateFrames = ws.sent.filter((frame) => frame.type === "state");
+		assert.equal(stateFrames.length, 1);
+		assert.equal(stateFrames[0].data.runtime, "claude-code");
+		assert.equal(stateFrames[0].data.claudeCodeSessionId, "fake-claude-session");
+		assert.equal(stateFrames[0].data.claudeCodeModelAlias, "local-claude-opus-4-8");
+		assert.equal(stateFrames[0].data.model.provider, "claude-code");
+	});
+
+	it("does not leak a bare runtime field for Pi archived sessions (no Claude Code fields present)", async () => {
+		const archived = {
+			id: "session-1",
+			title: "Archived Pi session",
+			archivedAt: 12345,
+			modelProvider: "anthropic",
+			modelId: "claude-opus-4-5",
+		};
+		const manager: any = {
+			getSession: mock.fn(() => undefined),
+			getArchivedSession: mock.fn(() => archived),
+			getSessionCostUpdate: mock.fn(() => undefined),
+			getImageModelForSession: mock.fn(() => undefined),
+			withSessionCostInState: mock.fn((_id: string, data: unknown) => data),
+		};
+		const ws = new FakeWs();
+
+		await connect(ws, manager);
+
+		const stateFrames = ws.sent.filter((frame) => frame.type === "state");
+		assert.equal(stateFrames.length, 1);
+		assert.equal(stateFrames[0].data.runtime, undefined);
+		assert.equal(stateFrames[0].data.claudeCodeSessionId, undefined);
+	});
+
+	it("live Claude Code session's fallback state (getState unavailable) carries runtime + claudeCodeSessionId", async () => {
+		const session = makeSession({
+			eventBuffer: { size: 1 },
+			rpcClient: {
+				getMessages: mock.fn(async () => ({ success: true, data: { messages: [] } })),
+				getState: mock.fn(async () => ({ success: false })),
+			},
+		});
+		const persisted = {
+			id: "session-1",
+			runtime: "claude-code",
+			modelProvider: "claude-code",
+			modelId: "local-claude-sonnet-4-6",
+			claudeCodeSessionId: "fake-claude-session",
+			claudeCodeModelAlias: "local-claude-sonnet-4-6",
+		};
+		const manager = makeManager(session, persisted);
+		const ws = new FakeWs();
+
+		await connect(ws, manager);
+		await waitImmediate();
+		await waitImmediate();
+
+		const stateFrames = ws.sent.filter((frame) => frame.type === "state");
+		const fallback = stateFrames.find((frame) => frame.data?.model?.provider === "claude-code");
+		assert.ok(fallback, "expected a fallback state frame carrying the persisted Claude Code model");
+		assert.equal(fallback.data.runtime, "claude-code");
+		assert.equal(fallback.data.claudeCodeSessionId, "fake-claude-session");
+	});
+});

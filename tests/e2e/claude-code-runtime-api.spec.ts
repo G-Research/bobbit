@@ -201,4 +201,52 @@ test.describe("Claude Code runtime session API", () => {
 		}
 	});
 
+	// CC-841 reconcile: `session-runtime.ts` defines `assertRuntimeSwitchAllowed()`
+	// / `RuntimeSwitchError` specifically to stop a live `set_model` from
+	// crossing the Pi/Claude Code runtime boundary — but it was never wired
+	// into the WS `set_model` path (`ws/runtime-model-selection.ts`), which
+	// went straight to `applyModelString` regardless of runtime. The UI model
+	// picker already blocks this client-side (see claude-code-ui.spec.ts), but
+	// the server must not depend on client cooperation. See
+	// docs/design/claude-code-runtime-reconcile.md "Runtime dispatch seam".
+	test("set_model rejects a Pi model on a Claude Code session with RUNTIME_SWITCH_REQUIRES_NEW_SESSION and leaves the persisted model untouched", async ({ gateway }) => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-claude-code-runtime-guard-"));
+		const recordPath = path.join(tmp, "record.jsonl");
+		const wrapper = makeFakeWrapper(recordPath);
+		let sessionId: string | undefined;
+		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
+		try {
+			setClaudeCodePrefs(gateway, { "claudeCode.executablePath": wrapper.executable });
+			await apiFetch("/api/claude-code/status/refresh", { method: "POST" });
+			const create = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, model: "claude-code/local-claude-sonnet-4-6" }),
+			});
+			expect(create.status).toBe(201);
+			sessionId = (await create.json()).id;
+			conn = await connectWs(sessionId!);
+			conn.send({ type: "prompt", text: "capture Claude Code resume id" });
+			await conn.waitFor(agentEndPredicate());
+
+			conn.send({ type: "set_model", provider: "anthropic", modelId: "claude-opus-4-1" });
+			const errorFrame = await conn.waitFor((m: any) => m.type === "error");
+			expect(errorFrame.code).toBe("RUNTIME_SWITCH_REQUIRES_NEW_SESSION");
+
+			const detail = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+			expect(detail.runtime).toBe("claude-code");
+			expect(detail.modelProvider).toBe("claude-code");
+			expect(detail.modelId).toBe("local-claude-sonnet-4-6");
+
+			// Only the original spawn argv — the rejected set_model must never
+			// have reached the CLI bridge (no restart/resume argv).
+			const argvs = await waitForSpawnArgvs(recordPath, 1);
+			expect(argvs).toHaveLength(1);
+		} finally {
+			conn?.close();
+			if (sessionId) await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+			fs.rmSync(tmp, { recursive: true, force: true });
+			fs.rmSync(wrapper.dir, { recursive: true, force: true });
+		}
+	});
+
 });
