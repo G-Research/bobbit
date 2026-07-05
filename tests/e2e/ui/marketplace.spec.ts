@@ -668,7 +668,12 @@ test.describe("Marketplace UI", () => {
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]').first()
 			.locator('[data-testid="market-uninstall-pack"]').click();
 		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
-		await page.keyboard.press("Enter");
+		// UX-03 (Fable audit): this is a destructive confirmAction dialog —
+		// focus defaults to Cancel and Enter is no longer bound globally, so
+		// confirm via the dialog's own button. Scoped to `[role="dialog"]`
+		// because the dialog's "Uninstall" button shares its accessible name
+		// with the installed card's own uninstall button (strict-mode collision).
+		await page.locator('[role="dialog"]').getByRole("button", { name: "Uninstall" }).click();
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]')).toHaveCount(0, { timeout: 15_000 });
 
 		await navigateToHash(page, "#/roles");
@@ -720,9 +725,12 @@ test.describe("Marketplace UI", () => {
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first()
 			.locator('[data-testid="market-uninstall-pack"]').click();
 		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
-		// Confirm via Enter — the dialog's "Uninstall" button shares its accessible
-		// name with the installed card's uninstall button (strict-mode collision).
-		await page.keyboard.press("Enter");
+		// UX-03 (Fable audit): destructive confirmAction no longer binds Enter
+		// globally (focus defaults to Cancel), so confirm via the dialog's own
+		// button — scoped to `[role="dialog"]` since the "Uninstall" button
+		// shares its accessible name with the installed card's uninstall button
+		// (strict-mode collision).
+		await page.locator('[role="dialog"]').getByRole("button", { name: "Uninstall" }).click();
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]')).toHaveCount(0, { timeout: 15_000 });
 
 		await navigateToHash(page, "#/roles");

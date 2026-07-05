@@ -1,9 +1,11 @@
-// Test entry for UX-01: pressing Escape to dismiss a confirm/error dialog
-// must NOT also abort the streaming agent. Mounts the real <agent-interface>
-// (which installs AgentInterface._handleGlobalEscape as a document
-// capture-phase keydown listener) alongside a real confirmAction() dialog
-// from src/app/dialogs.ts, so the fixture exercises the exact DOM guard the
-// production code relies on rather than a mock of it.
+// Test entry for UX-01 and UX-03: pressing Escape to dismiss a confirm/error
+// dialog must NOT also abort the streaming agent (UX-01), and a destructive
+// confirmAction() dialog must move focus in on open and never let a stray
+// Enter confirm it (UX-03). Mounts the real <agent-interface> (which installs
+// AgentInterface._handleGlobalEscape as a document capture-phase keydown
+// listener) alongside a real confirmAction() dialog from src/app/dialogs.ts,
+// so the fixture exercises the exact DOM guard/focus behavior the production
+// code relies on rather than a mock of it.
 import "../../src/ui/components/AgentInterface.js";
 import { confirmAction } from "../../src/app/dialogs.js";
 
@@ -69,6 +71,20 @@ function installCss(): void {
 	document.head.appendChild(style);
 }
 
+// UX-03: a decoy button that sits entirely outside any dialog. Used to prove
+// Enter pressed while focus is OUTSIDE the confirm dialog does not confirm it
+// (the fix removes the old document-level "Enter always confirms" listener).
+function ensureDecoyButton(): HTMLButtonElement {
+	let decoy = document.getElementById("ux03-decoy-outside-button") as HTMLButtonElement | null;
+	if (!decoy) {
+		decoy = document.createElement("button");
+		decoy.id = "ux03-decoy-outside-button";
+		decoy.textContent = "decoy";
+		document.body.appendChild(decoy);
+	}
+	return decoy;
+}
+
 let session: FixtureSession | undefined;
 
 async function mountFixture(options: { isStreaming?: boolean } = {}): Promise<void> {
@@ -92,9 +108,10 @@ async function mountFixture(options: { isStreaming?: boolean } = {}): Promise<vo
 
 let confirmResult: { settled: boolean; value?: boolean } = { settled: false };
 
-function openConfirmDialog(): void {
+function openConfirmDialog(destructive = true): void {
 	confirmResult = { settled: false };
-	void confirmAction("Discard changes?", "You have unsaved changes.", "Discard", true).then((value) => {
+	ensureDecoyButton();
+	void confirmAction("Discard changes?", "You have unsaved changes.", destructive ? "Discard" : "Save", destructive).then((value) => {
 		confirmResult = { settled: true, value };
 	});
 }
@@ -103,4 +120,9 @@ function openConfirmDialog(): void {
 (window as any).__openConfirmDialog = openConfirmDialog;
 (window as any).__getAbortCallCount = () => session?.abortCallCount ?? 0;
 (window as any).__getConfirmResult = () => confirmResult;
+(window as any).__focusDecoyButton = () => ensureDecoyButton().focus();
+(window as any).__getActiveElementInfo = () => {
+	const active = document.activeElement as HTMLElement | null;
+	return active ? { tag: active.tagName, text: active.textContent?.trim() ?? "", id: active.id, className: active.className } : null;
+};
 (window as any).__agentInterfaceDialogEscapeReady = true;

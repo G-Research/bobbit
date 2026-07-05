@@ -446,7 +446,13 @@ test.describe("Settings/admin UI fixture", () => {
 		await section.locator("[data-testid='claude-code-executable']").fill("/opt/bin/claude");
 		await section.locator("[data-testid='claude-code-executable']").blur();
 		await expect(page.getByText("Change Claude Code executable?")).toBeVisible();
-		await page.keyboard.press("Enter");
+		// UX-03 (Fable audit): destructive confirmAction no longer binds Enter
+		// globally (focus defaults to Cancel) — confirm via the dialog's own
+		// button. .evaluate(button.click()) bypasses actionability/viewport
+		// checks — this fixture loads no CSS, so the dialog's inline
+		// `position: fixed` centering never actually applies (same pattern
+		// already used for the "Clean worktrees" confirm below).
+		await page.locator('[role="dialog"]').getByRole("button", { name: "Change executable" }).evaluate((button: HTMLElement) => button.click());
 		await expect.poll(async () => (await prefs(page))["claudeCode.executablePath"]).toBe("/opt/bin/claude");
 
 		await section.locator("[data-testid='claude-code-default-model']").selectOption("opus");

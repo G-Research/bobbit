@@ -88,3 +88,99 @@ test.describe("UX-01: Escape on an unrelated dialog does not abort a streaming a
 		expect(await page.evaluate(() => (window as any).__getAbortCallCount())).toBe(1);
 	});
 });
+
+// UX-03 (Fable audit): a document-level Enter used to resolve confirmAction's
+// promise as CONFIRMED regardless of the `destructive` flag and regardless of
+// where focus was — no button was ever focused on open, so a stray Enter
+// (mid-typing, or a screen-reader user who's landed nowhere in particular)
+// could fire a destructive action with zero warning. The fix moves focus into
+// the dialog on open (Cancel for destructive — the safe default — Confirm
+// otherwise), drops the global Enter binding entirely, and adds a Tab focus
+// trap. Native <button> Enter/Space activation then scopes "Enter confirms"
+// to focus-within-dialog for free.
+test.describe("UX-03: destructive confirmAction focuses Cancel and scopes Enter to focus-within-dialog", () => {
+	test("destructive dialog moves focus to the Cancel button on open", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(true));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Cancel");
+	});
+
+	test("non-destructive dialog moves focus to the Confirm button on open", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(false));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Save");
+	});
+
+	test("Enter while focus is OUTSIDE the dialog does NOT confirm a destructive action", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(true));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		// Wait for the dialog's own open-focus rAF to land on Cancel first, so
+		// it can't race with (and steal back) the decoy focus set below.
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Cancel");
+
+		// Move focus to a decoy control entirely outside the dialog, then press
+		// Enter. Under the old (buggy) behavior the document-level handler
+		// confirmed regardless of focus location; under the fix, nothing is
+		// bound globally, so an out-of-dialog Enter is a no-op for the dialog.
+		await page.evaluate(() => (window as any).__focusDecoyButton());
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.id)).toBe("ux03-decoy-outside-button");
+
+		await page.keyboard.press("Enter");
+
+		// Dialog is still open and unsettled — the stray Enter did nothing.
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		expect(await page.evaluate(() => (window as any).__getConfirmResult())).toEqual({ settled: false });
+	});
+
+	test("Enter on the focused Confirm button DOES confirm", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(true));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Cancel");
+
+		// Tab from the default-focused Cancel button onto Confirm, then Enter.
+		await page.keyboard.press("Tab");
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Discard");
+
+		await page.keyboard.press("Enter");
+
+		await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+		expect(await page.evaluate(() => (window as any).__getConfirmResult())).toEqual({ settled: true, value: true });
+	});
+
+	test("Enter on the focused Cancel button (the default) cancels — no accidental destructive confirm", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(true));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Cancel");
+
+		// This is the exact repro from the finding: press Enter without
+		// clicking/tabbing anywhere. Previously this fired the destructive
+		// action; now the safe default (Cancel) is what's focused.
+		await page.keyboard.press("Enter");
+
+		await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+		expect(await page.evaluate(() => (window as any).__getConfirmResult())).toEqual({ settled: true, value: false });
+	});
+
+	test("Tab focus trap keeps focus cycling within the dialog", async ({ page }) => {
+		await loadFixture(page, { isStreaming: false });
+		await page.evaluate(() => (window as any).__openConfirmDialog(true));
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		await expect.poll(() => page.evaluate(() => (window as any).__getActiveElementInfo()?.text)).toBe("Cancel");
+
+		// Shift+Tab from the first focusable element wraps to the last, rather
+		// than escaping the dialog into the page behind the backdrop.
+		await page.keyboard.press("Shift+Tab");
+		const wrapped = await page.evaluate(() => {
+			const active = document.activeElement as HTMLElement | null;
+			return active !== null && document.querySelector('[role="dialog"]')?.contains(active);
+		});
+		expect(wrapped).toBe(true);
+	});
+});

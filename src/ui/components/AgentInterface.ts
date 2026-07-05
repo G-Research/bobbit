@@ -442,6 +442,7 @@ export class AgentInterface extends LitElement {
 				"sidebar-actions-popover",
 				"continue-session-chooser",
 				"copy-link-fallback-dialog",
+				"[data-more-popover-open]",
 			].join(",");
 			if (document.querySelector(dialogSelector)) return;
 		}
@@ -984,6 +985,7 @@ export class AgentInterface extends LitElement {
 		}
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
+		document.removeEventListener("keydown", this._handleMoreKeyDown, true);
 		document.removeEventListener("keydown", this._handleGlobalEscape, true);
 
 		if (this._unsubscribeSession) {
@@ -2610,14 +2612,30 @@ export class AgentInterface extends LitElement {
 		this._moreExpanded = !this._moreExpanded;
 		this.requestUpdate();
 		if (this._moreExpanded) {
-			// Defer adding click-outside so this click doesn't immediately close it
+			this.setAttribute("data-more-popover-open", "");
+			// Defer adding click-outside/keydown so this click doesn't immediately
+			// close it. UX-04 (Fable audit): re-check _moreExpanded once the frame
+			// actually runs — if the popover was toggled closed again before this
+			// rAF fired (open+close within the same frame), the closing branch
+			// below already ran with nothing to remove, so without this guard the
+			// listeners would still get attached here and leak, orphaned, on an
+			// already-closed popover.
 			requestAnimationFrame(() => {
+				if (!this._moreExpanded) return;
 				document.addEventListener("click", this._handleMoreClickOutside, true);
+				document.addEventListener("keydown", this._handleMoreKeyDown, true);
 			});
 		} else {
-			document.removeEventListener("click", this._handleMoreClickOutside, true);
+			this._closeMorePopover();
 		}
 	};
+
+	private _closeMorePopover(): void {
+		this._moreExpanded = false;
+		this.removeAttribute("data-more-popover-open");
+		document.removeEventListener("click", this._handleMoreClickOutside, true);
+		document.removeEventListener("keydown", this._handleMoreKeyDown, true);
+	}
 
 	private _handleMoreClickOutside = (e: MouseEvent) => {
 		// Check if click is inside the "More" popover or its toggle button
@@ -2625,9 +2643,20 @@ export class AgentInterface extends LitElement {
 		const moreContainer = this.querySelector('.pill-more-popover');
 		const moreBtn = moreContainer?.parentElement?.querySelector('button');
 		if (moreContainer?.contains(target) || moreBtn?.contains(target)) return;
-		this._moreExpanded = false;
+		this._closeMorePopover();
 		this.requestUpdate();
-		document.removeEventListener("click", this._handleMoreClickOutside, true);
+	};
+
+	// UX-04 (Fable audit): the "More" popover previously had no keydown
+	// handler at all — a keyboard user who opened it with Enter/Space had no
+	// way to dismiss it short of a mouse click outside (mirrors the pattern in
+	// SidebarActionsPopover's own document Escape handler).
+	private _handleMoreKeyDown = (e: KeyboardEvent) => {
+		if (e.key !== "Escape" || !this._moreExpanded) return;
+		e.preventDefault();
+		e.stopPropagation();
+		this._closeMorePopover();
+		this.requestUpdate();
 	};
 
 	private _handlePillDismiss = (id: string) => {
@@ -2878,7 +2907,7 @@ export class AgentInterface extends LitElement {
 		} else {
 			// No pills — reset
 			this._visiblePillCount = Infinity;
-			this._moreExpanded = false;
+			if (this._moreExpanded) this._closeMorePopover();
 			this._pillsInitialized = false;
 			this._pillWidths.clear();
 			if (this._pillResizeObserver) {
