@@ -41,6 +41,38 @@ function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
 	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
 }
 
+/**
+ * W2.16 (Fable audit, follow-up to UX-01 / PR #15): mirrors the dialog/popover
+ * detection in `AgentInterface._handleGlobalEscape`
+ * (src/ui/components/AgentInterface.ts) — same selector idiom, duplicated
+ * rather than imported. AgentInterface.ts renders `<message-editor>` as a
+ * child, so importing the check from there would create a circular module
+ * dependency; keep this list in sync with that file's `dialogSelector`.
+ *
+ * Without this guard, the composer's own local Escape-to-abort handler below
+ * fires whenever the textarea has focus, even when a dialog/popover is open
+ * above it (e.g. a confirm/error dialog from src/app/dialogs.ts) — dismissing
+ * the dialog via its own Escape handler while ALSO aborting the streaming
+ * agent as an unwanted side effect. `_handleGlobalEscape` already guards
+ * against this for the document-level path; this composer-local path had no
+ * equivalent guard.
+ */
+function isDialogOrPopoverOpen(): boolean {
+	if (typeof document === "undefined") return false;
+	const dialogSelector = [
+		'[role="dialog"]',
+		'[aria-modal="true"]',
+		"attachment-overlay",
+		"verification-output-modal",
+		"annotation-popover",
+		"project-picker-popover",
+		"sidebar-actions-popover",
+		"continue-session-chooser",
+		"copy-link-fallback-dialog",
+	].join(",");
+	return document.querySelector(dialogSelector) !== null;
+}
+
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
 export interface QueuedMessage {
 	id: string;
@@ -623,6 +655,10 @@ export class MessageEditor extends LitElement {
 				this.handleSend();
 			}
 		} else if (e.key === "Escape" && this.isStreaming) {
+			// W2.16: a dialog/popover open above the composer should handle its
+			// own Escape (e.g. dismiss itself) — don't also abort the streaming
+			// agent as a side effect. See isDialogOrPopoverOpen() above.
+			if (isDialogOrPopoverOpen()) return;
 			e.preventDefault();
 			this.onAbort?.();
 		} else if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
