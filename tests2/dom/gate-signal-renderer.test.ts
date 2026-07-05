@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-signal-renderer.spec.ts (v2-dom tier).
 // Renders the REAL GateSignalRenderer via lit into a happy-dom container,
 // replacing the esbuild-bundled file:// fixture. The gate-verification-live

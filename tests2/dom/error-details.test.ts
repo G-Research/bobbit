@@ -1,3 +1,6 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
 // Migrated from tests/error-details.spec.ts (v2-dom tier).
 // Rewritten from the Playwright file:// fixture (which mirrored the component in
 // plain JS) to render the REAL <error-details> lit component under happy-dom.
