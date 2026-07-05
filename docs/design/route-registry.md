@@ -43,7 +43,13 @@ protocol future cohorts should follow, and what's left after cohort 1.
   (`src/server/routes/review-annotations-routes.ts`) — see
   [Cohort 6: workflows + review-annotations](#cohort-6-workflows--review-annotations)
   below.
-- Everything else in `handleApiRoute` (~361 remaining routes) is unchanged,
+- **Cohort 7: session utilities** — background-process routes,
+  `PUT`/`POST`/`GET`/`DELETE /api/sessions/:id/draft`,
+  `POST /api/sessions/:id/abort`, and
+  `GET /api/sessions/:id/prompt-sections`
+  (`src/server/routes/session-utility-routes.ts`) — see
+  [Cohort 7: session utilities](#cohort-7-session-utilities) below.
+- Everything else in `handleApiRoute` (~347 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -531,6 +537,58 @@ review-annotation family. For workflows:
 `tests/e2e/ui/goal-empty-workflows-banner.spec.ts`,
 `tests/e2e/ui/goal-proposal-workflow-tab.spec.ts` all pass unchanged.
 
+## Cohort 7: session utilities
+
+One new module, registered after cohort 6's in `server.ts`:
+`src/server/routes/session-utility-routes.ts`.
+
+This cohort intentionally picked a contiguous, cohesive "session utility"
+cluster with strong existing coverage and lower blast radius than the large
+session create/prompt/continue hot paths. It moves the background-process
+REST surface (well covered by persistent-bg-process and wait tests) together
+with the adjacent lightweight draft, abort, and prompt-section helpers
+covered by draft and prompt-section e2e specs.
+
+| Method | Path |
+|---|---|
+| POST | `/api/sessions/:id/bg-processes` |
+| GET | `/api/sessions/:id/bg-processes` |
+| GET | `/api/sessions/:id/bg-processes/:processId/logs` |
+| GET | `/api/sessions/:id/bg-processes/:processId/grep` |
+| GET | `/api/sessions/:id/bg-processes/:processId/head` |
+| GET | `/api/sessions/:id/bg-processes/:processId/slice` |
+| GET | `/api/sessions/:id/bg-processes/:processId/wait` |
+| DELETE | `/api/sessions/:id/bg-processes/:processId` |
+| PUT | `/api/sessions/:id/draft` |
+| POST | `/api/sessions/:id/draft` |
+| GET | `/api/sessions/:id/draft` |
+| DELETE | `/api/sessions/:id/draft` |
+| POST | `/api/sessions/:id/abort` |
+| GET | `/api/sessions/:id/prompt-sections` |
+
+`CoreRouteCtx` grew append-only by three fields: `noContent` (the existing
+204 helper used by the optional draft read path), `bgProcessManager`, and
+`toolManager`. Leaf helpers used only by these migrated handlers are imported
+directly by the route module (`streamBgWaitResponse`,
+`loadPersistedPromptSections`, `getPromptSections`, `bobbitStateDir`).
+
+**Fall-through parity: no shim needed.** Every legacy block in this cohort
+gated on path and method in the same `if` condition, including the
+`PUT|POST` draft upsert. A method mismatch skipped the block and fell through
+to the same generic terminal 404 as an unmatched path. The registry entries
+are method-scoped, so leaving unhandled methods unregistered preserves that
+behavior without a 405 shim.
+
+Parity evidence to run: `tests/e2e/bg-process-sandbox-guard.spec.ts`,
+`tests/e2e/bg-wait-steer-abort.spec.ts`,
+`tests/e2e/sandbox-security.spec.ts`, `tests/e2e/session-prompt.spec.ts`,
+`tests/e2e/draft-api.spec.ts`, `tests/e2e/delegate-prompt-sections.spec.ts`,
+`tests/e2e/prompt-sections-persist.spec.ts`, and browser coverage in
+`tests/e2e/ui/bg-process-persistence.spec.ts`,
+`tests/e2e/ui/draft-loss.spec.ts`,
+`tests/e2e/ui/queue-ui.spec.ts`, and
+`tests/e2e/ui/pill-overflow-promotion.spec.ts`.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -611,11 +669,12 @@ review-annotation family. For workflows:
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~361 routes, including the largest/highest-traffic families
+- The other ~347 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and
-  the workflows + review-annotation families in cohort 6 (all above).
+  the workflows + review-annotation families in cohort 6, and the session
+  utility cluster in cohort 7 (all above).
   Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see
