@@ -17,6 +17,7 @@ import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
 import { isHeadquartersProject } from "./project-registry.js";
+import type { PromptProfile } from "./system-prompt.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -339,8 +340,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string; promptProfile?: PromptProfile }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup, promptProfile } = opts ?? {};
 		const team = true;
 		const headquartersGoal = isHeadquartersProject(projectId);
 		const worktree = !headquartersGoal && opts?.worktree !== false;
@@ -439,6 +440,15 @@ export class GoalManager {
 			goal.swarmGroup = swarmGroup;
 			goal.subgoalsAllowed = false;
 			goal.maxNestingDepth = 0;
+		}
+
+		// SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1, staged-plan
+		// item 4.0/4.5): narrow, opt-in promptProfile stamp — `TeamManager.
+		// startTeam` reads this back to pass through to `createSession`. Absent
+		// for every existing caller (byte-identical default); today's only
+		// production writer is `swarm-plan-fan-in.ts`'s plan-phase siblings.
+		if (promptProfile) {
+			goal.promptProfile = promptProfile;
 		}
 
 		// Per-goal metadata (arbitrary, namespaced keys). Persist only a non-empty
