@@ -97,6 +97,13 @@ export interface DecisionOutcome {
 	decision: Decision;
 	ms: number;
 	/**
+	 * Privacy-safe, identity/shape-only summary of the classifier consult input,
+	 * when derivable. Never contains prompt text, spec/content, command args, diff
+	 * content, or changed-file paths; `changedFiles` is recorded only as
+	 * `changedFileCount`. Omitted for legacy rows and for absent/non-object args.
+	 */
+	argSummary?: Record<string, string | number | boolean>;
+	/**
 	 * CLF-W3 — whether a `select` decision was actually applied to live session
 	 * state, as opposed to merely recorded for telemetry. Set by the CALLER via
 	 * `dispatchDecision`'s `opts.applyIfSelected` (decided BEFORE the classifier

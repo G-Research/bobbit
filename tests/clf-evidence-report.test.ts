@@ -158,12 +158,12 @@ describe("aggregateThinkingRouter", () => {
 describe("aggregateLabelDistribution", () => {
 	it("computes label distribution + applied rate, ignoring abstains", () => {
 		const decisions = [
-			{ decision: { kind: "select", choice: "frontier" }, applied: true },
-			{ decision: { kind: "select", choice: "mid" }, applied: false },
+			{ decision: { kind: "select", choice: "frontier" }, applied: true, argSummary: { roleName: "architect" } },
+			{ decision: { kind: "select", choice: "mid" }, applied: false, argSummary: { roleName: "coder" } },
 			{ decision: { kind: "select", choice: "mid" } },
 			{ decision: { kind: "abstain" } },
 		];
-		const result = aggregateLabelDistribution(decisions);
+		const result = aggregateLabelDistribution(decisions, { groupKeys: ["roleName"] });
 		assert.equal(result.total, 4);
 		assert.equal(result.selects, 3);
 		assert.equal(result.abstains, 1);
@@ -171,6 +171,9 @@ describe("aggregateLabelDistribution", () => {
 		assert.equal(result.appliedTrue, 1);
 		assert.equal(result.appliedFalse, 1);
 		assert.equal(result.appliedUnknown, 1);
+		assert.equal(result.missingArgSummary, 2);
+		assert.deepEqual(result.byArgSummary["roleName=architect"].byLabel, { frontier: 1 });
+		assert.deepEqual(result.byArgSummary["roleName=coder"].byLabel, { mid: 1 });
 	});
 });
 
@@ -286,8 +289,9 @@ describe("renderReport", () => {
 				providers: [],
 				decisions: [
 					{ ts: 1, point: "user-prompt-submit", decisionKind: "thinking", consulted: ["builtin.thinking-router"], decision: { kind: "select", choice: "xhigh", rationale: "matched deterministic rule 'ultrathink'" }, ms: 0 },
-					{ ts: 1, point: "session-spawn", decisionKind: "model-tier", consulted: ["builtin.model-tier"], decision: { kind: "select", choice: "frontier" }, ms: 0 },
-					{ ts: 1, point: "gate-verify", decisionKind: "risk", consulted: ["builtin.gate-risk"], decision: { kind: "select", choice: "high" }, ms: 0 },
+					{ ts: 1, point: "session-spawn", decisionKind: "model-tier", consulted: ["builtin.model-tier"], decision: { kind: "select", choice: "frontier" }, argSummary: { roleName: "architect" }, ms: 0 },
+					{ ts: 2, point: "session-spawn", decisionKind: "model-tier", consulted: ["builtin.model-tier"], decision: { kind: "select", choice: "mid" }, ms: 0 },
+					{ ts: 1, point: "gate-verify", decisionKind: "risk", consulted: ["builtin.gate-risk"], decision: { kind: "select", choice: "high" }, argSummary: { changedFileCount: 1 }, ms: 0 },
 				],
 			}) + "\n",
 		);
@@ -319,8 +323,8 @@ describe("renderReport", () => {
 		const data = {
 			toolApprove: aggregateToolApprove(auditEntries),
 			thinkingRouter: aggregateThinkingRouter(flattenDecisions(traceEntries, "user-prompt-submit", "thinking")),
-			modelTier: aggregateLabelDistribution(flattenDecisions(traceEntries, "session-spawn", "model-tier")),
-			gateRisk: aggregateLabelDistribution(flattenDecisions(traceEntries, "gate-verify", "risk")),
+			modelTier: aggregateLabelDistribution(flattenDecisions(traceEntries, "session-spawn", "model-tier"), { groupKeys: ["roleName"] }),
+			gateRisk: aggregateLabelDistribution(flattenDecisions(traceEntries, "gate-verify", "risk"), { groupKeys: ["changedFileCount"] }),
 			cost: {
 				outliers: computeCostOutliers(flattenCostTurns(costData)),
 				compaction: computeCompactionShare(flattenCostTurns(costData)),
@@ -331,12 +335,19 @@ describe("renderReport", () => {
 		assert.equal(data.toolApprove.disagreementCount, 1);
 		assert.equal(data.thinkingRouter.selects, 1);
 		assert.equal(data.modelTier.byLabel.frontier, 1);
+		assert.equal(data.modelTier.missingArgSummary, 1);
+		assert.equal(data.modelTier.byArgSummary["roleName=architect"].selects, 1);
 		assert.equal(data.gateRisk.byLabel.high, 1);
+		assert.equal(data.gateRisk.byArgSummary["changedFileCount=1"].selects, 1);
 		assert.equal(data.cost.outliers.outlierCount, 1);
 		assert.equal(data.cost.compaction.compactionTagged, 1);
 
 		const report = renderReport(data, { generatedAt: 0, stateDirLabel: stateDir, costStateDirLabel: stateDir });
 		assert.match(report, /Total tool-permission asks: \*\*2\*\*/);
+		assert.match(report, /By role/);
+		assert.match(report, /roleName=architect/);
+		assert.match(report, /Rows lacking `argSummary`: 1/);
+		assert.match(report, /changedFileCount=1/);
 		assert.match(report, /frontier/);
 		assert.match(report, /high/);
 		assert.doesNotMatch(report, /lorem ipsum/i);

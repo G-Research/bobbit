@@ -112,6 +112,7 @@ describe("Model-tier classifier — real registration + trace-row integration (C
 			assert.deepEqual(recorded?.consulted, [MODEL_TIER_CLASSIFIER_ID]);
 			assert.equal(recorded?.decision.kind, "select");
 			assert.equal((recorded?.decision as { choice: string }).choice, "frontier");
+			assert.deepEqual(recorded?.argSummary, { roleName: "architect" });
 			// Pure telemetry this wave — never applied, never even attempted.
 			assert.equal(recorded?.applied, undefined);
 
