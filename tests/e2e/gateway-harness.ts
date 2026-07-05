@@ -186,6 +186,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
 	enableToolApproveHeuristic: boolean;
+	enableThinkingRouterApply: boolean;
 	gateway: GatewayInfo;
 }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
@@ -215,7 +216,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// for the transparency panel but never change tool-grant behavior).
 	enableToolApproveHeuristic: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, enableToolApproveHeuristic }, use, workerInfo) => {
+	// Worker-scoped option. Default false leaves BOBBIT_CLF_THINKING_ROUTER unset
+	// (observe mode). Opt in from a dedicated spec to boot that worker in enforce
+	// mode and assert transparency rows show applied decisions.
+	enableThinkingRouterApply: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, enableToolApproveHeuristic, enableThinkingRouterApply }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -319,6 +325,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			process.env.BOBBIT_CLF_TOOL_APPROVE = "observe";
 		} else {
 			delete process.env.BOBBIT_CLF_TOOL_APPROVE;
+		}
+		const previousThinkingRouterClf = process.env.BOBBIT_CLF_THINKING_ROUTER;
+		if (enableThinkingRouterApply) {
+			process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		} else {
+			delete process.env.BOBBIT_CLF_THINKING_ROUTER;
 		}
 		process.env.BOBBIT_DIR = bobbitDir;
 		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
@@ -582,6 +594,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 		if (previousToolApproveClf === undefined) delete process.env.BOBBIT_CLF_TOOL_APPROVE;
 		else process.env.BOBBIT_CLF_TOOL_APPROVE = previousToolApproveClf;
+		if (previousThinkingRouterClf === undefined) delete process.env.BOBBIT_CLF_THINKING_ROUTER;
+		else process.env.BOBBIT_CLF_THINKING_ROUTER = previousThinkingRouterClf;
 		if (previousZdotdir === undefined) delete process.env.ZDOTDIR;
 		else process.env.ZDOTDIR = previousZdotdir;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],

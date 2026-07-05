@@ -81,6 +81,63 @@ test("shutdown persists re-drive state from session lifecycle state", async () =
 	assert.equal(updates.idle.wasStreaming, false);
 });
 
+test("MEM-1: shutdown() dispatches sessionShutdown for every live session before it settles", async () => {
+	const dispatched: Array<{ hook: string; ctx: any }> = [];
+	const manager: any = new SessionManager();
+	manager._testStore = {
+		update: () => {},
+		get: () => undefined,
+		flush: () => {},
+	};
+	manager.closeExtensionChannelsForSession = async () => {};
+	manager.cancelPendingAutoRetry = () => {};
+	manager._untrackConnectedSession = () => {};
+	manager.lifecycleHub = {
+		dispatch: async (hook: string, ctx: any) => {
+			dispatched.push({ hook, ctx });
+			return { blocks: [], diagnostics: [] };
+		},
+	};
+
+	manager.sessions.set("s1", makeShutdownSession("s1", "idle", { projectId: "p1", cwd: "/w/p1", goalId: "g1", role: "coder" }));
+	manager.sessions.set("s2", makeShutdownSession("s2", "idle", { projectId: undefined, cwd: "/w/global", teamGoalId: "tg2" }));
+
+	await manager.shutdown();
+
+	assert.equal(dispatched.length, 2, "sessionShutdown dispatched once per live session (previously never dispatched at all — MEM-1)");
+	assert.ok(dispatched.every((d) => d.hook === "sessionShutdown"));
+	const s1 = dispatched.find((d) => d.ctx.sessionId === "s1");
+	assert.equal(s1?.ctx.projectId, "p1");
+	assert.equal(s1?.ctx.scope, "project");
+	assert.equal(s1?.ctx.cwd, "/w/p1");
+	assert.equal(s1?.ctx.goalId, "g1");
+	assert.equal(s1?.ctx.roleName, "coder");
+	const s2 = dispatched.find((d) => d.ctx.sessionId === "s2");
+	assert.equal(s2?.ctx.scope, "global", "no projectId ⇒ global scope");
+	assert.equal(s2?.ctx.goalId, "tg2", "falls back to teamGoalId when goalId is absent");
+});
+
+test("MEM-1: a throwing sessionShutdown dispatch never blocks graceful shutdown", async () => {
+	const manager: any = new SessionManager();
+	manager._testStore = {
+		update: () => {},
+		get: () => undefined,
+		flush: () => {},
+	};
+	manager.closeExtensionChannelsForSession = async () => {};
+	manager.cancelPendingAutoRetry = () => {};
+	manager._untrackConnectedSession = () => {};
+	manager.lifecycleHub = {
+		dispatch: async () => {
+			throw new Error("provider hook boom");
+		},
+	};
+	manager.sessions.set("s1", makeShutdownSession("s1", "idle"));
+
+	await assert.doesNotReject(manager.shutdown());
+	assert.equal(manager.sessions.has("s1"), false, "session teardown still completes despite the dispatch failure");
+});
+
 test("shutdown uses the centralized restart re-drive predicate, not exact streaming", () => {
 	const source = sessionManagerSource();
 	const body = shutdownBody(source);

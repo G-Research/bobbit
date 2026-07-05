@@ -1,0 +1,14 @@
+id: pr-walkthrough.trusted-hosts
+title: Trusted GitHub hosts
+scope: system
+tab: general
+order: 100
+# `entry` resolves relative to THIS yaml (settings/) and stays inside the pack
+# root, mirroring panels/pr-walkthrough-panel.yaml's `entry` convention. The
+# built module lives in the shared lib/ dir (scripts/build-market-packs.mjs).
+entry: ../lib/TrustedHostsSection.js
+# The ONLY preference key this section's `host.preferences.set()` may write —
+# re-checked LIVE server-side on every write (never trusted from a client
+# claim); see src/server/extension-host/settings-section-preferences.ts.
+preferenceKeys:
+  - githubTrustedHosts

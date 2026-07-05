@@ -246,6 +246,17 @@ describe("SessionStore", () => {
 			assert.equal(store.get("sess-1")!.lastReadAt, undefined);
 		});
 
+		it("thinkingLevelUserPinned round-trips through disk", () => {
+			const store1 = freshStore();
+			store1.put(makeSession());
+			store1.update("sess-1", { thinkingLevelUserPinned: true });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw.sessions[0].thinkingLevelUserPinned, true);
+
+			const store2 = freshStore();
+			assert.equal(store2.get("sess-1")!.thinkingLevelUserPinned, true);
+		});
+
 		// -------------------------------------------------------------------
 		// CON-04 — restart-redrive fields must flush synchronously
 		//

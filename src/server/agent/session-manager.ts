@@ -106,6 +106,7 @@ import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import type { Decision } from "./decision-types.js";
 import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID, isThinkingRouterApplyMode } from "./thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND, isToolApproveEnforceMode, isAutoDenyDecision, type ToolApproveVerdict } from "./tool-approve-classifier.js";
+import { ToolPermissionAuditLog, type ToolPermissionAuditDecision, type ToolPermissionAuditSource } from "./tool-permission-audit-log.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -453,11 +454,16 @@ export interface SessionInfo {
 	 * `spawnPinnedThinkingLevel` but is not a human decision. Consulted by
 	 * `canApplyThinkingRouterDecision` so the F14 thinking-router's apply mode
 	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`) can never silently override a
-	 * setting the user picked on purpose. In-memory only — does not currently
-	 * survive a session restore/respawn (flagged as a known gap, not fixed
-	 * this wave; re-setting it is one click).
+	 * setting the user picked on purpose. Persisted via `SessionStore` so the
+	 * precedence survives restore/respawn.
 	 */
 	thinkingLevelUserPinned?: boolean;
+	/**
+	 * Baseline level to restore after CLF-W3 thinking-router apply mode
+	 * transiently escalates the live runtime. In-memory only: it describes the
+	 * currently running process, not durable user/session config.
+	 */
+	thinkingRouterAppliedBaseline?: ThinkingLevel;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -504,6 +510,7 @@ export interface SessionInfo {
 		reject: (err: Error) => void;
 		toolName: string;
 		toolGroup: string;
+		toolApproveDecision?: Decision<ToolApproveVerdict>;
 		timer: ReturnType<typeof setTimeout>;
 		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
 		 * verbatim to late-joining clients so we never burn a fresh global seq
@@ -919,6 +926,8 @@ export interface SessionManagerOptions {
 	prStatusStore?: PrStatusStore;
 	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
 	extensionChannels?: ExtensionChannelServices;
+	/** Durable tool-permission ask audit log. Override is primarily for tests. */
+	toolPermissionAuditLog?: ToolPermissionAuditLog;
 }
 
 function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
@@ -1038,6 +1047,7 @@ export class SessionManager {
 	private _testCostTracker: CostTracker | null = null;
 	/** @internal Test-only search index (used when no PCM is available). */
 	private _testSearchIndex: SearchService | null = null;
+	private toolPermissionAuditLog!: ToolPermissionAuditLog;
 	private colorStore?: ColorStore;
 	private roleManager?: RoleManager;
 	/**
@@ -1453,6 +1463,7 @@ export class SessionManager {
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
 		this._extensionChannels = options?.extensionChannels;
+		this.toolPermissionAuditLog = options?.toolPermissionAuditLog ?? new ToolPermissionAuditLog(bobbitStateDir());
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -3087,6 +3098,39 @@ export class SessionManager {
 		return true;
 	}
 
+	private clampThinkingLevelForSession(session: SessionInfo, level: ThinkingLevel): ThinkingLevel {
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.modelId) {
+				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
+				if (clamped) return clamped;
+			}
+		} catch { /* best-effort; keep fail-open thinking-level discipline */ }
+		return level;
+	}
+
+	private resolveCurrentThinkingRouterBaseline(session: SessionInfo): ThinkingLevel {
+		const candidate = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(session.role, session.projectId) ?? "medium";
+		return this.clampThinkingLevelForSession(session, (isKnownThinkingLevel(candidate) ?? "medium") as ThinkingLevel);
+	}
+
+	private async restoreThinkingRouterAppliedBaseline(session: SessionInfo): Promise<void> {
+		const baseline = session.thinkingRouterAppliedBaseline;
+		if (!baseline) return;
+		session.thinkingRouterAppliedBaseline = undefined;
+		try {
+			const levelToRestore = this.clampThinkingLevelForSession(session, baseline);
+			await session.rpcClient.setThinkingLevel(levelToRestore);
+			console.log(`[session-manager] CLF-W3 thinking-router RESTORED "${levelToRestore}" for session ${session.id}`);
+		} catch (err) {
+			console.warn(`[session-manager] CLF-W3 thinking-router restore failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private clearThinkingRouterAppliedBaseline(session: SessionInfo): void {
+		session.thinkingRouterAppliedBaseline = undefined;
+	}
+
 	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
@@ -3194,16 +3238,19 @@ export class SessionManager {
 					// so a classifier "xhigh" select degrades gracefully on a model that
 					// doesn't support it instead of sending an unsupported level to the
 					// runtime. Falls back to the raw choice when no model is known yet.
-					let levelToApply: ThinkingLevel = thinkingRouterDecision.choice;
-					const persisted = this.resolveStoreForSession(session.id).get(session.id);
-					if (persisted?.modelId) {
-						const clamped = clampThinkingLevelForModel(levelToApply, persisted.modelProvider, persisted.modelId);
-						if (clamped) levelToApply = clamped;
-					}
+					const baseline = session.thinkingRouterAppliedBaseline ?? this.resolveCurrentThinkingRouterBaseline(session);
+					const levelToApply = this.clampThinkingLevelForSession(session, thinkingRouterDecision.choice);
 					await session.rpcClient.setThinkingLevel(levelToApply);
+					session.thinkingRouterAppliedBaseline = baseline;
 					console.log(`[session-manager] CLF-W3 thinking-router APPLIED "${levelToApply}" for session ${session.id} (turn-scoped, not persisted)`);
 				} catch (err) {
 					console.warn(`[session-manager] CLF-W3 thinking-router apply failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else if (session.thinkingRouterAppliedBaseline && isThinkingRouterApplyMode()) {
+				if (canApplyThinking) {
+					await this.restoreThinkingRouterAppliedBaseline(session);
+				} else {
+					this.clearThinkingRouterAppliedBaseline(session);
 				}
 			}
 		}
@@ -4574,6 +4621,7 @@ export class SessionManager {
 					granted: false,
 					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
 				});
+				this.appendToolPermissionAudit(session, pending, "denied", "auto");
 				return session.allowedTools ?? [];
 			}
 		}
@@ -4622,6 +4670,7 @@ export class SessionManager {
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
 			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			this.appendToolPermissionAudit(session, pending, "granted", "user");
 			return resultTools;
 		}
 
@@ -4652,6 +4701,28 @@ export class SessionManager {
 		}
 	}
 
+	private appendToolPermissionAudit(
+		session: SessionInfo,
+		ask: { toolName: string; toolGroup?: string; toolApproveDecision?: Decision<ToolApproveVerdict> },
+		decision: ToolPermissionAuditDecision,
+		source: ToolPermissionAuditSource,
+	): void {
+		try {
+			this.toolPermissionAuditLog.append(session.id, {
+				ts: Date.now(),
+				sessionId: session.id,
+				...(session.projectId ? { projectId: session.projectId } : {}),
+				toolName: ask.toolName,
+				...(ask.toolGroup ? { toolGroup: ask.toolGroup } : {}),
+				decision,
+				source,
+				...(ask.toolApproveDecision ? { toolApproveDecision: ask.toolApproveDecision } : {}),
+			});
+		} catch (err) {
+			console.warn(`[session-manager] tool-permission audit append failed for session ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
 	/**
 	 * Called by the guard extension's long-poll endpoint. Creates a pending
 	 * grant request, broadcasts to UI clients, and returns a promise that
@@ -4664,7 +4735,9 @@ export class SessionManager {
 		// If a previous grant request is still pending, resolve it as denied
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
@@ -4696,6 +4769,7 @@ export class SessionManager {
 		// mechanics via a directly-registered test classifier.
 		const toolApproveDecision = this.lifecycleHub ? await this.consultToolApproveHub(session, toolName, toolGroup) : undefined;
 		if (isToolApproveEnforceMode() && isAutoDenyDecision(toolApproveDecision)) {
+			this.appendToolPermissionAudit(session, { toolName, toolGroup, toolApproveDecision }, "denied", "auto");
 			return { granted: false, reason: toolApproveDecision.rationale ?? "Auto-denied by the tool-approve decision seam (CLF-W2, enforce mode)" };
 		}
 
@@ -4711,11 +4785,13 @@ export class SessionManager {
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
 			const timer = setTimeout(() => {
+				const pending = session.pendingGrantRequest;
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
+				if (pending) this.appendToolPermissionAudit(session, pending, "denied", "timeout");
 			}, 5 * 60 * 1000); // 5 minute timeout
 
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, toolApproveDecision, timer, seq, ts };
 		});
 
 		// Broadcast to UI clients
@@ -4747,6 +4823,7 @@ export class SessionManager {
 		const pending = session.pendingGrantRequest;
 		session.pendingGrantRequest = undefined;
 		pending.resolve({ granted: false });
+		this.appendToolPermissionAudit(session, pending, "denied", "user");
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
@@ -4957,6 +5034,7 @@ export class SessionManager {
 
 		const sessionCostTracker = this.resolveCostTracker(session);
 		const stampGoalId = session.goalId ?? session.teamGoalId;
+		const trigger = this.costTriggerFromEvent(session, event);
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
@@ -4969,7 +5047,7 @@ export class SessionManager {
 			// cost-tracker.ts's `cacheWrite1hTokens` doc.
 			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? usage.cacheWrite1h,
 			cost: costValue,
-		}, stampGoalId);
+		}, stampGoalId, trigger);
 
 		// SWARM-W1 — hard per-node token-budget governor (design/swarm-orchestration.md
 		// §6, must-fix #1): this `message_end` hook is the ONE place cumulative
@@ -4989,7 +5067,7 @@ export class SessionManager {
 					console.warn(`[swarm-governor] abort() failed for session ${session.id} (non-fatal):`, err);
 				}
 			} else if (action?.kind === "hard-kill") {
-				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason)
+				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason, { killReason: "governor-budget" })
 					.catch((err) => console.warn(`[swarm-governor] hardKillSwarmNode failed for goal ${stampGoalId} (non-fatal):`, err));
 			}
 		}
@@ -5009,6 +5087,16 @@ export class SessionManager {
 			taskId,
 			cost: cumulativeCost,
 		});
+	}
+
+	private costTriggerFromEvent(session: SessionInfo, event: any): string | undefined {
+		if (event.type !== "message_end") return undefined;
+		if (!session.isCompacting) return undefined;
+		const pending = (session as any)._pendingCompactionStart as
+			| { trigger?: "auto" | "overflow" }
+			| undefined;
+		const trigger = pending?.trigger ?? ((session as any)._manualCompactionId ? "manual" : undefined);
+		return trigger ? `compaction:${trigger}` : undefined;
 	}
 
 	/**
@@ -5678,6 +5766,7 @@ export class SessionManager {
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+			thinkingLevelUserPinned: ps.thinkingLevelUserPinned,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreePushPolicy: ps.worktreePushPolicy,
@@ -7280,6 +7369,7 @@ export class SessionManager {
 		claudeCodeModelAlias?: string;
 		modelProvider?: string;
 		modelId?: string;
+		thinkingLevelUserPinned?: boolean;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -7327,6 +7417,7 @@ export class SessionManager {
 				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
 				modelProvider: ps?.modelProvider,
 				modelId: ps?.modelId,
+				thinkingLevelUserPinned: s.thinkingLevelUserPinned,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 				repoPath: ps?.repoPath || s.repoPath,
@@ -7647,10 +7738,11 @@ export class SessionManager {
 			readOnly: respawnPersisted?.readOnly ?? session.readOnly,
 		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-		const rpcClient = createSessionBridge(bridgeOptions);
-		session.spawnPinnedModel = bridgeOptions.initialModel;
-		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		let switchingSession = true;
+			const rpcClient = createSessionBridge(bridgeOptions);
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+			session.thinkingRouterAppliedBaseline = undefined;
+			let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			if (isUserVisibleActivity(event)) {
@@ -7901,6 +7993,10 @@ export class SessionManager {
 		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
 	}
 
+	persistSessionThinkingUserPinned(sessionId: string, pinned: boolean): void {
+		this.resolveStoreForSession(sessionId).update(sessionId, { thinkingLevelUserPinned: pinned });
+	}
+
 	/** True when (provider, modelId) is registered as an available image model. */
 	isKnownImageModel(provider: string, modelId: string): boolean {
 		if (!this.preferencesStore) return false;
@@ -8019,7 +8115,9 @@ export class SessionManager {
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
@@ -8621,10 +8719,11 @@ export class SessionManager {
 				readOnly: forceRespawnPersisted?.readOnly ?? session.readOnly,
 			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-			const rpcClient = createSessionBridge(bridgeOptions);
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-			let switchingSession = true;
+		const rpcClient = createSessionBridge(bridgeOptions);
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		session.thinkingRouterAppliedBaseline = undefined;
+		let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				if (isUserVisibleActivity(event)) {
@@ -8738,6 +8837,33 @@ export class SessionManager {
 			if (!session) continue;
 
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
+
+			// MEM-1: graceful shutdown (SIGINT/SIGTERM) previously never dispatched
+			// `sessionShutdown` for still-live sessions — only archiveWithCascade and
+			// terminateSession did — so a lifecycle provider's flush-on-shutdown hook
+			// (e.g. the hindsight memory pack's pending-buffer flush + retry-queue
+			// drain) never ran on a plain gateway restart/stop, stranding whatever was
+			// buffered. Mirrors the archiveWithCascade/terminateSession dispatch sites
+			// above: best-effort and bounded by the hub's own per-provider timeouts
+			// (ModuleHost's invoke-level terminate-on-timeout — see
+			// LifecycleHub.dispatch), wrapped in try/catch so a hung/throwing provider
+			// can never block graceful shutdown.
+			if (this.lifecycleHub) {
+				try {
+					await this.lifecycleHub.dispatch("sessionShutdown", {
+						sessionId: id,
+						projectId: session.projectId,
+						scope: session.projectId ? "project" : "global",
+						cwd: session.cwd,
+						// Effective goal (goalId ?? teamGoalId) so disabled-provider
+						// filtering applies to members/delegates/reviewers too.
+						goalId: session.goalId ?? session.teamGoalId,
+						roleName: session.role,
+					});
+				} catch (err) {
+					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
+				}
+			}
 
 			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,

@@ -30,6 +30,19 @@ export const DECISION_POINTS = [
 	// CLF-W4 — session spawn, where the model/thinking-tier for a new session
 	// is resolved (see model-tier-classifier.ts's header for the full design).
 	"session-spawn",
+	// CLF-W5 — gate verification, where a signal's diff shape (changed-file
+	// count/path-classes/high-risk surfaces) is known before its verify[]
+	// steps run (see gate-risk-classifier.ts's header for the full design).
+	"gate-verify",
+	// SWARM-W4.2 — goal creation, where a swarm topology is (today, always
+	// caller-supplied) chosen for a new goal. Hand-added exactly the same way
+	// (tool-call, tool-approve) was hand-added by CLF-W2, per
+	// docs/design/swarm-orchestration-w4.md §3.2: "do not wait for STR-01"
+	// (the route-registry-derived interception-point generalization) — flag
+	// this point for STR-01 to later subsume, same discipline as this file's
+	// own header. See swarm-topology-classifier.ts's header for the full
+	// design/scope of this wave (harness only — zero classifiers registered).
+	"goal-create",
 ] as const;
 
 export type DecisionPoint = (typeof DECISION_POINTS)[number];

@@ -19,6 +19,7 @@ import {
 	PackContributionError,
 	type PackContributions,
 	type PanelContribution,
+	type SettingsSectionContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
 	type ChannelContribution,
@@ -34,6 +35,8 @@ export interface PackContributionResolver {
 	getPack(projectId: string | undefined, packId: string): PackContributions | undefined;
 	/** Resolve a panel within a pack. */
 	getPanel(projectId: string | undefined, packId: string, panelId: string): PanelContribution | undefined;
+	/** Resolve a settings-section within a pack (docs/design/pack-settings-contribution.md §4.2). */
+	getSettingsSection(projectId: string | undefined, packId: string, sectionId: string): SettingsSectionContribution | undefined;
 	/** Resolve an entrypoint within a pack. */
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
@@ -151,6 +154,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	getPanel(projectId: string | undefined, packId: string, panelId: string): PanelContribution | undefined {
 		return this.getPack(projectId, packId)?.panels.find((p) => p.id === panelId);
+	}
+
+	getSettingsSection(projectId: string | undefined, packId: string, sectionId: string): SettingsSectionContribution | undefined {
+		return this.getPack(projectId, packId)?.settingsSections.find((s) => s.id === sectionId);
 	}
 
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined {

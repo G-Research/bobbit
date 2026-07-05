@@ -33,6 +33,7 @@ import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { mintOperatorConfirmation, consumeOperatorConfirmation, stableConfirmationBinding } from "../auth/operator-confirmation.js";
 import { createBestOfNSwarm, type BestOfNSiblingSpec } from "./swarm-best-of-n.js";
 import { verifyBestOfNGroup } from "./swarm-verifier.js";
+import { SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND, type SwarmTopologyChoice, type SwarmTopologyArg } from "./swarm-topology-classifier.js";
 
 const SWARM_PICK_CONFIRMATION_PURPOSE = "swarm-best-of-n-pick";
 
@@ -102,6 +103,18 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 		const hardKillMarginMultiplier = typeof body.hardKillMarginMultiplier === "number" && body.hardKillMarginMultiplier > 1 ? body.hardKillMarginMultiplier : undefined;
 		const verifyCommand = typeof body.verifyCommand === "string" ? body.verifyCommand : "";
 		if (!verifyCommand) { json({ error: "verifyCommand is required — best-of-N MUST have a deterministic verifier, never an LLM grading its own output", code: "VERIFY_COMMAND_REQUIRED" }, 400); return true; }
+		// SWARM-W4.1: opt-in early-kill (design/swarm-orchestration-w4.md §1.3)
+		// — defaults false, byte-identical to pre-W4.1 behavior when omitted.
+		const earlyKill = body.earlyKill === true;
+		// SWARM-W4.2 — goal-create decision seam HARNESS consult (see
+		// swarm-topology-classifier.ts's header + design/swarm-orchestration-w4.md
+		// §3.3 step 1). `server.ts` only allow-lists (goal-create,
+		// swarm-topology) and registers NO classifier, so this always abstains
+		// in production today — recorded via `dispatchDecision`'s own
+		// trace/transparency-panel wiring only. The topology created below is
+		// UNCONDITIONALLY the caller-supplied best-of-N shape regardless of
+		// this decision's outcome — nothing here reads or branches on it.
+		await consultSwarmTopologyHub(deps, req, { goalId: parentId, spec, hasVerifyCommand: true, requestedFanOut: n }, resolveCandidateCwd(parent));
 		try {
 			const result = await createBestOfNSwarm(
 				{
@@ -109,7 +122,7 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 					getGoalManagerForGoal,
 					harness: verificationHarness,
 				},
-				{ parentGoalId: parentId, title, spec, siblings, tokenBudgetPerNode, wallClockMsPerNode, hardKillMarginMultiplier, verifyCommand },
+				{ parentGoalId: parentId, title, spec, siblings, tokenBudgetPerNode, wallClockMsPerNode, hardKillMarginMultiplier, verifyCommand, earlyKill },
 			);
 			broadcastToAll({ type: "goal_created", goalId: parentId, swarmGroup: result.swarmGroup });
 			json({ ...result }, 201);
@@ -260,4 +273,35 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 function firstHeader(req: http.IncomingMessage, name: string): string | undefined {
 	const v = req.headers[name.toLowerCase()];
 	return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * SWARM-W4.2 — consult the swarm-topology decision seam (harness only, see
+ * `swarm-topology-classifier.ts`) for a best-of-N creation. Never throws and
+ * never returns anything the caller reads — the whole point this wave is a
+ * pure, discarded telemetry consult recorded via `dispatchDecision`'s own
+ * trace/transparency-panel wiring. Fail-open, mirroring
+ * `SessionManager.consultToolApproveHub`'s discipline exactly: no hub, an
+ * unregistered (point,kind) pair, or the classifier itself erroring must
+ * NEVER block or slow swarm creation.
+ */
+async function consultSwarmTopologyHub(
+	deps: SwarmRouteDeps,
+	req: http.IncomingMessage,
+	arg: SwarmTopologyArg,
+	cwd: string | undefined,
+): Promise<void> {
+	const hub = deps.sessionManager.lifecycleHub;
+	if (!hub) return;
+	try {
+		const sessionId = deps.sessionManager.sessionSecretStore.resolveSessionIdBySecret(firstHeader(req, "x-bobbit-session-secret")) ?? arg.goalId;
+		await hub.dispatchDecision<SwarmTopologyChoice>(
+			SWARM_TOPOLOGY_POINT,
+			SWARM_TOPOLOGY_KIND,
+			{ sessionId, goalId: arg.goalId, cwd: cwd ?? "" },
+			arg,
+		);
+	} catch (err) {
+		console.warn(`[swarm-routes] swarm-topology dispatchDecision failed for goal ${arg.goalId} (non-fatal, observe-mode only): ${err instanceof Error ? err.message : String(err)}`);
+	}
 }

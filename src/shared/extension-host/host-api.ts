@@ -260,6 +260,33 @@ export interface HostChannelsApi {
 	list(opts?: { name?: string; includeClosed?: boolean }): Promise<ChannelInfo[]>;
 }
 
+// ── Settings-section Host API (docs/design/pack-settings-contribution.md §4.3) ──
+// Deliberately NOT `HostApi`: a settings section has no session and no
+// toolUseId, so it gets a narrow, PURPOSE-BUILT surface — `preferences.{get,set}`
+// ONLY, key-allowlisted per pack manifest and re-checked server-side regardless
+// of that declaration (see settings-section-preferences.ts). No `host.store`,
+// `host.session`, `host.channels`, `host.callRoute` — a settings section
+// literally cannot reach anything else through this API, which is itself the
+// safety property (mirrors how a panel cannot reach another pack's store).
+export interface SettingsHostApi {
+	preferences: {
+		/** Synchronous read of the LAST-FETCHED value (undefined until the first
+		 *  background fetch resolves — a section must tolerate `undefined` on its
+		 *  first render, exactly like a pack panel tolerates `host === undefined`). */
+		get(key: string): unknown;
+		/** Persist `value` under `key`. Rejected server-side (400/403) unless `key`
+		 *  is in THIS section's manifest-declared `preferenceKeys` AND is not one of
+		 *  the hard-blocked Claude-Code-runtime / agent-dir keys, regardless of the
+		 *  manifest. Resolves after the authoritative GET readback (the server
+		 *  normalizes-and-stores; see `persistGithubTrustedHosts`'s comment for why
+		 *  a readback, not the raw echo, is authoritative). */
+		set(key: string, value: unknown): Promise<void>;
+	};
+	/** Repaint after a local (non-preference) state change — e.g. an input's
+	 *  in-progress text. Mirrors `HostApi.requestRender()`. */
+	requestRender(): void;
+}
+
 // ── Structured UI addressing (frozen; no hash strings) ──
 export interface PanelTarget {
 	panelId: string;

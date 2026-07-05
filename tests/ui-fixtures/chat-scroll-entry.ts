@@ -1,5 +1,8 @@
 import "../../src/ui/components/AgentInterface.js";
-import { streamSimple } from "@earendil-works/pi-ai";
+// streamFn below is never invoked (FixtureSession.prompt is a no-op stub) —
+// this import only needs to resolve. root pi-ai no longer exports streamSimple
+// (moved under /compat in 0.80); TODO(pi-0.8x): migrate off /compat.
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 
 type Listener = (event: any) => void | Promise<void>;
 type FixtureMessage = Record<string, any>;

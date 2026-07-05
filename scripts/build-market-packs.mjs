@@ -105,6 +105,13 @@ const PACKS = [
 			// from panels/pr-walkthrough-panel.yaml). routes.mjs is hand-authored and
 			// relocated to lib/ — NOT bundled here.
 			{ in: "panel.js", out: "lib/panel.js" },
+			// CLIENT settings-section bundle: the "Trusted GitHub hosts" widget
+			// (auto-discovered from settings/trusted-hosts.yaml), migrated OFF core
+			// settings-page.ts (docs/design/pack-settings-contribution.md §4.5). Imports
+			// src/shared/pr-walkthrough/url-safety.ts directly (see panel.js's identical
+			// `../../../src/shared/pr-walkthrough/ids.ts` import for precedent that this
+			// import graph is clean) instead of hand-duplicating the normalizer.
+			{ in: "TrustedHostsSection.ts", out: "lib/TrustedHostsSection.js" },
 			// SERVER-side synthesis bundle: the pure shared YAML→cards mapper (with its
 			// `yaml` dep inlined), imported by the hand-authored routes.mjs `publish`
 			// route in the confined NODE worker. platform:"node" so Buffer + node:* stay

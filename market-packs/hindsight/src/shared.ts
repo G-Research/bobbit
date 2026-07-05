@@ -502,17 +502,42 @@ export const RECALL_QUERY_CHARS_PER_TOKEN = 3.5;
  *  500-token cap with headroom (see the block comment above for the derivation). */
 export const RECALL_QUERY_SAFE_CHAR_CEILING = 1600;
 
+/** Joiner spliced between the kept head and tail when {@link clampRecallQuery}
+ *  clips a query (MEM-5). Its length is deducted from the character budget so the
+ *  clamped output is always EXACTLY `effective` chars — callers that size around
+ *  the clamp see no contract change. */
+const RECALL_QUERY_JOINER = " ... ";
+/** Fraction of the post-joiner budget given to the HEAD; the remainder goes to the
+ *  TAIL. Biased toward the tail because a long turn/prompt's actual question is
+ *  usually asked LAST — a pure head-slice (the old behavior) silently dropped it. */
+const RECALL_QUERY_HEAD_FRACTION = 0.4;
+
 /** Clamp a recall QUERY so it can NEVER trip the data plane's 500-token "Query too
- *  long" 400. Trims first, then slices to the SMALLER of the configured `maxChars`
+ *  long" 400. Trims first, then clips to the SMALLER of the configured `maxChars`
  *  char clamp (when `maxChars > 0`) and the hard {@link RECALL_QUERY_SAFE_CHAR_CEILING}
  *  token-safe ceiling. The token-safe ceiling is enforced even when char-clamping is
  *  disabled (`maxChars <= 0` / non-finite) — the query stays under the token cap
- *  regardless of the configured value. Pure; never throws. */
+ *  regardless of the configured value.
+ *
+ *  MEM-5: when clipping is needed, keeps BOTH ends (head + tail joined by
+ *  {@link RECALL_QUERY_JOINER}) instead of a pure head-slice — a long prompt's tail
+ *  often carries the actual question, which a head-only clamp silently lost. The
+ *  output length is always exactly `effective` chars (same as the old head-slice),
+ *  so callers relying on the length contract are unaffected. Falls back to a plain
+ *  head-slice when the budget is too small for a joiner to be worthwhile. Pure;
+ *  never throws. */
 export function clampRecallQuery(query: string, maxChars: number): string {
 	const trimmed = (query ?? "").trim();
 	const charClamp = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
 	const effective = Math.min(charClamp, RECALL_QUERY_SAFE_CHAR_CEILING);
-	return trimmed.length <= effective ? trimmed : trimmed.slice(0, effective);
+	if (trimmed.length <= effective) return trimmed;
+	const available = effective - RECALL_QUERY_JOINER.length;
+	if (available < 2) return trimmed.slice(0, effective);
+	const headLen = Math.floor(available * RECALL_QUERY_HEAD_FRACTION);
+	const tailLen = available - headLen;
+	const head = trimmed.slice(0, headLen);
+	const tail = trimmed.slice(trimmed.length - tailLen);
+	return `${head}${RECALL_QUERY_JOINER}${tail}`;
 }
 
 /** Classify a recall failure as the data plane's 500-token "Query too long" 400 —
@@ -628,6 +653,10 @@ export const RETAIN_PENDING_PREFIX = "retain-pending:";
 export const MENTAL_MODEL_REFRESH_PREFIX = "mental-model-refresh:";
 export const DIRECTIVES_APPLIED_PREFIX = "directives-applied:";
 export const QUEUE_CAP = 100;
+/** Durable eviction counter (MEM-3): incremented every time a full retry queue
+ *  drops an entry on the floor instead of queuing it, so sustained-outage loss is
+ *  observable (routes `status` surfaces it) instead of silent. */
+export const QUEUE_EVICTIONS_KEY = "retain-queue-evictions";
 
 export function projectConfigKey(projectId: string): string {
 	return `${PROJECT_CONFIG_KEY_PREFIX}${projectId}`;
@@ -650,11 +679,59 @@ export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<void
 	}
 }
 
-/** Append a failed retain; FIFO-evict the oldest beyond the cap (100). */
+/** Durable eviction stats persisted at {@link QUEUE_EVICTIONS_KEY} (MEM-3). */
+export interface QueueEvictionStats {
+	count: number;
+	lastAt: number;
+	/** A short, non-sensitive preview of the most recently dropped entry's tags,
+	 *  for diagnostics (never the full content — kept small). */
+	lastTags?: Tags;
+}
+
+/** Read the durable eviction counter (defaults to a zero-count record). */
+export async function loadQueueEvictions(store: StoreLike): Promise<QueueEvictionStats> {
+	try {
+		const v = await store.get<QueueEvictionStats>(QUEUE_EVICTIONS_KEY);
+		return v && typeof v.count === "number" ? v : { count: 0, lastAt: 0 };
+	} catch {
+		return { count: 0, lastAt: 0 };
+	}
+}
+
+/** Record ONE dropped-on-the-floor retry-queue entry: bump the durable counter
+ *  (so `status` can surface sustained-outage loss instead of it being silent) and
+ *  emit a console.warn with the running count. Best-effort; never throws. */
+async function recordQueueEviction(store: StoreLike, dropped: QueueEntry, now = Date.now()): Promise<void> {
+	try {
+		const prior = await loadQueueEvictions(store);
+		const next: QueueEvictionStats = { count: prior.count + 1, lastAt: now, lastTags: dropped.tags };
+		await store.put(QUEUE_EVICTIONS_KEY, next);
+		console.warn(
+			`[hindsight] retry queue full (cap ${QUEUE_CAP}); dropped an entry instead of queuing it — ${next.count} total eviction(s) so far. A sustained outage is silently losing memories; check the data-plane connection.`,
+		);
+	} catch {
+		/* diagnostics are non-fatal */
+	}
+}
+
+/** Append a failed retain to the durable retry queue, capped at {@link QUEUE_CAP}
+ *  (100). MEM-3: when the queue is already full, TAIL-DROP — refuse the incoming
+ *  (newest) entry rather than evicting the queue HEAD (the oldest). The head is
+ *  also the entry `drainQueueHead`/`drainQueueAll` retry NEXT, and it has already
+ *  survived the longest without loss; evicting it to make room for a flood of new
+ *  failures during a sustained outage threw away the durable backlog that was
+ *  closest to recovering. Tail-dropping instead means: (1) FIFO drain order and
+ *  continuity are preserved once the data plane recovers — no gap is punched
+ *  into the middle of the backlog, and (2) the loss is NOT silent — every drop is
+ *  durably counted ({@link QUEUE_EVICTIONS_KEY}) and logged so a sustained outage
+ *  is observable via `status.queueEvictions` instead of vanishing unnoticed. */
 export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<void> {
 	const q = await loadQueue(store);
+	if (q.length >= QUEUE_CAP) {
+		await recordQueueEviction(store, entry);
+		return;
+	}
 	q.push(entry);
-	while (q.length > QUEUE_CAP) q.shift();
 	await saveQueue(store, q);
 }
 
@@ -1218,4 +1295,127 @@ export function nextOverlap(turns: PendingTurn[], overlapTurns: number): string[
 	const k = Number.isFinite(overlapTurns) && overlapTurns >= 1 ? Math.floor(overlapTurns) : 0;
 	if (k <= 0) return [];
 	return turns.slice(-k).map((t) => t.summary);
+}
+
+// ── Crash-recovery sweep for STRANDED pending buffers (MEM-1b) ────────────────
+//
+// `sessionShutdown` is the ONLY thing that flushes a session's durable pending
+// buffer outside the normal batch/max-delay cadence. A session that never reaches
+// it — killed (SIGKILL/OOM), a host crash/reboot, or (historically, see MEM-1a)
+// a gateway shutdown path that forgot to dispatch it — leaves its
+// `retain-pending:<sessionId>` buffer on disk FOREVER: nothing else ever reads it
+// again, so it is silently lost even though the bytes are still sitting in the
+// store.
+//
+// There is no dedicated pack "boot" lifecycle hook (adding one is a wide,
+// high-risk cross-cutting change touching `LIFECYCLE_HOOKS` — see
+// lifecycle-hooks.ts's own warning about hook-set drift being exactly how a past
+// outage happened). Instead this piggybacks on `sessionSetup`, which fires near
+// every session start/resume: at most once per `RETAIN_SWEEP_INTERVAL_MS` (a
+// stored last-swept timestamp gates it, mirroring the mental-model refresh
+// cadence), it lists every OTHER session's pending buffer and reclaims any whose
+// oldest turn is older than `staleAfterMs` — comfortably past when a live session
+// would have flushed it itself via the batch/max-delay cadence or its own
+// shutdown.
+export const RETAIN_SWEEP_LAST_KEY = "retain-pending-sweep:last";
+/** Minimum spacing between sweeps — cheap (one store list + gate check) but there
+ *  is no reason to pay it on every single sessionSetup. */
+export const RETAIN_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+/** Floor for how old a pending buffer's oldest turn must be before it is treated
+ *  as stranded, regardless of the caller's configured `retainMaxDelayMs` (a
+ *  disabled/huge max-delay must not make the sweep effectively never fire). */
+export const DEFAULT_STRANDED_AFTER_MS = 3 * 60 * 60 * 1000;
+
+/** List sessions (other than `currentSessionId`) whose durable pending buffer
+ *  looks stranded (non-empty, oldest turn older than `staleAfterMs`), gated to
+ *  run at most once per {@link RETAIN_SWEEP_INTERVAL_MS}. Returns `[]` on a
+ *  gate-skip, a store without `list`, or any error (best-effort; never throws).
+ *  Callers (the provider's `sessionSetup`) are expected to flush/queue each
+ *  returned session id via the normal `flushPending` path — this helper only
+ *  identifies candidates, it does not touch the network. */
+export async function listStrandedPendingSessions(
+	store: StoreLike,
+	currentSessionId: string | undefined,
+	staleAfterMs: number,
+	now: number = Date.now(),
+): Promise<string[]> {
+	if (typeof store.list !== "function") return [];
+	try {
+		const last = await store.get<number>(RETAIN_SWEEP_LAST_KEY);
+		if (typeof last === "number" && Number.isFinite(last) && now - last < RETAIN_SWEEP_INTERVAL_MS) return [];
+		await store.put(RETAIN_SWEEP_LAST_KEY, now);
+	} catch {
+		return [];
+	}
+	const stranded: string[] = [];
+	try {
+		const keys = await store.list(RETAIN_PENDING_PREFIX);
+		for (const key of keys) {
+			const sessionId = key.startsWith(RETAIN_PENDING_PREFIX) ? key.slice(RETAIN_PENDING_PREFIX.length) : "";
+			if (!sessionId || sessionId === currentSessionId) continue;
+			const buf = await loadPending(store, sessionId);
+			if (buf.turns.length === 0) continue;
+			const oldest = buf.turns[0]?.ts ?? now;
+			if (now - oldest >= staleAfterMs) stranded.push(sessionId);
+		}
+	} catch {
+		/* best-effort: return whatever was found before the error */
+	}
+	return stranded;
+}
+
+// ── CAS-guarded pending-buffer mutation (MEM-4) ───────────────────────────────
+//
+// `afterTurn`'s lifecycle dispatch is fire-and-forget (session-manager.ts) while
+// `sessionShutdown`'s is awaited, so for the SAME session two separate flushes can
+// genuinely overlap in wall-clock time. Bobbit's pack confinement model runs
+// EVERY lifecycle hook dispatch in its own fresh, isolated `worker_threads.Worker`
+// (module-host-worker.ts spins one up per `ModuleHost.invoke()` call and tears it
+// down when that call settles), so an in-module `Promise`-chain mutex — the
+// models-json-store.ts idiom — cannot serialize two SEPARATE hook dispatches: they
+// execute in different JS heaps with no shared memory. The actual race window is
+// the durable store's two independent `get`/`put` round trips (one file per key,
+// no built-in compare-and-swap) sitting on either side of the pending-buffer
+// read-modify-write.
+//
+// Since there is no atomic host-store primitive to hold a lock across, safety has
+// to be an APPLICATION-LEVEL optimistic-concurrency retry using only get/put:
+// re-read immediately before writing, and if the stored value moved since the
+// value the caller's mutation was computed FROM, retry the mutation against the
+// freshly observed value instead of blindly overwriting it. This still has a
+// theoretical (much narrower — two local reads instead of a full network retain
+// round trip) TOCTOU gap between the final re-read and the write; a fully
+// airtight fix needs a host-level atomic CAS store primitive, which is a
+// versioned host-API contract change out of scope here (flagged in the PR).
+
+function pendingSnapshotEqual(a: PendingBuffer, b: PendingBuffer): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** CAS-retry a pending-buffer mutation: `transform` is re-applied against the
+ *  FRESHEST stored value until a write lands with no concurrent writer detected
+ *  in between (bounded attempts). On exhausting `maxAttempts` under sustained
+ *  contention, applies one final `transform`/save and logs a durable warning so
+ *  the (rare) residual race is visible rather than silent. `transform` must be
+ *  pure/synchronous — it may be invoked more than once. */
+export async function mutatePending(
+	store: StoreLike,
+	sessionId: string,
+	transform: (buf: PendingBuffer) => PendingBuffer,
+	maxAttempts = 5,
+): Promise<PendingBuffer> {
+	let current = await loadPending(store, sessionId);
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		const next = transform(current);
+		const recheck = await loadPending(store, sessionId);
+		if (pendingSnapshotEqual(recheck, current)) {
+			await savePending(store, sessionId, next);
+			return next;
+		}
+		current = recheck; // a concurrent writer landed between our load and this recheck — retry against it
+	}
+	const next = transform(current);
+	console.warn(`[hindsight] pending-buffer update for session ${sessionId} applied after exhausting ${maxAttempts} CAS retries (sustained contention)`);
+	await savePending(store, sessionId, next);
+	return next;
 }
