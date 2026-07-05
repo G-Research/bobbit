@@ -1009,7 +1009,7 @@ The resolver is a single, type-agnostic pipeline (`src/server/agent/pack-resolve
 
 - `PackResolver.resolve<T>(type)` walks the ordered `PackEntry[]` low→high and merges by name. A later entry shadows an earlier same-name entry; shadowed entries are retained in `ResolvedEntity.shadows[]` to drive conflict UI.
 - Type-specific reading is delegated to **`EntityLoader<T>`** plugins — `RoleLoader`, `ToolLoader`, `SkillLoader`. Loaders are pure `(entry) → entities`; they contain **no** precedence logic. Roles/tools read the `defaults-tree` layout; the skill loader additionally handles `skills-flat` (a directory that is itself a skills root) and `commands-flat` (`.claude/commands/*.md`).
-- Adding a future name-merged entity type is *adding a loader*, not touching the ordering core. MCP uses a separate pack-contribution path because it resolves to scoped runtime managers rather than role/tool/skill name-merged entities.
+- Adding a future name-merged entity type is *adding a loader*, not touching the ordering core. MCP uses a separate pack-contribution path because it resolves to scoped runtime managers rather than role/tool/skill name-merged entities. Whether `providers`/`mcp`/`channels`/`runtimes` (and the other `pack-contributions.ts` kinds) should unify onto this pipeline is evaluated — and recommended against — in [docs/design/pack-loader-unification.md](design/pack-loader-unification.md).
 
 Key types are in `src/server/agent/pack-types.ts`: `PackManifest`, `PackMeta`, `PackEntry`, `EntityLoader<T>`, `ResolvedEntity<T>`, and the `scopePaths()` helper that both resolution and install derive paths from.
 
