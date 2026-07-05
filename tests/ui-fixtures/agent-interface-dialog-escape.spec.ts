@@ -29,7 +29,7 @@ test.beforeAll(() => {
 	});
 });
 
-async function loadFixture(page: Page, options?: { isStreaming?: boolean }): Promise<string[]> {
+async function loadFixture(page: Page, options?: { isStreaming?: boolean; keepComposerFocus?: boolean }): Promise<string[]> {
 	const errors: string[] = [];
 	page.on("pageerror", (err) => errors.push(err.message));
 	page.on("console", (msg) => {
@@ -48,7 +48,14 @@ async function loadFixture(page: Page, options?: { isStreaming?: boolean }): Pro
 	// scoping: "+ focus not in a textarea"). Blur it so Escape exercises the
 	// guard this fix targets, matching the realistic repro (a dialog opened
 	// from a button click, which itself moves focus off the composer).
-	await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+	//
+	// W2.16 (Fable audit): the composer's own local handler had NO equivalent
+	// guard for this case — see the "composer focused" describe block below,
+	// which deliberately passes `keepComposerFocus: true` to leave focus in
+	// the textarea and exercise that path instead.
+	if (!options?.keepComposerFocus) {
+		await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+	}
 	return errors;
 }
 
@@ -184,3 +191,56 @@ test.describe("UX-03: destructive confirmAction focuses Cancel and scopes Enter 
 		expect(wrapped).toBe(true);
 	});
 });
+
+// W2.16 (Fable audit, follow-up to UX-01 / PR #15): MessageEditor
+// (src/ui/components/MessageEditor.ts) binds its own LOCAL keydown handler
+// directly on the textarea (`@keydown=${this.handleKeyDown}`), which aborts
+// the streaming session on Escape whenever the composer has focus — a
+// separate code path from AgentInterface's document-level, capture-phase
+// `_handleGlobalEscape`. That global handler already bails when a dialog is
+// open, but it ALSO bails whenever focus is in a TEXTAREA/INPUT (so it
+// doesn't double-fire against MessageEditor's own abort) — which means when a
+// dialog is open *and* the composer still has focus (the realistic case: the
+// dialog itself doesn't steal focus), neither handler stops MessageEditor
+// from aborting. This block reproduces that with the composer left focused.
+test.describe("W2.16: Escape on a dialog does not abort when the composer still has focus", () => {
+	test("RED (pre-fix) / GREEN (post-fix): dialog closes and streaming is NOT aborted", async ({ page }) => {
+		const errors = await loadFixture(page, { isStreaming: true, keepComposerFocus: true });
+
+		// Sanity: the composer textarea genuinely has focus before the dialog.
+		await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.tagName)).toBe("TEXTAREA");
+
+		await page.evaluate(() => (window as any).__openConfirmDialog());
+		await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+		// Post-UX-03 (merged), confirmAction moves focus INTO the dialog on
+		// open — so the original "composer keeps focus" premise no longer
+		// happens by default. The guard still matters as defense-in-depth for
+		// any overlay that does NOT manage focus (and for a user clicking back
+		// into the composer while a dialog is open) — simulate exactly that by
+		// re-focusing the composer with the dialog up.
+		await page.evaluate(() => (document.querySelector("textarea") as HTMLTextAreaElement).focus());
+		await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.tagName)).toBe("TEXTAREA");
+
+		await page.keyboard.press("Escape");
+
+		// Dialog is gone, resolved as cancelled...
+		await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+		await expect.poll(() => page.evaluate(() => (window as any).__getConfirmResult())).toEqual({ settled: true, value: false });
+		// ...and critically, the streaming agent was NOT aborted by the
+		// composer's own local Escape handler.
+		expect(await page.evaluate(() => (window as any).__getAbortCallCount())).toBe(0);
+
+		expect(errors.filter((line) => !/favicon|ResizeObserver loop/i.test(line))).toEqual([]);
+	});
+
+	test("control: Escape with composer focused and no dialog open DOES abort (guard is not overbroad)", async ({ page }) => {
+		await loadFixture(page, { isStreaming: true, keepComposerFocus: true });
+		await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.tagName)).toBe("TEXTAREA");
+		await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+
+		await page.keyboard.press("Escape");
+
+		expect(await page.evaluate(() => (window as any).__getAbortCallCount())).toBe(1);
+	});
+});
+
