@@ -237,6 +237,14 @@ async function boot(): Promise<BootedGateway> {
 	const defaultProjectId = await registerDefaultProject(baseURL, token, defaultProjectRoot);
 	await seedDefaultWorkflows(baseURL, token, defaultProjectId);
 
+	// Live holder for the default project id. A test can delete/mutate the default
+	// project; restoreDefaultProject() re-registers (or re-resolves) it and gets a
+	// FRESH server-assigned id. Consumers (scope.ts createSession/createGoal, the
+	// "never delete default" guard) must always see the CURRENT id, so the fixture
+	// exposes `defaultProjectId` as a getter over this holder rather than a value
+	// captured once at boot (which would dangle at a deleted project → 404 flakes).
+	let currentDefaultProjectId = defaultProjectId;
+
 	const authHeaders = (extra?: HeadersInit): HeadersInit => ({ Authorization: `Bearer ${token}`, ...(extra ?? {}) });
 
 	const fixture: BootedGateway = {
@@ -244,7 +252,7 @@ async function boot(): Promise<BootedGateway> {
 		wsBase,
 		token,
 		bobbitDir,
-		defaultProjectId,
+		get defaultProjectId() { return currentDefaultProjectId; },
 		clock,
 		sessionManager: gw.sessionManager,
 		teamManager: (gw as any).teamManager,
@@ -297,12 +305,21 @@ async function boot(): Promise<BootedGateway> {
 			return { sessions, goals, projects };
 		},
 		async restoreDefaultProject() {
+			// If the default still exists (test only mutated it), keep its id — do NOT
+			// re-register (that would create a duplicate). Otherwise re-register and
+			// adopt the new id. Either way, publish the resolved id to the live holder
+			// so subsequent createSession/createGoal calls target a real project.
 			const list = await this.apiJson<any>("/api/projects");
 			const projects: Array<{ id?: string; name?: string; hidden?: boolean }> = Array.isArray(list) ? list : (list?.projects ?? []);
 			const existing = projects.find(p => !p.hidden && p.name === "default" && p.id);
-			if (existing?.id) { await seedDefaultWorkflows(baseURL, token, existing.id); return; }
+			if (existing?.id) {
+				currentDefaultProjectId = existing.id;
+				await seedDefaultWorkflows(baseURL, token, existing.id);
+				return;
+			}
 			mkdirSync(defaultProjectRoot, { recursive: true });
 			const id = await registerDefaultProject(baseURL, token, defaultProjectRoot);
+			currentDefaultProjectId = id;
 			await seedDefaultWorkflows(baseURL, token, id);
 		},
 		async shutdown() {
