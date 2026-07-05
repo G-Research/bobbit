@@ -39,7 +39,7 @@ Git-dependent affordances are guarded instead of falling back to the server chec
 
 A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
 
-Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New normal projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Headquarters can own workflows too: `projectId=headquarters` reads the Headquarters `project.yaml::workflows` block from the aliased server config store. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only), [No default workflow scaffold](internals.md#no-default-workflow-scaffold), and [Headquarters project](headquarters.md).
+Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New normal projects do **not** receive any default seed at registration time; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows until then. (See the `POST /api/goals` auto-seed caveat in [Default workflow resolution](#default-workflow-resolution) below for what happens if a goal-creation call reaches an empty-workflow project before the project assistant runs.) Headquarters can own workflows too: `projectId=headquarters` reads the Headquarters `project.yaml::workflows` block from the aliased server config store. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only), [No default workflow scaffold](internals.md#no-default-workflow-scaffold), and [Headquarters project](headquarters.md).
 
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
 
@@ -47,16 +47,21 @@ Goals without workflows still work fine — workflows are optional **at the data
 
 #### Default workflow resolution
 
-Goal creation never assumes a workflow named `"general"` exists. The default-workflow rule, applied both server-side and UI-side (the goal preview panel and proposal toast), is:
+`GoalManager.createGoal()` never assumes a workflow named `"general"` exists. Its default-workflow rule, mirrored UI-side (the goal preview panel and proposal toast), is:
 
 1. **Inline `workflow` body supplied** — the public `POST /api/goals` route uses that workflow snapshot directly. The goal proposal UI sends this body field, not `workflowId`, when the draft carries a valid `inlineWorkflow`.
-2. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
+2. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, `createGoal` throws `Workflow not found: <id>`.
 3. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
 4. **No workflows at all and no inline workflow body** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
 
+That four-step rule is `GoalManager.createGoal()`'s own resolution (`goal-manager.ts`). The public `POST /api/goals` REST handler (`server.ts`) runs an earlier cascade before ever calling `createGoal()`, and it changes what a caller of that endpoint actually observes for two of the cases above:
+
+- **Explicit `workflowId` that doesn't resolve** — the REST handler checks the config cascade and the project store itself first and, when the store is non-empty, responds directly with `400 { code: "WORKFLOW_NOT_FOUND", error: "Workflow \"<id>\" not found. Available: <ids>" }` without ever calling `createGoal()`. Point 2's `Workflow not found: <id>` message only surfaces for a caller that invokes `GoalManager.createGoal()` directly, bypassing this REST handler's own pre-check.
+- **No `workflowId`, no inline workflow, and the project's `WorkflowStore` is empty** — rather than falling through to point 4's `NO_WORKFLOWS_MSG`, the REST handler first auto-seeds the project's store with Bobbit's built-in template set (`buildDefaultWorkflows()` plus the sub-goal `buildParentWorkflow()`, both from `seed-default-workflows.ts`) and resolves against the freshly-seeded store — defaulting to the seeded workflow literally named `general` when no id was requested. By the time `createGoal()` runs the store is no longer empty, so `NO_WORKFLOWS_MSG` is not reachable through `POST /api/goals` for this case; it only fires for callers that invoke `createGoal()` directly against a store nobody has seeded yet. This auto-seed is orthogonal to "New normal projects do not receive any default seed" above: a project's store stays genuinely empty until *some* `POST /api/goals` call reaches this handler with no explicit or inline workflow, at which point the built-in templates land in that project's store as a side effect of that call. The UI's own goal-creation surfaces are unaffected in practice — the empty-workflows banner and disabled Accept button (point 4) already steer a normal user to the project assistant before this path is reached — but any other caller that posts to this endpoint first (a raw API call, an early proposal-accept, a test) will trigger it.
+
 These defaults are final goal-creation and user-side acceptance safety nets. Proposal seed validation follows the same precedence for bespoke workflows: a structurally valid `inlineWorkflow` satisfies the workflow requirement, and any omitted, stale, or unknown `workflow` field is non-authoritative. Without a valid `inlineWorkflow`, `propose_goal` must still name an explicit project workflow ID when project workflows are resolvable and non-empty (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
 
-No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
+No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). That scan does **not** cover `src/server/server.ts`: the `POST /api/goals` auto-seed fallback described in [Default workflow resolution](#default-workflow-resolution) below does fall back to the literal id `"general"` when it seeds an empty project store, so the invariant this test enforces is not currently pinned end-to-end for that path. The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
 #### Goal creation in a zero-workflow project
 
@@ -164,7 +169,7 @@ The fix is `normalizeWorkflowSelections()`: once the workflow list is loaded, or
 ```typescript
 interface VerifyStep {
   name: string;
-  type: "command" | "llm-review" | "agent-qa" | "human-signoff";
+  type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
   // For type: "command" — three exclusive shapes:
   component?: string; // Component name to resolve against components[]
   command?: string;   // Named command on that component (component.commands[command])
@@ -179,6 +184,12 @@ interface VerifyStep {
   optionalLabel?: string; // Human-readable label for the goal-creation toggle.
   label?: string;     // Human-signoff card title only (type: "human-signoff").
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
+  subgoal?: {         // Descriptor for type: "subgoal" — spawns/tracks a child goal as a verify step.
+    planId: string; title: string; spec: string;
+    workflowId?: string; suggestedRole?: string; dependsOn?: string[];
+  };
+  cacheInputGlobs?: string[]; // Path globs this step's result depends on. Opts the step into content-keyed gate-cache reuse. See "Gate step cache" below.
+  docGate?: boolean;  // Marks the doc-coverage llm-review step for the diff-based skip filter. See "Documentation gate diff filter".
 }
 
 interface WorkflowGate {
@@ -266,6 +277,8 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
 
 The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
+
+An agent can propose a single workflow directly with the `propose_workflow` tool (`id`, `name`, `gates[]`, optional `description`/`projectId`) instead of going through the project assistant's whole-project `propose_project` flow — an existing `id` updates that workflow in place, a new `id` creates one. The proposal panel renders the seeded draft in the same gate editor Settings → Workflows uses, and accepting it `POST`s to the same `/api/workflows` resource as the human editor — there is no separate storage path or acceptance flow for agent-proposed workflows.
 
 #### Dependency DAG
 
@@ -428,6 +441,7 @@ Gates can define automated verification that runs when signaled:
 - **Command** — runs shell commands and checks exit codes (e.g. `npm run check`). Command steps default to a 300s timeout unless the workflow sets `timeout`; component-linked `command: unit` steps default to 1200s because the full unit suite can exceed the generic shell default under contention.
 - **LLM review** — spawns a sub-agent for qualitative review against a prompt
 - **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **Subgoal** — spawns (or resumes) a child goal from the step's `subgoal` descriptor and resolves pass/fail from the child's outcome, idempotent on `subgoal.planId`. This is the mechanism behind the nested sub-goals feature; see [Nested Sub-Goals](nested-goals.md) and [docs/design/production-subgoals-port.md](design/production-subgoals-port.md) for the full spawn/merge/pause/divergence contract.
 - **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
@@ -587,6 +601,14 @@ Set `BOBBIT_PARALLEL_REVIEWS=0` to opt back out to the fully-serial path (defaul
 - If the command phase(s) **pass**, the real review verdicts are committed exactly as the serial path would have.
 
 With the feature disabled (`BOBBIT_PARALLEL_REVIEWS=0`, or the retry-aware guard firing), `earlyReviewPhases` is never computed and every phase runs through the unchanged code path — byte-identical ordering to pre-VER-07 behavior.
+
+##### Gate step cache (`BOBBIT_GATE_CACHE`)
+
+By default (mode `"sha"`, unchanged), a verify step's passed result is reused on a re-signal only when the new signal's commit SHA is byte-identical to a prior signal's — the "same-commit reuse" the [Reset invalidation semantics](#reset-invalidation-semantics) section above describes. A Ralph-style fix-commit loop advances HEAD on every iteration, so under `"sha"` mode essentially every re-signal re-runs the whole gate suite from scratch even when a fix touched one file in one component.
+
+Setting `BOBBIT_GATE_CACHE=content` widens reuse: a step declaring `cacheInputGlobs` (a `VerifyStep` field, see the data model above) can be reused across *different* commit SHAs as long as none of its declared globs differ between the two commits (checked via `git diff --quiet` at the step's resolved cwd). Any value other than the literal string `"content"` — unset, empty, or a typo — resolves to `"sha"`, so a misconfigured env var can only ever be more conservative, never silently widen reuse (`resolveGateCacheMode` in `verification-logic.ts`). Steps that don't declare `cacheInputGlobs` always require an exact SHA match regardless of mode; `llm-review`, `agent-qa`, `subgoal`, and `human-signoff` steps never declare it, because their real inputs (a full diff, live orchestration state, or a prior human decision) aren't soundly reducible to a static file-glob key.
+
+`seed-default-workflows.ts`'s legacy-migration/per-project templates and `src/server/state-migration/per-component-workflows.ts`'s per-component fan-out both ship `cacheInputGlobs: ["**"]` on every workflow's Build / Type check / Unit tests command steps by default — `["**"]` is sound because those globs are matched relative to the step's own resolved cwd (the component root), so the step is reused only when nothing tracked under that component changed. Shipping the globs is free either way: they only take effect once a project opts into `BOBBIT_GATE_CACHE=content`, which remains a separate, per-environment operational decision. Bobbit's own `.bobbit/config/project.yaml` declares project-layout-specific `cacheInputGlobs` (not the generic `["**"]`) on its `general`/`feature`/`bug-fix`/`quick-fix` workflows' Build/Type check/Unit tests steps. See [design/gate-step-cache.md](design/gate-step-cache.md) for the full safety analysis, the per-step key table, and the `[verification][gate-cache]` telemetry line format.
 
 #### Verification step artifacts
 
@@ -937,7 +959,7 @@ State is per-project — each project has its own copies of these files in `<pro
 
 | Location | What |
 |---|---|
-| `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
+| `<project>/.bobbit/config/project.yaml` (`workflows:` block) | Workflow templates, inline per project (see [Workflows](#workflows) above; `defaults/workflows/*.yaml` no longer exists) |
 | `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
 | `<project>/.bobbit/state/gates.json` | Gate state and signal history |
 | `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
