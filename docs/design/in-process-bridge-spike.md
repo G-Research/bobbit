@@ -276,3 +276,207 @@ in-process for read-only agents.
   the exact magnitude without a follow-up measurement.
 - Migration risk list: **high** — these are architectural facts about the
   current sandbox/restart model, not estimates.
+
+## Sizing results (2026-07-05)
+
+Step 1 of the staged path above ("Instrument first"), executed as its own
+lane. Instrumentation added behind the existing `BOBBIT_E2E_PROFILE` flag
+(zero behavior change when unset — see `profiling.ts`): `executePlan`'s and
+`executeWorktreeAsync`'s spawn/postSpawn timers are now labeled by session
+class (`readOnly` / `exec` / `sandboxed`, computed by the new
+`spawnSessionClass()` in `session-setup.ts`, mirroring but not importing
+`isInProcessBridgeEligible`'s three-way split), and the pre-idle
+`persistSessionMetadata` call — previously unmeasured — is timed separately
+from `spawnAgent.rpcStart`. Measured against a real, isolated gateway
+(`dist/server/cli.js`, real `pi-coding-agent` child processes, real
+Gemini-backed model binding via `GEMINI_API_KEY`, real Docker for the
+sandboxed class) in a scratch project, not the synthetic
+`bench-in-process-bridge-spike.mjs` harness — this is what the recommendation
+called "prod-like": full tool/extension loading, full model-selection
+handshake, real REST API surface, as opposed to the spike's deliberately
+stripped `--no-builtin-tools --no-context-files --no-approve` benchmark.
+
+### (a) Spawn split by session class
+
+| Phase | readOnly (N=3) | exec (N=3) | sandboxed (N=1, successful run) |
+|---|---|---|---|
+| `spawnAgent.rpcStart` (child spawn + ready handshake) | 100.9–101.3ms | 101.1–101.8ms | 103–106ms |
+| `persistSessionMetadata` (first real `getState()` RPC) | 526–1411ms | 542–1443ms | ~780ms (derived) / 3938ms (failed run, see caveat) |
+| **Total spawn-to-persist window** | **627–1512ms** | **643–1545ms** | **886.6ms** (clean run) |
+
+Two findings, both different from what the spike's synthetic bench implied:
+
+1. **The bare child-process spawn (`rpcClient.start()`) is cheap and
+   class-independent**: ~100–106ms across all three classes on this host
+   right now, well under the spike's isolated 400ms/2794ms figures (this
+   host's OS file-cache for `node_modules` is warm after repeated spawns in
+   the same session — the spike's own numbers already flagged high host-load
+   sensitivity, e.g. its 2nd run at load average ~51). readOnly and exec pay
+   statistically the same `rpcStart` cost, confirming today's per-session
+   spawn tax does **not** already discriminate by class — it is paid
+   identically by the class the bridge would help and the class it can't
+   touch.
+2. **The dominant, previously-unmeasured cost is `persistSessionMetadata`'s
+   `getState()` round trip** (500ms–1.5s, noisy under host load, same
+   order of magnitude as the *entire* spike's headline spawn number) — not
+   the bare spawn. This call happens after the child process has started but
+   is still finishing its own real work: loading the full builtin/extension
+   tool graph (185–376 tool definitions in these runs, vs. the bench
+   script's explicit `--no-builtin-tools`), resolving MCP servers, and (via
+   `tryAutoSelectModel` in `postSpawn`, called right after) a live
+   model-provider handshake. The spike's synthetic bench isolated the bare
+   spawn specifically by disabling all of this — so its 400–700ms estimate is
+   a **lower bound on the real production tax**, not the full number. Real
+   spawn-to-idle for a host-side (non-sandboxed) session is closer to
+   **0.6–1.5s** end to end on this host.
+   - This matters for the prize calculus in both directions: it's a **bigger
+     prize** than scoped (more real latency to remove), but only insofar as
+     the in-process path also avoids re-doing this same
+     tool/extension-loading work per session — which the prototype already
+     does, structurally, for the read-only class: `createReadOnlyTools()` is
+     passed as `customTools` directly (in-memory function calls), never going
+     through the file-system-based extension-discovery pipeline that a
+     spawned child process re-walks on every single spawn.
+
+**Sandboxed class caveat**: N=1 successful sample only. A second and third
+attempt in this ad hoc scratch-project setup **reproducibly failed**
+during `persistSessionMetadata`'s retries with `Extension path does not
+exist: /tools-builtin/<name>/extension.ts` inside the container, i.e. the
+`-v <builtinToolsDir>:/tools-builtin:ro` bind mount (`docker-args.ts:228`)
+did not resolve inside the container for this scratch project/worktree
+layout, crashing the freshly-`docker exec`'d pi process (`rpc-bridge.ts`
+logged `Agent process exited (code 1)` then `Agent process not running`,
+exhausting `persistSessionMetadata`'s 4 retries at 500/1000/2000ms delays —
+hence the 3.9s outlier in the table, which is a retry-storm artifact, not a
+latency number, and is excluded from the headline range). This was not
+chased to root cause (out of this lane's time box) but is itself a relevant,
+independent data point: **Docker-sandboxed spawn has its own operational
+fragility mode** (mount resolution) on top of whatever latency it adds, which
+is a cost/risk the read-only, non-sandboxed in-process class structurally
+cannot have (no mount, no container). The one clean sandboxed run
+(886.6ms total, 106ms `rpcStart`) sits inside the same range as host-side
+sessions — i.e. once a project's container is already warm (this measured
+`docker exec` into an existing long-lived per-project container, not
+`docker run` cold start), Docker's own per-session overhead is not the
+dominant term either; the same `persistSessionMetadata` tool/model-handshake
+cost dominates there too.
+
+**Caveat applying to all of the above**: N=1–3 per class, one host, one
+session in time — the spike doc's own numbers moved by 7x between two runs
+under different load. Treat the *shape* (rpcStart flat and small;
+persistSessionMetadata large, noisy, and class-independent) as the finding,
+not the exact milliseconds.
+
+### (b) Fraction of real sessions in the in-process-eligible class
+
+Static census (method: `grep`/read over `defaults/roles/*.yaml`,
+`market-packs/`, `verification-harness.ts` spawn call sites — no log
+mining; no `sessions.json` trace was available on this host to sample
+live data, so this is code-only). Full detail from the census pass:
+
+- Of 16 built-in + market-pack roles surveyed, **7 are read-only in tool
+  policy** (no `edit`, no `bash`, `bash_bg: never`): `code-reviewer`,
+  `bug-hunter`, `security-reviewer`, `architect`, `spec-auditor`,
+  `reviewer`, and the market-pack `pr-reviewer`
+  (`market-packs/pr-walkthrough/roles/pr-reviewer.yaml`) — i.e. **~44% of
+  role types are shaped like the eligible class**.
+- But eligibility (`isInProcessBridgeEligible`) doesn't key off role tool
+  policy — it keys off the session-level `readOnly` flag set **at spawn
+  time**, and **only one call site in the whole repo sets it**:
+  `market-packs/pr-walkthrough/lib/routes.mjs:1364-1365`
+  (`launchReviewer` → `spawnReviewerWithRetry(ctx, { role: "pr-reviewer",
+  readOnly: true, ... })`), one fresh reviewer per PR/changeset walkthrough,
+  always-fresh (no reuse).
+- The higher-volume reviewer fan-out — `verification-harness.ts`'s
+  `llm-review`/`agent-qa` gate reviewers (~3–4 concurrent reviewer/QA
+  sessions per gate-verify phase, per the "3-4 concurrent reviewers" comment
+  at `verification-harness.ts:3621-3625`, called from
+  `verification-harness.ts:4452` and `:4822`) — **never sets `readOnly`**,
+  even though these roles are read-only in spirit. `buildVerificationReviewerMeta`
+  (`verification-reviewer-meta.ts:50-62`) stamps `role`/`teamGoalId`/
+  `accessory`/`nonInteractive` but not `readOnly`.
+
+**This is the load-bearing finding of the census**: today, the
+flag-gated eligible population is **effectively zero** in the highest-volume
+fan-out (gate-check reviewers) despite roughly half of role types being
+tool-policy read-only. The gap is not "not enough read-only work exists" —
+it's that **eligibility isn't derived from the thing that actually
+determines safety** (the role's resolved tool bundle), it's derived from an
+opt-in flag that's wired up in exactly one (lower-volume, per-PR-walkthrough)
+code path. Sizing "how many sessions would benefit" therefore has two very
+different answers depending on which number you use:
+- **As coded today**: ~0% of gate-check volume, 100% of PR-walkthrough-reviewer volume.
+- **As tool-policy would allow** (if eligibility were derived from the
+  resolved allowlist instead of a caller-supplied flag): the 3–4
+  llm-review/agent-qa reviewers per gate-verify phase would also qualify,
+  which is most of the *reviewer-class* session volume in the repo's own
+  verification pipeline — a materially larger prize than the flag-based
+  count suggests, but contingent on a real (not scoped in this lane) change
+  to how eligibility is derived.
+
+### (c) RPC tax at realistic transcript sizes (the spike's flagged gap)
+
+Closed with `scripts/bench-rpc-transcript-tax.mjs` (new, committed): builds a
+real pi `--session <path>` JSONL transcript (pi's actual on-disk wire format,
+reverse-engineered from a real `pi --print` run — `{type:"session",...}`
+header then one `{type:"message", id, parentId, timestamp, message:{role,
+content,...}}` per turn), spawns a real `pi --mode rpc` child pointed at it,
+and measures 8 warm `get_messages` round trips at 3 transcript sizes (no API
+key needed — same no-network methodology as the original spike bench):
+
+| Messages | Transcript file | `get_messages` response | Median RPC round trip |
+|---|---|---|---|
+| 50 | 26 KB | 21 KB | 0.17ms |
+| 500 | 259 KB | 210 KB | 0.85ms |
+| 2,000 | 1.0 MB | 841 KB | 2.73ms |
+
+40x more messages → 15.6x more time (sub-linear — fixed per-call overhead
+amortizes as size grows). **This confirms the spike's flagged
+transcript-size-scaling tax is real** (the empty-session `get_state` numbers
+in the spike were not exercising it) **but it stays small in absolute terms**
+— 2.7ms at 2000 messages / ~840KB, three orders of magnitude below the
+0.6–1.5s spawn-to-idle tax measured in (a). Bobbit's own `session-manager.ts`
+re-`JSON.stringify`s the response again before broadcasting to WS clients
+(not separately measured here — estimate, not measured: roughly one more
+pass of the same curve, so plausibly ~5ms total serialization tax at 2000
+messages, still small). **Steady-state RPC tax is not the bottleneck this
+lane should optimize for, at any transcript size tested.**
+
+### Go/no-go recommendation for step-2 productionization
+
+**Narrow go, but re-scope step 2 before investing**: the numbers change
+*why* the in-process bridge would be worth productionizing, not *whether*.
+
+- The prize is **larger than the spike estimated** on latency alone
+  (0.6–1.5s real spawn-to-idle, not 400–700ms) but **smaller than it could
+  be** on population, because eligibility today is wired to an opt-in flag
+  almost nothing sets, not to the tool-policy signal that actually
+  determines safety. **Fix the eligibility signal first** (derive
+  `readOnly`-equivalence from the resolved tool allowlist — no `edit`/`bash`/
+  `bash_bg` reachable — rather than requiring every caller to remember to
+  pass `readOnly: true`) before or as part of step 2; otherwise
+  productionizing the bridge ships a fast path almost nothing routes through
+  in practice, since the current callers of the review-shaped roles
+  (`verification-harness.ts`) don't set the flag.
+- Steady-state RPC tax ((c)) is confirmed real but **does not change the
+  recommendation** — it's too small relative to the spawn tax to be worth
+  designing around at this stage, at any transcript size tested here.
+- **Warm-pool comparison**: the doc's "alternative/complement" — a warm pool
+  of pre-spawned `--mode rpc` processes per project — remains a live
+  alternative for the **code-exec majority** specifically because this
+  lane's numbers show the tool/extension-loading cost inside
+  `persistSessionMetadata`/`postSpawn` (not just the bare process spawn) is
+  most of the real tax, and a warm pool amortizes that loading cost across
+  many sessions without needing to solve sandbox containment in-process.
+  It does **not** compete with the in-process bridge for the read-only class:
+  a warm-pooled *sandboxed* process still pays Docker's own overhead
+  (measured here as small once warm, but with the separate mount-fragility
+  failure mode above) and still can't skip the file-system extension-walk
+  the way `createReadOnlyTools()`'s direct `customTools` injection already
+  does. Recommendation: pursue **both**, not either/or — warm pool for the
+  code-exec/sandboxed majority, in-process (with the eligibility-signal fix
+  above) for the read-only minority-by-flag/majority-by-tool-policy class.
+- Steps 2–4 of the original staged path (event-shape parity, transcript
+  persistence, keep sandboxed path untouched) are unaffected by this lane's
+  findings and remain the right next steps once the eligibility-signal gap
+  above is addressed.
