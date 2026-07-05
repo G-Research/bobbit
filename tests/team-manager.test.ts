@@ -35,6 +35,7 @@ interface MockGoal {
 	sandboxed?: boolean;
 	team?: boolean;
 	teamLeadSessionId?: string;
+	inlineRoles?: Record<string, any>;
 }
 
 function createMockGoal(overrides: Partial<MockGoal> = {}): MockGoal {
@@ -341,6 +342,84 @@ describe("TeamManager", () => {
 			assert.equal(session.role, "team-lead");
 			assert.equal(session.teamGoalId, "goal-1");
 		});
+
+		// CLF-W1c (F5-read verify): `startTeam` used to read `storedRole.model` /
+		// `storedRole.thinkingLevel` off `this.config.roleStore` — a flat
+		// server+builtin store with NO project-cascade awareness — and pass them
+		// straight through as `opts.initialModel`/`opts.initialThinkingLevel`.
+		// Those explicit values win over session-setup's own cascade-aware
+		// resolution (`ctx.resolveInitialModel`/`resolveInitialThinkingLevel`,
+		// which DOES walk project > server > builtin via `configCascade`), so a
+		// project-level override of the team-lead role's model/thinkingLevel was
+		// silently invisible at team-lead spawn time. Fixed by dropping the
+		// explicit fields and relying on `roleName` alone (same pattern
+		// staff-manager already used) — pin that here.
+		it("should not shortcut role model/thinkingLevel via the flat roleStore — let session-setup's cascade-aware resolver own it", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			let capturedOpts: any = undefined;
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				capturedOpts = opts;
+				return origCreateSession(cwd, args, goalId, goalAssistant, opts);
+			};
+
+			// This roleStore's team-lead carries model/thinkingLevel — mimicking a
+			// server/builtin tier value that a PROJECT-level override could differ
+			// from. If team-manager ever again reads these fields directly and
+			// forwards them as initialModel/initialThinkingLevel, this test fails.
+			const roleStore = createMockRoleStore();
+			(roleStore.get("team-lead") as any).model = "acme/stale-flat-model";
+			(roleStore.get("team-lead") as any).thinkingLevel = "high";
+
+			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, roleStore });
+			await team.startTeam("goal-1");
+
+			assert.ok(capturedOpts, "createSession should have been called with opts");
+			assert.equal(capturedOpts.roleName, "team-lead", "roleName must still be passed so session-setup can resolve the role's tier");
+			assert.equal(
+				capturedOpts.initialModel,
+				undefined,
+				"initialModel must NOT be pre-set from the flat roleStore — session-setup's cascade-aware resolver must own this",
+			);
+			assert.equal(
+				capturedOpts.initialThinkingLevel,
+				undefined,
+				"initialThinkingLevel must NOT be pre-set from the flat roleStore — session-setup's cascade-aware resolver must own this",
+			);
+		});
+
+		// CLF-W1c: a goal-scoped `inlineRoles` override is an EPHEMERAL, one-off
+		// role snapshot that never reaches the project/server/builtin cascade
+		// (see PersistedGoal.inlineRoles doc comment) — session-setup's
+		// cascade-aware resolver can never see it. It must still reach spawn, so
+		// team-manager is the only place that can forward it explicitly. Prove
+		// the CLF-W1c fix (dropping the flat-roleStore passthrough) didn't also
+		// drop this legitimate inline-override path.
+		it("honours a goal-scoped inline role override for model/thinkingLevel (ephemeral, cascade-invisible)", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				inlineRoles: { "team-lead": { name: "team-lead", promptTemplate: "inline lead", accessory: "crown", model: "acme/inline-model", thinkingLevel: "low", createdAt: 0, updatedAt: 0 } },
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			let capturedOpts: any = undefined;
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				capturedOpts = opts;
+				return origCreateSession(cwd, args, goalId, goalAssistant, opts);
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			assert.equal(capturedOpts.initialModel, "acme/inline-model");
+			assert.equal(capturedOpts.initialThinkingLevel, "low");
+		});
 	});
 
 	// ---------------------------------------------------------------------------
@@ -384,6 +463,77 @@ describe("TeamManager", () => {
 			assert.ok(result.sessionId, "should return a sessionId");
 			// worktreePath should be undefined since no worktree was created
 			assert.equal(result.worktreePath, undefined);
+		});
+
+		// CLF-W1c (F5-read verify): same fix as startTeam's team-lead spawn above,
+		// applied to worker spawn. `spawnRole` used to read `storedRoleDef.model` /
+		// `storedRoleDef.thinkingLevel` off the flat (project-cascade-unaware)
+		// roleStore and forward them as `opts.initialModel`/`initialThinkingLevel`,
+		// which would win over session-setup's cascade-aware resolution and hide a
+		// project-level role override for every worker role. Pin that the fix
+		// leaves `initialModel`/`initialThinkingLevel` unset and `roleName` intact.
+		it("should not shortcut role model/thinkingLevel via the flat roleStore — let session-setup's cascade-aware resolver own it", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ repoPath: undefined, cwd: "/tmp/no-repo" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			let capturedOpts: any = undefined;
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				if (opts?.roleName === "coder") capturedOpts = opts;
+				return origCreateSession(cwd, args, goalId, goalAssistant, opts);
+			};
+
+			const roleStore = createMockRoleStore();
+			(roleStore.get("coder") as any).model = "acme/stale-flat-model";
+			(roleStore.get("coder") as any).thinkingLevel = "medium";
+
+			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, roleStore });
+			await team.startTeam("goal-1");
+			await team.spawnRole("goal-1", "coder", "code stuff");
+
+			assert.ok(capturedOpts, "createSession should have been called with the coder's opts");
+			assert.equal(capturedOpts.roleName, "coder");
+			assert.equal(
+				capturedOpts.initialModel,
+				undefined,
+				"initialModel must NOT be pre-set from the flat roleStore — session-setup's cascade-aware resolver must own this",
+			);
+			assert.equal(
+				capturedOpts.initialThinkingLevel,
+				undefined,
+				"initialThinkingLevel must NOT be pre-set from the flat roleStore — session-setup's cascade-aware resolver must own this",
+			);
+		});
+
+		// CLF-W1c: mirrors the startTeam inline-role test above — a worker role's
+		// goal-scoped inlineRoles override must still reach spawn explicitly, since
+		// it's invisible to session-setup's project/server/builtin cascade.
+		it("honours a goal-scoped inline role override for model/thinkingLevel on a worker spawn", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath: undefined,
+				cwd: "/tmp/no-repo",
+				inlineRoles: { coder: { name: "coder", promptTemplate: "inline coder", accessory: "headphones", model: "acme/inline-coder-model", thinkingLevel: "high", createdAt: 0, updatedAt: 0 } },
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			let capturedOpts: any = undefined;
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				if (opts?.roleName === "coder") capturedOpts = opts;
+				return origCreateSession(cwd, args, goalId, goalAssistant, opts);
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+			await team.spawnRole("goal-1", "coder", "code stuff");
+
+			assert.ok(capturedOpts, "createSession should have been called with the coder's opts");
+			assert.equal(capturedOpts.initialModel, "acme/inline-coder-model");
+			assert.equal(capturedOpts.initialThinkingLevel, "high");
 		});
 
 		it("should reject team-lead role in spawnRole", async () => {

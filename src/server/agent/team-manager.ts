@@ -1826,6 +1826,9 @@ export class TeamManager {
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
+		// Goal-scoped inline role snapshot ONLY (see the initialModel/initialThinkingLevel
+		// comment below for why this must not be `storedRole` itself).
+		const inlineTeamLeadRole = goal.inlineRoles?.["team-lead"];
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
 		const teamLeadPrompt = applyPromptConditionals(
 			teamLeadPromptTemplate
@@ -1860,10 +1863,25 @@ export class TeamManager {
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container
 				sandboxBranch: sandboxed && goal.branch ? goal.branch : undefined,
-				// Honour role-level model / thinking-level override (cascade-resolved above).
-				// Empty string falls through to undefined → system default.
-				initialModel: storedRole.model || undefined,
-				initialThinkingLevel: storedRole.thinkingLevel || undefined,
+				// Only pass initialModel/initialThinkingLevel when this goal carries an
+				// EPHEMERAL inline-role override for team-lead (goal.inlineRoles — a
+				// one-off role snapshot that never reaches the project/server/builtin
+				// role-store cascade, see the doc comment on `PersistedGoal.inlineRoles`).
+				// For every other case (no inline override), do NOT read `storedRole.model`/
+				// `.thinkingLevel` here — `storedRole` falls back to `this.config.roleStore`,
+				// a flat server+builtin store with NO project-cascade awareness. Passing its
+				// fields explicitly would win over session-setup's own resolution
+				// (`ctx.resolveInitialModel`/`resolveInitialThinkingLevel`, wired to
+				// `SessionManager.resolveRoleModelValue`/`resolveRoleThinkingLevelValue`,
+				// which DOES walk the full project→server→builtin cascade via
+				// `configCascade`) and silently drop a project-level role override.
+				// Passing only `roleName` (above) lets that cascade-aware resolver run —
+				// same pattern staff-manager uses (see staff-manager.ts
+				// createStaff/ensureSessionForStaff). Fixed CLF-W1c; pinned by
+				// tests/team-manager.test.ts "should not shortcut role model/thinkingLevel..."
+				// and "...honours a goal-scoped inline role override...".
+				initialModel: inlineTeamLeadRole?.model || undefined,
+				initialThinkingLevel: inlineTeamLeadRole?.thinkingLevel || undefined,
 			},
 		);
 
@@ -2009,6 +2027,9 @@ export class TeamManager {
 			const available = listAvailableRoles(goalForRole, roleStore).join(", ") || "none";
 			throw new Error(`Role "${role}" not found. Available roles: ${available}`);
 		}
+		// Goal-scoped inline role snapshot ONLY (see the initialModel/initialThinkingLevel
+		// comment at the createSession call below for why this must not be `storedRoleDef` itself).
+		const inlineRoleDef = goalForRole?.inlineRoles?.[role];
 
 		if (role === 'team-lead') {
 			throw new Error('Cannot spawn team-lead role via spawnRole — use startTeam() instead');
@@ -2144,10 +2165,22 @@ export class TeamManager {
 					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
-					// Honour role-level model / thinking-level override (cascade-resolved above).
-					// Empty string falls through to undefined → system default.
-					initialModel: storedRoleDef.model || undefined,
-					initialThinkingLevel: storedRoleDef.thinkingLevel || undefined,
+					// Only pass initialModel/initialThinkingLevel for an EPHEMERAL
+					// goal-scoped inline role override (`inlineRoleDef`, from
+					// `goal.inlineRoles` — never reaches the project/server/builtin
+					// cascade, see PersistedGoal.inlineRoles doc comment). Otherwise do
+					// NOT read `storedRoleDef.model`/`.thinkingLevel` here —
+					// `storedRoleDef` falls back to `this.config.roleStore`, a flat
+					// server+builtin store with no project-cascade awareness. Passing its
+					// fields explicitly would short-circuit session-setup's own
+					// cascade-aware resolution (`ctx.resolveInitialModel`/
+					// `resolveInitialThinkingLevel`) and silently drop a project-level
+					// role override. `roleName: role` (above) is enough for session-setup
+					// to resolve model/thinkingLevel through the full
+					// project→server→builtin cascade when there's no inline override.
+					// Fixed CLF-W1c; see the matching comment/tests in startTeam() above.
+					initialModel: inlineRoleDef?.model || undefined,
+					initialThinkingLevel: inlineRoleDef?.thinkingLevel || undefined,
 				},
 			);
 
