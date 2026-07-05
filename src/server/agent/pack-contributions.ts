@@ -44,13 +44,15 @@ const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-// Route names are JavaScript export/member names, so first-party packs use
-// camelCase route ids (e.g. `defineExperiment`). Mirrors pack-manifest.ts's
-// ROUTE_NAME_RE (restores commit 0eacc2dc, "Allow camelCase pack route
-// names" — dropped from this copy by a later merge; pinned by
-// tests/pack-contributions.test.ts's "accepts camelCase route names in the
-// allowlist").
-const ROUTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+// Case-insensitive (mirrors PANEL_ID_RE/PROVIDER_ID_RE and pack-manifest.ts's
+// ROUTE_NAME_RE): route names are JavaScript export/member names, and real
+// first-party packs (e.g. market-packs/experiment-runner) declare camelCase
+// route ids such as `defineExperiment` / `projectCost` / `saveDashboard`. A
+// case-sensitive regex here silently drops every one of those routes.
+// Restores commit 0eacc2dc ("Allow camelCase pack route names") — dropped from
+// this copy by a later merge while the pack-manifest.ts sibling kept it; pinned
+// by tests/pack-contributions.test.ts "accepts camelCase route names".
+const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
 // Acceptance list for `providers/<id>.yaml` `hooks:` entries — derived from the
 // single source of truth in lifecycle-hooks.ts (finding EXT-02) so this can
@@ -578,13 +580,9 @@ export function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeC
 			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is invalid: ${problems.join("; ") || "unknown error"}`);
 			continue;
 		}
-		if (runtime.id !== listName) {
-			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) id ${JSON.stringify(runtime.id)} does not match contents.runtimes entry; skipping`);
-			continue;
-		}
 		if (seen.has(runtime.id)) {
 			throw new PackContributionError(
-				`pack "${packIdFromRoot(packRoot)}" declares runtime "${runtime.id}" more than once; runtime ids must be unique within a pack`,
+				`pack "${packIdFromRoot(packRoot)}" declares runtime id "${runtime.id}" more than once; runtime ids must be unique within a pack`,
 			);
 		}
 		seen.add(runtime.id);

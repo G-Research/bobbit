@@ -24,6 +24,7 @@ function requiredStateMounts(stateDir: string) {
 		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
+		mount(path.join(stateDir, "openai-orphan-tool-result"), "/bobbit-state/openai-orphan-tool-result", false, "ro"),
 		mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge", false, "ro"),
 	];
 }
