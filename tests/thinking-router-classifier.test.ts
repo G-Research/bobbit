@@ -6,11 +6,12 @@
 // src/server/agent/thinking-router-classifier.ts's header comment for why
 // there are no further heuristic tiers this wave — every rule not below MUST
 // abstain, never guess.
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	classifyThinkingLevel,
 	thinkingRouterClassifier,
+	isThinkingRouterApplyMode,
 	THINKING_ROUTER_CLASSIFIER_ID,
 	THINKING_ROUTER_POINT,
 	THINKING_ROUTER_KIND,
@@ -92,5 +93,36 @@ describe("thinkingRouterClassifier (DecisionClassifier wrapper)", () => {
 	it("abstains for a null/undefined arg rather than throwing", async () => {
 		assert.deepEqual(await thinkingRouterClassifier.evaluate(ctx, undefined), { kind: "abstain" });
 		assert.deepEqual(await thinkingRouterClassifier.evaluate(ctx, null), { kind: "abstain" });
+	});
+});
+
+describe("isThinkingRouterApplyMode (CLF-W3 mode flag)", () => {
+	afterEach(() => {
+		delete process.env.BOBBIT_CLF_THINKING_ROUTER;
+	});
+
+	it("is false when BOBBIT_CLF_THINKING_ROUTER is unset (observe, default)", () => {
+		delete process.env.BOBBIT_CLF_THINKING_ROUTER;
+		assert.equal(isThinkingRouterApplyMode(), false);
+	});
+
+	it("is false for the explicit 'observe' value", () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "observe";
+		assert.equal(isThinkingRouterApplyMode(), false);
+	});
+
+	it("is false for any other non-'enforce' value", () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "yes";
+		assert.equal(isThinkingRouterApplyMode(), false);
+	});
+
+	it("is true only for the exact string 'enforce'", () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "enforce";
+		assert.equal(isThinkingRouterApplyMode(), true);
+	});
+
+	it("is case-sensitive ('Enforce' does not count)", () => {
+		process.env.BOBBIT_CLF_THINKING_ROUTER = "Enforce";
+		assert.equal(isThinkingRouterApplyMode(), false);
 	});
 });

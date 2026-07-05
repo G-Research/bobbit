@@ -17,8 +17,16 @@ import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
+// Pure static-catalog read — durable pi-ai 0.80 replacement for text-parsing
+// the vendored models.generated.js (see catalogProviderModels).
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import {
+	getModelsJsonPath as storeGetModelsJsonPath,
+	readModelsJson as storeReadModelsJson,
+	replaceModelsJson,
+	updateModelsJson,
+} from "./models-json-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -214,37 +222,15 @@ export function deriveName(modelId: string): string {
  * one canonical path/read/write implementation instead of re-deriving it.
  */
 export function getModelsJsonPath(): string {
-	return path.join(globalAgentDir(), "models.json");
+	return storeGetModelsJsonPath();
 }
 
 export function readModelsJson(): Record<string, any> {
-	const p = getModelsJsonPath();
-	try {
-		if (fs.existsSync(p)) {
-			return JSON.parse(fs.readFileSync(p, "utf-8"));
-		}
-	} catch (err) {
-		console.error("[aigw-manager] Failed to read models.json:", err);
-	}
-	return { providers: {} };
+	return storeReadModelsJson("[aigw-manager]");
 }
 
-export function writeModelsJson(data: Record<string, any>): void {
-	const p = getModelsJsonPath();
-	let tmp = "";
-	try {
-		const dir = path.dirname(p);
-		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-		fs.renameSync(tmp, p);
-		console.log(`[aigw-manager] Wrote models.json to ${p}`);
-	} catch (err) {
-		if (tmp) {
-			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
-		}
-		console.error("[aigw-manager] Failed to write models.json:", err);
-	}
+export async function writeModelsJson(data: Record<string, any>): Promise<void> {
+	replaceModelsJson(data, { logPrefix: "[aigw-manager]" });
 }
 
 function unescapeGeneratedString(raw: string): string {
@@ -406,7 +392,37 @@ export function parseModelsGeneratedText(text: string): Map<string, string[]> {
 }
 
 /**
+ * Model IDs for the override providers, read from pi-ai's durable catalog API
+ * (getBuiltinModels). Primary source since pi-ai 0.80: models.generated.js
+ * became a per-provider import aggregator with no inline entries, so the
+ * text parse below returns an empty map on 0.80+ — which silently wrote zero
+ * overrides (caught by tests/e2e/context-window-overrides.spec.ts in the
+ * 0.80.3 upgrade gate). Falls back to the legacy text parse for any provider
+ * the catalog API errors on.
+ */
+function catalogProviderModels(providers: readonly string[]): Map<string, string[]> {
+	const providerModels = new Map<string, string[]>();
+	let legacy: Map<string, string[]> | undefined;
+	for (const provider of providers) {
+		try {
+			const ids = (getBuiltinModels(provider as any) as Array<{ id?: unknown }>).map(m => String(m.id)).filter(id => id && id !== "undefined");
+			if (ids.length > 0) {
+				providerModels.set(provider, ids);
+				continue;
+			}
+		} catch (err) {
+			console.error(`[aigw-manager] getBuiltinModels("${provider}") failed; falling back to models.generated.js text parse:`, err);
+		}
+		legacy ??= parseModelsGenerated();
+		const legacyIds = legacy.get(provider);
+		if (legacyIds) providerModels.set(provider, legacyIds);
+	}
+	return providerModels;
+}
+
+/**
  * Parse model IDs from pi-ai's models.generated.js, grouped by provider.
+ * LEGACY (pre-pi-0.80 layout) — kept only as catalogProviderModels' fallback.
  */
 function parseModelsGenerated(): Map<string, string[]> {
 	try {
@@ -465,13 +481,14 @@ export function applyContextWindowOverrides(data: Record<string, any>, providerM
 	return overridesWritten;
 }
 
-export function writeContextWindowOverrides(): void {
-	const providerModels = parseModelsGenerated();
-	const data = readModelsJson();
-	const overridesWritten = applyContextWindowOverrides(data, providerModels);
+export async function writeContextWindowOverrides(): Promise<void> {
+	const providerModels = catalogProviderModels(CONTEXT_WINDOW_OVERRIDE_PROVIDERS);
+	const overridesWritten = await updateModelsJson(
+		(data) => applyContextWindowOverrides(data, providerModels),
+		{ logPrefix: "[aigw-manager]", write: (count) => count > 0 },
+	);
 
 	if (overridesWritten > 0) {
-		writeModelsJson(data);
 		console.log(`[aigw-manager] Wrote ${overridesWritten} contextWindow overrides to models.json`);
 	} else {
 		console.log("[aigw-manager] No contextWindow overrides needed");
@@ -497,9 +514,7 @@ function setBedrockEnvVars(aigwUrl: string): void {
 	console.log(`[aigw] Bedrock env configured: endpoint=${bedrockBaseUrl}`);
 }
 
-export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
-	const data = readModelsJson();
-	if (!data.providers) data.providers = {};
+export async function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): Promise<void> {
 
 	// AI gateways typically expose both OpenAI-compatible and Bedrock endpoints.
 	// Route Claude models through the Bedrock Converse API (same path as Claude
@@ -531,7 +546,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		return slash >= 0 ? id.slice(slash + 1) : id;
 	};
 
-	data.providers.aigw = {
+	const aigwProvider = {
 		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
@@ -577,19 +592,27 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 	};
 
 	setBedrockEnvVars(aigwUrl);
-
-	writeModelsJson(data);
+	await updateModelsJson(
+		(data) => {
+			if (!data.providers) data.providers = {};
+			data.providers.aigw = aigwProvider;
+		},
+		{ logPrefix: "[aigw-manager]" },
+	);
 }
 
 /**
  * Remove the "aigw" provider from models.json.
  */
-export function removeAigwModelsJson(): void {
-	const data = readModelsJson();
-	if (data.providers?.aigw) {
-		delete data.providers.aigw;
-		writeModelsJson(data);
-	}
+export async function removeAigwModelsJson(): Promise<void> {
+	await updateModelsJson(
+		(data) => {
+			if (!data.providers?.aigw) return false;
+			delete data.providers.aigw;
+			return true;
+		},
+		{ logPrefix: "[aigw-manager]", write: (changed) => changed },
+	);
 }
 
 // ── Startup internet check ─────────────────────────────────────────
@@ -689,7 +712,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		}
 		try {
 			const models = await discoverAigwModels(existingUrl);
-			writeAigwModelsJson(existingUrl, models);
+			await writeAigwModelsJson(existingUrl, models);
 			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
 		} catch (err: any) {
 			const msg = err?.message || String(err);
@@ -914,17 +937,17 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 	prefs.set("aigw.url", normalizedUrl);
 	// Note: aigw.models no longer cached in preferences — model-registry discovers fresh each time
 
-	writeAigwModelsJson(normalizedUrl, models);
+	await writeAigwModelsJson(normalizedUrl, models);
 	return models;
 }
 
 /**
  * Remove aigw configuration.
  */
-export function removeAigw(prefs: PreferencesStore): void {
+export async function removeAigw(prefs: PreferencesStore): Promise<void> {
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.models");
-	removeAigwModelsJson();
+	await removeAigwModelsJson();
 }
 
 /**

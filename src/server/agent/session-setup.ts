@@ -34,10 +34,11 @@ import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
-import type { PromptParts, NestingContext } from "./system-prompt.js";
+import type { PromptParts, NestingContext, PromptProfile } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
+import { MODEL_TIER_POINT, MODEL_TIER_KIND } from "./model-tier-classifier.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -271,6 +272,7 @@ export interface SessionSetupPlan {
 	staffId?: string;
 	accessory?: string;
 	nonInteractive?: boolean;
+	promptProfile?: PromptProfile;
 
 	// Computed during planning
 	bridgeOptions: SessionBridgeOptions;
@@ -765,6 +767,27 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 	} catch (err) {
 		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
 	}
+	// CLF-W4 — model-tier classifier, OBSERVE-ONLY (see model-tier-classifier.ts's
+	// header for the full design). Consulted AFTER the `sessionSetup` dispatch
+	// above so an active TraceEntry already exists to attach into
+	// (ContextTraceStore.appendDecision's "attaches to the latest entry"
+	// contract, same ordering constraint the thinking router's own tests rely
+	// on). Pure telemetry: the result is NEVER read back to change
+	// `plan.bridgeOptions.initialModel`, which is already resolved by this
+	// point (`resolveBridgeOptions` runs earlier in every pipeline ordering).
+	// Non-fatal: an unregistered (point,kind) pair (e.g. most unit-test
+	// LifecycleHub fixtures, which don't wire this new pair) or any classifier
+	// error must never block session spawn.
+	try {
+		await ctx.lifecycleHub.dispatchDecision(MODEL_TIER_POINT, MODEL_TIER_KIND, {
+			sessionId: plan.id,
+			projectId: plan.projectId,
+			goalId: effectiveGoalId(plan),
+			cwd: plan.cwd,
+		}, { roleName: plan.roleName ?? plan.role });
+	} catch (err) {
+		console.warn(`[session-setup] model-tier dispatchDecision failed for ${plan.id} (non-fatal, observe-only): ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 /** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
@@ -839,6 +862,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
+			promptProfile: plan.promptProfile,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	} else if (plan.mode === "delegate") {
@@ -863,6 +887,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
+			promptProfile: plan.promptProfile,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	} else {
@@ -920,14 +945,10 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			nestingContext,
 			sectionOrder,
-			// F2: read-only verification reviewer/agent-qa sessions are spawned
-			// with nonInteractive:true (see verification-reviewer-meta.ts) and
-			// never accept user input or make commits — drop the Git-conventions
-			// and mutate-same-target stanzas from the base system prompt. Any
-			// other nonInteractive session shape would get the same treatment,
-			// but today the only callers stamping nonInteractive are the
-			// verification harness's llm-review/agent-qa spawns.
-			promptProfile: plan.nonInteractive ? "reviewer" : undefined,
+			// F2: reviewer-class sessions can request the reviewer profile
+			// explicitly. Keep the original nonInteractive fallback so older
+			// verification spawns and restored metadata still get the same trim.
+			promptProfile: plan.promptProfile ?? (plan.nonInteractive ? "reviewer" : undefined),
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}

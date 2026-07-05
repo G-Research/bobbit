@@ -59,6 +59,8 @@ export {
 	type ArchivedSessionWorktreeCleanupResult,
 } from "./archived-worktree-manager.js";
 import { McpWiring, type McpWiringDeps } from "./mcp-wiring.js";
+import { SessionLifecycleFence, type RestoreCoordinator, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
+export { type RestoreCoordinator, type LifecycleFenceSession, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -66,7 +68,7 @@ import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, type PromptParts, type PromptProfile } from "./system-prompt.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -102,8 +104,9 @@ import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import type { Decision } from "./decision-types.js";
-import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID } from "./thinking-router-classifier.js";
+import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID, isThinkingRouterApplyMode } from "./thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND, isToolApproveEnforceMode, isAutoDenyDecision, type ToolApproveVerdict } from "./tool-approve-classifier.js";
+import { ToolPermissionAuditLog, type ToolPermissionAuditDecision, type ToolPermissionAuditSource } from "./tool-permission-audit-log.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -453,6 +456,23 @@ export interface SessionInfo {
 	spawnPinnedModel?: string;
 	/** Thinking level passed via `--thinking` at spawn time, if any. */
 	spawnPinnedThinkingLevel?: string;
+	/**
+	 * CLF-W3 — true only when the user EXPLICITLY changed this session's
+	 * thinking level via the `set_thinking_level` ws action (ws/handler.ts) —
+	 * never set by spawn-time role/preference resolution, which also writes
+	 * `spawnPinnedThinkingLevel` but is not a human decision. Consulted by
+	 * `canApplyThinkingRouterDecision` so the F14 thinking-router's apply mode
+	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`) can never silently override a
+	 * setting the user picked on purpose. Persisted via `SessionStore` so the
+	 * precedence survives restore/respawn.
+	 */
+	thinkingLevelUserPinned?: boolean;
+	/**
+	 * Baseline level to restore after CLF-W3 thinking-router apply mode
+	 * transiently escalates the live runtime. In-memory only: it describes the
+	 * currently running process, not durable user/session config.
+	 */
+	thinkingRouterAppliedBaseline?: ThinkingLevel;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -499,6 +519,7 @@ export interface SessionInfo {
 		reject: (err: Error) => void;
 		toolName: string;
 		toolGroup: string;
+		toolApproveDecision?: Decision<ToolApproveVerdict>;
 		timer: ReturnType<typeof setTimeout>;
 		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
 		 * verbatim to late-joining clients so we never burn a fresh global seq
@@ -914,12 +935,9 @@ export interface SessionManagerOptions {
 	prStatusStore?: PrStatusStore;
 	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
 	extensionChannels?: ExtensionChannelServices;
+	/** Durable tool-permission ask audit log. Override is primarily for tests. */
+	toolPermissionAuditLog?: ToolPermissionAuditLog;
 }
-
-type RestoreCoordinator = {
-	generation: number;
-	promise: Promise<SessionInfo | undefined>;
-};
 
 function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
 	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
@@ -1038,6 +1056,7 @@ export class SessionManager {
 	private _testCostTracker: CostTracker | null = null;
 	/** @internal Test-only search index (used when no PCM is available). */
 	private _testSearchIndex: SearchService | null = null;
+	private toolPermissionAuditLog!: ToolPermissionAuditLog;
 	private colorStore?: ColorStore;
 	private roleManager?: RoleManager;
 	/**
@@ -1164,10 +1183,16 @@ export class SessionManager {
 	 *  See docs/design/unify-session-status.md §3.4. */
 	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
-	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
-	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
-	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
-	private _sessionRespawnGenerations = new Map<string, number>();
+	/**
+	 * Lifecycle restore/respawn fencing (SessionManager decomposition cohort 3,
+	 * docs/design/session-manager-decomposition.md). Same accessor-wrapper
+	 * discipline as `mcpWiring`: tests poke `_sessionRespawnGenerations`
+	 * directly, so the same-named SessionManager surface must remain backed by
+	 * the extracted module's real map.
+	 */
+	private lifecycleFence!: SessionLifecycleFence<SessionInfo>;
+	private get _restoreCoordinators(): Map<string, RestoreCoordinator<SessionInfo>> { return this.lifecycleFence.restoreCoordinators; }
+	get _sessionRespawnGenerations(): Map<string, number> { return this.lifecycleFence.sessionRespawnGenerations; }
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -1186,48 +1211,24 @@ export class SessionManager {
 		return this._bootRepromptedSessions.has(sessionId);
 	}
 
-	private _currentRespawnGeneration(sessionId: string): number {
-		return this._sessionRespawnGenerations.get(sessionId) ?? 0;
+	private _currentRespawnGeneration(...args: Parameters<SessionLifecycleFence<SessionInfo>["currentRespawnGeneration"]>): ReturnType<SessionLifecycleFence<SessionInfo>["currentRespawnGeneration"]> {
+		return this.lifecycleFence.currentRespawnGeneration(...args);
 	}
 
-	private _nextRespawnGeneration(sessionId: string): number {
-		const next = this._currentRespawnGeneration(sessionId) + 1;
-		this._sessionRespawnGenerations.set(sessionId, next);
-		return next;
+	_nextRespawnGeneration(...args: Parameters<SessionLifecycleFence<SessionInfo>["nextRespawnGeneration"]>): ReturnType<SessionLifecycleFence<SessionInfo>["nextRespawnGeneration"]> {
+		return this.lifecycleFence.nextRespawnGeneration(...args);
 	}
 
-	private _sessionWriterIsCurrent(session: SessionInfo): boolean {
-		if (session.lifecycleFenced) return false;
-		const canonical = this.sessions.get(session.id);
-		if (canonical && canonical !== session) return false;
-		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
+	private _sessionWriterIsCurrent(...args: Parameters<SessionLifecycleFence<SessionInfo>["sessionWriterIsCurrent"]>): ReturnType<SessionLifecycleFence<SessionInfo>["sessionWriterIsCurrent"]> {
+		return this.lifecycleFence.sessionWriterIsCurrent(...args);
 	}
 
-	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
-		session.lifecycleFenced = true;
-		session.lifecycleGeneration = replacingGeneration - 1;
-		session.dormant = true;
-		session.status = "terminated";
-		session.clients.clear();
-		this.cancelPendingAutoRetry(session, "terminated");
-		this._untrackConnectedSession(session);
+	private _fenceReplacedSession(...args: Parameters<SessionLifecycleFence<SessionInfo>["fenceReplacedSession"]>): ReturnType<SessionLifecycleFence<SessionInfo>["fenceReplacedSession"]> {
+		return this.lifecycleFence.fenceReplacedSession(...args);
 	}
 
-	private _coalesceRestore(
-		sessionId: string,
-		restore: (generation: number) => Promise<SessionInfo | undefined>,
-	): Promise<SessionInfo | undefined> {
-		const inFlight = this._restoreCoordinators.get(sessionId);
-		if (inFlight) return inFlight.promise;
-
-		const generation = this._nextRespawnGeneration(sessionId);
-		const promise = (async () => restore(generation))()
-			.finally(() => {
-				const current = this._restoreCoordinators.get(sessionId);
-				if (current?.generation === generation) this._restoreCoordinators.delete(sessionId);
-			});
-		this._restoreCoordinators.set(sessionId, { generation, promise });
-		return promise;
+	private _coalesceRestore(...args: Parameters<SessionLifecycleFence<SessionInfo>["coalesceRestore"]>): ReturnType<SessionLifecycleFence<SessionInfo>["coalesceRestore"]> {
+		return this.lifecycleFence.coalesceRestore(...args);
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
@@ -1498,6 +1499,7 @@ export class SessionManager {
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
 		this._extensionChannels = options?.extensionChannels;
+		this.toolPermissionAuditLog = options?.toolPermissionAuditLog ?? new ToolPermissionAuditLog(bobbitStateDir());
 		// Warm pi-process pool (wave 1, docs/design/warm-pi-process-pool.md).
 		// Dark by default — BOBBIT_WARM_POOL=1 opts in. When off, no sweep timer
 		// is started and `buildPipelineContext()` never hands `ctx.piProcessPool`
@@ -1520,6 +1522,12 @@ export class SessionManager {
 			// may still hit re-attempt code paths.
 			if (!this.prStatusStore) this.prStatusStore = new PrStatusStore(stateDir);
 		}
+
+		this.lifecycleFence = new SessionLifecycleFence({
+			getCanonicalSession: (sessionId) => this.sessions.get(sessionId),
+			cancelPendingAutoRetry: (session, reason) => this.cancelPendingAutoRetry(session, reason),
+			untrackConnectedSession: (session) => this._untrackConnectedSession(session),
+		} satisfies SessionLifecycleFenceDeps<SessionInfo>);
 
 		// Constructed here (not lazily) so every field it captures by value
 		// (projectContextManager, testStore, testSearchIndex, colorStore) is
@@ -3007,6 +3015,7 @@ export class SessionManager {
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder,
+				promptProfile: (session.nonInteractive ?? persisted?.nonInteractive) ? "reviewer" : undefined,
 			};
 		}
 
@@ -3081,13 +3090,15 @@ export class SessionManager {
 	 * than letting the caller hold onto a stale reference.
 	 */
 	/**
-	 * CLF-W1b — consult the built-in F14 thinking-level router (registered at
-	 * construction, see `registerThinkingRouterClassifier` in `server.ts`) for
-	 * this submitted prompt. OBSERVE MODE ONLY: the caller must not apply the
-	 * returned `Decision` (no `setThinkingLevel`) — it exists purely so the
-	 * outcome gets traced (`dispatchDecision` → `ContextTraceStore.appendDecision`)
-	 * and, when the message goes on to be queued rather than dispatched
-	 * directly, can be stamped onto the `QueuedMessage` row for a later wave.
+	 * CLF-W1b/W3 — consult the built-in F14 thinking-level router (registered
+	 * at construction, see `registerThinkingRouterClassifier` in `server.ts`)
+	 * for this submitted prompt. The outcome is ALWAYS traced (`dispatchDecision`
+	 * → `ContextTraceStore.appendDecision`) and, when the message goes on to be
+	 * queued rather than dispatched directly, stamped onto the `QueuedMessage`
+	 * row. `applyIfSelected` (CLF-W3) is passed straight through to
+	 * `dispatchDecision`'s own `opts.applyIfSelected` so the recorded outcome's
+	 * `applied` field matches what the caller is ABOUT to do with a `select` —
+	 * this method itself never calls `setThinkingLevel`; see `enqueuePrompt`.
 	 *
 	 * Returns `undefined` (rather than throwing) when the (point,kind) pair
 	 * isn't registered on the hub (e.g. a bare test `LifecycleHub` built
@@ -3105,18 +3116,72 @@ export class SessionManager {
 	 * `rpcClient.prompt` was already called synchronously before the caller
 	 * awaits `enqueuePrompt`'s own returned promise.
 	 */
-	private async consultThinkingRouterHub(session: SessionInfo, text: string): Promise<Decision<ThinkingLevel> | undefined> {
+	private async consultThinkingRouterHub(session: SessionInfo, text: string, applyIfSelected: boolean): Promise<Decision<ThinkingLevel> | undefined> {
 		try {
 			return await this.lifecycleHub!.dispatchDecision<ThinkingLevel>(
 				THINKING_ROUTER_POINT,
 				THINKING_ROUTER_KIND,
 				{ sessionId: session.id, projectId: session.projectId, goalId: session.goalId, cwd: session.cwd },
 				{ text },
+				{ applyIfSelected },
 			);
 		} catch (err) {
 			console.warn(`[session-manager] thinking-router dispatchDecision failed for session ${session.id} (non-fatal, observe-mode only): ${err instanceof Error ? err.message : String(err)}`);
 			return undefined;
 		}
+	}
+
+	/**
+	 * CLF-W3 — precedence gate for the F14 thinking-router's apply mode
+	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`). The classifier's per-prompt
+	 * `select` must LOSE to any thinking-level config a human (or a role
+	 * author) already committed to:
+	 *   - a role-level `thinkingLevel` override (`resolveRoleThinkingLevel`) —
+	 *     the role author made an explicit, considered choice for this role;
+	 *   - `session.thinkingLevelUserPinned` — the user explicitly changed this
+	 *     session's thinking level via the composer's slider (`set_thinking_level`
+	 *     ws action), a deliberate in-session decision.
+	 * Neither is "the spawn-time default resolved to something" (role/pref
+	 * cascade with no explicit override) — that case has no human decision to
+	 * protect, so apply mode is free to route per-prompt as usual.
+	 */
+	private canApplyThinkingRouterDecision(session: SessionInfo): boolean {
+		if (session.thinkingLevelUserPinned) return false;
+		if (this.resolveRoleThinkingLevel(session)) return false;
+		return true;
+	}
+
+	private clampThinkingLevelForSession(session: SessionInfo, level: ThinkingLevel): ThinkingLevel {
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.modelId) {
+				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
+				if (clamped) return clamped;
+			}
+		} catch { /* best-effort; keep fail-open thinking-level discipline */ }
+		return level;
+	}
+
+	private resolveCurrentThinkingRouterBaseline(session: SessionInfo): ThinkingLevel {
+		const candidate = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(session.role, session.projectId) ?? "medium";
+		return this.clampThinkingLevelForSession(session, (isKnownThinkingLevel(candidate) ?? "medium") as ThinkingLevel);
+	}
+
+	private async restoreThinkingRouterAppliedBaseline(session: SessionInfo): Promise<void> {
+		const baseline = session.thinkingRouterAppliedBaseline;
+		if (!baseline) return;
+		session.thinkingRouterAppliedBaseline = undefined;
+		try {
+			const levelToRestore = this.clampThinkingLevelForSession(session, baseline);
+			await session.rpcClient.setThinkingLevel(levelToRestore);
+			console.log(`[session-manager] CLF-W3 thinking-router RESTORED "${levelToRestore}" for session ${session.id}`);
+		} catch (err) {
+			console.warn(`[session-manager] CLF-W3 thinking-router restore failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private clearThinkingRouterAppliedBaseline(session: SessionInfo): void {
+		session.thinkingRouterAppliedBaseline = undefined;
 	}
 
 	/**
@@ -3188,19 +3253,17 @@ export class SessionManager {
 
 		session.lastPromptSource = opts?.source ?? "user";
 
-		// CLF-W1b — F14 thinking-level router, OBSERVE MODE ONLY. Consulted once
-		// per `enqueuePrompt` call (the single pre-dispatch funnel design doc §3
+		// CLF-W1b/W3 — F14 thinking-level router. Consulted once per
+		// `enqueuePrompt` call (the single pre-dispatch funnel design doc §3
 		// names — direct/queued/extension/steer paths all converge here), on the
 		// user's verbatim `text` (never `dispatchText`, since the keyword rules
 		// describe user intent, not model-facing/expanded content). The returned
-		// Decision is recorded into the transparency trace by `dispatchDecision`
-		// itself (`ContextTraceStore.appendDecision`) — NOTHING here applies it;
-		// the session's live thinking level is untouched this wave (design doc
-		// §10 Wave 1 vs Wave 2). Fail-open/non-fatal: absence of a hub, an
-		// unregistered (point,kind) pair (e.g. a bare test `LifecycleHub` that
-		// never wired the router), or any classifier error must never block a
-		// prompt from dispatching — see design doc §6.1 (advisory kinds default
-		// fail-open).
+		// Decision is ALWAYS recorded into the transparency trace by
+		// `dispatchDecision` itself (`ContextTraceStore.appendDecision`).
+		// Fail-open/non-fatal: absence of a hub, an unregistered (point,kind)
+		// pair (e.g. a bare test `LifecycleHub` that never wired the router), or
+		// any classifier error must never block a prompt from dispatching — see
+		// design doc §6.1 (advisory kinds default fail-open).
 		// Guarded HERE (not inside the helper): when there is no hub at all —
 		// true for the overwhelming majority of today's tests and any deployment
 		// that never wires one — this must introduce ZERO extra microtask ticks
@@ -3209,7 +3272,41 @@ export class SessionManager {
 		// yields at least once even if the awaited async function resolves
 		// synchronously, so the guard has to live outside the `await`, not just
 		// inside it.
-		const thinkingRouterDecision = this.lifecycleHub ? await this.consultThinkingRouterHub(session, text) : undefined;
+		let thinkingRouterDecision: Decision<ThinkingLevel> | undefined;
+		if (this.lifecycleHub) {
+			// CLF-W3 apply mode: whether we WILL apply a `select` is decided here,
+			// from the mode flag + precedence (role/user-pinned) ONLY — never from
+			// the classifier's actual choice, which doesn't exist yet. Passed into
+			// the consult so the recorded outcome's `applied` field matches what
+			// we're about to do below. Observe mode (absent/"observe") always
+			// resolves `canApplyThinking` to `false`, keeping this byte-identical
+			// to CLF-W1b when the flag isn't set.
+			const canApplyThinking = isThinkingRouterApplyMode() && this.canApplyThinkingRouterDecision(session);
+			thinkingRouterDecision = await this.consultThinkingRouterHub(session, text, canApplyThinking);
+			if (canApplyThinking && thinkingRouterDecision?.kind === "select") {
+				try {
+					// Clamp against the session's CURRENT bound model before applying —
+					// same defense-in-depth every other live setThinkingLevel call site
+					// uses (ws/handler.ts's set_thinking_level, tryApplyDefaultThinkingLevel)
+					// so a classifier "xhigh" select degrades gracefully on a model that
+					// doesn't support it instead of sending an unsupported level to the
+					// runtime. Falls back to the raw choice when no model is known yet.
+					const baseline = session.thinkingRouterAppliedBaseline ?? this.resolveCurrentThinkingRouterBaseline(session);
+					const levelToApply = this.clampThinkingLevelForSession(session, thinkingRouterDecision.choice);
+					await session.rpcClient.setThinkingLevel(levelToApply);
+					session.thinkingRouterAppliedBaseline = baseline;
+					console.log(`[session-manager] CLF-W3 thinking-router APPLIED "${levelToApply}" for session ${session.id} (turn-scoped, not persisted)`);
+				} catch (err) {
+					console.warn(`[session-manager] CLF-W3 thinking-router apply failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else if (session.thinkingRouterAppliedBaseline && isThinkingRouterApplyMode()) {
+				if (canApplyThinking) {
+					await this.restoreThinkingRouterAppliedBaseline(session);
+				} else {
+					this.clearThinkingRouterAppliedBaseline(session);
+				}
+			}
+		}
 		// Stamped onto the QueuedMessage row at BOTH enqueue call sites below
 		// (the queued-path fix) — data-only, read by no code yet.
 		const thinkingDecisionStamp: QueuedMessage["thinkingDecision"] = thinkingRouterDecision
@@ -4577,6 +4674,7 @@ export class SessionManager {
 					granted: false,
 					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
 				});
+				this.appendToolPermissionAudit(session, pending, "denied", "auto");
 				return session.allowedTools ?? [];
 			}
 		}
@@ -4625,6 +4723,7 @@ export class SessionManager {
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
 			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			this.appendToolPermissionAudit(session, pending, "granted", "user");
 			return resultTools;
 		}
 
@@ -4655,6 +4754,28 @@ export class SessionManager {
 		}
 	}
 
+	private appendToolPermissionAudit(
+		session: SessionInfo,
+		ask: { toolName: string; toolGroup?: string; toolApproveDecision?: Decision<ToolApproveVerdict> },
+		decision: ToolPermissionAuditDecision,
+		source: ToolPermissionAuditSource,
+	): void {
+		try {
+			this.toolPermissionAuditLog.append(session.id, {
+				ts: Date.now(),
+				sessionId: session.id,
+				...(session.projectId ? { projectId: session.projectId } : {}),
+				toolName: ask.toolName,
+				...(ask.toolGroup ? { toolGroup: ask.toolGroup } : {}),
+				decision,
+				source,
+				...(ask.toolApproveDecision ? { toolApproveDecision: ask.toolApproveDecision } : {}),
+			});
+		} catch (err) {
+			console.warn(`[session-manager] tool-permission audit append failed for session ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
 	/**
 	 * Called by the guard extension's long-poll endpoint. Creates a pending
 	 * grant request, broadcasts to UI clients, and returns a promise that
@@ -4674,7 +4795,9 @@ export class SessionManager {
 		// If a previous grant request is still pending, resolve it as denied
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
@@ -4706,6 +4829,7 @@ export class SessionManager {
 		// mechanics via a directly-registered test classifier.
 		const toolApproveDecision = this.lifecycleHub ? await this.consultToolApproveHub(session, toolName, toolGroup) : undefined;
 		if (isToolApproveEnforceMode() && isAutoDenyDecision(toolApproveDecision)) {
+			this.appendToolPermissionAudit(session, { toolName, toolGroup, toolApproveDecision }, "denied", "auto");
 			return { granted: false, reason: toolApproveDecision.rationale ?? "Auto-denied by the tool-approve decision seam (CLF-W2, enforce mode)" };
 		}
 
@@ -4721,11 +4845,13 @@ export class SessionManager {
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
 			const timer = setTimeout(() => {
+				const pending = session.pendingGrantRequest;
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
+				if (pending) this.appendToolPermissionAudit(session, pending, "denied", "timeout");
 			}, 5 * 60 * 1000); // 5 minute timeout
 
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, toolApproveDecision, timer, seq, ts };
 		});
 
 		// Broadcast to UI clients
@@ -4757,6 +4883,7 @@ export class SessionManager {
 		const pending = session.pendingGrantRequest;
 		session.pendingGrantRequest = undefined;
 		pending.resolve({ granted: false });
+		this.appendToolPermissionAudit(session, pending, "denied", "user");
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
@@ -4967,6 +5094,7 @@ export class SessionManager {
 
 		const sessionCostTracker = this.resolveCostTracker(session);
 		const stampGoalId = session.goalId ?? session.teamGoalId;
+		const trigger = this.costTriggerFromEvent(session, event);
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
@@ -4979,7 +5107,7 @@ export class SessionManager {
 			// cost-tracker.ts's `cacheWrite1hTokens` doc.
 			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? usage.cacheWrite1h,
 			cost: costValue,
-		}, stampGoalId);
+		}, stampGoalId, trigger);
 
 		// SWARM-W1 — hard per-node token-budget governor (design/swarm-orchestration.md
 		// §6, must-fix #1): this `message_end` hook is the ONE place cumulative
@@ -4999,7 +5127,7 @@ export class SessionManager {
 					console.warn(`[swarm-governor] abort() failed for session ${session.id} (non-fatal):`, err);
 				}
 			} else if (action?.kind === "hard-kill") {
-				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason)
+				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason, { killReason: "governor-budget" })
 					.catch((err) => console.warn(`[swarm-governor] hardKillSwarmNode failed for goal ${stampGoalId} (non-fatal):`, err));
 			}
 		}
@@ -5019,6 +5147,16 @@ export class SessionManager {
 			taskId,
 			cost: cumulativeCost,
 		});
+	}
+
+	private costTriggerFromEvent(session: SessionInfo, event: any): string | undefined {
+		if (event.type !== "message_end") return undefined;
+		if (!session.isCompacting) return undefined;
+		const pending = (session as any)._pendingCompactionStart as
+			| { trigger?: "auto" | "overflow" }
+			| undefined;
+		const trigger = pending?.trigger ?? ((session as any)._manualCompactionId ? "manual" : undefined);
+		return trigger ? `compaction:${trigger}` : undefined;
 	}
 
 	/**
@@ -5602,6 +5740,7 @@ export class SessionManager {
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
+				promptProfile: ps.nonInteractive ? "reviewer" : undefined,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
@@ -5687,6 +5826,7 @@ export class SessionManager {
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+			thinkingLevelUserPinned: ps.thinkingLevelUserPinned,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreePushPolicy: ps.worktreePushPolicy,
@@ -5826,7 +5966,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; promptProfile?: PromptProfile; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -5981,6 +6121,7 @@ export class SessionManager {
 				role: opts?.role,
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
+				promptProfile: opts?.promptProfile,
 				agentArgs,
 				env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 				rolePrompt: resolvedRolePrompt,
@@ -6068,6 +6209,7 @@ export class SessionManager {
 			role: opts?.role,
 			accessory: opts?.accessory,
 			nonInteractive: opts?.nonInteractive,
+			promptProfile: opts?.promptProfile,
 			agentArgs,
 			env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 			rolePrompt: resolvedRolePrompt,
@@ -7298,6 +7440,7 @@ export class SessionManager {
 		claudeCodeModelAlias?: string;
 		modelProvider?: string;
 		modelId?: string;
+		thinkingLevelUserPinned?: boolean;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -7345,6 +7488,7 @@ export class SessionManager {
 				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
 				modelProvider: ps?.modelProvider,
 				modelId: ps?.modelId,
+				thinkingLevelUserPinned: s.thinkingLevelUserPinned,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 				repoPath: ps?.repoPath || s.repoPath,
@@ -7665,10 +7809,11 @@ export class SessionManager {
 			readOnly: respawnPersisted?.readOnly ?? session.readOnly,
 		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-		const rpcClient = createSessionBridge(bridgeOptions);
-		session.spawnPinnedModel = bridgeOptions.initialModel;
-		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		let switchingSession = true;
+			const rpcClient = createSessionBridge(bridgeOptions);
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+			session.thinkingRouterAppliedBaseline = undefined;
+			let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			if (isUserVisibleActivity(event)) {
@@ -7919,6 +8064,10 @@ export class SessionManager {
 		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
 	}
 
+	persistSessionThinkingUserPinned(sessionId: string, pinned: boolean): void {
+		this.resolveStoreForSession(sessionId).update(sessionId, { thinkingLevelUserPinned: pinned });
+	}
+
 	/** True when (provider, modelId) is registered as an available image model. */
 	isKnownImageModel(provider: string, modelId: string): boolean {
 		if (!this.preferencesStore) return false;
@@ -8037,7 +8186,9 @@ export class SessionManager {
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
@@ -8639,10 +8790,11 @@ export class SessionManager {
 				readOnly: forceRespawnPersisted?.readOnly ?? session.readOnly,
 			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-			const rpcClient = createSessionBridge(bridgeOptions);
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-			let switchingSession = true;
+		const rpcClient = createSessionBridge(bridgeOptions);
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		session.thinkingRouterAppliedBaseline = undefined;
+		let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				if (isUserVisibleActivity(event)) {

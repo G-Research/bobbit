@@ -89,6 +89,12 @@ import { registerServerSystemRoutes } from "./routes/server-system-routes.js";
 import { registerStaffMcpOperatorRoutes } from "./routes/staff-mcp-operator-routes.js";
 // STR-01 cohort 11: OAuth account routes.
 import { registerOauthAccountRoutes } from "./routes/oauth-account-routes.js";
+// STR-01 cohort 12: preferences routes.
+import { registerPreferencesRoutes } from "./routes/preferences-routes.js";
+// STR-01 cohort 13: config-directories routes.
+import { registerConfigDirectoriesRoutes } from "./routes/config-directories-routes.js";
+// STR-05: roles route-handler hoist.
+import { registerRolesRoutes } from "./routes/roles-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -111,6 +117,8 @@ import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecyc
 import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
 import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
+import { registerModelTierClassifier } from "./agent/model-tier-classifier.js";
+import { registerGateRiskClassifier } from "./agent/gate-risk-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -582,7 +590,6 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
 import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
-import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
@@ -592,10 +599,9 @@ import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieT
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
-import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
-import { consumeOperatorConfirmation, mintOperatorConfirmation, stableConfirmationBinding } from "./auth/operator-confirmation.js";
+import { stableConfirmationBinding } from "./auth/operator-confirmation.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
@@ -604,7 +610,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey, probeOpenAICompatModels } from "./agent/model-registry.js";
-import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
+import { sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -1889,6 +1895,19 @@ export function createGateway(config: GatewayConfig) {
 	if (isToolApproveHeuristicEnabled()) {
 		registerToolApproveHeuristicClassifier(sessionManager.lifecycleHub);
 	}
+	// CLF-W4 — model-tier classifier: registered unconditionally, same as the
+	// F14 thinking router above — this classifier has no apply/enforce mode at
+	// all this wave (see model-tier-classifier.ts's header for why), so there
+	// is nothing to gate behind a flag. Pure telemetry, zero behavior change.
+	registerModelTierClassifier(sessionManager.lifecycleHub);
+	// CLF-W5 — gate-risk classifier: registered unconditionally, same pattern
+	// as CLF-W4's model-tier classifier above — no apply/enforce mode this
+	// wave either (see gate-risk-classifier.ts's header for why). Pure
+	// telemetry, zero behavior change; the classifier's proposed
+	// low/medium/high label is the evidence VER-05's solo-fast auto-selection
+	// question needs (RECONCILIATION-2026-07-05.md's dark-flags lane), never
+	// applied by this wave.
+	registerGateRiskClassifier(sessionManager.lifecycleHub);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;
@@ -2764,8 +2783,8 @@ export function createGateway(config: GatewayConfig) {
 					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
 				}
 			}
-			writeContextWindowOverrides();
-			writeOpenAIModelAdditions();
+			await writeContextWindowOverrides();
+			await writeOpenAIModelAdditions();
 			// Re-discover configured custom local providers (Ollama/LM Studio/vLLM/
 			// llama.cpp/manual) and refresh their models.json entries so restarts
 			// pick up whatever's currently running without requiring a manual
@@ -3355,6 +3374,9 @@ registerMaintenanceRoutes(coreRouteTable);
 registerServerSystemRoutes(coreRouteTable);
 registerStaffMcpOperatorRoutes(coreRouteTable);
 registerOauthAccountRoutes(coreRouteTable);
+registerPreferencesRoutes(coreRouteTable);
+registerConfigDirectoriesRoutes(coreRouteTable);
+registerRolesRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3416,20 +3438,6 @@ async function handleApiRoute(
 		// so roles/tools match the skills wire shape (finding #3).
 		originPackId: r.originPackId ?? null,
 		originPackName: r.originPackName ?? null,
-	});
-	/**
-	 * Serialize a cascade-resolved role with origin metadata PLUS the per-field
-	 * `modelResolution` (model/thinkingLevel source hierarchy + editability) the
-	 * Roles list/detail UI uses to render accurate source badges. Backwards
-	 * compatible: existing top-level fields (model, thinkingLevel, origin…) are
-	 * preserved; `modelResolution` is purely additive.
-	 */
-	const withRoleResolution = (
-		r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null },
-		projectId?: string,
-	): Record<string, unknown> => ({
-		...withOrigin(r),
-		modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),
 	});
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
@@ -3606,7 +3614,11 @@ async function handleApiRoute(
 	// cohort 10, staff CRUD plus MCP operator/internal-MCP routes
 	// (src/server/routes/staff-mcp-operator-routes.ts).
 	// server/system routes (src/server/routes/server-system-routes.ts); cohort
-	// 11, OAuth account routes (src/server/routes/oauth-account-routes.ts).
+	// 11, OAuth account routes (src/server/routes/oauth-account-routes.ts);
+	// cohort 12, preferences routes (src/server/routes/preferences-routes.ts);
+	// cohort 13, config-directories routes
+	// (src/server/routes/config-directories-routes.ts);
+	// STR-05, roles routes (src/server/routes/roles-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3640,6 +3652,10 @@ async function handleApiRoute(
 				config, preferencesStore, sandboxManager: sandboxManager ?? undefined, getAigwUrl, writeProjectResolutionError,
 				// Cohort 10 (staff CRUD + MCP operator routes) additions — append-only.
 				groupPolicyStore, refreshMcpExternalTools, resolveRoleForProject,
+				// Cohort 12 (preferences routes) additions — append-only.
+				broadcastPreferencesChanged, claudeCodeConfirmationBinding, firstHeader, getSafePreferences, isHumanOperatorRequest,
+				// STR-05 roles route-hoist additions — append-only.
+				clampRoleThinking, resolveRequiredConfigProjectScope, roleManager, serverRoleStore, writeConfigProjectScopeError,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -3695,10 +3711,6 @@ async function handleApiRoute(
 		}
 		return { ok: true };
 	}
-
-	type RoleMutationTarget =
-		| { scope: "server"; store: RoleStore; manager: RoleManager }
-		| { scope: "project"; store: RoleStore; projectId: string };
 
 	/**
 	 * The hidden internal `system` project is compatibility-only and never a
@@ -3756,18 +3768,6 @@ async function handleApiRoute(
 
 	function writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void {
 		json({ error: error.error, code: error.code }, error.status);
-	}
-
-	/**
-	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
-	 * project ids still resolve to that project's role store.
-	 */
-	function resolveRoleMutationTarget(rawProjectId: unknown): { ok: true; target: RoleMutationTarget } | RequiredConfigProjectScopeError {
-		const resolved = resolveRequiredConfigProjectScope(rawProjectId, { aliasSystem: true });
-		if (!resolved.ok) return resolved;
-		if (!resolved.effectiveProjectId) return { ok: true, target: { scope: "server", store: serverRoleStore, manager: roleManager } };
-		if (!resolved.context) return { ok: false, status: 404, error: `Project not found: ${resolved.effectiveProjectId}`, code: "PROJECT_NOT_FOUND" };
-		return { ok: true, target: { scope: "project", store: resolved.context.roleStore, projectId: resolved.effectiveProjectId } };
 	}
 
 	/**
@@ -7044,7 +7044,7 @@ async function handleApiRoute(
 			return;
 		}
 		// Scope the mutation to a project-level store when projectId is given.
-		// Headquarters/system alias to server scope (mirrors resolveRoleMutationTarget).
+		// Headquarters/system alias to server scope (mirrors role mutation routes).
 		const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"), { aliasSystem: true });
 		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 		const targetStore: ToolGroupPolicyStore = projectScope.context?.toolGroupPolicyStore ?? groupPolicyStore;
@@ -7244,145 +7244,18 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/preferences/claude-code/confirmation — mint a short-lived operator confirmation
-	// for host-local Claude Code preferences that affect process execution or permission bypass.
-	if (url.pathname === "/api/preferences/claude-code/confirmation" && req.method === "POST") {
-		if (!isHumanOperatorRequest()) {
-			json({ error: "Claude Code preference confirmation requires an operator browser session" }, 403);
-			return;
-		}
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-		try {
-			confirmation = claudeCodeConfirmationBinding(body as Record<string, unknown>);
-		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 400);
-			return;
-		}
-		if (!confirmation.requiresConfirmation) {
-			json({ confirmationRequired: false, sensitiveKeys: [] });
-			return;
-		}
-		const minted = mintOperatorConfirmation({ purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-		json({ confirmationRequired: true, confirmationToken: minted.token, expiresAt: minted.expiresAt, sensitiveKeys: confirmation.keys });
-		return;
-	}
-
-	// GET /api/preferences — return all preferences (filter sensitive keys)
-	if (url.pathname === "/api/preferences" && req.method === "GET") {
-		json(getSafePreferences());
-		return;
-	}
-
-	// PUT /api/preferences — merge preferences
-	if (url.pathname === "/api/preferences" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const blockedAgentDirKeys = ["agentDir", "agentDirHistory"];
-		const blockedKey = Object.keys(body).find(key => blockedAgentDirKeys.includes(key));
-		if (blockedKey) {
-			json({
-				error: `${blockedKey} is managed by the agent directory settings workflow. Use PUT /api/agent-dir/pending instead.`,
-				code: "AGENT_DIR_PREFERENCE_FORBIDDEN",
-				key: blockedKey,
-				use: "/api/agent-dir/pending",
-			}, 400);
-			return;
-		}
-		const claudeCodePrefsChanged = Object.keys(body).some(isClaudeCodePreferenceKey);
-		let preferencePatch = body as Record<string, unknown>;
-		if (claudeCodePrefsChanged) {
-			let confirmation: { requiresConfirmation: boolean; keys: string[]; binding: string };
-			try {
-				confirmation = claudeCodeConfirmationBinding(preferencePatch);
-			} catch (err: any) {
-				json({ error: err?.message || String(err) }, 400);
-				return;
-			}
-			if (confirmation.requiresConfirmation) {
-				const token = firstHeader("x-bobbit-operator-confirmation");
-				const confirmed = isHumanOperatorRequest()
-					&& consumeOperatorConfirmation(token, { purpose: CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, binding: confirmation.binding });
-				if (!confirmed) {
-					json({
-						error: "Claude Code host-runtime preference changes require operator confirmation",
-						confirmationRequired: true,
-						sensitiveKeys: confirmation.keys,
-					}, 403);
-					return;
-				}
-			}
-			const normalized = normalizeClaudeCodePreferencePatch(preferencePatch, preferencesStore);
-			if (!normalized.ok) { json({ error: normalized.error }, 400); return; }
-			preferencePatch = { ...preferencePatch, ...normalized.values };
-		}
-		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
-		for (const [key, value] of Object.entries(preferencePatch)) {
-			if (key === "githubTrustedHosts") {
-				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
-				// authoritative. An empty/invalid list removes the key entirely.
-				const normalized = normalizeTrustedHosts(value);
-				if (normalized.length === 0) preferencesStore.remove(key);
-				else preferencesStore.set(key, normalized);
-			} else if (value === null || value === undefined) {
-				preferencesStore.remove(key);
-			} else {
-				preferencesStore.set(key, value);
-			}
-		}
-		if (claudeCodePrefsChanged) {
-			invalidateClaudeCodeStatusCache();
-			invalidateModelCache();
-		}
-		json(getSafePreferences());
-		broadcastPreferencesChanged();
-		if (headquartersVisibilityChanged) {
-			broadcastToAll({ type: "projects_changed", projects: listProjectsForApi() });
-		}
-		return;
-	}
+	// /api/preferences and /api/preferences/claude-code/confirmation moved to
+	// the core route registry (STR-01 cohort 12) — see
+	// src/server/routes/preferences-routes.ts and docs/design/route-registry.md.
 
 	// GET /api/project-config, GET /api/project-config/defaults, and (below)
 	// PUT /api/project-config moved to the core route registry (STR-01
 	// cohort 4) — see src/server/routes/project-config-server-routes.ts and
 	// docs/design/route-registry.md.
 
-	// GET /api/config-directories — return all scanned config directories
-	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		json(getAllConfigDirectories(resolved.project.rootPath, resolvedStore));
-		return;
-	}
-
-	// DELETE /api/config-directories — remove a built-in directory from scanning
-	if (url.pathname === "/api/config-directories" && req.method === "DELETE") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || typeof (body as any).path !== "string") {
-			json({ error: "Missing 'path' in body" }, 400);
-			return;
-		}
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId: (body as any).projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		removeBuiltinDirectory(resolvedStore, (body as any).path);
-		json({ ok: true });
-		return;
-	}
-
-	// POST /api/config-directories/reset — reset all config dirs to defaults
-	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
-		const body = await readBody(req);
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId: body && typeof body === "object" ? (body as any).projectId : undefined });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		resetConfigDirectories(resolvedStore);
-		json({ ok: true });
-		return;
-	}
+	// /api/config-directories* moved to the core route registry (STR-01
+	// cohort 13) — see src/server/routes/config-directories-routes.ts and
+	// docs/design/route-registry.md.
 
 	// ── Pack-Based Marketplace (design §9 / §9.1 / §9.2) ──────────────
 	// GET/POST/PUT/DELETE/PATCH /api/marketplace/* (sources, browse, install/
@@ -7638,7 +7511,7 @@ async function handleApiRoute(
 		preferencesStore.set("customProviders", filtered);
 		if (removed) {
 			try {
-				removeCustomProviderModelsJsonEntry(removed);
+				await removeCustomProviderModelsJsonEntry(removed);
 			} catch (err) {
 				console.error(`[custom-providers] Failed to remove "${removed.name}" from models.json:`, err);
 			}
@@ -7746,7 +7619,7 @@ async function handleApiRoute(
 
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
-		removeAigw(preferencesStore);
+		await removeAigw(preferencesStore);
 		invalidateModelCache();
 		broadcastPreferencesChanged();
 		json({ ok: true });
@@ -7892,269 +7765,8 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/roles/assistant/prompts — must come before :name route
-	if (url.pathname === "/api/roles/assistant/prompts" && req.method === "GET") {
-		const { ASSISTANT_REGISTRY } = await import("./agent/assistant-registry.js");
-		const prompts = Object.values(ASSISTANT_REGISTRY).map((def) => ({
-			type: def.type,
-			title: def.title,
-			promptTitle: def.promptTitle,
-			prompt: def.prompt,
-		}));
-		json({ prompts });
-		return;
-	}
-
-	// PUT /api/roles/assistant/prompts/:type
-	if (url.pathname.startsWith("/api/roles/assistant/prompts/") && req.method === "PUT") {
-		const type = url.pathname.slice("/api/roles/assistant/prompts/".length);
-		if (!type) {
-			json({ error: "Missing type parameter" }, 400);
-			return;
-		}
-		const body = await readBody(req);
-		const { updateAssistantDef } = await import("./agent/assistant-registry.js");
-		const updated = updateAssistantDef(type, {
-			prompt: body?.prompt,
-			title: body?.title,
-			promptTitle: body?.promptTitle,
-		});
-		if (!updated) {
-			json({ error: `Unknown assistant type: ${type}` }, 404);
-			return;
-		}
-		json(updated);
-		return;
-	}
-
-	// GET /api/roles (with cascade origin)
-	if (url.pathname === "/api/roles" && req.method === "GET") {
-		// Require an explicit projectId. `headquarters` aliases the server/global
-		// scope via normalizeConfigProjectId; use only the normalized value below.
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const effectiveConfigProjectId = projectScope.effectiveProjectId;
-		const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
-		json({ roles: resolved.map(r => withRoleResolution(r as any, effectiveConfigProjectId)) });
-		return;
-	}
-
-	// POST /api/roles (scope-aware: body.projectId → create in that project's store; Headquarters aliases server scope)
-	if (url.pathname === "/api/roles" && req.method === "POST") {
-		const body = await readBody(req);
-		try {
-			const resolvedTarget = resolveRoleMutationTarget(body?.projectId ?? url.searchParams.get("projectId"));
-			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
-			const target = resolvedTarget.target;
-			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-			if (target.scope === "server") {
-				const role = target.manager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
-				});
-				json(role, 201);
-			} else {
-				const now = Date.now();
-				const role = {
-					name: body?.name,
-					label: body?.label ?? body?.name,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory ?? "none",
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
-				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				target.store.put(role);
-				json(role, 201);
-			}
-		} catch (err: any) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/roles/:name/customize — copy resolved role to a target scope
-	const roleCustomizeMatch = url.pathname.match(/^\/api\/roles\/([^/]+)\/customize$/);
-	if (roleCustomizeMatch && req.method === "POST") {
-		const name = decodeURIComponent(roleCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const projectId = projectScope.effectiveProjectId;
-
-		const resolved = configCascade.resolveRoles(projectId);
-		const source = resolved.find(r => r.item.name === name);
-		if (!source) { json({ error: "Role not found" }, 404); return; }
-
-		let targetStore: RoleStore;
-		if (scope === "project" && projectId) {
-			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
-		} else {
-			// scope === "server" (or Headquarters project scope) → system/server layer
-			targetStore = serverRoleStore;
-		}
-
-		const now = Date.now();
-		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		targetStore.put(copy);
-		json(copy, 201);
-		return;
-	}
-
-	// DELETE /api/roles/:name/override — remove override at a scope, reverting to inherited
-	const roleOverrideMatch = url.pathname.match(/^\/api\/roles\/([^/]+)\/override$/);
-	if (roleOverrideMatch && req.method === "DELETE") {
-		const name = decodeURIComponent(roleOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const projectId = projectScope.effectiveProjectId;
-
-		let targetStore: RoleStore;
-		if (scope === "project" && projectId) {
-			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
-		} else {
-			// scope === "server" (or Headquarters project scope) → system/server layer
-			targetStore = serverRoleStore;
-		}
-
-		targetStore.remove(name);
-		json({ ok: true });
-		return;
-	}
-
-	// Routes with role :name parameter
-	const roleMatch = url.pathname.match(/^\/api\/roles\/([^/]+)$/);
-	if (roleMatch) {
-		const name = decodeURIComponent(roleMatch[1]);
-
-		if (req.method === "GET") {
-			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
-			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-			const effectiveConfigProjectId = projectScope.effectiveProjectId;
-			const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
-			const found = resolved.find(r => r.item.name === name);
-			if (found) {
-				json(withRoleResolution(found as any, effectiveConfigProjectId));
-			} else if (!effectiveConfigProjectId) {
-				const role = roleManager.getRole(name);
-				if (!role) { json({ error: "Role not found" }, 404); return; }
-				json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name, effectiveConfigProjectId) });
-			} else {
-				json({ error: "Role not found" }, 404);
-			}
-			return;
-		}
-
-		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
-			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
-			const target = resolvedTarget.target;
-			if (target.scope === "project") {
-				const existing = target.store.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
-				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-				let toolPolicies = existing.toolPolicies;
-				if (body.toolPolicies !== undefined) {
-					const cleaned: Record<string, any> = {};
-					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-						for (const [k, v] of Object.entries(body.toolPolicies)) {
-							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v;
-						}
-					}
-					toolPolicies = cleaned;
-				}
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				let model = existing.model;
-				if (body.model !== undefined) {
-					model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				}
-				let thinkingLevel = existing.thinkingLevel;
-				if (body.thinkingLevel !== undefined) {
-					thinkingLevel = clampRoleThinking(body.thinkingLevel, model);
-				}
-				const updated = {
-					...existing,
-					label: body.label ?? existing.label,
-					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
-					accessory: body.accessory ?? existing.accessory,
-					toolPolicies,
-					model,
-					thinkingLevel,
-					name,
-					updatedAt: Date.now(),
-				};
-				target.store.put(updated);
-				json({ ok: true });
-			} else {
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				const modelUpdate = body.model !== undefined
-					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
-					: undefined;
-				const thinkingUpdate = body.thinkingLevel !== undefined
-					? (clampRoleThinking(body.thinkingLevel, typeof modelUpdate === "string" ? modelUpdate : undefined) ?? "")
-					: undefined;
-				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
-				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = target.manager.getRole(name);
-					if (existing) {
-						const patched = {
-							...existing,
-							model: modelUpdate !== undefined ? (modelUpdate || undefined) : existing.model,
-							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
-							updatedAt: Date.now(),
-						};
-						target.store.put(patched);
-					}
-				}
-				const ok = target.manager.updateRole(name, {
-					label: body.label,
-					promptTemplate: body.promptTemplate,
-					accessory: body.accessory,
-					toolPolicies: body.toolPolicies !== undefined ? (() => {
-						const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-						const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
-						if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-							for (const [k, v] of Object.entries(body.toolPolicies)) {
-								if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
-							}
-						}
-						return cleaned;
-					})() : undefined,
-				});
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
-			}
-			return;
-		}
-
-		if (req.method === "DELETE") {
-			const resolvedTarget = resolveRoleMutationTarget(url.searchParams.get("projectId"));
-			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
-			const target = resolvedTarget.target;
-			if (target.scope === "project") {
-				target.store.remove(name);
-				json({ ok: true });
-			} else {
-				const ok = target.manager.deleteRole(name);
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
-			}
-			return;
-		}
-	}
+	// /api/roles* moved to the core route registry (STR-05) — see
+	// src/server/routes/roles-routes.ts and docs/design/route-registry.md.
 
 	// ── Task endpoints ─────────────────────────────────────────────
 
@@ -8851,8 +8463,10 @@ async function handleApiRoute(
 			const existingGateForCache = gateStore.getGate(goalId, gateId);
 			if (existingGateForCache) {
 				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
+				const incomingContent = typeof body?.content === "string" ? body.content : "";
 				const priorPassed = existingGateForCache.signals.find(s =>
 					s.commitSha === commitSha
+					&& ((typeof s.content === "string" ? s.content : "") === incomingContent)
 					&& s.verification?.status === "passed"
 					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
 					&& !s.verification.steps.some(step => step.type === "human-signoff")

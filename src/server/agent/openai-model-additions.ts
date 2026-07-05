@@ -1,10 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
+// Pure static-catalog read — durable pi-ai 0.80 replacement, no /compat needed.
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
-import { getModels } from "@earendil-works/pi-ai";
-
-import { globalAgentDir } from "../bobbit-dir.js";
 import type { ApiModel } from "./model-registry.js";
+import { updateModelsJson } from "./models-json-store.js";
 
 // `authenticated` is resolved at registry-merge time; session/runtime selector
 // metadata is owned by registry emitters and is never carried by an OpenAI addition.
@@ -123,39 +121,6 @@ export function getOpenAIModelAdditions(provider: string): OpenAIAddition[] {
 	return OPENAI_MODEL_ADDITIONS.filter((model) => model.provider === provider);
 }
 
-function getModelsJsonPath(): string {
-	return path.join(globalAgentDir(), "models.json");
-}
-
-function readModelsJson(): Record<string, any> {
-	const p = getModelsJsonPath();
-	try {
-		if (fs.existsSync(p)) {
-			return JSON.parse(fs.readFileSync(p, "utf-8"));
-		}
-	} catch (err) {
-		console.error("[openai-model-additions] Failed to read models.json:", err);
-	}
-	return { providers: {} };
-}
-
-function writeModelsJson(data: Record<string, any>): void {
-	const p = getModelsJsonPath();
-	const dir = path.dirname(p);
-	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-	const tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-	try {
-		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-		fs.renameSync(tmp, p);
-	} catch (err) {
-		try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
-		throw err;
-	}
-	if (process.env.BOBBIT_DEBUG) {
-		console.log(`[openai-model-additions] Wrote models.json to ${p}`);
-	}
-}
-
 function valuesEqual(a: unknown, b: unknown): boolean {
 	if (a === b) return true;
 	if (a == null || b == null) return false;
@@ -172,7 +137,7 @@ function valuesEqual(a: unknown, b: unknown): boolean {
 
 function getBuiltInModel(provider: string, id: string): Record<string, unknown> | undefined {
 	try {
-		return (getModels(provider as any) as unknown as Array<Record<string, unknown>>).find((m) => m.id === id);
+		return (getBuiltinModels(provider as any) as unknown as Array<Record<string, unknown>>).find((m) => m.id === id);
 	} catch {
 		return undefined;
 	}
@@ -271,75 +236,79 @@ function pruneEmptyProviderBlocks(data: Record<string, any>): boolean {
 	return changed;
 }
 
-export function writeOpenAIModelAdditions(): void {
-	const data = readModelsJson();
-	if (!data.providers) data.providers = {};
+export async function writeOpenAIModelAdditions(): Promise<void> {
+	await updateModelsJson(
+		(data) => {
+			if (!data.providers) data.providers = {};
 
-	let changed = false;
-	for (const model of DEPRECATED_OPENAI_MODEL_ADDITIONS) {
-		const providerBlock = data.providers[model.provider];
-		const models = providerBlock?.models;
-		if (!Array.isArray(models)) continue;
-		const existing = models.find((m: Record<string, unknown>) => m.id === model.id) as Record<string, unknown> | undefined;
-		if (existing) {
-			models.splice(models.indexOf(existing), 1);
-			changed = true;
-		}
-	}
-
-	for (const model of OPENAI_MODEL_ADDITIONS) {
-		const provider = model.provider;
-		const builtIn = getBuiltInModel(provider, model.id);
-		if (builtIn && !data.providers[provider]) continue;
-
-		if (!data.providers[provider]) data.providers[provider] = {};
-		if (!Array.isArray(data.providers[provider].models)) data.providers[provider].models = [];
-
-		const models = data.providers[provider].models as Array<Record<string, unknown>>;
-		const existing = models.find((m) => m.id === model.id) as Record<string, unknown> | undefined;
-
-		if (builtIn) {
-			if (existing && syncOrRemoveBuiltInDuplicate(provider, model, builtIn, models, existing)) changed = true;
-			continue;
-		}
-
-		if (!existing) {
-			// Entry missing entirely — write the full default payload.
-			models.push({
-				id: model.id,
-				name: model.name,
-				api: model.api,
-				baseUrl: model.baseUrl,
-				reasoning: model.reasoning,
-				thinkingLevelMap: model.thinkingLevelMap,
-				input: model.input,
-				cost: model.cost,
-				contextWindow: model.contextWindow,
-				maxTokens: model.maxTokens,
-			});
-			changed = true;
-			continue;
-		}
-
-		// Entry exists — write each field only if (a) missing, or (b) the existing
-		// value still matches a previously-emitted default (i.e. user hasn't edited it).
-		for (const field of ADDITION_FIELDS) {
-			const desired = (model as Record<string, unknown>)[field];
-			const current = existing[field];
-			if (current === undefined) {
-				existing[field] = desired;
-				changed = true;
-				continue;
+			let changed = false;
+			for (const model of DEPRECATED_OPENAI_MODEL_ADDITIONS) {
+				const providerBlock = data.providers[model.provider];
+				const models = providerBlock?.models;
+				if (!Array.isArray(models)) continue;
+				const existing = models.find((m: Record<string, unknown>) => m.id === model.id) as Record<string, unknown> | undefined;
+				if (existing) {
+					models.splice(models.indexOf(existing), 1);
+					changed = true;
+				}
 			}
-			if (valuesEqual(current, desired)) continue;
-			if (isBobbitOwned(provider, model.id, field, current, desired)) {
-				existing[field] = desired;
-				changed = true;
-			}
-			// Otherwise: user has edited this field — preserve their value.
-		}
-	}
 
-	if (pruneEmptyProviderBlocks(data)) changed = true;
-	if (changed) writeModelsJson(data);
+			for (const model of OPENAI_MODEL_ADDITIONS) {
+				const provider = model.provider;
+				const builtIn = getBuiltInModel(provider, model.id);
+				if (builtIn && !data.providers[provider]) continue;
+
+				if (!data.providers[provider]) data.providers[provider] = {};
+				if (!Array.isArray(data.providers[provider].models)) data.providers[provider].models = [];
+
+				const models = data.providers[provider].models as Array<Record<string, unknown>>;
+				const existing = models.find((m) => m.id === model.id) as Record<string, unknown> | undefined;
+
+				if (builtIn) {
+					if (existing && syncOrRemoveBuiltInDuplicate(provider, model, builtIn, models, existing)) changed = true;
+					continue;
+				}
+
+				if (!existing) {
+					// Entry missing entirely — write the full default payload.
+					models.push({
+						id: model.id,
+						name: model.name,
+						api: model.api,
+						baseUrl: model.baseUrl,
+						reasoning: model.reasoning,
+						thinkingLevelMap: model.thinkingLevelMap,
+						input: model.input,
+						cost: model.cost,
+						contextWindow: model.contextWindow,
+						maxTokens: model.maxTokens,
+					});
+					changed = true;
+					continue;
+				}
+
+				// Entry exists — write each field only if (a) missing, or (b) the existing
+				// value still matches a previously-emitted default (i.e. user hasn't edited it).
+				for (const field of ADDITION_FIELDS) {
+					const desired = (model as Record<string, unknown>)[field];
+					const current = existing[field];
+					if (current === undefined) {
+						existing[field] = desired;
+						changed = true;
+						continue;
+					}
+					if (valuesEqual(current, desired)) continue;
+					if (isBobbitOwned(provider, model.id, field, current, desired)) {
+						existing[field] = desired;
+						changed = true;
+					}
+					// Otherwise: user has edited this field — preserve their value.
+				}
+			}
+
+			if (pruneEmptyProviderBlocks(data)) changed = true;
+			return changed;
+		},
+		{ logPrefix: "[openai-model-additions]", debugOnly: true, write: (changed) => changed },
+	);
 }

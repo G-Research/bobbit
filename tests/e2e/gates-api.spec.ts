@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, base, nonGitCwd, gitCwd, injectDefaultProjectId } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
@@ -23,13 +23,15 @@ async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
 }
 
 /** Create a goal with a specific workflow, returning its ID. */
-async function createGoalWithWorkflow(workflowId: string): Promise<string> {
+async function createGoalWithWorkflow(workflowId: string, cwd = nonGitCwd()): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `Gate Test ${workflowId} ${Date.now()}`,
-			cwd: nonGitCwd(),
+			cwd,
 			team: false,
+			worktree: false,
+			autoStartTeam: false,
 			workflowId,
 		}),
 	});
@@ -236,6 +238,28 @@ test.describe("Gates API", () => {
 			const contentResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/content`);
 			const { version } = await contentResp.json();
 			expect(version).toBe(2);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("same-commit auto-pass is content-keyed", async () => {
+		const goalId = await createGoalWithWorkflow("general", gitCwd());
+		try {
+			const firstContent = "# Design v1\n\nApproach: A\nFiles: x.ts\nCriteria: P";
+			const changedContent = "# Design v2\n\nApproach: B\nFiles: y.ts\nCriteria: Q";
+
+			const firstSignal = await signalGate(goalId, "design-doc", { content: firstContent });
+			await waitForSignalVerificationStatus(goalId, "design-doc", firstSignal.signal.id, "passed");
+
+			const sameContentSignal = await signalGate(goalId, "design-doc", { content: firstContent });
+			expect(sameContentSignal.signal.cached).toBe(true);
+			expect(sameContentSignal.signal.status).toBe("passed");
+
+			const changedContentSignal = await signalGate(goalId, "design-doc", { content: changedContent });
+			expect(changedContentSignal.signal.cached).toBeUndefined();
+			expect(changedContentSignal.signal.status).toBe("running");
+			await waitForSignalVerificationStatus(goalId, "design-doc", changedContentSignal.signal.id, "passed");
 		} finally {
 			await deleteGoal(goalId);
 		}

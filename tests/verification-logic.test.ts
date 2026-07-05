@@ -15,6 +15,7 @@ import {
 	getSortedPhases,
 	computeEarlyReviewPhases,
 	isParallelReviewsEnabled,
+	isRetryAfterCommandFailure,
 	isCommandStepSkippable,
 	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
@@ -743,16 +744,86 @@ function reviewStep(name: string, opts: Record<string, unknown> = {}): any {
 }
 
 describe("isParallelReviewsEnabled", () => {
-	it("is off for undefined, empty, and any value other than the literal \"1\"", () => {
-		assert.equal(isParallelReviewsEnabled(undefined), false);
-		assert.equal(isParallelReviewsEnabled(""), false);
-		assert.equal(isParallelReviewsEnabled("0"), false);
-		assert.equal(isParallelReviewsEnabled("true"), false);
-		assert.equal(isParallelReviewsEnabled("yes"), false);
+	it("is on (default-on / opt-out) for undefined, empty, and any value other than the literal \"0\"", () => {
+		assert.equal(isParallelReviewsEnabled(undefined), true);
+		assert.equal(isParallelReviewsEnabled(""), true);
+		assert.equal(isParallelReviewsEnabled("1"), true);
+		assert.equal(isParallelReviewsEnabled("true"), true);
+		assert.equal(isParallelReviewsEnabled("yes"), true);
 	});
 
-	it("is on only for the literal string \"1\"", () => {
-		assert.equal(isParallelReviewsEnabled("1"), true);
+	it("is off only for the literal string \"0\"", () => {
+		assert.equal(isParallelReviewsEnabled("0"), false);
+	});
+});
+
+describe("isRetryAfterCommandFailure", () => {
+	it("is false when there is no prior signal for the gate (fresh verify)", () => {
+		assert.equal(isRetryAfterCommandFailure([], "sig-1"), false);
+	});
+
+	it("is false when the most recent prior signal's command track passed", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "passed", steps: [{ name: "Build", passed: true, type: "command" }] }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), false);
+	});
+
+	it("is true when the most recent prior signal has a failed, non-skipped command-track step", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "failed", steps: [{ name: "Unit tests", passed: false, type: "command" }] }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), true);
+	});
+
+	it("is false when only an llm-review step failed (a review-only failure is not a command-track failure)", () => {
+		const sigs = [
+			signal("sig-0", "abc", {
+				status: "failed",
+				steps: [
+					{ name: "Build", passed: true, type: "command" },
+					{ name: "Code quality review", passed: false, type: "llm-review" },
+				],
+			}),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), false);
+	});
+
+	it("ignores a failed step that was skipped", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "failed", steps: [{ name: "e2e", passed: false, type: "command", skipped: true } as any] }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), false);
+	});
+
+	it("ignores the currently in-flight signal itself", () => {
+		const sigs = [
+			signal("sig-1", "abc", { status: "failed", steps: [{ name: "Build", passed: false, type: "command" }] }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), false);
+	});
+
+	it("ignores a still-running prior signal", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "running", steps: [{ name: "Build", passed: false, type: "command" }] }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-1"), false);
+	});
+
+	it("only consults the MOST RECENT completed prior signal, not older history", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "failed", steps: [{ name: "Build", passed: false, type: "command" }] }, { timestamp: 1000 }),
+			signal("sig-1", "def", { status: "passed", steps: [{ name: "Build", passed: true, type: "command" }] }, { timestamp: 2000 }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-2"), false);
+	});
+
+	it("is true when the most recent completed prior signal (by timestamp) failed, even if an older one passed", () => {
+		const sigs = [
+			signal("sig-0", "abc", { status: "passed", steps: [{ name: "Build", passed: true, type: "command" }] }, { timestamp: 1000 }),
+			signal("sig-1", "def", { status: "failed", steps: [{ name: "Build", passed: false, type: "command" }] }, { timestamp: 2000 }),
+		];
+		assert.equal(isRetryAfterCommandFailure(sigs, "sig-2"), true);
 	});
 });
 

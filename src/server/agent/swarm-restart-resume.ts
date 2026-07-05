@@ -135,7 +135,7 @@ export function reArmSwarmGovernorsOnBoot(
 					},
 					(reason) => {
 						harness
-							.hardKillSwarmNode(goalId, reason)
+							.hardKillSwarmNode(goalId, reason, { killReason: "governor-wallclock" })
 							.catch((err) => console.warn(`[swarm-restart-resume] straggler hard-kill failed for ${goalId} (non-fatal):`, err));
 					},
 					{ elapsedMs },

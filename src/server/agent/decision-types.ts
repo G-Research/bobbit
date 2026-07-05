@@ -27,6 +27,13 @@ export const DECISION_POINTS = [
 	"tool-call",
 	"turn-boundary",
 	"compaction",
+	// CLF-W4 — session spawn, where the model/thinking-tier for a new session
+	// is resolved (see model-tier-classifier.ts's header for the full design).
+	"session-spawn",
+	// CLF-W5 — gate verification, where a signal's diff shape (changed-file
+	// count/path-classes/high-risk surfaces) is known before its verify[]
+	// steps run (see gate-risk-classifier.ts's header for the full design).
+	"gate-verify",
 ] as const;
 
 export type DecisionPoint = (typeof DECISION_POINTS)[number];
@@ -80,6 +87,17 @@ export interface DecisionOutcome {
 	consulted: string[];
 	decision: Decision;
 	ms: number;
+	/**
+	 * CLF-W3 — whether a `select` decision was actually applied to live session
+	 * state, as opposed to merely recorded for telemetry. Set by the CALLER via
+	 * `dispatchDecision`'s `opts.applyIfSelected` (decided BEFORE the classifier
+	 * runs, from mode-flag + precedence checks only — never from the resulting
+	 * `choice`), not computed here. Omitted for `abstain` outcomes (never
+	 * meaningful) and for any caller that doesn't pass `opts.applyIfSelected` at
+	 * all (every pre-CLF-W3 call site) — those stay exactly as before, byte-
+	 * identical. See `dispatchDecision`'s doc comment.
+	 */
+	applied?: boolean;
 }
 
 /** The allow-list / registration map key for a (point, kind) pair. */

@@ -240,7 +240,28 @@ function collectClientReferences(): ClientReference[] {
  * `type` union at the call site would require real type-flow analysis,
  * disproportionate for two call sites.
  */
-const ALLOWLIST = new Set<string>(["/api/0/0/customize", "/api/0/0/override"]);
+/**
+ * `src/app/pi-ai-lazy.ts` dynamically imports pi-ai 0.80's per-API lazy
+ * stream factories, e.g. `import("@earendil-works/pi-ai/api/anthropic-messages.lazy")`.
+ * The extractor's tokenizer has no concept of `import()` vs `fetch()` — it
+ * flags any quoted literal containing "/api/", so these npm subpath
+ * specifiers get misread as server route paths ("/api/anthropic-messages.lazy"
+ * etc.) once the "/api/" prefix inside the specifier is sliced off. They are
+ * not HTTP routes at all — verified against src/app/pi-ai-lazy.ts's 8
+ * `case "..."` branches (one per pi-ai API id).
+ */
+const ALLOWLIST = new Set<string>([
+	"/api/0/0/customize",
+	"/api/0/0/override",
+	"/api/anthropic-messages.lazy",
+	"/api/azure-openai-responses.lazy",
+	"/api/google-generative-ai.lazy",
+	"/api/google-vertex.lazy",
+	"/api/mistral-conversations.lazy",
+	"/api/openai-codex-responses.lazy",
+	"/api/openai-completions.lazy",
+	"/api/openai-responses.lazy",
+]);
 
 // ── 3. Known-missing burn-down list — real orphans pending restoration on open PRs ──
 

@@ -173,7 +173,7 @@ describe("AI Gateway pricing metadata", () => {
 			try {
 				const discoveredModels = await discoverAigwModels(mock.url);
 
-				writeAigwModelsJson(`${mock.url}/v1`, discoveredModels);
+				await writeAigwModelsJson(`${mock.url}/v1`, discoveredModels);
 
 				const data = readModelsJson(tmpAgentDir);
 				const persistedModels = data.providers.aigw.models;

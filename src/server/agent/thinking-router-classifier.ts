@@ -6,14 +6,33 @@
 // ("Regex `ultrathink`→xhigh (0 tokens); else `ambiguous`→cheap model") and
 // §10 Wave 1 ("deterministic-only ... no model-backed tiebreak yet").
 //
-// OBSERVE MODE ONLY (this wave): `SessionManager.enqueuePrompt` consults this
-// classifier and the resulting `Decision` is recorded into the transparency
-// trace via `LifecycleHub.dispatchDecision` → `ContextTraceStore.appendDecision`,
-// but NOTHING applies it — no `setThinkingLevel` call exists on this path yet.
+// OBSERVE MODE (default, unchanged since W1b): `SessionManager.enqueuePrompt`
+// consults this classifier and the resulting `Decision` is recorded into the
+// transparency trace via `LifecycleHub.dispatchDecision` → `ContextTraceStore
+// .appendDecision`, but nothing applies it — no `setThinkingLevel` call runs.
 // The session's live thinking level is only ever changed by the pre-existing
 // role/spawn-time resolution (`resolveInitialThinkingLevel`) and explicit user
-// action. Applying this Decision (transient `setThinkingLevel` per turn) is
-// Wave 2's job (design doc §10).
+// action (`set_thinking_level`, ws/handler.ts).
+//
+// CLF-W3 — APPLY MODE (`BOBBIT_CLF_THINKING_ROUTER=enforce`, see
+// `isThinkingRouterApplyMode` below): `enqueuePrompt` calls
+// `session.rpcClient.setThinkingLevel(choice)` with the classifier's exact
+// `select`ed level, transiently for that turn only. The pre-apply effective
+// level is remembered in live `SessionInfo` and restored on the next apply-mode
+// prompt where the router does not select; neither the escalation nor the
+// restore marker is persisted as `spawnPinnedThinkingLevel`. Three states mirror
+// the tool-approve-heuristic pattern exactly (`isToolApproveEnforceMode`):
+// absent or any value other than the literal string `"enforce"` (including
+// `"observe"`) stays observe-only, byte-identical to W1b.
+//
+// PRECEDENCE (pinned invariant — the classifier must lose to any config a
+// human already committed to): apply mode never fires when
+// `SessionManager.resolveRoleThinkingLevel(session)` returns a role-level
+// override, or when `session.thinkingLevelUserPinned` is true (set only by
+// the explicit `set_thinking_level` ws action — never by spawn-time default
+// resolution). See `SessionManager.canApplyThinkingRouterDecision`. An
+// `abstain` never calls `setThinkingLevel` regardless of mode — there is
+// nothing to apply.
 //
 // Deterministic-only discipline: the design doc names "heuristic tiers" as a
 // Wave-1 aspiration but gives no concrete deterministic rule for prompt-shape
@@ -92,6 +111,17 @@ export const thinkingRouterClassifier: DecisionClassifier<ThinkingLevel> = {
 		return classifyThinkingLevel(arg.text);
 	},
 };
+
+/** Reads the flag LIVE (not cached at module load) so tests can flip it
+ *  in-process without re-importing — same idiom as
+ *  `isToolApproveEnforceMode()` (tool-approve-classifier.ts). Default is
+ *  OBSERVE: any value other than the exact string "enforce" (including
+ *  unset, or the explicit "observe") stays observe-only, byte-identical to
+ *  CLF-W1b. See this file's header for the precedence rules apply mode must
+ *  still honor. */
+export function isThinkingRouterApplyMode(): boolean {
+	return process.env.BOBBIT_CLF_THINKING_ROUTER === "enforce";
+}
 
 /**
  * Registers the built-in thinking router at `(user-prompt-submit, thinking)`.

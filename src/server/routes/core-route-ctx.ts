@@ -35,7 +35,8 @@ import type { ReviewAnnotationStore } from "../review-annotation-store.js";
 import type { BgProcessManager } from "../agent/bg-process-manager.js";
 import type { ToolManager } from "../agent/tool-manager.js";
 import type { ToolGroupPolicyStore } from "../agent/tool-group-policy-store.js";
-import type { Role } from "../agent/role-store.js";
+import type { Role, RoleStore } from "../agent/role-store.js";
+import type { RoleManager } from "../agent/role-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
@@ -58,6 +59,20 @@ export interface PackRuntimeSupervisorLike {
 	capabilitySummary(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string; config?: Record<string, unknown> }): Promise<PackRuntimeCapabilitySummary>;
 	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
 }
+
+export type RequiredConfigProjectScope = {
+	ok: true;
+	requestedProjectId: string;
+	effectiveProjectId?: string;
+	context?: ProjectContext;
+};
+
+export type RequiredConfigProjectScopeError = {
+	ok: false;
+	status: 400 | 404;
+	error: string;
+	code: string;
+};
 
 export interface CoreRouteCtx {
 	req: http.IncomingMessage;
@@ -216,4 +231,18 @@ export interface CoreRouteCtx {
 	groupPolicyStore: ToolGroupPolicyStore;
 	refreshMcpExternalTools(): void;
 	resolveRoleForProject(roleId: string, projectId?: string): Role | undefined;
+
+	// ── Cohort 12 (preferences routes) additions — append-only.
+	broadcastPreferencesChanged(): void;
+	claudeCodeConfirmationBinding(patch: Record<string, unknown>): { requiresConfirmation: boolean; keys: string[]; binding: string };
+	firstHeader(name: string): string | undefined;
+	getSafePreferences(): Record<string, unknown>;
+	isHumanOperatorRequest(): boolean;
+
+	// ── STR-05 roles route-hoist additions — append-only.
+	clampRoleThinking(value: unknown, modelStr: string | undefined): string | undefined;
+	resolveRequiredConfigProjectScope(projectIdValue: unknown, opts?: { aliasSystem?: boolean }): RequiredConfigProjectScope | RequiredConfigProjectScopeError;
+	roleManager: RoleManager;
+	serverRoleStore: RoleStore;
+	writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void;
 }

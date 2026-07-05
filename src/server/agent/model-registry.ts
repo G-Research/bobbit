@@ -12,14 +12,18 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels, getModel } from "@earendil-works/pi-ai";
+// Pure static-catalog reads — the durable pi-ai 0.80 replacement for the old
+// root `getProviders`/`getModels`/`getModel`. No `/compat` needed here since
+// none of these calls stream/complete a request.
+import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
-import { inferMeta, discoverAigwModels, getAigwUrl, readModelsJson, writeModelsJson } from "./aigw-manager.js";
+import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { CLAUDE_CODE_MODEL_ALIASES } from "./claude-code-config.js";
 import { getClaudeCodeStatus } from "./claude-code-status.js";
+import { updateModelsJson } from "./models-json-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -209,7 +213,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getModel(normalizedProvider as any, modelId as any) as {
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
 				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
 				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
 			} | undefined;
@@ -246,7 +250,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
  * Results are cached for 5 seconds.
  */
 export function getBuiltInProviderIds(): string[] {
-	return getProviders().map(provider => String(provider));
+	return getBuiltinProviders().map(provider => String(provider));
 }
 
 export async function getAvailableModels(
@@ -324,9 +328,9 @@ async function assembleModels(prefs: PreferencesStore, projectConfig?: { get(key
 	if (!aigwExclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
-			const providers = getProviders();
+			const providers = getBuiltinProviders();
 			for (const providerId of providers) {
-				const models = getModels(providerId as any);
+				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
 				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
 				const mergedModels = [
@@ -629,14 +633,7 @@ const LOCAL_OPENAI_COMPAT = {
  */
 export async function syncCustomProviderModelsJson(prefs: PreferencesStore): Promise<void> {
 	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
-	const data = readModelsJson();
-	const previousKeys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
-
-	// Common case: no custom providers configured, and none ever were —
-	// nothing to discover or prune, skip the read-modify-write entirely.
-	if (configs.length === 0 && previousKeys.length === 0) return;
-
-	if (!data.providers) data.providers = {};
+	const discovered: Array<{ key: string; config: CustomProviderConfig; models: ApiModel[] }> = [];
 	const nextKeys: string[] = [];
 
 	for (const config of configs) {
@@ -648,52 +645,70 @@ export async function syncCustomProviderModelsJson(prefs: PreferencesStore): Pro
 		try {
 			const models = await discoverFromSingleConfig(config);
 			if (models.length === 0) continue;
-			data.providers[key] = {
-				baseUrl: `${config.baseUrl.replace(/\/+$/, "")}/v1`,
-				apiKey: config.apiKey || "none",
-				api: "openai-completions",
-				models: models.map(m => ({
-					id: m.id,
-					name: m.name,
-					contextWindow: m.contextWindow,
-					maxTokens: m.maxTokens,
-					reasoning: m.reasoning,
-					input: m.input,
-					cost: m.cost,
-					compat: LOCAL_OPENAI_COMPAT,
-				})),
-			};
+			discovered.push({ key, config, models });
 			nextKeys.push(key);
 		} catch (err) {
 			console.error(`[model-registry] Failed to sync custom provider "${key}" to models.json:`, err);
 		}
 	}
 
-	// Prune keys we previously wrote whose owning config is now gone entirely
-	// (deleted or renamed to a different key). Conservative: a key whose
-	// config still exists but failed discovery this round (transient
-	// unreachable server) is left untouched — its models.json entry is stale
-	// but harmless, and will self-heal on the next successful sync.
-	for (const staleKey of previousKeys) {
-		if (!nextKeys.includes(staleKey) && !configs.some(c => (c.name || c.id) === staleKey)) {
-			delete data.providers[staleKey];
-		}
-	}
-	data[CUSTOM_PROVIDER_KEYS_FIELD] = nextKeys;
+	await updateModelsJson(
+		(data) => {
+			const previousKeys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
 
-	writeModelsJson(data);
+			// Common case: no custom providers configured, and none ever were —
+			// nothing to discover or prune, skip the write entirely.
+			if (configs.length === 0 && previousKeys.length === 0) return false;
+
+			if (!data.providers) data.providers = {};
+			for (const { key, config, models } of discovered) {
+				data.providers[key] = {
+					baseUrl: `${config.baseUrl.replace(/\/+$/, "")}/v1`,
+					apiKey: config.apiKey || "none",
+					api: "openai-completions",
+					models: models.map(m => ({
+						id: m.id,
+						name: m.name,
+						contextWindow: m.contextWindow,
+						maxTokens: m.maxTokens,
+						reasoning: m.reasoning,
+						input: m.input,
+						cost: m.cost,
+						compat: LOCAL_OPENAI_COMPAT,
+					})),
+				};
+			}
+
+			// Prune keys we previously wrote whose owning config is now gone entirely
+			// (deleted or renamed to a different key). Conservative: a key whose
+			// config still exists but failed discovery this round (transient
+			// unreachable server) is left untouched — its models.json entry is stale
+			// but harmless, and will self-heal on the next successful sync.
+			for (const staleKey of previousKeys) {
+				if (!nextKeys.includes(staleKey) && !configs.some(c => (c.name || c.id) === staleKey)) {
+					delete data.providers[staleKey];
+				}
+			}
+			data[CUSTOM_PROVIDER_KEYS_FIELD] = nextKeys;
+			return true;
+		},
+		{ logPrefix: "[model-registry]", write: (changed) => changed },
+	);
 }
 
 /** Remove a single custom provider's entry from models.json immediately (used by the DELETE route so removal doesn't wait for the next full sync). */
-export function removeCustomProviderModelsJsonEntry(config: CustomProviderConfig): void {
+export async function removeCustomProviderModelsJsonEntry(config: CustomProviderConfig): Promise<void> {
 	const key = config.name || config.id;
-	const data = readModelsJson();
-	if (data.providers?.[key]) {
-		delete data.providers[key];
-		const keys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
-		data[CUSTOM_PROVIDER_KEYS_FIELD] = keys.filter(k => k !== key);
-		writeModelsJson(data);
-	}
+	await updateModelsJson(
+		(data) => {
+			if (!data.providers?.[key]) return false;
+			delete data.providers[key];
+			const keys: string[] = Array.isArray(data[CUSTOM_PROVIDER_KEYS_FIELD]) ? data[CUSTOM_PROVIDER_KEYS_FIELD] : [];
+			data[CUSTOM_PROVIDER_KEYS_FIELD] = keys.filter(k => k !== key);
+			return true;
+		},
+		{ logPrefix: "[model-registry]", write: (changed) => changed },
+	);
 }
 
 async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<ApiModel[]> {

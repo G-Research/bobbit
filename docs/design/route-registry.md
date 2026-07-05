@@ -63,10 +63,24 @@ protocol future cohorts should follow, and what's left after cohort 1.
   outside inbox plus `GET`/`POST` MCP runtime/meta-tool routes
   (`src/server/routes/staff-mcp-operator-routes.ts`) — see
   [Cohort 10](#cohort-10-staff-crud--mcp-operator-routes) below.
-- Everything else in `handleApiRoute` (~298 remaining routes) is unchanged,
 - **Cohort 11: OAuth account routes** — the five `/api/oauth/*` account
   endpoints (`src/server/routes/oauth-account-routes.ts`) — see
   [Cohort 11: OAuth account routes](#cohort-11-oauth-account-routes) below.
+- **Cohort 12: preferences routes** — `GET`/`PUT /api/preferences` and
+  `POST /api/preferences/claude-code/confirmation`
+  (`src/server/routes/preferences-routes.ts`) — see
+  [Cohort 12: preferences routes](#cohort-12-preferences-routes) below.
+- **STR-05 slice: roles routes** — `GET`/`POST /api/roles`,
+  `GET`/`PUT`/`DELETE /api/roles/:name`, assistant prompt routes, and
+  customize/override routes (`src/server/routes/roles-routes.ts`) — see
+  [STR-05: roles route-handler hoist](#str-05-roles-route-handler-hoist)
+  below.
+- **Cohort 13: config-directories routes** — `GET`/`DELETE`
+  `/api/config-directories` and `POST /api/config-directories/reset`
+  (`src/server/routes/config-directories-routes.ts`) — see
+  [Cohort 13: config-directories routes](#cohort-13-config-directories-routes)
+  below.
+- Everything else in `handleApiRoute` (~283 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -774,6 +788,127 @@ Pinning coverage: OAuth helper behavior is covered by `tests/oauth-google.test.t
 Route-level E2E coverage is `tests/e2e/oauth-flow-status.spec.ts` and
 `tests/e2e/oauth-google-logout.spec.ts`.
 
+## Cohort 12: preferences routes
+
+`src/server/routes/preferences-routes.ts`.
+
+This cohort moved the cohesive preferences surface used by Settings and the
+Claude Code sensitive-preference confirmation flow. It deliberately avoids the
+recently modified `/api/custom-providers*` security-redaction surface and the
+recently modified `POST /api/sessions` create block.
+
+| Method | Path |
+|---|---|
+| POST | `/api/preferences/claude-code/confirmation` |
+| GET | `/api/preferences` |
+| PUT | `/api/preferences` |
+
+`CoreRouteCtx` grew append-only by five small helper closures already defined
+inside `handleApiRoute`: `broadcastPreferencesChanged`,
+`claudeCodeConfirmationBinding`, `firstHeader`, `getSafePreferences`, and
+`isHumanOperatorRequest`. Existing ctx fields already supplied
+`preferencesStore`, `broadcastToAll`, and `listProjectsForApi`.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+Registry count reconciliation: the current status summary says ~298 remaining
+legacy routes after cohort 11. Moving these 3 routes leaves ~295 routes in the
+legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`
+and `tests/helpers/server-route-surface*`. Preference behavior is covered by
+`tests/e2e/claude-code-status-api.spec.ts`,
+`tests/e2e/claude-code-confirmation-auth.spec.ts`,
+`tests/e2e/claude-code-confirmation-localhost.spec.ts`, and related UI
+settings specs.
+
+## STR-05: roles route-handler hoist
+
+`src/server/routes/roles-routes.ts`.
+
+STR-05 is the follow-on to the route-registry cohorts: hoist coherent legacy
+handler families out of `handleApiRoute` to shrink its captured closure scope
+before STR-06 introduces an explicit deps object. This slice moved the roles
+configuration family:
+
+| Method | Path |
+|---|---|
+| GET | `/api/roles/assistant/prompts` |
+| PUT | `/api/roles/assistant/prompts/*` |
+| GET | `/api/roles` |
+| POST | `/api/roles` |
+| POST | `/api/roles/:name/customize` |
+| DELETE | `/api/roles/:name/override` |
+| GET | `/api/roles/:name` |
+| PUT | `/api/roles/:name` |
+| DELETE | `/api/roles/:name` |
+
+The assistant prompt PUT route stays a prefix registration because the legacy
+handler used `startsWith("/api/roles/assistant/prompts/")` and treated the
+full remaining suffix as the prompt type. The role `:name` block was
+path-first with method branches inside; unhandled methods fell through to the
+terminal 404, so the registry registers only handled methods and needs no
+parity shim.
+
+Captured deps made explicit through `CoreRouteCtx`: `clampRoleThinking`,
+`resolveRequiredConfigProjectScope`, `roleManager`, `serverRoleStore`, and
+`writeConfigProjectScopeError`. Role-only helpers
+`withRoleResolution` and `resolveRoleMutationTarget` moved with the route
+module; shared config-scope helpers remain in `server.ts` for the still-inline
+tools and tool-group policy routes.
+
+Registry count reconciliation: cohort 12 left ~295 remaining legacy routes.
+Moving these 9 routes leaves ~286 routes in the legacy chain.
+
+Remaining-handler inventory for the next STR-05 slice: large inline families
+still include sessions create/prompt/continue/output/git/PR helpers, goals/
+tasks/gates/team endpoints, tools/extension-host routes, model/provider/
+agent-directory settings routes, preview routes, cost routes, and the
+internal verification/user-question routes.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/orient-api-route-families.test.ts`,
+`tests/client-api-orphan-pinning.test.ts`, and `tests/prompt-api-drift.test.ts`.
+Role behavior is covered by `tests/e2e/role-manager-api.spec.ts`,
+`tests/e2e/config-cascade-api.spec.ts`, `tests/e2e/tool-policy.spec.ts`,
+`tests/e2e/mcp-tool-permission.spec.ts`, and role-manager UI specs.
+
+## Cohort 13: config-directories routes
+
+`src/server/routes/config-directories-routes.ts`.
+
+This cohort moved the small back-compat config-directory surface used by
+project-scoped Settings directory management. It deliberately avoids the
+nearby model/provider settings routes and the gate-verification/gate-signal
+regions being edited concurrently.
+
+| Method | Path |
+|---|---|
+| GET | `/api/config-directories` |
+| DELETE | `/api/config-directories` |
+| POST | `/api/config-directories/reset` |
+
+No new `CoreRouteCtx` fields were needed. The handlers reuse existing
+`resolveProjectConfigStore` and `writeProjectResolutionError` ctx fields, and
+import the leaf config-directory helpers directly.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on path and method together, so unhandled methods fell through to the terminal
+404. The registry preserves this by registering only the legacy method/path
+pairs.
+
+Registry count reconciliation: STR-05 left ~286 remaining legacy routes.
+Moving these 3 routes leaves ~283 routes in the legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/orient-api-route-families.test.ts`,
+`tests/client-api-orphan-pinning.test.ts`, and `tests/prompt-api-drift.test.ts`.
+Config-directory behavior is covered by `tests/config-directories.test.ts` and
+`tests/e2e/per-project-config-dirs.spec.ts`.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -854,7 +989,7 @@ Route-level E2E coverage is `tests/e2e/oauth-flow-status.spec.ts` and
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~310 routes, including the largest/highest-traffic families
+- The other ~286 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
   MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
   trio were migrated in cohort 4, the staff-inbox family in cohort 5, and

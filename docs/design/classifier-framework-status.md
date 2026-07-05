@@ -1,7 +1,10 @@
 # CLF — Classifier Framework lane: in-repo status ledger
 
-Status: Wave 2.5 shipped (real tool-approve heuristic, observe-mode-only value
-delivery). The full design (interception points, the select/abstain `Decision`
+Status: Wave 5 shipped (gate-risk classifier, observe-only). Wave 4 shipped
+(model-tier classifier, observe-only). Wave 3 (F14
+thinking-router apply mode) shipped behind `BOBBIT_CLF_THINKING_ROUTER=enforce`,
+defaulting to observe — unset/`=observe` stays byte-identical to Wave 1(b).
+The full design (interception points, the select/abstain `Decision`
 model, the RO/RW mount-property safety model, and the phased wave plan) lives
 in the Fable program's classifier-framework design note — that document is
 tracked outside this repo, so it is referenced here only by name, never by
@@ -111,3 +114,169 @@ still pending AJ's trust-tier decision):
   this classifier will never grow one; that's a different, separate seam.
 - The pre-spawn apply barrier and the per-turn decision budget mentioned in
   the design note's phased plan.
+
+## Wave 3 — F14 thinking-router APPLY MODE
+
+`thinking-router-classifier.ts`'s `isThinkingRouterApplyMode()`
+(`BOBBIT_CLF_THINKING_ROUTER=enforce` exactly) turns on the first *apply* path
+in this lane's history for a `user-prompt-submit` decision: `SessionManager
+.enqueuePrompt` calls `session.rpcClient.setThinkingLevel(choice)` with the
+classifier's exact `select`ed level — transiently, for that turn only, never
+persisted as a new `spawnPinnedThinkingLevel` pin (the next prompt re-consults
+from scratch). Mirrors Wave 2/2.5's three-state flag shape exactly: absent or
+any value other than the literal string `"enforce"` (including `"observe"`)
+stays Wave 1(b)'s byte-identical observe-only behavior.
+
+**Clamped, never raw.** The level is run through `clampThinkingLevelForModel`
+against the session's currently-bound model before the RPC call — the same
+defense-in-depth `ws/handler.ts`'s `set_thinking_level` action and
+`tryApplyDefaultThinkingLevel` already use, so a classifier `xhigh` select on a
+non-reasoning model degrades instead of sending an unsupported literal to the
+runtime.
+
+**PINNED PRECEDENCE INVARIANT — the classifier always loses to a human/role
+decision.** Apply mode is gated by `SessionManager
+.canApplyThinkingRouterDecision`, which refuses to apply (recording the
+`select` for telemetry only, never touching the live level) when EITHER is
+true:
+  - a role-level `thinkingLevel` override resolves for the session
+    (`resolveRoleThinkingLevel`) — a role author already made an explicit,
+    considered choice;
+  - `session.thinkingLevelUserPinned` is set — true ONLY when the user
+    explicitly changed the session's thinking level via the composer's
+    `set_thinking_level` ws action (never by spawn-time role/preference
+    resolution, which is a default, not a decision).
+
+Neither case is "the spawn-time default resolved to something" (no explicit
+override) — that case has no human decision to protect, so apply mode is free
+to route per-prompt as usual. An `abstain` never calls `setThinkingLevel`
+regardless of mode — there is nothing to apply.
+
+**Full transparency of the apply outcome, not just the choice.** `Lifecycle
+Hub.dispatchDecision` gained an optional `opts.applyIfSelected: boolean` —
+the CALLER's pre-decided answer to "if this comes back `select`, will I
+actually apply it?", computed from mode-flag + precedence checks BEFORE the
+classifier runs (never from the resulting `choice`). When the result is
+`select`, that boolean is recorded verbatim onto the outcome's new `applied?:
+boolean` field (omitted for `abstain`, and omitted entirely for any
+pre-Wave-3 call site that doesn't pass the option — byte-identical for every
+other classifier in this lane). The transparency panel renders
+`selected: <choice> (applied)` and an `applied: yes` detail row when true. See
+`tests/session-manager-thinking-router.test.ts`'s CLF-W3 block and
+`tests/thinking-router-classifier.test.ts`'s `isThinkingRouterApplyMode`
+block for the full pin set.
+
+**Deliberately not built this wave:** persistence of
+`session.thinkingLevelUserPinned` across a restore/respawn (in-memory only —
+a known, small gap, not a safety issue since the flag can only ever suppress
+an auto-apply, never force one); a dedicated browser E2E for enforce-mode
+rendering (the existing `tests/e2e/ui/transparency-panel.spec.ts` CLF-W1b
+block already exercises a real registered-classifier decision row generically
+and is unaffected by the additive `applied` field — a dedicated enforce-mode
+spec is flagged as a good follow-up, not done here).
+
+## Wave 4 — model-tier classifier (observe-only, no apply path at all)
+
+`model-tier-classifier.ts`: the first classifier at a brand-new decision
+point, `(session-spawn, model-tier)` (added to `DECISION_POINTS`), consulted
+from `session-setup.ts`'s `resolveDynamicContext` (right after the
+`sessionSetup` provider dispatch, so a `TraceEntry` already exists to attach
+into — same durability property CLF-W1b's own consult relies on).
+
+**What it proposes:** a symbolic tier label (`"cheap" | "mid" | "frontier"`),
+never a literal `<provider>/<modelId>` string. The rule table is a verbatim
+mirror of docs/internals.md's "Recommended model tiers (VER-02)" role→tier
+table (Frontier: team-lead/architect/security-reviewer/spec-auditor/
+bug-hunter; Mid: coder/reviewer/code-reviewer/test-engineer/qa-tester; Cheap:
+docs-writer; everything else abstains — no ambiguity guessing), kept in sync
+with that doc section by `tests/model-tier-classifier.test.ts`.
+
+**Why this sidesteps AJ's earlier model-tiering deferral instead of reopening
+it.** AJ reversed a prior attempt to ship a literal `model:` default per
+built-in role (VER-02, PR #89 — CLOSED; TRACKER.md: "built-in role models
+stay as they were... revisit inside the roles/models-overhaul + dynamic-
+selection future lane") because `role.model` is a hard-fail contract — a
+literal model id baked into a built-in role can hard-fail spawns on installs
+without that exact model (see docs/internals.md's "Why this is guidance and
+not a shipped default"). This classifier changes nothing: the recorded tier
+is never read back to alter `bridgeOptions.initialModel` or any spawn
+decision — zero behavior change, zero hard-fail risk, by construction (there
+is no apply path to build, let alone gate behind a flag). What it produces
+instead is the real would-have-chosen tier distribution across actual usage,
+which is exactly the evidence AJ needs to make the eventual literal-tiering
+call (or the symbolic, install-portable resolver the doc names as the
+long-term shape) an informed decision instead of a guess.
+
+**Registered unconditionally**, like the thinking router (Wave 1(b)) — unlike
+Wave 2.5's tool-approve heuristic, there is no enable/enforce flag at all
+this wave, since there is no apply behavior for a flag to gate. Pure
+telemetry from the moment this PR merges.
+
+**Deliberately not built this wave:** any apply path (that's the future
+roles/models-overhaul + dynamic-selection lane's job, informed by this
+wave's telemetry); a literal-model resolver of any kind; consulting anything
+beyond role identity (no prompt content, no per-invocation reasoning — same
+identity-only discipline as the tool-approve heuristic).
+
+## Wave 5 — gate-risk classifier (observe-only, VER-05 evidence-gatherer)
+
+`gate-risk-classifier.ts`: another brand-new decision point, `(gate-verify,
+risk)` (added to `DECISION_POINTS`), consulted from
+`VerificationHarness.verifyGateSignal` right after the run's `baseBranch` is
+resolved — the exact same `origin/<baseBranch>...HEAD` ref shape
+`computeReviewDiffArtifact` already uses for the review-prompt diff artifact,
+reused rather than re-derived a second way.
+
+**Why this wave exists.** The Fable program's dark-flags reconciliation
+(`RECONCILIATION-2026-07-05.md`, VER-05 section) measured the seeded
+`solo-fast` workflow (opt-in per goal — build/check/unit + one consolidated
+review, no e2e, no doc gate) at a real -12.8% wall-clock / -75% review-token
+win on the pass path, but concluded **KEEP-DARK**: "there is NO
+risk-classification logic anywhere — selection is purely human/agent
+choice," so auto-selecting solo-fast for a "low-risk" diff would route
+arbitrary-risk changes past e2e and 2 of 3 reviewers with nothing backing the
+"low-risk" call. This classifier is the safe first step toward ever making
+that call: it runs on every real gate verification from the moment this PR
+merges and accumulates the would-have-chosen `low`/`medium`/`high` label
+distribution against real changesets — the exact evidence the reconciliation
+doc says is missing — without touching workflow selection at all.
+
+**What it proposes:** a symbolic risk label (`"low" | "medium" | "high"`),
+computed ONLY from changeset shape: changed-file count, path classes
+(`src/server` / `src/ui`+`src/app` / `tests` / `docs` / other), and a small
+explicit high-risk-surface list (`session-manager.ts`, `verification-
+harness.ts`, `server.ts`, `auth/*` — reused verbatim, not inferred). No diff
+content, no commit messages, no file contents ever reach the classifier — the
+same identity/shape-only discipline as `ModelTierArg`/`ToolApproveArg`. Rule
+precedence: any high-risk-surface hit → `high`; else changeset size over
+`LARGE_CHANGESET_FILE_THRESHOLD` (15 files) → `medium`; else `src/server/`
+files changed with zero `tests/` files in the same changeset → `medium`;
+else `low`. Unlike the model-tier/tool-approve rule tables, this one never
+abstains once the changed-file list is known — a risk label is a total
+function of shape, so `abstain` is reserved for "the signal itself is
+unavailable" (the git call failed), not "the label is ambiguous."
+
+**Registered unconditionally**, like the model-tier classifier (Wave 4) —
+there is no enable/enforce flag at all this wave, since there is no apply
+behavior for a flag to gate. Pure telemetry from the moment this PR merges.
+
+**What telemetry this accumulates and what decision it feeds.** Every gate
+verification run records one `DecisionOutcome` (point `gate-verify`, kind
+`risk`) into the raising session's transparency-panel trace (when one is
+active) or the in-process fallback ring otherwise — a real would-have-chosen
+label plus its rationale string, timestamped, per real changeset. That
+distribution is the input to the still-open VER-05 question: whether/how to
+ever auto-select `solo-fast` for a goal instead of leaving it a human/agent
+choice. This wave builds no consumer for that question — it only makes the
+label exist and accumulate, mirroring Wave 4's model-tier classifier's own
+"produce the evidence, defer the decision" split.
+
+**Deliberately not built this wave:** any apply path (auto-selecting a
+workflow, skipping a gate, or altering `verify[]` based on the label); an
+affected-files list for `npm run test:unit -- <paths>` (CLF-W5 computes path
+CLASSES for its own label, not a file list — see `seed-default-workflows
+.ts`'s comment seam); any diff-CONTENT-aware signal (line counts, added vs.
+removed, semantic diffing) — this classifier will only ever reason about
+changed-file identity/shape, same as every other rule table in this lane;
+tuning `LARGE_CHANGESET_FILE_THRESHOLD` or the high-risk-surface list against
+real data (that's exactly what this wave's own telemetry is for).

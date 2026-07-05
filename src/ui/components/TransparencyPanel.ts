@@ -17,6 +17,10 @@ export interface TransparencyDecision {
 		| { kind: "select"; choice: unknown; confidence?: number; rationale?: string }
 		| { kind: "abstain" };
 	ms: number;
+	/** CLF-W3: true when a `select` decision was actually applied to live
+	 *  session state (not just recorded). Omitted for `abstain` outcomes and
+	 *  for any decision recorded in observe-mode. */
+	applied?: boolean;
 }
 
 /**
@@ -52,7 +56,9 @@ export class TransparencyPanel extends LitElement {
 
 	private renderRow(d: TransparencyDecision, index: number) {
 		const expanded = this._expandedRows.has(index);
-		const verdict = d.decision.kind === "select" ? `selected: ${String(d.decision.choice)}` : "abstained";
+		const verdict = d.decision.kind === "select"
+			? `selected: ${String(d.decision.choice)}${d.applied ? " (applied)" : ""}`
+			: "abstained";
 		return html`
 			<div class="border border-border rounded-md overflow-hidden text-xs" data-testid="transparency-panel-row">
 				<button
@@ -93,6 +99,9 @@ export class TransparencyPanel extends LitElement {
 												: nothing}
 											${d.decision.rationale
 												? html`<div><span class="text-muted-foreground">rationale:</span> ${d.decision.rationale}</div>`
+												: nothing}
+											${d.applied
+												? html`<div><span class="text-muted-foreground">applied:</span> yes</div>`
 												: nothing}
 										`
 									: nothing}
