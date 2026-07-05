@@ -113,12 +113,23 @@ function writeRuntimePack(root: string, packName: string, mode: "external" | "ma
 		...(opts.extraProviderConfig ?? []),
 	].join("\n") + "\n", "utf-8");
 	// Minimal but realistic runtime descriptor (raw manifest is carried verbatim;
-	// the activation hook only reads startPolicy + forwards to the supervisor).
+	// the activation hook reads startPolicy + the S1 declarative policy below and
+	// forwards to the supervisor). `deploymentModes`/`configRemap` mirror the REAL
+	// shipped market-packs/hindsight/runtimes/hindsight.yaml — since S1 the
+	// deployment-mode → runtime-mode mapping and the env remap are PACK-OWNED
+	// manifest data (see src/server/runtime/manifest.ts), not global core policy,
+	// so a fixture whose tests exercise the managed path must declare them.
 	fs.writeFileSync(path.join(packDir, "runtimes", "hindsight.yaml"), [
 		"id: hindsight",
 		"title: Hindsight",
 		"startPolicy: on-enable",
 		"composeFile: ../runtime/compose.yaml",
+		"deploymentModes:",
+		"  managed: { runtimeMode: managed-postgres }",
+		"  managed-external-postgres: { runtimeMode: external-postgres }",
+		"configRemap:",
+		"  externalDatabaseUrl: HINDSIGHT_API_DATABASE_URL",
+		"  llmApiKey: HINDSIGHT_API_LLM_API_KEY",
 		"modes:",
 		"  managed-postgres: { services: [api, web, db] }",
 		"  external-postgres: { services: [api, web, db], omitServices: [db] }",
@@ -150,6 +161,10 @@ function writeProviderlessRuntimePack(root: string, packName: string): string {
 		"  runtimes: [hindsight]",
 	].join("\n") + "\n", "utf-8");
 	writeMeta(packDir, packName);
+	// Deliberately NO deploymentModes/configRemap (S1): these tests pin the
+	// NO-deployment-surface fallback, which starts the runtime in the manifest
+	// DEFAULT mode (mode undefined ⇒ supervisor picks) without ever consulting
+	// the declarative mapping — a minimal manifest must keep working.
 	fs.writeFileSync(path.join(packDir, "runtimes", "hindsight.yaml"), [
 		"id: hindsight",
 		"title: Hindsight",
@@ -196,6 +211,8 @@ function writeNoModeProviderRuntimePack(root: string, packName: string): string 
 		"config:",
 		"  label: { type: string, default: hello }",
 	].join("\n") + "\n", "utf-8");
+	// Deliberately NO deploymentModes/configRemap (S1): same rationale as the
+	// provider-less fixture — this pins the no-surface default-mode path.
 	fs.writeFileSync(path.join(packDir, "runtimes", "hindsight.yaml"), [
 		"id: hindsight",
 		"title: Hindsight",

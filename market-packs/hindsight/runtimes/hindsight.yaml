@@ -80,6 +80,29 @@ env:
   HINDSIGHT_API_PORT:
     port: HINDSIGHT_API_PORT
 
+# Deployment-mode linkage (declarative — see src/server/runtime/manifest.ts
+# RuntimeManifest.deploymentModes). The `memory` provider's `config.mode`
+# value (external / managed / managed-external-postgres — see
+# ../providers/memory.yaml) maps onto one of THIS manifest's own `modes` keys
+# below. `external` (and any mode value with no entry here) has no
+# Docker-backed runtime mode: it is the non-Docker / operator-supplied setup
+# path, so no runtime start is requested. Consumed generically by
+# `resolveRuntimeStartPlan` (src/server/server.ts) — the single source of
+# truth shared by the marketplace pack-activation path and the
+# `/api/pack-runtimes/:id/{start,restart,capabilities}` REST routes.
+deploymentModes:
+  managed:
+    runtimeMode: managed-postgres
+  managed-external-postgres:
+    runtimeMode: external-postgres
+
+# Provider deployment-config FIELD → this manifest's ENV KEY (declarative —
+# see RuntimeManifest.configRemap). A value already set directly under the
+# env key wins (never overwritten) — enforced by `resolveRuntimeStartPlan`.
+configRemap:
+  externalDatabaseUrl: HINDSIGHT_API_DATABASE_URL
+  llmApiKey: HINDSIGHT_API_LLM_API_KEY
+
 # Mode-specific argument construction. `managed-postgres` includes the `db`
 # service. `external-postgres` omits `db` and injects a configured connection URL.
 modes:

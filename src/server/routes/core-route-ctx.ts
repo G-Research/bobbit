@@ -144,7 +144,17 @@ export interface CoreRouteCtx {
 		mcp: { listName: string; sourceFile?: string; operationMetadata?: unknown },
 		metaDetails: Record<string, unknown>,
 	): Array<{ name: string; label?: string; description?: string; inputSchema?: unknown }>;
-	resolveRuntimeStartPlan(deploymentConfig: Record<string, unknown>): { start: boolean; mode?: string; config: Record<string, unknown> };
+	/** `runtimeManifest` is the target runtime's raw manifest (e.g.
+	 *  `RuntimeContribution.manifest`) — declarative `deploymentModes`/
+	 *  `configRemap` policy is read from it; omitted ⇒ no managed-mode ever
+	 *  starts (see resolveRuntimeStartPlan's doc comment in server.ts). */
+	resolveRuntimeStartPlan(
+		deploymentConfig: Record<string, unknown>,
+		runtimeManifest?: Record<string, unknown>,
+	): { start: boolean; mode?: string; config: Record<string, unknown> };
+	/** Identity-fallback mode-name mapping sharing `resolveRuntimeStartPlan`'s
+	 *  `deploymentModes` table — see its doc comment in server.ts. */
+	mapDeploymentModeToRuntimeMode(deploymentMode: string, runtimeManifest?: Record<string, unknown>): string;
 	providerCarriesDeploymentMode(
 		provider: { config?: Record<string, unknown>; activation?: { activeWhenConfig?: Record<string, string[]> } },
 		effectiveConfig?: Record<string, unknown>,

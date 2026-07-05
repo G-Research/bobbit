@@ -358,16 +358,27 @@ test.describe("Pack runtimes REST API", () => {
 		expect((capCall?.opts as { mode?: string })?.mode).toBeUndefined();
 	});
 
-	test("GET capabilities ?mode=managed maps the deployment mode to the managed-postgres runtime mode", async () => {
+	// S1 (extension-seam audit): deployment-mode → runtime-mode mapping is now
+	// declarative, read from the TARGET RUNTIME'S OWN manifest
+	// (`deploymentModes` — see src/server/runtime/manifest.ts). `demo-pack` has
+	// no installed contributions/manifest of its own (this whole suite mocks
+	// Docker via registerPackRuntimeSupervisorFactory, not a real on-disk
+	// pack), so there is no mapping table to consult — an explicit `?mode=`
+	// value passes straight through UNCHANGED (identity fallback), exactly
+	// like the `?mode=managed-postgres` case above. The real
+	// managed→managed-postgres mapping (Hindsight's own manifest) is pinned
+	// separately in tests/hindsight-deployment-policy.test.ts and exercised
+	// end-to-end in tests/e2e/pack-runtimes-start-config.spec.ts.
+	test("GET capabilities ?mode=<anything> passes through unchanged when the runtime declares no deploymentModes mapping", async () => {
 		const id = encodeId(KNOWN.packId, KNOWN.runtimeId);
 		const res = await apiFetch(`/api/pack-runtimes/${id}/capabilities?mode=managed`);
 		expect(res.status).toBe(200);
 		const data = await res.json();
 		expect(data.dockerRequired).toBe(true);
-		expect(data.mode).toBe("managed-postgres");
+		expect(data.mode).toBe("managed");
 		expect(data.services).toEqual(["api", "web", "db"]);
 		const capCall = calls.find((c) => c.op === "capabilities");
-		expect((capCall?.opts as { mode?: string })?.mode).toBe("managed-postgres");
+		expect((capCall?.opts as { mode?: string })?.mode).toBe("managed");
 	});
 
 	test("GET capabilities for an unknown runtime → 404", async () => {

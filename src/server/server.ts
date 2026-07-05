@@ -1159,40 +1159,82 @@ export interface PackRuntimeSupervisorDeps {
 	defaultCwd: string;
 }
 
+/** True for a non-array plain object — the shape a manifest's declarative
+ *  mapping fields (`deploymentModes`, `configRemap`) are expected in. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
- * Map an effective Hindsight-style deployment config onto a runtime START plan —
- * the SINGLE source of truth shared by the marketplace pack-activation enable
- * path AND the `/api/pack-runtimes/:id/{start,restart}` REST routes, so the two
- * can never diverge on how a deployment config becomes supervisor start args.
+ * Map an effective deployment config onto a runtime START plan — the SINGLE
+ * source of truth shared by the marketplace pack-activation enable path AND
+ * the `/api/pack-runtimes/:id/{start,restart,capabilities}` REST routes, so
+ * the three can never diverge on how a deployment config becomes supervisor
+ * start args.
  *
- * - `mode` (deployment) maps to a runtime manifest mode: `managed` ⇒
- *   `managed-postgres`, `managed-external-postgres` ⇒ `external-postgres`. The
- *   external (and absent/default) deployment mode is a NON-Docker setup path, so
- *   `start: false` and no container is brought up.
- * - The provider's `externalDatabaseUrl` is remapped onto the manifest's
- *   `HINDSIGHT_API_DATABASE_URL` env key, and `llmApiKey` onto
- *   `HINDSIGHT_API_LLM_API_KEY`, so the supervisor's config overlay satisfies
- *   those user-configured `secret:` env refs without seeding the global secret
- *   store. A value already set directly under the env key wins.
+ * Policy is DECLARATIVE, read from the pack's own `runtimeManifest` (S1 — see
+ * `RuntimeManifest.deploymentModes` / `.configRemap`,
+ * src/server/runtime/manifest.ts) rather than hard-coded here:
+ * - `deploymentConfig.mode` is looked up in `runtimeManifest.deploymentModes`;
+ *   a hit starts the manifest's own mapped mode. A miss — including the
+ *   absent/default mode, an unrecognized mode, or a manifest with no
+ *   `deploymentModes` at all — is a NON-Docker setup path: `start: false` and
+ *   no container is brought up.
+ * - Each `runtimeManifest.configRemap` entry copies the named deployment-
+ *   config field onto its target env key, UNLESS a value is already present
+ *   under that key (a value set directly under the env key always wins).
+ *
+ * A pack with no runtime manifest (or one declaring neither field) always
+ * gets `{ start: false, config: deploymentConfig }` regardless of `mode` —
+ * the generic fallback every pack had before this policy became declarative.
  */
 export function resolveRuntimeStartPlan(
 	deploymentConfig: Record<string, unknown>,
+	runtimeManifest?: Record<string, unknown>,
 ): { start: boolean; mode?: string; config: Record<string, unknown> } {
 	const mode = typeof deploymentConfig.mode === "string" ? deploymentConfig.mode : "external";
 	const config: Record<string, unknown> = { ...deploymentConfig };
-	if (typeof deploymentConfig.externalDatabaseUrl === "string" && deploymentConfig.externalDatabaseUrl.length > 0
-		&& !(typeof config.HINDSIGHT_API_DATABASE_URL === "string" && (config.HINDSIGHT_API_DATABASE_URL as string).length > 0)) {
-		config.HINDSIGHT_API_DATABASE_URL = deploymentConfig.externalDatabaseUrl;
+
+	const configRemap = isPlainRecord(runtimeManifest?.configRemap) ? runtimeManifest!.configRemap as Record<string, unknown> : undefined;
+	if (configRemap) {
+		for (const [fromKey, toKeyRaw] of Object.entries(configRemap)) {
+			if (typeof toKeyRaw !== "string" || toKeyRaw.length === 0) continue;
+			const fromVal = deploymentConfig[fromKey];
+			const existing = config[toKeyRaw];
+			if (typeof fromVal === "string" && fromVal.length > 0
+				&& !(typeof existing === "string" && existing.length > 0)) {
+				config[toKeyRaw] = fromVal;
+			}
+		}
 	}
-	if (typeof deploymentConfig.llmApiKey === "string" && deploymentConfig.llmApiKey.length > 0
-		&& !(typeof config.HINDSIGHT_API_LLM_API_KEY === "string" && (config.HINDSIGHT_API_LLM_API_KEY as string).length > 0)) {
-		config.HINDSIGHT_API_LLM_API_KEY = deploymentConfig.llmApiKey;
-	}
-	switch (mode) {
-		case "managed": return { start: true, mode: "managed-postgres", config };
-		case "managed-external-postgres": return { start: true, mode: "external-postgres", config };
-		default: return { start: false, config };
-	}
+
+	const deploymentModes = isPlainRecord(runtimeManifest?.deploymentModes) ? runtimeManifest!.deploymentModes as Record<string, unknown> : undefined;
+	const modeSpec = deploymentModes?.[mode];
+	const runtimeMode = isPlainRecord(modeSpec) && typeof modeSpec.runtimeMode === "string" && modeSpec.runtimeMode.length > 0
+		? modeSpec.runtimeMode
+		: undefined;
+	return runtimeMode ? { start: true, mode: runtimeMode, config } : { start: false, config };
+}
+
+/**
+ * Map an already-resolved DEPLOYMENT mode value onto its runtime-manifest mode
+ * id, using the SAME declarative `runtimeManifest.deploymentModes` table
+ * `resolveRuntimeStartPlan` reads — an unmapped value (including a caller
+ * value that is ALREADY a runtime mode id, e.g. an explicit
+ * `?mode=managed-postgres` override) passes through UNCHANGED (identity
+ * fallback), so this never throws away an explicit runtime-mode override.
+ * Used by the `/api/pack-runtimes/:id/capabilities` disclosure route so it
+ * agrees with `resolveRuntimeStartPlan`'s mapping without re-declaring it.
+ */
+export function mapDeploymentModeToRuntimeMode(
+	deploymentMode: string,
+	runtimeManifest?: Record<string, unknown>,
+): string {
+	const deploymentModes = isPlainRecord(runtimeManifest?.deploymentModes) ? runtimeManifest!.deploymentModes as Record<string, unknown> : undefined;
+	const modeSpec = deploymentModes?.[deploymentMode];
+	return isPlainRecord(modeSpec) && typeof modeSpec.runtimeMode === "string" && modeSpec.runtimeMode.length > 0
+		? modeSpec.runtimeMode
+		: deploymentMode;
 }
 
 /**
@@ -3552,7 +3594,7 @@ async function handleApiRoute(
 				getDefaultDisabledInfo, readForceEnabledPacks, writeForceEnabledPacks,
 				loadPiExtensionContributionsFromRuntime, piExtensionDiagnostic, normalisePiExtensionCatalogueRefs,
 				activationMcpContributionId, operationMetadataForMcpContribution,
-				resolveRuntimeStartPlan, providerCarriesDeploymentMode,
+				resolveRuntimeStartPlan, providerCarriesDeploymentMode, mapDeploymentModeToRuntimeMode,
 				// Cohort 5 (staff inbox) additions — append-only, see core-route-ctx.ts.
 				staffManager, inboxManager,
 				// Cohort 4 (pack-runtimes) additions — append-only, see core-route-ctx.ts.
