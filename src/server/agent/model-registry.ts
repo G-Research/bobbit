@@ -74,6 +74,23 @@ export interface CustomProviderConfig {
 	models?: Array<{ id: string; name: string }>;
 }
 
+/**
+ * Wire shape of a custom provider config as serialized to clients.
+ *
+ * Secrets are write-only: stored API keys are NEVER echoed back to the
+ * client (same convention as the hindsight pack's `apiKeySet` and
+ * project-config sandbox-secret redaction). Any route that serializes a
+ * CustomProviderConfig to the browser MUST go through
+ * redactCustomProviderConfig() — never reintroduce raw `apiKey` on a read
+ * path. Pinned by tests/e2e/custom-provider-key-redaction.spec.ts.
+ */
+export type RedactedCustomProviderConfig = Omit<CustomProviderConfig, "apiKey"> & { hasApiKey: boolean };
+
+export function redactCustomProviderConfig(config: CustomProviderConfig): RedactedCustomProviderConfig {
+	const { apiKey, ...rest } = config;
+	return { ...rest, hasApiKey: Boolean(apiKey) };
+}
+
 // ── Cache ──────────────────────────────────────────────────────────
 
 let cachedModels: ApiModel[] | null = null;
