@@ -16,16 +16,32 @@
  * fully-serial path would have written.
  *
  * These tests exercise `verifyGateSignal` end-to-end with:
- *   - real `command`-type steps (actual `runCommandStep` shell spawns), and
- *   - a stubbed `runLlmReviewStep` (so no real LLM session is spawned) that
- *     records when it was invoked and can be told to wait before resolving,
- *     to control interleaving deterministically.
+ *   - real `command`-type steps (actual `runCommandStep` shell spawns) where
+ *     ordering doesn't matter (the default-OFF serial path), and
+ *   - stubbed `runCommandStep`/`runLlmReviewStep` (so no real subprocess or
+ *     LLM session is spawned) wherever a test needs to pin the *interleaving*
+ *     of the command track and the early-started review. Interleaving is
+ *     controlled with explicit deferreds (a command/review "step" only
+ *     resolves when the test tells it to) rather than real sleeps + wall-clock
+ *     margins — the former VER-07 tests raced a real `sleep 0.1`/`sleep 0.3`
+ *     shell spawn against a fixed `setTimeout`, which was flaky under load
+ *     (spawn overhead routinely ate the timing margin — see
+ *     docs/testing-strategy.md and the fix commit for the measured rates).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+/** Same shape as verification-harness.ts's internal `deferred()` — lets a
+ * test hold a stubbed step "open" until it explicitly decides to resolve it,
+ * making interleaving assertions exact instead of timing-margin-based. */
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+	let resolveFn!: (value: T) => void;
+	const promise = new Promise<T>((resolve) => { resolveFn = resolve; });
+	return { promise, resolve: resolveFn };
+}
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-parallel-reviews-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
@@ -149,33 +165,45 @@ test("BOBBIT_PARALLEL_REVIEWS=1: review starts concurrently with the command pha
 	try {
 		const events: BroadcastEvent[] = [];
 		const { harness, persisted, gateStatuses } = makeHarness(events);
-		let reviewStartedAt = 0;
+
+		// Unit tests is held open on a deferred instead of a real `sleep N` —
+		// the test controls exactly when it resolves, so "the review started
+		// while Unit tests was still running" is asserted by construction,
+		// never by racing a real subprocess against a wall-clock margin.
+		const unitTests = deferred<{ passed: boolean; output: string }>();
+		(harness as any).runCommandStep = async (cmd: string) => {
+			if (cmd === "true") return { passed: true, output: "" };
+			return unitTests.promise;
+		};
+
+		let reviewInvoked = false;
+		const reviewStarted = deferred<void>();
 		(harness as any).runLlmReviewStep = async (...args: any[]) => {
-			reviewStartedAt = Date.now();
+			reviewInvoked = true;
+			reviewStarted.resolve();
 			return { passed: true, output: "LGTM", sessionId: args[8] };
 		};
 
 		const signal = makeSignal("sha-on-1");
-		// Unit tests takes 300ms — comfortably long enough to observe the
-		// review step_started event land before Unit tests' step_complete.
-		const gate = makeGate("sleep 0.3 && true");
-		const before = Date.now();
-		await (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
-		const totalMs = Date.now() - before;
+		const gate = makeGate("__controlled-by-stub__");
+		const verifyPromise = (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
 
-		const unitComplete = stepCompleteEvents(events).find(e => e.stepName === "Unit tests");
-		const reviewStarted = stepStartedEvents(events).find(e => e.stepName === "Code quality review");
-		assert.ok(unitComplete, "Unit tests should have completed");
-		assert.ok(reviewStarted, "Code quality review should have started");
+		// Wait for the review to actually be invoked — proves it was kicked
+		// off without waiting for the (still in-flight) Unit tests command.
+		await reviewStarted.promise;
+		assert.equal(reviewInvoked, true);
 
-		// Timing/order spy: the review's step_started broadcast — and the
-		// underlying runLlmReviewStep invocation — must both have happened
-		// BEFORE Unit tests finished, proving genuine overlap rather than a
-		// lucky fast serial run.
-		assert.ok(
-			reviewStartedAt > 0 && reviewStartedAt < before + 300,
-			"runLlmReviewStep should be invoked well before the 300ms Unit tests step finishes",
+		const unitCompleteEarly = stepCompleteEvents(events).find(e => e.stepName === "Unit tests");
+		const reviewStartedEvent = stepStartedEvents(events).find(e => e.stepName === "Code quality review");
+		assert.ok(reviewStartedEvent, "Code quality review should have started");
+		assert.equal(
+			unitCompleteEarly, undefined,
+			"Unit tests must still be in flight when the review starts — this is the overlap being pinned, not a race",
 		);
+
+		// Now let Unit tests finish (passing) and let the gate resolve fully.
+		unitTests.resolve({ passed: true, output: "" });
+		await verifyPromise;
 
 		const order = events
 			.filter(e => e.type === "gate_verification_step_started" || e.type === "gate_verification_step_complete")
@@ -193,11 +221,6 @@ test("BOBBIT_PARALLEL_REVIEWS=1: review starts concurrently with the command pha
 		const reviewResult = persisted.at(-1)?.steps.find((s: any) => s.name === "Code quality review");
 		assert.equal(reviewResult.passed, true, "on a passing command track, the real review verdict is committed");
 		assert.equal(reviewResult.output, "LGTM");
-
-		// Sanity: wall clock should be well under the serial sum
-		// (~0.3s unit + review latency); this is a loose bound, not a strict
-		// benchmark, just guarding against a regression back to full seriality.
-		assert.ok(totalMs < 280 + 300, `expected overlap to save wall-clock, took ${totalMs}ms`);
 	} finally {
 		if (prevFlag === undefined) delete process.env.BOBBIT_PARALLEL_REVIEWS;
 		else process.env.BOBBIT_PARALLEL_REVIEWS = prevFlag;
@@ -211,25 +234,64 @@ test("BOBBIT_PARALLEL_REVIEWS=1 + command phase fails: the early review verdict 
 		const events: BroadcastEvent[] = [];
 		const { harness, persisted, gateStatuses } = makeHarness(events);
 
-		const terminateCalls: { sessionId: string; at: number }[] = [];
+		const terminateCalls: string[] = [];
+		const terminateCalled = deferred<void>();
 		(harness as any).sessionManager = {
-			terminateSession: async (sessionId: string) => { terminateCalls.push({ sessionId, at: Date.now() }); return true; },
+			terminateSession: async (sessionId: string) => {
+				terminateCalls.push(sessionId);
+				terminateCalled.resolve();
+				return true;
+			},
 		};
 
-		let reviewResolvedAt = 0;
+		// Unit tests is held open on a deferred (instead of a real
+		// `sleep 0.1 && false`) so the test decides exactly when the command
+		// track fails. The review is likewise held open on a deferred
+		// (instead of a real `setTimeout(250)`) so the test — not the OS
+		// scheduler — decides exactly when it "would have" resolved. This
+		// replaces the former timestamp-margin assertion (which flaked under
+		// load when subprocess-spawn overhead ate the 50ms margin) with a
+		// strictly-ordered proof: the session is torn down BEFORE the review
+		// is ever allowed to resolve, full stop — no race, no margin.
+		const unitTests = deferred<{ passed: boolean; output: string }>();
+		(harness as any).runCommandStep = async (cmd: string) => {
+			if (cmd === "true") return { passed: true, output: "" };
+			return unitTests.promise;
+		};
+
+		let reviewResolved = false;
+		const reviewInFlight = deferred<void>();
+		const releaseReview = deferred<{ passed: boolean; output: string }>();
 		(harness as any).runLlmReviewStep = async (...args: any[]) => {
-			// Slow review — still "in flight" when the 100ms failing Unit
-			// tests step finishes and the command track is marked failed.
-			await new Promise(r => setTimeout(r, 250));
-			reviewResolvedAt = Date.now();
-			return { passed: true, output: "Would have passed", sessionId: args[8] };
+			reviewInFlight.resolve();
+			const result = await releaseReview.promise;
+			reviewResolved = true;
+			return { ...result, sessionId: args[8] };
 		};
 
 		const signal = makeSignal("sha-fail-1");
-		// Unit tests fails fast (100ms); the review (250ms) is still running
-		// when the command track's failure is discovered.
-		const gate = makeGate("sleep 0.1 && false");
-		await (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
+		const gate = makeGate("__controlled-by-stub__");
+		const verifyPromise = (harness as any).verifyGateSignal(signal, gate, TEST_DIR, undefined, "master");
+
+		// Let the review actually start before failing Unit tests, so the
+		// discard genuinely races a review that is in flight.
+		await reviewInFlight.promise;
+
+		// Fail Unit tests now that the review is confirmed running.
+		unitTests.resolve({ passed: false, output: "unit tests failed" });
+
+		// The reviewer session must be torn down as soon as the command
+		// track's failure is discovered.
+		await terminateCalled.promise;
+		assert.equal(
+			reviewResolved, false,
+			"the review must still be unresolved when its session is torn down — proves the discard doesn't wait for (or depend on) the review's real verdict",
+		);
+
+		// Only now let the (now-irrelevant) review settle, so
+		// verifyGateSignal can finish joining the discarded promise.
+		releaseReview.resolve({ passed: true, output: "Would have passed" });
+		await verifyPromise;
 
 		assert.equal(gateStatuses.at(-1)?.status, "failed");
 		const finalSteps = persisted.at(-1)?.steps ?? [];
@@ -246,16 +308,7 @@ test("BOBBIT_PARALLEL_REVIEWS=1 + command phase fails: the early review verdict 
 		const reviewStartedEvent = stepStartedEvents(events).find(e => e.stepName === "Code quality review");
 		assert.ok(reviewStartedEvent?.sessionId, "review step_started event should carry the pre-generated sessionId");
 		assert.equal(terminateCalls.length, 1, "the in-flight reviewer session should be terminated exactly once");
-		assert.equal(terminateCalls[0].sessionId, reviewStartedEvent!.sessionId, "the terminated session must be the one the early-started review actually used");
-
-		// Confirm the mocked review really was still in flight at discard time
-		// (i.e. this test is actually exercising the race, not a fluke): the
-		// termination call must land well before the review's own 250ms delay
-		// would otherwise have resolved it naturally.
-		assert.ok(
-			terminateCalls[0].at < reviewResolvedAt - 50,
-			`expected terminateSession to fire well before the review's natural resolution; terminatedAt=${terminateCalls[0].at} resolvedAt=${reviewResolvedAt}`,
-		);
+		assert.equal(terminateCalls[0], reviewStartedEvent!.sessionId, "the terminated session must be the one the early-started review actually used");
 
 		// Final skip broadcast supersedes whatever transient event the early
 		// start may have produced — assert the LAST event for this step is
