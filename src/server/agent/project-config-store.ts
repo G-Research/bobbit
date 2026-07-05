@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
+import { atomicWriteFileSync, bakPath } from "./atomic-json.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -358,12 +359,56 @@ const DEFAULTS: Record<string, string> = {
  * prefer the typed accessors (`getConfigDirectories()`, …).
  *
  * Auto-saves on every set/remove. Handles missing file gracefully.
+ *
+ * ── CON-02: crash-safe write + corrupt-file guard ──────────────────────
+ * `project.yaml` is the highest-value user-authored config (workflows,
+ * components, pack activation/order, build/test commands), so it gets two
+ * protections beyond the CON-01 atomic-write discipline it now shares with
+ * gate/team/task/inbox stores (`atomic-json.ts` — tmp-write → fsync → rename
+ * → dir fsync, `BACKUP_COUNT`-deep `.bak.N` rotation):
+ *
+ *   1. `load()` never lets a corrupt-or-unreadable-but-PRESENT file collapse
+ *      into an empty in-memory state that a subsequent save() would then
+ *      serialize back over the corrupt file, destroying it for good. On
+ *      failure it first tries the newest parseable `.bak.N` (a valid state
+ *      to resume from — recovering clears `loadFailed`); if nothing parses,
+ *      it sets `loadFailed` and leaves the in-memory state exactly as it was
+ *      (fresh boot: pristine `{}`; live `reload()`: last known-good
+ *      snapshot) WITHOUT touching disk.
+ *   2. `save()` refuses (throws) while `loadFailed` is set, so no setter can
+ *      ever write over a corrupt-but-recoverable-by-hand file. `loadFailed`
+ *      is re-evaluated on every `load()`/`reload()` call, so fixing the file
+ *      by hand (or restoring a `.bak.N`) and re-reading clears it.
+ *   3. A MISSING file is never `loadFailed` UNLESS a `.bak.N` generation
+ *      exists on disk (which only happens after this store has saved at
+ *      least once) — i.e. missing-with-no-history is a fresh project, but
+ *      missing-with-history is far more likely an accidental deletion, and
+ *      is treated like a corrupt primary (try backups, else `loadFailed`).
+ *      A PRESENT-BUT-EMPTY file is always treated as an intentional reset
+ *      (fresh, not `loadFailed`) and deliberately does NOT fall back to a
+ *      `.bak.N` — resurrecting old content the user just emptied would
+ *      violate their intent (mirrors the CON-01 "resurrection guard" for
+ *      deliberate deletes elsewhere in the durable-store layer).
  */
 export class ProjectConfigStore {
+	/** Number of `.bak.N` generations to keep alongside project.yaml (matches gate/team/task/inbox). */
+	private static readonly BACKUP_COUNT = 3;
+
 	private data: ProjectConfig = {};
 	/** Structured side-table — components[] and workflows{} from the same yaml file. */
 	private components: Component[] = [];
 	private workflows: Record<string, InlineWorkflowDef> | undefined;
+	/** Set when the on-disk file existed (or had prior `.bak.N` history) but could not be
+	 *  parsed into a usable config and no backup generation recovered it either. While set,
+	 *  save() refuses — see the class-level CON-02 doc comment above. Cleared by the next
+	 *  successful load()/reload(). */
+	private loadFailed = false;
+	/** Rate limiter for the loadFailed / recovered-from-backup operator logs: load() runs on
+	 *  every getWithDefaults() call (i.e. per REST GET), so a persistently corrupt file would
+	 *  otherwise spam the log line per request. Log once per failure/recovery episode; reset
+	 *  when the primary parses cleanly again. */
+	private failureLogged = false;
+	private recoveryLogged = false;
 
 	// ── Native-YAML migrated fields ──
 	private configDirectories: ConfigDirectoryEntry[] = [];
@@ -406,8 +451,106 @@ export class ProjectConfigStore {
 	 *  shape for any of the migrated fields. Cleared by save(). */
 	isDirty(): boolean { return this.dirty; }
 
+	/** True iff the on-disk file failed to load (corrupt/unreadable, no recoverable
+	 *  backup) — while true, save() refuses. See the class-level CON-02 doc comment. */
+	isLoadFailed(): boolean { return this.loadFailed; }
+
 	private load(): void {
-		// Reset migrated fields to defaults before loading.
+		this.loadFailed = false;
+
+		const primaryExists = fs.existsSync(this.configFile);
+
+		if (!primaryExists) {
+			// No primary. `.bak.N` files can only exist if this store previously
+			// saved at this path, so their presence means "accidentally deleted",
+			// not "fresh project" — recover from them instead of starting empty.
+			let anyBackupExists = false;
+			for (let i = 1; i <= ProjectConfigStore.BACKUP_COUNT; i++) {
+				if (fs.existsSync(bakPath(this.configFile, i))) { anyBackupExists = true; break; }
+			}
+			if (!anyBackupExists) {
+				this.resetToEmpty();
+				this.resetEpisodeLogs();
+				return;
+			}
+			if (this.recoverFromBackups()) return;
+			this.enterLoadFailed(
+				`[project-config-store] project.yaml is missing and no .bak.N generation is parseable — ` +
+				`refusing further saves until the file is restored manually. File: ${this.configFile}`,
+			);
+			return;
+		}
+
+		let text: string | undefined;
+		try {
+			text = fs.readFileSync(this.configFile, "utf-8");
+		} catch (err) {
+			if (!this.failureLogged) console.error(`[project-config-store] Failed to read ${this.configFile}:`, err);
+		}
+
+		if (text !== undefined) {
+			if (text.trim().length === 0) {
+				// Present-but-empty file: treat as an intentional reset, not
+				// corruption. Deliberately do NOT fall back to a .bak.N here —
+				// resurrecting old content over a file the user just emptied
+				// would violate their intent (mirrors the CON-01 resurrection
+				// guard for deliberate deletes elsewhere in the durable-store layer).
+				this.resetToEmpty();
+				this.resetEpisodeLogs();
+				return;
+			}
+			if (this.tryApplyYaml(text)) {
+				// Primary parsed cleanly — any prior failure/recovery episode is over.
+				this.resetEpisodeLogs();
+				return;
+			}
+			if (!this.failureLogged) {
+				console.error(`[project-config-store] Failed to parse project config (invalid YAML or unexpected shape): ${this.configFile}`);
+			}
+		}
+
+		if (this.recoverFromBackups()) return;
+
+		// No parseable primary or backup. Leave the FULL in-memory state exactly
+		// as it was — flat keys, components, workflows, and migrated side-tables
+		// alike (fresh boot: still pristine defaults; live reload(): last
+		// known-good snapshot) — and do NOT touch disk. Setting loadFailed is
+		// what actually prevents the next set()/setWorkflows()/… from
+		// serializing that state (empty or stale) back over the still-present,
+		// possibly hand-recoverable corrupt file.
+		this.enterLoadFailed(
+			`[project-config-store] project.yaml is corrupt/unreadable with no parseable backup — ` +
+			`refusing further saves until the file is fixed or restored manually. File: ${this.configFile}`,
+		);
+	}
+
+	/** Mark this load as failed, logging the operator error once per episode.
+	 *  (load() runs per getWithDefaults() call, i.e. per REST GET — unthrottled
+	 *  logging would spam a line per request while the file stays corrupt.) */
+	private enterLoadFailed(message: string): void {
+		this.loadFailed = true;
+		if (!this.failureLogged) {
+			console.error(message);
+			this.failureLogged = true;
+		}
+	}
+
+	/** Clear the per-episode log rate limiters after a clean primary load. */
+	private resetEpisodeLogs(): void {
+		this.failureLogged = false;
+		this.recoveryLogged = false;
+	}
+
+	/** Reset the full in-memory state to a fresh empty config (missing file /
+	 *  intentionally emptied file). */
+	private resetToEmpty(): void {
+		this.data = {};
+		this.components = [];
+		this.workflows = undefined;
+		this.resetMigratedFields();
+	}
+
+	private resetMigratedFields(): void {
 		this.configDirectories = [];
 		this.sandboxTokens = [];
 		this.packOrder = {};
@@ -418,38 +561,72 @@ export class ProjectConfigStore {
 			pack_order: false,
 			pack_activation: false,
 		};
+	}
 
-		try {
-			if (!fs.existsSync(this.configFile)) {
-				this.data = {};
-				this.components = [];
-				this.workflows = undefined;
-				return;
+	/** Try each `.bak.N` (newest first), applying the first one that parses. Returns
+	 *  true (and leaves loadFailed false) on success. */
+	private recoverFromBackups(): boolean {
+		for (let i = 1; i <= ProjectConfigStore.BACKUP_COUNT; i++) {
+			const bak = bakPath(this.configFile, i);
+			let bakText: string;
+			try {
+				bakText = fs.readFileSync(bak, "utf-8");
+			} catch {
+				continue;
 			}
-			const raw = yaml.parse(fs.readFileSync(this.configFile, "utf-8"));
-			if (!isPlainObject(raw)) return;
-
-			// Flat string map for legacy keys — exclude migrated keys (handled below).
-			const cleaned: ProjectConfig = {};
-			for (const [k, v] of Object.entries(raw)) {
-				if (MIGRATED_KEYS.has(k)) continue;
-				if (typeof v === "string") cleaned[k] = v;
+			if (this.tryApplyYaml(bakText)) {
+				if (!this.recoveryLogged) {
+					console.warn(
+						`[project-config-store] Recovered project config from backup ${path.basename(bak)} — ` +
+						`the primary was corrupt/missing. The bad primary (if any) is left on disk untouched; ` +
+						`the next successful save() rotates it into .bak.1 before writing the recovered state. ` +
+						`See docs/debugging.md.`,
+					);
+					this.recoveryLogged = true;
+				}
+				return true;
 			}
-			this.data = cleaned;
-
-			// Structured side-table: components[] and workflows{}.
-			this.components = Array.isArray(raw.components)
-				? normalizeComponents(raw.components as unknown[])
-				: [];
-			this.workflows = isPlainObject(raw.workflows)
-				? raw.workflows as Record<string, InlineWorkflowDef>
-				: undefined;
-
-			// ── Migrated fields — accept native, legacy JSON-string, or numeric-string ──
-			this.loadMigrated(raw);
-		} catch (err) {
-			console.error("[project-config-store] Failed to load project config:", err);
 		}
+		return false;
+	}
+
+	/** Parse `text` as YAML and, if it is a plain object, apply it as the current
+	 *  config (components/workflows/migrated fields included). Returns false
+	 *  (without mutating any state) if the text fails to parse or isn't a plain
+	 *  object — callers can then try the next candidate (a backup generation). */
+	private tryApplyYaml(text: string): boolean {
+		let raw: unknown;
+		try {
+			raw = yaml.parse(text);
+		} catch {
+			return false;
+		}
+		if (!isPlainObject(raw)) return false;
+
+		// Parse + shape check passed — safe to replace state now. Migrated
+		// side-tables reset first because loadMigrated() only assigns fields
+		// that are present in `raw`.
+		this.resetMigratedFields();
+
+		// Flat string map for legacy keys — exclude migrated keys (handled below).
+		const cleaned: ProjectConfig = {};
+		for (const [k, v] of Object.entries(raw)) {
+			if (MIGRATED_KEYS.has(k)) continue;
+			if (typeof v === "string") cleaned[k] = v;
+		}
+		this.data = cleaned;
+
+		// Structured side-table: components[] and workflows{}.
+		this.components = Array.isArray(raw.components)
+			? normalizeComponents(raw.components as unknown[])
+			: [];
+		this.workflows = isPlainObject(raw.workflows)
+			? raw.workflows as Record<string, InlineWorkflowDef>
+			: undefined;
+
+		// ── Migrated fields — accept native, legacy JSON-string, or numeric-string ──
+		this.loadMigrated(raw);
+		return true;
 	}
 
 	private loadMigrated(raw: Record<string, unknown>): void {
@@ -575,6 +752,18 @@ export class ProjectConfigStore {
 	}
 
 	private save(): void {
+		if (this.loadFailed) {
+			// CON-02 guard: never serialize whatever is currently in memory (empty
+			// or stale) over a project.yaml that failed to load and has no
+			// recoverable backup — that would make the loss permanent. Throwing
+			// (rather than silently no-op'ing) matches the existing precedent of
+			// setMigratedFromString() already throwing synchronously from these
+			// same public setters on bad input, so callers get a catchable signal
+			// instead of a misleading "success".
+			const msg = `ProjectConfigStore: refusing to save — ${this.configFile} is corrupt/unreadable and has no recoverable backup; fix or restore the file manually, then retry`;
+			console.error(`[project-config-store] ${msg}`);
+			throw new Error(msg);
+		}
 		try {
 			const dir = path.dirname(this.configFile);
 			if (!fs.existsSync(dir)) {
@@ -617,7 +806,13 @@ export class ProjectConfigStore {
 			// Clear dirty flag — file is now in native form.
 			this.dirty = false;
 
-			fs.writeFileSync(this.configFile, yaml.stringify(out), "utf-8");
+			// CON-02: crash-safe write (tmp-write → fsync → rename → dir fsync) with
+			// BACKUP_COUNT-deep .bak.N rotation, shared with gate/team/task/inbox via
+			// atomic-json.ts. rotateBackups() (inside atomicWriteFileSync) always
+			// copies the CURRENT on-disk file into .bak.1 before the rename, so even
+			// if this write is ever reached against a not-yet-detected-bad primary,
+			// that primary is preserved as a backup generation, never silently lost.
+			atomicWriteFileSync(this.configFile, yaml.stringify(out), { backups: ProjectConfigStore.BACKUP_COUNT });
 		} catch (err) {
 			console.error("[project-config-store] Failed to save project config:", err);
 		}

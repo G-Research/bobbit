@@ -58,7 +58,7 @@ export function rotateBackups(file: string, backups: number): void {
 }
 
 /**
- * Write `data` as JSON to `file` using the crash-safe tmp-write + fsync +
+ * Write raw `contents` to `file` using the crash-safe tmp-write + fsync +
  * rename pattern. Rotates up to `backups` `.bak.N` generations first
  * (best-effort, skipped when `backups` is 0). Throws on failure to write —
  * callers should catch and log (mirroring existing store `save()` methods),
@@ -69,20 +69,26 @@ export function rotateBackups(file: string, backups: number): void {
  * *content* is on disk but the directory entry pointing at it may not be.
  * Some platforms (notably Windows) reject opening/fsyncing a directory, so
  * failure there is swallowed.
+ *
+ * Format-agnostic (CON-02): `atomicWriteJsonSync()` below is a thin
+ * JSON-specific wrapper around this. Non-JSON durable stores (e.g.
+ * `project-config-store.ts`'s `project.yaml`) call this function directly
+ * with their own serialized text, so every durable store shares exactly one
+ * write-discipline implementation instead of each format re-implementing
+ * tmp-write/fsync/rename/.bak-rotation on its own.
  */
-export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups?: number } = {}): void {
+export function atomicWriteFileSync(file: string, contents: string, opts: { backups?: number } = {}): void {
 	const dir = path.dirname(file);
 	if (!fs.existsSync(dir)) {
 		fs.mkdirSync(dir, { recursive: true });
 	}
 	rotateBackups(file, opts.backups ?? 0);
 
-	const json = JSON.stringify(data, null, 2);
 	const tmp = `${file}.tmp`;
 	try {
 		const fd = fs.openSync(tmp, "w");
 		try {
-			fs.writeFileSync(fd, json, "utf-8");
+			fs.writeFileSync(fd, contents, "utf-8");
 			try {
 				fs.fsyncSync(fd);
 			} catch {
@@ -113,6 +119,14 @@ export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups
 		}
 		throw err;
 	}
+}
+
+/**
+ * Write `data` as JSON to `file`. Thin convenience wrapper around
+ * {@link atomicWriteFileSync} — see that function for the write discipline.
+ */
+export function atomicWriteJsonSync(file: string, data: unknown, opts: { backups?: number } = {}): void {
+	atomicWriteFileSync(file, JSON.stringify(data, null, 2), opts);
 }
 
 /**
@@ -164,6 +178,12 @@ export function removeJsonWithBackups(file: string): void {
  *
  * Does not validate the parsed shape — callers own their own shape checks
  * (e.g. `Array.isArray`), matching existing store load() methods.
+ *
+ * (JSON-only by design: `project-config-store.ts`'s YAML loader has richer
+ * per-candidate semantics — intentional-empty-file resets, a `loadFailed`
+ * refuse-to-save state — so it walks the same `bakPath()` generations itself
+ * rather than forcing a parse-callback abstraction in here that only one
+ * caller would use.)
  */
 export function loadJsonWithBackupFallback<T = unknown>(
 	file: string,
