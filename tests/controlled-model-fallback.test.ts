@@ -227,6 +227,11 @@ function makeRuntimeHarness(options: {
 	prefs?: Prefs;
 	failModels?: string[];
 	readBack?: { provider: string; id: string };
+	/** Runtime the session is already on before this `set_model` call — mirrors
+	 *  the persisted `PersistedSession.runtime`/`modelProvider` fields
+	 *  `resolveSessionRuntime()` reads. Defaults to unset ("pi"). */
+	initialRuntime?: string;
+	initialModelProvider?: string;
 } = {}) {
 	const setModelCalls: ModelPair[] = [];
 	const persisted: Array<{ sessionId: string; provider: string; modelId: string }> = [];
@@ -240,7 +245,11 @@ function makeRuntimeHarness(options: {
 		},
 		getPersistedSession(sessionId: string) {
 			const match = [...persisted].reverse().find((entry) => entry.sessionId === sessionId);
-			return match ? { modelProvider: match.provider, modelId: match.modelId } : undefined;
+			if (match) return { runtime: options.initialRuntime, modelProvider: match.provider, modelId: match.modelId };
+			if (options.initialRuntime || options.initialModelProvider) {
+				return { runtime: options.initialRuntime, modelProvider: options.initialModelProvider };
+			}
+			return undefined;
 		},
 		updateModelNameFile(_sessionId: string, modelName: string) {
 			modelFiles.push(modelName);
@@ -495,6 +504,71 @@ describe("F5-model-aigw: aigw auto-select is role-tier aware", () => {
 });
 
 describe("controlled model fallback policy — runtime WS set_model", () => {
+	// Regression coverage for the CC-841 reconcile: a live `set_model` request
+	// crossing the Pi/Claude Code runtime boundary must be rejected by
+	// `assertRuntimeSwitchAllowed()` (session-runtime.ts) with
+	// `RUNTIME_SWITCH_REQUIRES_NEW_SESSION` BEFORE any RPC call is attempted —
+	// not fall through to `applyModelString`, which would try to bind a
+	// cross-runtime model onto whichever bridge the session already has. See
+	// docs/design/claude-code-runtime-reconcile.md "Runtime dispatch seam".
+	it("rejects a Pi session's set_model targeting claude-code with RUNTIME_SWITCH_REQUIRES_NEW_SESSION and never calls the RPC", async () => {
+		const harness = makeRuntimeHarness({ initialRuntime: "pi", initialModelProvider: "anthropic" });
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"claude-code",
+				"local-claude-opus-4-8",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			(err: any) => err?.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION",
+		);
+
+		assert.deepEqual(harness.setModelCalls, [], "runtime-switch rejection must happen before any setModel RPC");
+		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.modelFiles, []);
+		assert.deepEqual(harness.messages, [], "runtime-switch rejection must not broadcast a model state");
+	});
+
+	it("rejects a Claude Code session's set_model targeting a Pi-backed provider with RUNTIME_SWITCH_REQUIRES_NEW_SESSION", async () => {
+		const harness = makeRuntimeHarness({ initialRuntime: "claude-code", initialModelProvider: "claude-code" });
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"anthropic",
+				"claude-opus-4-1",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			(err: any) => err?.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION",
+		);
+
+		assert.deepEqual(harness.setModelCalls, []);
+		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.modelFiles, []);
+		assert.deepEqual(harness.messages, []);
+	});
+
+	it("allows a same-runtime Claude Code alias switch through to the RPC unaffected by the guard", async () => {
+		const harness = makeRuntimeHarness({ initialRuntime: "claude-code", initialModelProvider: "claude-code" });
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			"claude-code",
+			"local-claude-opus-4-8",
+			harness.prefs as any,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: "claude-code", id: "local-claude-opus-4-8" });
+		assert.deepEqual(harness.setModelCalls, [["claude-code", "local-claude-opus-4-8"]]);
+	});
+
 	it("fallback off: read-back mismatch rejects and does not persist, broadcast, or update model file", async () => {
 		const harness = makeRuntimeHarness({
 			readBack: { provider: "anthropic", id: "still-old" },
