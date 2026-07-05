@@ -114,6 +114,37 @@ export function gitCwd(): string {
 }
 
 /**
+ * W2.R hygiene fix: `nonGitCwd()`/`gitCwd()` memoize one directory per
+ * worker process directly under `os.tmpdir()` (NOT under the harness's own
+ * `bobbitDir`/`defaultProjectRoot`, which the gateway fixtures already
+ * `awaitableRm()` at worker teardown — see in-process-harness.ts and
+ * gateway-harness.ts). Nothing ever removed these two, so every worker in
+ * every run left one or two `bobbit-e2e-<port>-*` / `bobbit-e2e-git-<port>-*`
+ * directories behind permanently. Over many runs in a session these
+ * accumulate into thousands of stale entries under the shared E2E temp root
+ * (observed: 21k+ `bobbit-*` entries after a night of repeated full-suite
+ * runs). Call this from each worker-scoped gateway fixture's teardown
+ * (after `use(info)`, alongside its existing `awaitableRm` calls) — safe to
+ * call unconditionally since these two dirs are exclusively owned by THIS
+ * worker process (created lazily, in-process, never shared cross-worker).
+ */
+export async function cleanupWorkerTempCwds(): Promise<void> {
+	const { awaitableRm } = await import("./test-utils/cleanup.js");
+	if (_nonGitCwd) {
+		await awaitableRm(_nonGitCwd, {
+			onFinalFailure: (err) => console.warn(`[e2e-setup] cleanup deferred for ${_nonGitCwd}: ${(err as Error)?.message ?? String(err)}`),
+		});
+		_nonGitCwd = undefined;
+	}
+	if (_gitCwd) {
+		await awaitableRm(_gitCwd, {
+			onFinalFailure: (err) => console.warn(`[e2e-setup] cleanup deferred for ${_gitCwd}: ${(err as Error)?.message ?? String(err)}`),
+		});
+		_gitCwd = undefined;
+	}
+}
+
+/**
  * Read the auth token that the test server auto-created on startup.
  *
  * The token is written once per worker by the gateway fixture (sync

@@ -352,9 +352,12 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 
 		// Teardown — use existing shutdown() for proper cleanup
 		try {
-			const { registerOrchestrateSecretStore, registerTeamLeadSecretSource } = await import("./e2e-setup.js");
+			const { registerOrchestrateSecretStore, registerTeamLeadSecretSource, cleanupWorkerTempCwds } = await import("./e2e-setup.js");
 			registerOrchestrateSecretStore(undefined);
 			registerTeamLeadSecretSource(undefined);
+			// W2.R: remove this worker's memoized nonGitCwd()/gitCwd() dirs —
+			// see cleanupWorkerTempCwds() doc comment for why these leaked.
+			await cleanupWorkerTempCwds();
 		} catch { /* best-effort */ }
 		await gw.shutdown();
 		// Bounded-retry cleanup — see gateway-harness.ts for rationale.

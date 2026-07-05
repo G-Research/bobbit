@@ -856,6 +856,14 @@ safety net only:
   `.e2e-browser-*` harness directories whose encoded owner PID has exited.
 - It removes an owned Playwright transform cache unless `BOBBIT_KEEP_PWTEST_CACHE=1` is set.
 
+Per-worker teardown (in both `gateway-harness.ts` and `in-process-harness.ts`)
+also calls `cleanupWorkerTempCwds()` (`tests/e2e/e2e-setup.ts`) to remove the
+worker's memoized `nonGitCwd()`/`gitCwd()` directories. These live directly
+under the shared E2E temp root (not under `bobbitDir`/`defaultProjectRoot`)
+and were never removed before this fix (Finding W2.R) — every worker in every
+run left one or two directories behind permanently, which is safe to delete
+unconditionally at worker teardown since only that worker ever created them.
+
 Do **not** change global teardown to sweep every `.e2e-*` directory under the
 shared temp root. Overlapping worktrees and active E2E runs use the same root;
 unknown or live directories must be left alone. Also do **not** re-add
