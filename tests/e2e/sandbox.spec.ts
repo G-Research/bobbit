@@ -30,7 +30,7 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 
 test.describe("Docker Sandbox", () => {
 	test("GET /api/sandbox-status returns correct shape", async () => {
-		const res = await apiFetch("/api/sandbox-status");
+		const res = await apiFetch("/api/sandbox-status?projectId=headquarters");
 		expect(res.status).toBe(200);
 		const data = await res.json();
 		expect(data).toHaveProperty("configured");
@@ -70,7 +70,7 @@ test.describe("Docker Sandbox", () => {
 
 	test("GET /api/sandbox-status reflects config changes", async () => {
 		// Initially configured should be false
-		const res1 = await apiFetch("/api/sandbox-status");
+		const res1 = await apiFetch("/api/sandbox-status?projectId=headquarters");
 		const data1 = await res1.json();
 		expect(data1.configured).toBe(false);
 
@@ -82,7 +82,7 @@ test.describe("Docker Sandbox", () => {
 		expect(putRes.status).toBe(200);
 
 		// Now configured should be true
-		const res2 = await apiFetch("/api/sandbox-status");
+		const res2 = await apiFetch("/api/sandbox-status?projectId=headquarters");
 		expect(res2.status).toBe(200);
 		const data2 = await res2.json();
 		expect(data2.configured).toBe(true);
@@ -92,5 +92,39 @@ test.describe("Docker Sandbox", () => {
 			method: "PUT",
 			body: JSON.stringify({ sandbox: "none" }),
 		});
+	});
+
+	test("GET /api/sandbox-status reflects the selected project's config", async () => {
+		const projectsRes = await apiFetch("/api/projects");
+		expect(projectsRes.status).toBe(200);
+		const projectsBody = await projectsRes.json();
+		const projects = Array.isArray(projectsBody) ? projectsBody : (projectsBody.projects || []);
+		const project = projects.find((p: any) => p.id !== "headquarters" && p.kind !== "headquarters");
+		expect(project?.id).toBeTruthy();
+
+		try {
+			await apiFetch("/api/project-config", {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "none" }),
+			});
+			const putRes = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "docker", sandbox_image: "selected-project-sandbox-image" }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const selected = await apiFetch(`/api/sandbox-status?projectId=${encodeURIComponent(project.id)}`);
+			expect(selected.status).toBe(200);
+			expect((await selected.json()).configured).toBe(true);
+
+			const hq = await apiFetch("/api/sandbox-status?projectId=headquarters");
+			expect(hq.status).toBe(200);
+			expect((await hq.json()).configured).toBe(false);
+		} finally {
+			await apiFetch(`/api/projects/${encodeURIComponent(project.id)}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "none", sandbox_image: "bobbit-agent" }),
+			}).catch(() => {});
+		}
 	});
 });

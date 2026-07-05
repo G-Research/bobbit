@@ -378,6 +378,7 @@ async function resetProjectScopeField(projectId: string, key: string): Promise<v
 // ── Sandbox section state ──
 let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
 let sandboxStatusLoaded = false;
+let sandboxStatusProjectId = "";
 let sandboxBuildInProgress = false;
 let sandboxBuildError = "";
 let worktreePoolStatus: { enabled: boolean; ready?: number; target?: number; filling?: boolean } | null = null;
@@ -390,10 +391,11 @@ let hostTokensLoaded = false;
 const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[]>();
 const _sandboxMountEntries = new Map<string, string[]>();
 
-function loadSandboxStatus(): void {
-	if (sandboxStatusLoaded) return;
+function loadSandboxStatus(projectId = getConfigApiProjectId(getActiveScope())): void {
+	if (sandboxStatusLoaded && sandboxStatusProjectId === projectId) return;
 	sandboxStatusLoaded = true;
-	fetchSandboxStatus().then(s => {
+	sandboxStatusProjectId = projectId;
+	fetchSandboxStatus(projectId).then(s => {
 		sandboxStatusLocal = s;
 		state.sandboxStatus = s;
 		renderApp();
@@ -566,7 +568,8 @@ function renderSandboxSection(
 	inputClass: string,
 	labelClass: string,
 ) {
-	loadSandboxStatus();
+	const apiProjectId = getConfigApiProjectId(getActiveScope());
+	loadSandboxStatus(apiProjectId);
 	initSandboxEntries(projectId, resolved);
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
@@ -623,7 +626,7 @@ function renderSandboxSection(
 																sandboxBuildError = "";
 																renderApp();
 																try {
-																	const resp = await gatewayFetch("/api/sandbox-image/build", { method: "POST" });
+																	const resp = await gatewayFetch("/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: apiProjectId }) });
 																	let result: any = {};
 																	try { result = await resp.json(); } catch (_e) { /* non-JSON */ }
 																	if (resp.ok && result.success) {

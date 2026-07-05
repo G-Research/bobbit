@@ -36,7 +36,12 @@ import {
 import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
-import { isHeadquartersProject } from "./headquarters.js";
+import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
+
+function configApiProjectId(projectId?: string | null): string {
+	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
+	return !selected || selected === "system" || isHeadquartersProject(selected) ? HEADQUARTERS_PROJECT_ID : selected;
+}
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -2433,7 +2438,8 @@ export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
 
 export async function fetchRoles(projectId?: string): Promise<RoleData[]> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/roles${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch roles: ${res.status}`);
 		const data = await res.json();
@@ -2495,7 +2501,7 @@ export interface McpServerInfo {
 export async function fetchMcpServers(opts?: { projectId?: string; cwd?: string; ensure?: boolean }): Promise<McpServerInfo[]> {
 	try {
 		const params = new URLSearchParams();
-		if (opts?.projectId) params.set("projectId", opts.projectId);
+		params.set("projectId", configApiProjectId(opts?.projectId));
 		if (opts?.cwd) params.set("cwd", opts.cwd);
 		if (opts?.ensure) params.set("ensure", "true");
 		const qs = params.toString();
@@ -2687,7 +2693,8 @@ export async function fetchContributions(projectId?: string): Promise<PackContri
 
 export async function fetchToolsResponse(projectId?: string): Promise<ToolsResponse> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
 		return normalizeToolsResponse(await res.json());
@@ -2733,7 +2740,8 @@ export async function updateTool(name: string, updates: { description?: string; 
 
 export async function fetchGroupPolicies(projectId?: string): Promise<Record<string, string>> {
 	try {
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const apiProjectId = configApiProjectId(projectId);
+		const qs = `?projectId=${encodeURIComponent(apiProjectId)}`;
 		const res = await gatewayFetch(`/api/tool-group-policies${qs}`);
 		if (!res.ok) return {};
 		const raw = await res.json();
@@ -2902,8 +2910,9 @@ export async function postBootTiming(sample: unknown): Promise<void> {
 // SANDBOX STATUS API
 // ============================================================================
 
-export async function fetchSandboxStatus() {
-	const res = await gatewayFetch("/api/sandbox-status");
+export async function fetchSandboxStatus(projectId?: string) {
+	const apiProjectId = configApiProjectId(projectId);
+	const res = await gatewayFetch(`/api/sandbox-status?projectId=${encodeURIComponent(apiProjectId)}`);
 	if (!res.ok) return null;
 	return res.json();
 }

@@ -273,17 +273,27 @@ test("server-scope assistant accepts an explicit cwd inside the Headquarters dir
 	assert.ok(samePath(accepted.body.cwd, hqSubdir), `expected role assistant cwd ${accepted.body.cwd} to be preserved inside Headquarters dir`);
 });
 
-test("MCP server API requires explicit projectId", async (t) => {
-	const serverRoot = tmpDir("bobbit-mcp-api-project-required-");
+test("config discovery APIs require explicit projectId", async (t) => {
+	const serverRoot = tmpDir("bobbit-config-api-project-required-");
 	const { baseUrl } = await startGateway(t, serverRoot);
 
-	const missing = await api(baseUrl, "/api/mcp-servers");
-	assert.equal(missing.status, 400);
-	assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
+	for (const pathname of ["/api/mcp-servers", "/api/tools", "/api/roles", "/api/sandbox-status", "/api/sandbox-image/build"]) {
+		const missing = await api(baseUrl, pathname, undefined, pathname.endsWith("/build") ? "POST" : "GET");
+		assert.equal(missing.status, 400, `${pathname} should require projectId`);
+		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
+	}
 
-	const scoped = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
-	assert.equal(scoped.status, 200, JSON.stringify(scoped.body));
-	assert.deepEqual(scoped.body, []);
+	const mcp = await api(baseUrl, "/api/mcp-servers?projectId=headquarters");
+	assert.equal(mcp.status, 200, JSON.stringify(mcp.body));
+	assert.deepEqual(mcp.body, []);
+
+	const tools = await api(baseUrl, "/api/tools?projectId=headquarters");
+	assert.equal(tools.status, 200, JSON.stringify(tools.body));
+	assert.ok(Array.isArray(tools.body.tools));
+
+	const roles = await api(baseUrl, "/api/roles?projectId=headquarters");
+	assert.equal(roles.status, 200, JSON.stringify(roles.body));
+	assert.ok(Array.isArray(roles.body.roles));
 });
 
 test("session MCP manager resolution fails closed for projectless sessions", async () => {

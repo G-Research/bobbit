@@ -10,7 +10,7 @@ import { showConnectionError } from "./dialogs.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 
 // ============================================================================
@@ -400,7 +400,7 @@ function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Re
 // ============================================================================
 
 async function fetchToolsScoped(): Promise<ToolInfo[]> {
-	const response = await fetchToolsResponse(getConfigProjectId());
+	const response = await fetchToolsResponse(getConfigApiProjectId());
 	toolDiagnostics = response.diagnostics;
 	return response.tools;
 }
@@ -411,7 +411,7 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	const scopedProjectId = getConfigProjectId();
+	const scopedProjectId = getConfigApiProjectId();
 	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(scopedProjectId), fetchGroupPolicies(scopedProjectId), fetchMcpServers({ projectId: scopedProjectId })]);
 	tools = t;
 	roles = r;
@@ -490,7 +490,7 @@ export function navigateToToolEdit(toolName: string): void {
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
-		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
+		fetchToolDetail(toolName, getConfigApiProjectId()).then((detail) => {
 			if (detail && selectedTool?.name === toolName) {
 				selectedTool = detail;
 				// Only update docs from detail if user hasn't changed it
@@ -508,7 +508,7 @@ export function navigateToToolEdit(toolName: string): void {
 		});
 	} else {
 		// Not in cache, fetch directly
-		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
+		fetchToolDetail(toolName, getConfigApiProjectId()).then((detail) => {
 			if (detail) {
 				currentView = "edit";
 				selectedTool = detail;
@@ -581,7 +581,7 @@ async function handleSave(): Promise<void> {
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
 			// Fetch full detail to get docs back
-			const detail = await fetchToolDetail(updated.name, getConfigProjectId());
+			const detail = await fetchToolDetail(updated.name, getConfigApiProjectId());
 			if (detail) {
 				showEdit(detail);
 			} else {
@@ -677,7 +677,7 @@ function inheritedMcpPolicyLabel(keys: Array<string | undefined>): string {
 }
 
 async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
-	const scopedProjectId = getConfigProjectId();
+	const scopedProjectId = getConfigApiProjectId();
 	await updateGroupPolicy(key, value || null, scopedProjectId);
 	groupPolicies = await fetchGroupPolicies(scopedProjectId);
 	renderApp();
@@ -1096,7 +1096,7 @@ function renderListView(): TemplateResult {
 								@change=${async (e: Event) => {
 									e.stopPropagation();
 									const val = (e.target as HTMLSelectElement).value;
-									const scopedProjectId = getConfigProjectId();
+									const scopedProjectId = getConfigApiProjectId();
 									await updateGroupPolicy(groupName, val || null, scopedProjectId);
 									groupPolicies = await fetchGroupPolicies(scopedProjectId);
 									renderApp();
@@ -1180,7 +1180,7 @@ function renderAccessTab(): TemplateResult {
 								const updated = { ...(role.toolPolicies || {}) };
 								if (val) { updated[toolName] = val; } else { delete updated[toolName]; }
 								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-								roles = await fetchRoles(getConfigProjectId());
+								roles = await fetchRoles(getConfigApiProjectId());
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,

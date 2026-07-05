@@ -39,9 +39,9 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url.startsWith("/api/tools")) return response({
 		tools: [{ name: "bash", description: "Run a shell command.", group: "Shell" }],
 	});
-	if (url === "/api/roles") return response([]);
-	if (url === "/api/mcp-servers") return response(mcpServers);
-	if (url === "/api/tool-group-policies" && method === "GET") {
+	if (url.startsWith("/api/roles")) return response([]);
+	if (url.startsWith("/api/mcp-servers")) return response(mcpServers);
+	if (url.startsWith("/api/tool-group-policies") && method === "GET") {
 		const cascade: Record<string, { policy: string; origin: string }> = {};
 		for (const [key, policy] of Object.entries(policies)) cascade[key] = { policy, origin: "fixture" };
 		return response(cascade);

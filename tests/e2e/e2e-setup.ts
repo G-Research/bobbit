@@ -395,8 +395,11 @@ async function maybeInjectProjectIdQuery(path: string, method: string): Promise<
 	// /api/workflows/:id and /:id/customize|/override require projectId on every method.
 	const rootGet = method === "GET" && WORKFLOWS_BODY_INJECT.test(path);
 	const idRoute = WORKFLOWS_QUERY_INJECT.test(path) && (method === "GET" || method === "POST" || method === "PUT" || method === "DELETE");
-	if (!rootGet && !idRoute) return path;
+	const hqDiscoveryRoute = (method === "GET" && /^\/api\/(tools|roles|sandbox-status)(\?|$)/.test(path))
+		|| (method === "POST" && /^\/api\/sandbox-image\/build(\?|$)/.test(path));
+	if (!rootGet && !idRoute && !hqDiscoveryRoute) return path;
 	if (/[?&]projectId=/.test(path)) return path;
+	if (hqDiscoveryRoute) return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
 	const pid = await defaultProjectId();
 	if (!pid) return path;
 	return path + (path.includes("?") ? "&" : "?") + "projectId=" + encodeURIComponent(pid);
