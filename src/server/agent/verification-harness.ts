@@ -173,6 +173,7 @@ import {
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
+import { SwarmGovernor } from "./swarm-governor.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
@@ -1424,6 +1425,45 @@ export class VerificationHarness {
 	 * constructor once `projectContextManager` is wired.
 	 */
 	private childScheduler!: ChildTeamScheduler;
+
+	/**
+	 * SWARM-W1 — hard per-node resource governor (design/swarm-orchestration.md
+	 * §6). Single instance for the whole gateway, mirroring `childScheduler`
+	 * above (per-rootGoalId state is keyed internally, not per-instance). Only
+	 * swarm-sibling goals are ever `registerNode`-d (by `swarm-best-of-n.ts`),
+	 * so this is zero-overhead for every non-swarm session — see
+	 * `session-manager.ts`'s `trackCostFromEvent` call site.
+	 */
+	readonly swarmGovernor = new SwarmGovernor();
+
+	/**
+	 * SWARM-W1 — hard-kill a swarm sibling that breached its token-budget
+	 * hard-kill margin OR its straggler wall-clock deadline. Terminates the
+	 * sibling's team-lead session (reusing `SessionManager.terminateSession`'s
+	 * existing SIGTERM→3s→SIGKILL path — the same backstop used everywhere
+	 * else a session is force-stopped) and fires the SAME terminal event
+	 * non-swarm children use, stamped "killed", so the barrier/artifact
+	 * capture + scheduler-permit release run off the existing seam exactly
+	 * like an operator-initiated kill. Best-effort: logs, never throws.
+	 */
+	async hardKillSwarmNode(goalId: string, reason: string): Promise<void> {
+		console.warn(`[swarm-governor] hard-killing ${goalId}: ${reason}`);
+		try {
+			const ctx = this.projectContextManager?.getContextForGoal(goalId);
+			const child = ctx?.goalStore.get(goalId);
+			const sessionId = child?.teamLeadSessionId;
+			if (sessionId && this.sessionManager) {
+				await this.sessionManager.terminateSession(sessionId);
+			}
+		} catch (err) {
+			console.warn(`[swarm-governor] terminateSession failed for ${goalId} (non-fatal):`, err);
+		}
+		try {
+			await this.notifyChildTerminal(goalId, "killed");
+		} catch (err) {
+			console.warn(`[swarm-governor] notifyChildTerminal(killed) failed for ${goalId} (non-fatal):`, err);
+		}
+	}
 
 	/** Override hook for tests so they can stub the spawn/wait/merge sub-steps. */
 	_subgoalHooks?: {
@@ -5958,6 +5998,10 @@ export class VerificationHarness {
 	 */
 	async notifyChildTerminal(childGoalId: string, status: SwarmTerminalStatus = "done"): Promise<void> {
 		this.childScheduler.notifyTerminal(childGoalId);
+		// SWARM-W1: stop governing this node — a terminal goal can no longer
+		// straggle or breach a turn-boundary budget. Idempotent / no-op for a
+		// non-swarm or never-registered goal (cheap Map lookup).
+		this.swarmGovernor.unregisterNode(childGoalId);
 		try {
 			await this._captureSwarmArtifactIfTagged(childGoalId, status);
 		} catch (err) {
@@ -6002,7 +6046,19 @@ export class VerificationHarness {
 			capturedAt: Date.now(),
 		};
 
-		const siblingIds = ctx.goalStore.getAll()
+		// SWARM-W1 carry-forward fix: prefer the expected-sibling set PERSISTED
+		// at group-creation time (`SwarmGroupStore.createGroup`, called by
+		// `createBestOfNSwarm` before any sibling can go terminal) over a
+		// fresh `goalStore` scan here. `SwarmGroupStore.recordArtifact` itself
+		// now enforces this precedence (a persisted `expectedSiblingIds` always
+		// wins), but avoid even performing the scan when we already have the
+		// authoritative set — it's cheaper AND a scan at capture time can be
+		// wrong if a sibling was created after another already terminated, or
+		// archived/reparented mid-run (see docs/design/swarm-orchestration-w0.md
+		// "expected-sibling set" note). Only groups that never went through
+		// `createGroup` (legacy / direct test callers) fall back to the scan.
+		const persistedExpected = ctx.swarmGroupStore.get(swarmGroup)?.expectedSiblingIds;
+		const siblingIds = persistedExpected ?? ctx.goalStore.getAll()
 			.filter(g => g.swarmGroup === swarmGroup)
 			.map(g => g.id);
 

@@ -335,6 +335,143 @@ let dashboardDescendantsInFlight = false;
 let dashboardDescendantsLastFetchAt = 0;
 
 /**
+ * SWARM-W1 governor strip (design/swarm-orchestration.md §8, tracker
+ * "governor STRIP on Agents grid"). Keyed by `swarmGroup` id — derived
+ * client-side from `dashboardDescendants` (direct children of the current
+ * goal carrying a `.swarmGroup` tag), never a separate cross-goal query.
+ * A goal with NO swarm-tagged children renders nothing extra here — the
+ * strip must not leak swarm internals into the normal Agents view.
+ */
+interface SwarmGroupStatus {
+	swarmGroup: string;
+	rootGoalId?: string;
+	expectedCount: number;
+	capturedCount: number;
+	barrierFired: boolean;
+	allFailed: boolean;
+	lastVerify?: { outcome: string; winnerGoalId?: string; scores: Array<{ goalId: string; passed: boolean; score: number }> };
+	integratedGoalId?: string;
+	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string };
+}
+const swarmGroupStatusCache = new Map<string, SwarmGroupStatus>();
+const swarmGroupStatusInFlight = new Set<string>();
+/** One-shot confirmation token minted by the LAST successful /verify call — never persisted server-side (design §9 human-gate), held client-side just long enough for the operator to click Confirm. Cleared on use or on a fresh /verify. */
+const swarmPendingConfirmation = new Map<string, { token: string; winnerGoalId: string }>();
+const swarmActionInFlight = new Set<string>();
+
+function swarmGroupIdsForCurrentGoal(): string[] {
+	if (!currentGoal) return [];
+	const ids = new Set<string>();
+	for (const g of dashboardDescendants) {
+		if (g.parentGoalId === currentGoal.id && typeof (g as any).swarmGroup === "string") {
+			ids.add((g as any).swarmGroup);
+		}
+	}
+	return [...ids];
+}
+
+async function fetchSwarmGroupStatus(parentGoalId: string, swarmGroup: string): Promise<void> {
+	if (swarmGroupStatusInFlight.has(swarmGroup)) return;
+	swarmGroupStatusInFlight.add(swarmGroup);
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}`);
+		if (!res.ok) return;
+		const data = await res.json() as SwarmGroupStatus;
+		swarmGroupStatusCache.set(swarmGroup, data);
+		renderApp();
+	} catch {
+		// best-effort — the strip just shows stale/no data until the next poll
+	} finally {
+		swarmGroupStatusInFlight.delete(swarmGroup);
+	}
+}
+
+async function runSwarmVerify(parentGoalId: string, swarmGroup: string): Promise<void> {
+	if (swarmActionInFlight.has(swarmGroup)) return;
+	swarmActionInFlight.add(swarmGroup);
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}/verify`, { method: "POST" });
+		const data = await res.json().catch(() => null);
+		if (res.ok && data?.confirmationToken && data?.winnerGoalId) {
+			swarmPendingConfirmation.set(swarmGroup, { token: data.confirmationToken, winnerGoalId: data.winnerGoalId });
+		} else {
+			swarmPendingConfirmation.delete(swarmGroup);
+		}
+	} catch {
+		// best-effort — surfaced implicitly by the strip not changing
+	} finally {
+		swarmActionInFlight.delete(swarmGroup);
+		await fetchSwarmGroupStatus(parentGoalId, swarmGroup);
+	}
+}
+
+async function confirmSwarmWinner(parentGoalId: string, swarmGroup: string): Promise<void> {
+	const pending = swarmPendingConfirmation.get(swarmGroup);
+	if (!pending || swarmActionInFlight.has(swarmGroup)) return;
+	swarmActionInFlight.add(swarmGroup);
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}/confirm`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Bobbit-Operator-Confirmation": pending.token },
+			body: JSON.stringify({ winnerGoalId: pending.winnerGoalId, confirmationToken: pending.token }),
+		});
+		if (res.ok) swarmPendingConfirmation.delete(swarmGroup);
+	} catch {
+		// best-effort
+	} finally {
+		swarmActionInFlight.delete(swarmGroup);
+		await fetchSwarmGroupStatus(parentGoalId, swarmGroup);
+		void fetchDashboardDescendants(parentGoalId);
+	}
+}
+
+/** Renders the governor strip for every swarm group tagged on the current goal's direct children — `nothing` for a goal with none (zero visual/DOM change for non-swarm goals). */
+function renderSwarmGovernorStrip(): TemplateResult | typeof nothing {
+	if (!currentGoal) return nothing;
+	const groupIds = swarmGroupIdsForCurrentGoal();
+	if (groupIds.length === 0) return nothing;
+	const goalId = currentGoal.id;
+	return html`
+		<div class="swarm-governor-strip-list">
+			${groupIds.map((swarmGroup) => {
+				const status = swarmGroupStatusCache.get(swarmGroup);
+				if (!status) { void fetchSwarmGroupStatus(goalId, swarmGroup); }
+				const pending = swarmPendingConfirmation.get(swarmGroup);
+				const busy = swarmActionInFlight.has(swarmGroup);
+				const expected = status?.expectedCount ?? 0;
+				const captured = status?.capturedCount ?? 0;
+				const budget = status?.config?.tokenBudgetPerNode;
+				return html`
+					<div class="swarm-governor-strip" data-swarm-group="${swarmGroup}">
+						<div class="swarm-governor-strip-row">
+							<span class="swarm-governor-badge">SWARM best-of-N</span>
+							<span class="swarm-governor-count">${captured}/${expected} candidates terminal</span>
+							${budget ? html`<span class="swarm-governor-budget">cap ${budget.toLocaleString()} tok/node</span>` : nothing}
+							${status?.allFailed ? html`<span class="swarm-governor-escalate">ALL FAILED — needs human triage</span>` : nothing}
+							${status?.integratedGoalId
+								? html`<span class="swarm-governor-integrated">integrated: ${status.integratedGoalId.slice(0, 8)}</span>`
+								: status?.barrierFired
+									? html`
+										<button class="swarm-governor-btn" ?disabled=${busy} @click=${() => runSwarmVerify(goalId, swarmGroup)}>Run verifier</button>
+										${pending
+											? html`<button class="swarm-governor-btn swarm-governor-btn-primary" ?disabled=${busy} @click=${() => confirmSwarmWinner(goalId, swarmGroup)}>Confirm winner ${pending.winnerGoalId.slice(0, 8)}</button>`
+											: nothing}
+									`
+									: html`<span class="swarm-governor-waiting">waiting for barrier…</span>`}
+						</div>
+						${status?.lastVerify
+							? html`<div class="swarm-governor-scores">verify outcome: ${status.lastVerify.outcome}${status.lastVerify.winnerGoalId ? ` — pick: ${status.lastVerify.winnerGoalId.slice(0, 8)}` : ""}</div>`
+							: nothing}
+					</div>
+				`;
+			})}
+		</div>
+	`;
+}
+
+/**
  * Pending plan-mutation approval requests for the current goal — the
  * dashboard mutation-pending card. Populated by (a) the initial REST fetch on
  * dashboard load / WS reconnect (restart-safe rehydration via
@@ -2500,8 +2637,13 @@ function renderAgentsTab(): TemplateResult {
 	}
 	allAgents.push(...agents);
 
+	const swarmStrip = renderSwarmGovernorStrip();
+
 	if (allAgents.length === 0) {
-		return html`<div class="tab-empty">${svgAgents}<span>No active agents</span></div>`;
+		return html`
+			${swarmStrip}
+			<div class="tab-empty">${svgAgents}<span>No active agents</span></div>
+		`;
 	}
 
 	// Separate live and archived agents
@@ -2559,6 +2701,7 @@ function renderAgentsTab(): TemplateResult {
 
 	return html`
 		<div class="tab-panel-inner">
+			${swarmStrip}
 			<div class="agent-grid">
 				${liveAgents.map(agent => renderAgentCard(agent, false))}
 				${archivedAgents.map(agent => renderAgentCard(agent, true))}

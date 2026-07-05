@@ -4952,6 +4952,29 @@ export class SessionManager {
 			cost: costValue,
 		}, stampGoalId);
 
+		// SWARM-W1 — hard per-node token-budget governor (design/swarm-orchestration.md
+		// §6, must-fix #1): this `message_end` hook is the ONE place cumulative
+		// turn usage becomes known, so it's the enforcement point for a HARD
+		// per-node ceiling — not just a spawn-boundary "pause and ask". Zero
+		// overhead for every non-swarm session: `checkTokenBudget` is a Map
+		// lookup that returns `{kind:"ok"}` unless `stampGoalId` was
+		// explicitly `registerNode`-d by `swarm-best-of-n.ts`.
+		if (stampGoalId) {
+			const totalTokens = (cumulativeCost.inputTokens ?? 0) + (cumulativeCost.outputTokens ?? 0);
+			const action = this._verificationHarness?.swarmGovernor.checkTokenBudget(stampGoalId, totalTokens);
+			if (action?.kind === "abort-turn") {
+				console.warn(`[swarm-governor] aborting in-flight turn for goal ${stampGoalId}: ${action.reason}`);
+				try {
+					session.rpcClient.abort();
+				} catch (err) {
+					console.warn(`[swarm-governor] abort() failed for session ${session.id} (non-fatal):`, err);
+				}
+			} else if (action?.kind === "hard-kill") {
+				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason)
+					.catch((err) => console.warn(`[swarm-governor] hardKillSwarmNode failed for goal ${stampGoalId} (non-fatal):`, err));
+			}
+		}
+
 		// PERF-05: was a per-message, per-project TaskManager alloc + full
 		// scan inlined here. Now reuses the shared, cached resolver (also
 		// used by getSessionCostUpdate/broadcastSessionCost for reconnect

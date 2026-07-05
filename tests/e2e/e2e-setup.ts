@@ -506,6 +506,17 @@ const CHILDREN_MUTATION_PATH =
 	/^\/api\/goals\/[^/]+\/(pause|resume|policy|mutation\/[^/]+\/decision)$/;
 
 /**
+ * SWARM-W1: the `/verify` and `/confirm` swarm-group actions are
+ * OPERATOR-class (`swarm-routes.ts`'s `authorize(..., "operator")` — same
+ * class as pause/resume above), so they need the same auto-injected
+ * `bobbit_session` cookie. Unlike `CHILDREN_MUTATION_PATH`, the human
+ * signal here ALSO controls whether the server mints a confirmation token
+ * at all (see `swarm-routes.ts`'s `humanConfirmed` gate) — tests that want
+ * to observe the agent-only (no-token) path use `rawApiFetch` instead.
+ */
+const SWARM_GROUP_ACTION_PATH = /^\/api\/goals\/[^/]+\/swarm-groups\/[^/]+\/(verify|confirm)$/;
+
+/**
  * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan
  * `PATCH`, `integrate-child`, `policy`) as the goal's team-lead.
  *
@@ -613,7 +624,7 @@ async function withChildrenAuthzCookie(path: string, method: string, headers: Re
 	// the cookie, so injecting it is harmless. Tests exercising the agent/deny
 	// path use `rawApiFetch` (which bypasses this) with explicit headers.
 	const isChildCreate = method.toUpperCase() === "POST" && bare === "/api/goals";
-	if (!CHILDREN_MUTATION_PATH.test(bare) && !isChildCreate) return headers;
+	if (!CHILDREN_MUTATION_PATH.test(bare) && !isChildCreate && !SWARM_GROUP_ACTION_PATH.test(bare)) return headers;
 	const hasExplicitAuth = Object.keys(headers).some((k) => {
 		const lk = k.toLowerCase();
 		if ((lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && headers[k]) return true;
