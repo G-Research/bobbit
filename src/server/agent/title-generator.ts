@@ -99,7 +99,7 @@ function loadAuth(): AuthCredentials | null {
 		if (!cred) return null;
 
 		if (cred.type === "oauth" && cred.access) return cred;
-		if (cred.type === "api-key" && cred.key) return { type: "api-key", access: cred.key };
+		if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", access: cred.key };
 		return null;
 	} catch {
 		return null;

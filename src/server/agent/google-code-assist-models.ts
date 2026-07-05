@@ -22,7 +22,8 @@
  * Design: docs/design/google-session-models.md; docs/design/google-oauth-model-auth.md §4.5.
  */
 
-import { getModels } from "@earendil-works/pi-ai";
+// Pure static-catalog read — durable pi-ai 0.80 replacement, no /compat needed.
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
 import type { ApiModel } from "./model-registry.js";
 import {
@@ -76,7 +77,7 @@ export function getGoogleCodeAssistModels(opts?: { ignoreCredential?: boolean })
 
 	let base: Array<Record<string, any>> = [];
 	try {
-		base = getModels("google" as any) as unknown as Array<Record<string, any>>;
+		base = getBuiltinModels("google" as any) as unknown as Array<Record<string, any>>;
 	} catch {
 		return [];
 	}

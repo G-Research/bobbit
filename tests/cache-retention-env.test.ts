@@ -148,11 +148,14 @@ describe("cache-retention wiring into spawn paths", () => {
 	});
 });
 
-describe("pi-ai 0.79.6 native PI_CACHE_RETENTION contract (patch-application-style guard)", () => {
+describe("pi-ai 0.80.3 native PI_CACHE_RETENTION contract (patch-application-style guard)", () => {
 	it("installed pi-ai reads PI_CACHE_RETENTION from env and treats \"long\" as the 1h-eligible retention tier", () => {
+		// pi-ai 0.80 moved the anthropic provider implementation from
+		// dist/providers/anthropic.js to dist/api/anthropic-messages.js
+		// (see the pi-0.80.3 upgrade PR) — both anchors below survive verbatim.
 		const anthropicProviderPath = path.join(
 			process.cwd(),
-			"node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js",
+			"node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js",
 		);
 		const src = readFileSync(anthropicProviderPath, "utf-8");
 
@@ -181,8 +184,8 @@ describe("pi-ai 0.79.6 native PI_CACHE_RETENTION contract (patch-application-sty
 		) as { dependencies?: Record<string, string> };
 		assert.equal(
 			pkg.dependencies?.["@earendil-works/pi-coding-agent"],
-			"0.79.6",
-			"this contract was verified against pi-coding-agent 0.79.6 — re-verify node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js before bumping the pin (see docs/design/cache-retention-long.md)",
+			"0.80.3",
+			"this contract was verified against pi-coding-agent 0.80.3 — re-verify node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js before bumping the pin (see docs/design/cache-retention-long.md)",
 		);
 	});
 });
