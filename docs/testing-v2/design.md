@@ -13,6 +13,8 @@ Authoritative inputs:
 
 `createGateway(config, deps?)` becomes the single runtime wiring point. Missing deps always default to production implementations; the CLI boundary passes no test doubles.
 
+**CLI contract phase scoping.** During migration, `cli.ts` MAY map legacy env flags to deps (the documented CLI-only bridge that keeps the legacy suite green) — the strict "no test doubles from the CLI" contract (`cli-real-deps.test.ts`) is enforced starting at the switchover gate, at which point the env→deps mapping is deleted from `src/` and the flags are removed. Concretely: the DI-runtime and mass-migration gates permit the CLI env bridge; the switchover gate's `check-no-test-flags.mjs` + `cli-real-deps.test.ts` require it gone. Intermediate migration commits therefore never conflict with the final no-deps CLI contract.
+
 ```ts
 export interface Clock {
   now(): number;
@@ -807,7 +809,7 @@ Every daily run writes `.profiles/testing-v2/daily/<timestamp>.json` and `.profi
 4. Mass migration: copy/codemod core/dom/integration files into `tests2/`; originals remain untouched.
 5. Browser tier: add Chromium keep adapters and 31 smoke journeys; retired specs stay in legacy until switchover.
 6. Parity proof: V8 coverage, story-registry walk, bucket guard, mapping guard, and baseline-history honesty check must pass.
-7. Concurrency proof: 5 simultaneous `test:v2` runs × 3 reps, `retries: 0`, with reservation-ledger artifacts proving `sum(workerSlots) <= cores` for every generation.
+7. Concurrency proof: 5 simultaneous `test:v2` runs × 3 reps, `retries: 0`; asserts 15/15 green, **each run's wall time ≤ `full.maxWallMs` × 1.25 tolerance under mutual load** (i.e. ≤ 3 min × 1.25 = 225 s while contending), and reservation-ledger artifacts proving `sum(workerSlots) <= cores` for every generation. The `perRunWallToleranceFactor` lives in `tests2/budgets.json`.
 8. Chaos proof: mutant comparison report proves v2 catches every legacy-caught mutant and at least matches kill rates overall and per area.
 9. Switchover: short freeze window; flip `.bobbit/config/project.yaml` commands to v2, delete/retire test env flags, update docs/AGENTS pointers.
 10. Daily lane: create the staff-agent trigger, land `docs/testing-v2.md`, run one full green `test:daily`, and persist the retirement counter.
@@ -836,7 +838,7 @@ Safety rules:
 ## 13. Acceptance checklist for later gates
 
 - `npm run test:v2` green within ≤180 s wall and ≤13 CPU-min measured by full process-tree CPU, `retries: 0`.
-- Five concurrent full v2 runs × three reps: 15/15 green, reservation-ledger proof attached and `sum(workerSlots) <= cores` in every generation.
+- Five concurrent full v2 runs × three reps: 15/15 green, **each run's wall ≤ 3 min × 1.25 tolerance under mutual load**, reservation-ledger proof attached and `sum(workerSlots) <= cores` in every generation.
 - `scripts/testing-v2/parity.mjs` shows V8 per-area line+branch coverage non-regression against named baselines, story-registry non-regression, no unmapped tests, no retired-without-replacement tests, and a clean baseline-history honesty check.
 - `scripts/testing-v2/check-no-test-flags.mjs` finds no test-only env flags or `NODE_ENV === "test"` conditionals in `src/` at switchover.
 - `docs/testing-v2/chaos-report.md` shows v2 catches 100% of legacy-caught mutants, matches/exceeds kill rate overall and per area, passes the null-mutant check, includes the ≥5 full-v2 sample, and remediates or justifies every both-missed mutant.

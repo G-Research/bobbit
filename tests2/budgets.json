@@ -1,0 +1,32 @@
+{
+  "$schema": "./budgets.schema.json",
+  "description": "Per-tier hard budget caps for the Test Suite v2. Enforced by scripts/testing-v2/assert-budget.mjs. Wall is read from runner JSON reports; CPU is measured directly from the whole-run process tree (see docs/testing-v2/design.md §6/§6.1). Tier CPU caps intentionally sum to the full cap (7.5 + 5.5 = 13.0).",
+  "cores": 24,
+  "tiers": {
+    "tier1": {
+      "label": "vitest core + dom + integration",
+      "maxWallMs": 100000,
+      "maxCpuMs": 450000,
+      "note": "\u2264100 s wall, \u22647.5 CPU-min"
+    },
+    "tier2": {
+      "label": "playwright-v2 browser (geometry adapters + smoke journeys)",
+      "maxWallMs": 120000,
+      "maxCpuMs": 330000,
+      "note": "\u2264120 s wall, \u22645.5 CPU-min"
+    },
+    "full": {
+      "label": "npm run test:v2 (tier1 + tier2, single uncontended run)",
+      "maxWallMs": 180000,
+      "maxCpuMs": 780000,
+      "note": "\u2264180 s wall (\u22643 min), \u226413 CPU-min; CPU measured from the whole process tree, not derived from tier sums"
+    }
+  },
+  "concurrency": {
+    "runs": 5,
+    "reps": 3,
+    "retries": 0,
+    "perRunWallToleranceFactor": 1.25,
+    "note": "5 concurrent test:v2 runs \u00d7 3 reps: 15/15 green, each run wall \u2264 full.maxWallMs \u00d7 1.25 under mutual load, ledger keeps sum(workerSlots) \u2264 cores"
+  }
+}
