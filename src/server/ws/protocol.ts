@@ -89,6 +89,14 @@ export interface SessionCostSnapshot {
 	totalCost: number;
 	/** Derived on read by current servers; optional for older persisted/WS payloads. */
 	cacheHitRate?: number | null;
+	/**
+	 * Subset of `cacheWriteTokens` written with a 1h cache TTL (Anthropic
+	 * `cache_creation.ephemeral_1h_input_tokens`). Optional for older servers
+	 * that predate this field. See docs/design/cache-retention-long.md.
+	 */
+	cacheWrite1hTokens?: number;
+	/** Derived: `cacheWriteTokens - cacheWrite1hTokens`, floored at 0. */
+	cacheWrite5mTokens?: number;
 }
 
 export type HostChannelFrame =

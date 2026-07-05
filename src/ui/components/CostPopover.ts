@@ -29,6 +29,13 @@ interface CostAggregate {
 	 * renders an em dash, never `0%`, so cold sessions are not misread.
 	 */
 	cacheHitRate?: number | null;
+	/**
+	 * Subset of `cacheWriteTokens` written with a 1h cache TTL. Optional —
+	 * older servers omit it, in which case the breakdown falls back to a
+	 * single "Cache write" row (no 1h/5m split). See
+	 * docs/design/cache-retention-long.md.
+	 */
+	cacheWrite1hTokens?: number;
 }
 
 /**
@@ -134,7 +141,17 @@ export class CostPopover extends LitElement {
 			{ label: "Output tokens", tokens: agg.outputTokens },
 		];
 		if (agg.cacheReadTokens) rows.push({ label: "Cache read", tokens: agg.cacheReadTokens });
-		if (agg.cacheWriteTokens) rows.push({ label: "Cache write", tokens: agg.cacheWriteTokens });
+		if (agg.cacheWriteTokens) {
+			rows.push({ label: "Cache write", tokens: agg.cacheWriteTokens });
+			// 1h/5m TTL split only when the server reports it (additive field —
+			// see cost-tracker.ts's cacheWrite1hTokens doc). Omitted entirely on
+			// older servers rather than rendering a misleading 0.
+			if (agg.cacheWrite1hTokens) {
+				rows.push({ label: "  — 1h TTL", tokens: agg.cacheWrite1hTokens });
+				const fiveMin = agg.cacheWriteTokens - agg.cacheWrite1hTokens;
+				if (fiveMin > 0) rows.push({ label: "  — 5m TTL", tokens: fiveMin });
+			}
+		}
 		return html`
 			${rows.map(r => this._renderTokenRow(r.label, r.tokens))}
 			${this._renderCacheHitRow(agg.cacheHitRate)}
