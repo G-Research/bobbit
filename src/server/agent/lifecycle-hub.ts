@@ -175,10 +175,13 @@ export class LifecycleHub {
 	// tests/lifecycle-hub-dispatch-decision.test.ts.
 	private readonly decisionAllowList = new Set<string>();
 	private readonly decisionClassifiers = new Map<string, DecisionClassifier[]>();
-	// TODO(CLF-W1a): fold into ContextTraceStore's `TraceEntry.decisions[]` +
-	// Transparency Panel rows instead of this bounded in-memory ring (design
-	// doc Wave 1(a)). Kept separate from `dispatch()`'s persisted trace for
-	// now so Wave 0(b) doesn't touch the on-disk TraceEntry schema/readers.
+	// CLF-W1a: decisions now attach to `ContextTraceStore`'s persisted
+	// `TraceEntry.decisions[]` (see `ContextTraceStore.appendDecision`) when a
+	// per-turn entry is active for the session. This ring is the FALLBACK for
+	// out-of-turn dispatches (no trace entry exists yet for the session, e.g.
+	// direct test calls with no prior `dispatch()`), and remains the
+	// mechanism `getDecisionTrace()` exposes for tests — see
+	// `recordDecisionOutcome`.
 	private readonly decisionTrace: DecisionOutcome[] = [];
 	private static readonly MAX_DECISION_TRACE = 500;
 
@@ -544,19 +547,33 @@ export class LifecycleHub {
 			// abstain → keep polling remaining classifiers
 		}
 		const ms = Math.round(performance.now() - t0);
-		this.recordDecisionOutcome({ ts: Date.now(), point, decisionKind: kind, consulted, decision, ms });
+		this.recordDecisionOutcome(ctx.sessionId, { ts: Date.now(), point, decisionKind: kind, consulted, decision, ms });
 		return decision;
 	}
 
-	private recordDecisionOutcome(entry: DecisionOutcome): void {
+	/**
+	 * CLF-W1a: record a decision outcome into the durable per-turn trace when
+	 * one is active for this session (`ContextTraceStore.appendDecision`
+	 * attaches to the latest `TraceEntry`), falling back to the in-memory ring
+	 * for out-of-turn dispatches (no trace entry exists yet — e.g. a direct
+	 * `dispatchDecision` call with no prior `dispatch()` for the session, as
+	 * every CLF-W0b pinning test does). This keeps those tests' `getDecisionTrace()`
+	 * assertions unchanged: `ContextTraceStore.appendDecision` returns `false`
+	 * when no trace file exists, so the ring still receives the outcome.
+	 */
+	private recordDecisionOutcome(sessionId: string, entry: DecisionOutcome): void {
+		const attached = this.trace.appendDecision(sessionId, entry);
+		if (attached) return;
 		this.decisionTrace.push(entry);
 		if (this.decisionTrace.length > LifecycleHub.MAX_DECISION_TRACE) {
 			this.decisionTrace.shift();
 		}
 	}
 
-	/** Test/inspection accessor for the internal decision-outcome trace buffer
-	 *  (see `recordDecisionOutcome`'s TODO for the planned Wave 1(a) migration). */
+	/** Test/inspection accessor for the FALLBACK in-memory decision-outcome
+	 *  ring — outcomes that had no active per-turn trace entry to attach to.
+	 *  Decisions attached to a durable `TraceEntry` are read via
+	 *  `ContextTraceStore.readTrace()` / `GET .../context-trace`, not here. */
 	getDecisionTrace(): readonly DecisionOutcome[] {
 		return this.decisionTrace;
 	}
