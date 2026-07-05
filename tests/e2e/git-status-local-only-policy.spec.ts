@@ -65,13 +65,11 @@ async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> 
 }
 
 async function withRemotePushEnabled<T>(fn: () => Promise<T>): Promise<T> {
-	const previous = process.env.BOBBIT_TEST_NO_PUSH;
-	process.env.BOBBIT_TEST_NO_PUSH = "0";
+	const prev = serverModule.__setServerRemoteGitPolicy({ skipRemotePush: false });
 	try {
 		return await fn();
 	} finally {
-		if (previous === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
-		else process.env.BOBBIT_TEST_NO_PUSH = previous;
+		serverModule.__setServerRemoteGitPolicy(prev);
 	}
 }
 

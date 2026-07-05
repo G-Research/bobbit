@@ -595,6 +595,7 @@ export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
+export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 
 function oneLineDescription(value: unknown): string | undefined {
