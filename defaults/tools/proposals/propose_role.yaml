@@ -1,7 +1,7 @@
 name: propose_role
 description: "Submit role proposal with name, label, prompt"
 summary: "Propose a custom agent role"
-params: [name, label, prompt, tools?, accessory?]
+params: [name, label, prompt, projectId?, tools?, accessory?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -12,8 +12,9 @@ docs: >-
   (the role's system prompt — supports {{AGENT_ID}}, {{GOAL_BRANCH}}, and other
   template variables; see defaults/roles/*.yaml for examples).
 
-  Optional parameters on the initial call: tools (comma-separated list of
-  allowed tool names), accessory (cosmetic icon).
+  Optional parameters on the initial call: projectId (registered project id;
+  defaults to this session's project and is the authoritative scope), tools
+  (comma-separated list of allowed tool names), accessory (cosmetic icon).
 
   ADDING ADVANCED FIELDS: the role YAML draft on disk supports the full role
   schema (see defaults/roles/coder.yaml as a reference) — including

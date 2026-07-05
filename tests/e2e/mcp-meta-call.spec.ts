@@ -53,6 +53,11 @@ const STUB_OPS = [
 	},
 ];
 
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+const projectQuery = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
+const mcpServersPath = (projectId: string, suffix = "") => `/api/mcp-servers${suffix}?${projectQuery(projectId)}`;
+const toolsPath = (projectId: string) => `/api/tools?${projectQuery(projectId)}`;
+
 /**
  * Seed a fake McpManager onto the live sessionManager so HTTP routes that
  * call sessionManager.getMcpManager() see a connected "fake-server" with two
@@ -165,16 +170,21 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	// 1. GET /api/mcp-servers shape
-	test("GET /api/mcp-servers returns an array of structured entries", async ({ gateway }) => {
+	test("GET /api/mcp-servers requires projectId and returns structured Headquarters entries", async ({ gateway }) => {
+		const missingProject = await apiFetch("/api/mcp-servers");
+		expect(missingProject.status).toBe(400);
+		const missingProjectBody = await missingProject.json().catch(() => ({}));
+		expect(String(missingProjectBody.code ?? missingProjectBody.error ?? "").toLowerCase()).toContain("project");
+
 		// First with no McpManager initialised (BOBBIT_SKIP_MCP=1) — empty array.
-		const empty = await apiFetch("/api/mcp-servers");
+		const empty = await apiFetch(mcpServersPath(HEADQUARTERS_PROJECT_ID));
 		expect(empty.status).toBe(200);
 		const emptyBody = await empty.json();
 		expect(Array.isArray(emptyBody)).toBe(true);
 
-		// Then seed a fake server and verify the entry shape.
-		await seedFakeMcpManager(gateway);
-		const resp = await apiFetch("/api/mcp-servers");
+		// Then seed a fake Headquarters server and verify the entry shape.
+		await seedFakeScopedMcpManager(gateway, HEADQUARTERS_PROJECT_ID);
+		const resp = await apiFetch(mcpServersPath(HEADQUARTERS_PROJECT_ID));
 		expect(resp.status).toBe(200);
 		const servers = await resp.json();
 		expect(Array.isArray(servers)).toBe(true);
@@ -186,9 +196,9 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("GET /api/mcp-servers attributes conflicted public tools only to the winning runtime owner", async ({ gateway }) => {
-		await seedFakeGatewayRuntimeMcpManager(gateway);
+		await seedFakeGatewayRuntimeMcpManager(gateway, HEADQUARTERS_PROJECT_ID);
 
-		const resp = await apiFetch("/api/mcp-servers");
+		const resp = await apiFetch(mcpServersPath(HEADQUARTERS_PROJECT_ID));
 		expect(resp.status).toBe(200);
 		const servers = await resp.json();
 		const first = servers.find((s: any) => s.name === "gw-a-gr");
@@ -221,8 +231,9 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
 
 		const cwdReadOnly = await apiFetch(`/api/mcp-servers?cwd=${encodeURIComponent(gateway.bobbitDir)}`);
-		expect(cwdReadOnly.status).toBe(200);
-		expect(await cwdReadOnly.json()).toEqual([]);
+		expect(cwdReadOnly.status).toBe(400);
+		const cwdReadOnlyBody = await cwdReadOnly.json().catch(() => ({}));
+		expect(String(cwdReadOnlyBody.code ?? cwdReadOnlyBody.error ?? "").toLowerCase()).toContain("project");
 		expect(gateway.sessionManager.getMcpManager({ cwd: gateway.bobbitDir })).toBeNull();
 
 		const ensured = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}&ensure=true`);
@@ -251,7 +262,7 @@ test.describe("MCP meta-tool API E2E", () => {
 		const cwdClient = (cwdMgr as any).clients.get("cwd-server");
 		const unrelatedCwdClient = (unrelatedCwdMgr as any).clients.get("unrelated-cwd-server");
 
-		let toolsBody = await (await apiFetch("/api/tools")).json();
+		let toolsBody = await (await apiFetch(toolsPath(projectId!))).json();
 		let names = toolsBody.tools.map((t: any) => t.name);
 		expect(names).toContain("mcp__default-server__echo");
 		expect(names).toContain("mcp__project-server__echo");
@@ -267,7 +278,7 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(cwdClient?.connected).toBe(false);
 		expect(unrelatedCwdClient?.connected).toBe(true);
 
-		toolsBody = await (await apiFetch("/api/tools")).json();
+		toolsBody = await (await apiFetch(toolsPath(projectId!))).json();
 		names = toolsBody.tools.map((t: any) => t.name);
 		expect(names).toContain("mcp__default-server__echo");
 		expect(names).toContain("mcp__unrelated-cwd-server__echo");
@@ -283,7 +294,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 		gateway.sessionManager.refreshExternalMcpToolRegistrations();
 
-		const toolsBody = await (await apiFetch("/api/tools")).json();
+		const toolsBody = await (await apiFetch(toolsPath(projectId!))).json();
 		const names = toolsBody.tools.map((t: any) => t.name);
 		expect(names).toContain("mcp__default-refresh__echo");
 		expect(names).toContain("mcp__scoped-refresh__echo");

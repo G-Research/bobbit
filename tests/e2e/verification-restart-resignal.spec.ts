@@ -37,10 +37,9 @@
  * "Verification already in progress for this commit").
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectRootPath, deleteGoal } from "./e2e-setup.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -111,7 +110,8 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 		// 1. Real git repo so `git rev-parse HEAD` returns a real SHA — without
 		//    this the duplicate-detection block in server.ts:4792 is skipped
 		//    entirely and we wouldn't actually exercise the bug.
-		const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "verif-restart-repo-"));
+		const defaultRoot = await defaultProjectRootPath();
+		const repoDir = fs.mkdtempSync(path.join(defaultRoot, ".e2e-verif-restart-repo-"));
 		const headSha = gitInitWithCommit(repoDir);
 
 		const goal = await createGoal({

@@ -62,6 +62,11 @@ function tryRealpath(p: string): string {
 	try { return fs.realpathSync(p); } catch { return p; }
 }
 
+function isSamePath(a: string, b: string): boolean {
+	const normalize = (p: string) => path.resolve(tryRealpath(p)).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+	return normalize(a) === normalize(b);
+}
+
 function isAncestorOf(parent: string, child: string): boolean {
 	const a = path.resolve(parent).replace(/\\/g, "/").toLowerCase();
 	const b = path.resolve(child).replace(/\\/g, "/").toLowerCase();
@@ -116,6 +121,7 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 
 	// Short-circuit downstream filesystem checks if the dir is unusable.
 	const reachable = exists && isDir;
+	const sameAsGatewayProjectRoot = reachable && isSamePath(rootPath, ctx.gatewayProjectRoot);
 
 	// 3. path.symlink
 	if (reachable) {
@@ -336,19 +342,35 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 		const bobbitState = path.join(rootPath, ".bobbit", "state");
 		const stats = summarizeBobbitDir(rootPath);
 		if (stats.totalEntries > 0) {
-			checks.push({
-				id: "bobbit.existing",
-				level: "warn",
-				title: "Existing .bobbit/ found",
-				detail:
-					`Found existing .bobbit/ contents: ${stats.summary}. ` +
-					`You can archive this aside into .bobbit-archive-NNN/ before registering.`,
-				remediation: {
-					kind: "archive-bobbit",
-					label: "Archive existing .bobbit/",
-					payload: { rootPath, summary: stats.summary },
-				},
-			});
+			if (sameAsGatewayProjectRoot) {
+				const headquartersPath = path.join(rootPath, ".bobbit", "headquarters");
+				const normalStatePath = path.join(rootPath, ".bobbit", "state");
+				const normalConfigPath = path.join(rootPath, ".bobbit", "config");
+				checks.push({
+					id: "bobbit.existing",
+					level: "warn",
+					title: "Server run directory .bobbit/ found",
+					detail:
+						`Found existing .bobbit/ contents: ${stats.summary}. ` +
+						`This is the server run directory; Headquarters server state may live under ${headquartersPath}. ` +
+						`Adding this path creates a separate normal project using ${normalStatePath} and ${normalConfigPath}. ` +
+						"Archive/delete remediation is not offered here so Headquarters state is preserved.",
+				});
+			} else {
+				checks.push({
+					id: "bobbit.existing",
+					level: "warn",
+					title: "Existing .bobbit/ found",
+					detail:
+						`Found existing .bobbit/ contents: ${stats.summary}. ` +
+						`You can archive this aside into .bobbit-archive-NNN/ before registering.`,
+					remediation: {
+						kind: "archive-bobbit",
+						label: "Archive existing .bobbit/",
+						payload: { rootPath, summary: stats.summary },
+					},
+				});
+			}
 		} else {
 			checks.push({
 				id: "bobbit.existing",
@@ -365,7 +387,7 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 
 	// 12. bobbit.gateway-owned
 	{
-		const sameAsGateway = exists && path.resolve(rootPath) === path.resolve(ctx.gatewayProjectRoot);
+		const sameAsGateway = sameAsGatewayProjectRoot;
 		const hasGwUrl = exists && fs.existsSync(path.join(rootPath, ".bobbit", "state", "gateway-url"));
 		const hasWatchdog = exists && fs.existsSync(path.join(rootPath, ".bobbit", "state", "watchdog.json"));
 		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
@@ -377,8 +399,10 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 			checks.push({
 				id: "bobbit.gateway-owned",
 				level: "warn",
-				title: "Gateway-owned directory",
-				detail: `This path is the running gateway's own working directory (${reasons.join("; ")}). Archive operations will preserve gateway-owned files.`,
+				title: sameAsGateway ? "Server run directory" : "Gateway-owned directory",
+				detail: sameAsGateway
+					? "This path is the running gateway's server run directory. Headquarters/server state must be preserved; Add Project will not offer archive/delete remediation here."
+					: `This path is the running gateway's own working directory (${reasons.join("; ")}). Archive operations will preserve gateway-owned files.`,
 			});
 		} else {
 			checks.push({

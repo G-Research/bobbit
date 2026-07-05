@@ -1,7 +1,6 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
+import { apiFetch, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,9 +31,9 @@ function writeMeta(packDir: string): void {
 }
 
 // Copy the source-of-truth fixture pack (pack.yaml + providers/ + lib/) into the
-// per-gateway server-scope market-packs dir, preserving subdir structure.
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+// per-gateway Headquarters config market-packs dir, preserving subdir structure.
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(fixturePackDir, packDir, { recursive: true });
 	writeMeta(packDir);
@@ -93,7 +92,7 @@ test.describe("sessionSetup provider dynamic context", () => {
 	test("sessionSetup blocks appear in prompt sections and provider failures do not block spawn", async () => {
 		await setProviderDisabled([]);
 
-		const happyCwd = fs.mkdtempSync(path.join(os.tmpdir(), "provider-demo-happy-"));
+		const happyCwd = fs.mkdtempSync(path.join(nonGitCwd(), "provider-demo-happy-"));
 		cwds.push(happyCwd);
 		const happySession = await createSession({ cwd: happyCwd });
 		sessions.push(happySession);
@@ -112,7 +111,7 @@ test.describe("sessionSetup provider dynamic context", () => {
 		// this session still spawns, and because boom returns no blocks, no Dynamic Context
 		// section is produced.
 		await setProviderDisabled(["demo"]);
-		const boomOnlyCwd = fs.mkdtempSync(path.join(os.tmpdir(), "provider-demo-boom-"));
+		const boomOnlyCwd = fs.mkdtempSync(path.join(nonGitCwd(), "provider-demo-boom-"));
 		cwds.push(boomOnlyCwd);
 		const boomOnlySession = await createSession({ cwd: boomOnlyCwd });
 		sessions.push(boomOnlySession);

@@ -14,6 +14,27 @@ import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
 type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
+// Stable project ids (mirrors ./agent/project-registry). The hidden internal
+// `system` project is compatibility-only and never a user-facing config scope;
+// `headquarters` is the user-facing server/global scope.
+const SYSTEM_PROJECT_ID = "system";
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+
+/**
+ * Map a session's projectId to the scope a proposal draft should carry.
+ *
+ * Server-scope role/tool assistant sessions resolve to the hidden internal
+ * `system` project, which is never a user-facing config scope. Stamp the
+ * user-facing Headquarters (server/global) scope instead so accepted role/tool
+ * config lands in the visible Headquarters store rather than the hidden system
+ * store. Safe for all non-project proposal types (`system` is never a valid
+ * user-facing scope). Any other projectId passes through unchanged.
+ */
+export function scopeProposalProjectId(sessionProjectId: string | undefined): string | undefined {
+	if (!sessionProjectId) return undefined;
+	return sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
+}
+
 /**
  * Module-private gateway helper. Returns parsed JSON or text on success;
  * throws on network error or non-2xx HTTP. For edit_proposal we want the
@@ -45,6 +66,35 @@ function sessionId(): string | undefined {
 	return process.env.BOBBIT_SESSION_ID;
 }
 
+let cachedSessionProjectId: string | undefined | null;
+
+async function currentSessionProjectId(): Promise<string | undefined> {
+	if (cachedSessionProjectId !== undefined) return cachedSessionProjectId || undefined;
+	const sid = sessionId();
+	if (!sid) {
+		cachedSessionProjectId = null;
+		return undefined;
+	}
+	try {
+		const { status, bodyJson } = await callGateway(`/api/sessions/${encodeURIComponent(sid)}`, "GET");
+		if (status >= 200 && status < 300 && bodyJson && typeof bodyJson === "object") {
+			const projectId = (bodyJson as { projectId?: unknown }).projectId;
+			cachedSessionProjectId = typeof projectId === "string" && projectId.trim() ? projectId.trim() : null;
+			return cachedSessionProjectId || undefined;
+		}
+	} catch { /* best effort */ }
+	cachedSessionProjectId = null;
+	return undefined;
+}
+
+async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unknown> {
+	if (type === "project" || !args || typeof args !== "object" || Array.isArray(args)) return args;
+	const record = args as Record<string, unknown>;
+	if (typeof record.projectId === "string" && record.projectId.trim()) return args;
+	const scoped = scopeProposalProjectId(await currentSessionProjectId());
+	return scoped ? { ...record, projectId: scoped } : args;
+}
+
 /**
  * Result of seeding a proposal. `rev` is set on success; `errorMessage` carries
  * a server-provided validation message (e.g. unknown workflow) on a structured
@@ -69,10 +119,11 @@ export async function seedProposal(type: ProposalType, args: unknown): Promise<S
 		return {};
 	}
 	try {
+		const scopedArgs = await argsWithProjectId(type, args);
 		const { status, bodyText, bodyJson } = await callGateway(
 			`/api/sessions/${encodeURIComponent(sid)}/proposal/${type}/seed`,
 			"POST",
-			{ args },
+			{ args: scopedArgs },
 		);
 		if (status < 200 || status >= 300) {
 			const msg = (bodyJson && typeof bodyJson === "object" && "message" in bodyJson)
@@ -119,7 +170,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
-			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. cwd never selects project." })),
+			cwd: Type.Optional(Type.String({ description: "Working directory override inside the selected project." })),
 			workflow: Type.Optional(Type.String({ description: "Registered workflow ID; optional with valid inlineWorkflow." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 			parentGoalId: Type.Optional(Type.String({ description: "Subgoal parent ID; team leads auto-fill only when child spawn is allowed." })),
@@ -174,6 +226,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.String({ description: "Role identifier, lowercase with hyphens." }),
 			label: Type.String({ description: "Human-readable display name." }),
 			prompt: Type.String(),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. Headquarters is server scope." })),
 			tools: Type.Optional(Type.String({ description: "Comma-separated allowed tools." })),
 			accessory: Type.Optional(Type.String()),
 		}),
@@ -190,6 +243,7 @@ export default function (pi: ExtensionAPI) {
 			tool: Type.String(),
 			action: Type.String({ description: "e.g. create, update." }),
 			content: Type.String({ description: "Tool definition YAML." }),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. Headquarters is server scope." })),
 		}),
 		async execute(_id, args) { const r = await seedProposal("tool", args); return ack(r.rev); },
 	});
@@ -204,8 +258,9 @@ export default function (pi: ExtensionAPI) {
 			name: Type.String(),
 			description: Type.Optional(Type.String()),
 			prompt: Type.String(),
+			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. cwd never selects project." })),
 			triggers: Type.Optional(Type.String()),
-			cwd: Type.Optional(Type.String()),
+			cwd: Type.Optional(Type.String({ description: "Working directory override inside the selected project." })),
 			role: Type.Optional(Type.String({ description: "Role name to attach to the staff agent (optional)." })),
 		}),
 		async execute(_id, args) { const r = await seedProposal("staff", args); return ack(r.rev); },

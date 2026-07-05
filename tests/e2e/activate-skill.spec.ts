@@ -14,6 +14,7 @@ import {
 	deleteSession,
 	apiFetch,
 	bobbitDir,
+	registerProject,
 } from "./e2e-setup.js";
 
 function freshCwd(label: string): string {
@@ -33,10 +34,12 @@ function writeSkill(rootPath: string, name: string, body: string) {
 test.describe.serial("activate_skill REST endpoint", () => {
 	let sessionId: string;
 	let projectRoot: string;
+	let projectId: string;
 
-	test.beforeAll(() => {
-		// Use a fresh cwd per describe block so the 5s TTL skill cache (keyed
-		// on cwd+config) never returns stale data from a sibling test file.
+	test.beforeAll(async () => {
+		// Use a fresh registered project per describe block so the 5s TTL skill
+		// cache (keyed on cwd+config) never returns stale data from a sibling
+		// test file while projectId remains the authoritative scope.
 		projectRoot = freshCwd("activate");
 		writeSkill(projectRoot, "skill-alpha",
 			"---\nname: skill-alpha\ndescription: Alpha skill for E2E\nargument-hint: <thing>\n---\nALPHA-BODY $ARGUMENTS"
@@ -47,13 +50,22 @@ test.describe.serial("activate_skill REST endpoint", () => {
 		writeSkill(projectRoot, "skill-locked",
 			"---\nname: skill-locked\ndescription: User-only skill\ndisable-model-invocation: true\n---\nLOCKED-BODY"
 		);
+		const project = await registerProject({
+			name: `activate-skill-${Date.now()}`,
+			rootPath: projectRoot,
+			seedWorkflows: false,
+		});
+		projectId = project.id;
 	});
 
 	test.beforeEach(async () => {
-		sessionId = await createSession({ cwd: projectRoot });
+		sessionId = await createSession({ cwd: projectRoot, projectId });
 	});
 	test.afterEach(async () => {
 		if (sessionId) { await deleteSession(sessionId); sessionId = ""; }
+	});
+	test.afterAll(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 	});
 
 	test("happy path: returns expanded body with substituted arguments", async () => {
@@ -116,8 +128,9 @@ test.describe.serial("activate_skill REST endpoint", () => {
 test.describe("system prompt skills catalog", () => {
 	let sessionId: string;
 	let projectRoot: string;
+	let projectId: string;
 
-	test.beforeAll(() => {
+	test.beforeAll(async () => {
 		projectRoot = freshCwd("catalog");
 		writeSkill(projectRoot, "catalog-skill-a",
 			"---\nname: catalog-skill-a\ndescription: Visible alpha\n---\nA"
@@ -125,14 +138,23 @@ test.describe("system prompt skills catalog", () => {
 		writeSkill(projectRoot, "catalog-skill-locked",
 			"---\nname: catalog-skill-locked\ndescription: Hidden from catalog\ndisable-model-invocation: true\n---\nL"
 		);
+		const project = await registerProject({
+			name: `activate-catalog-${Date.now()}`,
+			rootPath: projectRoot,
+			seedWorkflows: false,
+		});
+		projectId = project.id;
 	});
 
 	test.afterEach(async () => {
 		if (sessionId) { await deleteSession(sessionId); sessionId = ""; }
 	});
+	test.afterAll(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+	});
 
 	test("Available Skills section contains model-invocable skills only", async () => {
-		sessionId = await createSession({ cwd: projectRoot });
+		sessionId = await createSession({ cwd: projectRoot, projectId });
 		// Hit the prompt-sections inspector REST endpoint
 		const resp = await apiFetch(`/api/sessions/${sessionId}/prompt-sections`);
 		// Endpoint may not exist on this build — fall back to checking the

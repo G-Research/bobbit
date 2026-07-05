@@ -8,20 +8,22 @@
  * 3. Project-scoped custom dirs do NOT leak into system-level config dirs.
  */
 import { test, expect } from "./gateway-harness.js";
-import { apiFetch, readE2EToken, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, readE2EToken } from "./e2e-setup.js";
 import { resolve, join } from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { Page } from "@playwright/test";
 
 /** Register a project via the REST API and return its id + rootPath.
  *
- * Uses `upsert: true` so Playwright test retries (which re-run beforeAll on
- * the same worker) don't collide with the project already registered at the
- * memoized nonGitCwd() path from the first attempt — the server would
- * otherwise return 400 "already registered" and fail the retry too.
+ * Each run uses a unique project root outside the harness default project so
+ * HQ split's explicit project/cwd validation does not treat it as a nested
+ * duplicate of the default project.
  */
 async function registerProject(name: string): Promise<{ id: string; rootPath: string }> {
-	const rootPath = nonGitCwd(); // temp dir outside any git repo
+	const createdRoot = mkdtempSync(join(tmpdir(), "bobbit-config-dirs-project-"));
+	let rootPath = createdRoot;
+	try { rootPath = realpathSync(createdRoot); } catch { /* keep created path */ }
 	const resp = await apiFetch("/api/projects", {
 		method: "POST",
 		body: JSON.stringify({ name, rootPath, upsert: true }),
@@ -29,7 +31,7 @@ async function registerProject(name: string): Promise<{ id: string; rootPath: st
 	expect([200, 201]).toContain(resp.status);
 	const project = await resp.json();
 	expect(project.id).toBeTruthy();
-	return { id: project.id, rootPath };
+	return { id: project.id, rootPath: project.rootPath || rootPath };
 }
 
 /** Open the app authenticated via token query param. */
@@ -50,10 +52,12 @@ async function openApp(page: Page, hash?: string): Promise<void> {
 
 test.describe("Per-project Config Directories", () => {
 	let projectId: string;
+	let projectRoot: string;
 
 	test.beforeAll(async () => {
 		const project = await registerProject(`e2e-config-dirs-${Date.now()}`);
 		projectId = project.id;
+		projectRoot = project.rootPath;
 	});
 
 	// Project cleanup is REQUIRED. Without this, the registered project leaks
@@ -124,8 +128,8 @@ test.describe("Per-project Config Directories", () => {
 		expect(customEntry, `Expected custom dir '${resolvedCustomPath}' in project config dirs`).toBeTruthy();
 		expect(customEntry.types).toContain("skills");
 
-		// Verify system-level config dirs do NOT contain the custom path
-		const systemDirsResp = await apiFetch("/api/config-directories");
+		// Verify Headquarters/server-level config dirs do NOT contain the custom path.
+		const systemDirsResp = await apiFetch("/api/config-directories?projectId=headquarters");
 		expect(systemDirsResp.status).toBe(200);
 		const systemDirs = await systemDirsResp.json();
 		const leaked = systemDirs.find((d: any) => d.path === resolvedCustomPath);
@@ -154,8 +158,7 @@ test.describe("Per-project Config Directories", () => {
 		await expect(page.locator("code", { hasText: resolvedCustomPath })).toBeVisible({ timeout: 10_000 });
 
 		// Disk assertion: project.yaml uses native YAML (no escaped JSON).
-		const rootPath = nonGitCwd();
-		const yamlPath = join(rootPath, ".bobbit", "config", "project.yaml");
+		const yamlPath = join(projectRoot, ".bobbit", "config", "project.yaml");
 		const yamlText = readFileSync(yamlPath, "utf-8");
 		expect(yamlText, "config_directories must be a real YAML list, not an escaped JSON string")
 			.toMatch(/config_directories:\s*(\n|$)/);
@@ -215,8 +218,9 @@ test.describe("Per-project Config Directories", () => {
 		expect(mcpToolsDir.types).toContain("mcp");
 		expect(mcpToolsDir.types).toContain("tools");
 
-		// Verify system is unaffected
-		const sysResp = await apiFetch("/api/config-directories");
+		// Verify Headquarters/server scope is unaffected.
+		const sysResp = await apiFetch("/api/config-directories?projectId=headquarters");
+		expect(sysResp.status).toBe(200);
 		const sysDirs = await sysResp.json();
 		expect(sysDirs.find((d: any) => d.path === resolvedSkills)).toBeFalsy();
 		expect(sysDirs.find((d: any) => d.path === resolvedMcp)).toBeFalsy();

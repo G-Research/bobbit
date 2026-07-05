@@ -1353,6 +1353,15 @@ export class VerificationHarness {
 	/** Persist active verifications to disk. */
 	private _persistActive(): void {
 		try {
+			// When there is nothing active, remove the persist file entirely rather
+			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
+			// semantics with resumeInterruptedVerifications() (which unlinks) so two
+			// concurrent harnesses sharing a stateDir cannot race between unlink and
+			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
+			if (this.activeVerifications.size === 0) {
+				try { fs.unlinkSync(this._persistPath); } catch {}
+				return;
+			}
 			const data = { verifications: [...this.activeVerifications.values()] };
 			// Defensive: ensure parent dir exists. It is created at startup but may
 			// be removed mid-run by external cleanup (test teardown, maintenance,
@@ -2318,11 +2327,10 @@ export class VerificationHarness {
 		return detectPrimaryBranch(cwd).catch(() => "master");
 	}
 
-	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
+	private resolveToolActivationDeps(goalId?: string): VerificationToolActivationDeps {
 		let toolManager: ToolManager | undefined;
 		let groupPolicyStore: GroupPolicyProvider | undefined;
-		const project = this.projectContextManager?.getRegistry().findByCwd(cwd);
-		const ctx = project ? this.projectContextManager?.getOrCreate(project.id) : undefined;
+		const ctx = goalId ? this.projectContextManager?.getContextForGoal(goalId) : undefined;
 		if (ctx) {
 			toolManager = ctx.toolManager;
 			groupPolicyStore = ctx.toolGroupPolicyStore;
@@ -2330,7 +2338,9 @@ export class VerificationHarness {
 		return {
 			toolManager,
 			groupPolicyStore,
-			mcpManager: this.sessionManager?.getMcpManager() ?? undefined,
+			mcpManager: goalId && ctx
+				? this.sessionManager?.getMcpManager({ projectId: ctx.project.id }) ?? this.sessionManager?.getMcpManager() ?? undefined
+				: this.sessionManager?.getMcpManager() ?? undefined,
 		};
 	}
 
@@ -3745,7 +3755,7 @@ export class VerificationHarness {
 		}
 
 		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
-		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs, roleName);
+		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs, roleName, goalId);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -3879,11 +3889,15 @@ export class VerificationHarness {
 				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
 			});
 
+			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
+			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
+
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
 				...reviewerMeta,
 				sandboxed: isSandboxed,
+				projectId: goalProjectId,
 				sessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
@@ -4244,11 +4258,15 @@ export class VerificationHarness {
 				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
 			});
 
+			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
+			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
+
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
 				...qaReviewerMeta,
 				sandboxed: qaIsSandboxed,
+				projectId: qaGoalProjectId,
 				sessionId: qaSessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
@@ -4435,6 +4453,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		roleName?: string,
+		goalId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
@@ -4454,7 +4473,7 @@ export class VerificationHarness {
 			subSessionId,
 			cwd,
 			role,
-			this.resolveToolActivationDeps(cwd),
+			this.resolveToolActivationDeps(goalId),
 		);
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
@@ -4465,7 +4484,7 @@ export class VerificationHarness {
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
 		// Resolve and pin model + thinking level at spawn time (legacy direct path).
-		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName) : undefined;
+		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName, goalId) : undefined;
 		const _preLegacyRoleModel = _preLegacyRoleOverrides?.model;
 		const _preLegacyReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
 		const _preLegacyInitialModel = (_preLegacyRoleModel && /^[^/]+\/.+$/.test(_preLegacyRoleModel))
@@ -4499,12 +4518,9 @@ export class VerificationHarness {
 				}
 			});
 
-			// Register as a viewable session so users can watch the review live
+			// Register as a viewable session so users can watch the review live.
 			if (this.sessionManager) {
-				// Best-effort: resolve the project from cwd so the review session
-				// persists under a real project. If none is registered, we simply
-				// don't register the session as viewable (no silent default).
-				const reviewProjectId = this.projectContextManager?.getRegistry().findByCwd(cwd)?.id;
+				const reviewProjectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project.id : undefined;
 				if (reviewProjectId) {
 					unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
 						title: `LLM Review: ${step.name}`,
@@ -4515,8 +4531,8 @@ export class VerificationHarness {
 				}
 			}
 
-			// Resolve role overrides (sub-session path: no goalId for project lookup).
-			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName) : undefined;
+			// Resolve role overrides from the goal's explicit project scope.
+			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName, goalId) : undefined;
 			const roleModel_s = roleOverrides_s?.model;
 			const roleThinking_s = roleOverrides_s?.thinkingLevel;
 

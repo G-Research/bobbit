@@ -11,6 +11,7 @@ import {
 	nonGitCwd,
 	connectWs,
 	agentEndPredicate,
+	defaultProjectId,
 } from "./e2e-setup.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -80,16 +81,14 @@ test.describe("Slash skill expansion mismatch", () => {
 		const { id: sessionId, cwd: sessionCwd } = await sessResp.json();
 
 		try {
-			// WITHOUT projectId — the API correctly uses the default project's
-			// config store, so the non-default project's skill is not found.
-			// The UI fix ensures projectId is always passed for autocomplete.
+			// WITHOUT projectId — project-scoped autocomplete rejects instead of
+			// inferring scope from cwd.
 			const respWithout = await apiFetch(
 				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}`,
 			);
-			expect(respWithout.status).toBe(200);
-			const dataWithout = await respWithout.json();
-			const namesWithout = dataWithout.skills.map((s: any) => s.name);
-			expect(namesWithout).not.toContain(SKILL_NAME);
+			expect(respWithout.status).toBe(400);
+			const bodyWithout = await respWithout.json().catch(() => ({}));
+			expect(String(bodyWithout.code ?? bodyWithout.error ?? "").toLowerCase()).toContain("project");
 
 			// WITH projectId — the API resolves the correct per-project config
 			// store and finds the skill. This is what the fixed UI sends.
@@ -170,8 +169,10 @@ test.describe("Slash skill expansion mismatch", () => {
 
 		try {
 			// Fetch slash-skills for the default project
+			const defaultProject = await defaultProjectId();
+			expect(defaultProject).toBeTruthy();
 			const resp = await apiFetch(
-				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}`,
+				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}&projectId=${encodeURIComponent(defaultProject!)}`,
 			);
 			expect(resp.status).toBe(200);
 			const data = await resp.json();

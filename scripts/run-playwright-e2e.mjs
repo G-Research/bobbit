@@ -63,6 +63,14 @@ else delete env.BOBBIT_E2E_PWTEST_CACHE_OWNED;
 env.NODE_ENV = "test";
 env.BOBBIT_TEST_NO_EXTERNAL = env.BOBBIT_TEST_NO_EXTERNAL || "1";
 env.BOBBIT_TEST_NO_REMOTE = env.BOBBIT_TEST_NO_REMOTE || "1";
+// Live server secrets (token/TLS/sandbox-agent auth) resolve to an OS user-level
+// directory via serverSecretsDir(). Pin a run-level fallback under the E2E temp
+// root so that even specs which boot the server directly (without going through a
+// harness that sets its own per-worker BOBBIT_SECRETS_DIR) never write real admin
+// secrets into the developer's home dir. Per-worker harnesses override this.
+env.BOBBIT_SECRETS_DIR = env.BOBBIT_SECRETS_DIR
+  || join(resolve(cacheRootOverride() || e2eTempRoot()), "e2e-server-secrets", sanitizeSegment(`${process.pid}`));
+mkdirSync(env.BOBBIT_SECRETS_DIR, { recursive: true });
 env.NODE_DISABLE_COMPILE_CACHE = "1";
 delete env.NODE_COMPILE_CACHE;
 env.NODE_OPTIONS = [`--require=${cacheBootstrap}`, env.NODE_OPTIONS].filter(Boolean).join(" ");

@@ -44,9 +44,9 @@ import {
 	agentEndPredicate,
 	messageEndPredicate,
 	waitForCondition,
+	nonGitCwd,
 } from "./e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,8 +108,8 @@ function writeMeta(packDir: string): void {
 	);
 }
 
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(PACK_SRC, packDir, { recursive: true });
 	writeMeta(packDir);
@@ -241,7 +241,7 @@ describe("hindsight pack — external mode (stub)", () => {
 	let stub: HindsightStub;
 
 	function freshCwd(label: string): string {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `hindsight-${label}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `hindsight-${label}-`));
 		cwds.push(cwd);
 		return cwd;
 	}

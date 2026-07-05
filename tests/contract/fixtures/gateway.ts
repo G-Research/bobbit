@@ -96,6 +96,8 @@ export interface TestGateway {
 	token: string;
 	/** HTTP base URL — only set if startHttp was true. */
 	baseURL: string;
+	/** Default project id created during gateway setup. */
+	projectId: string;
 
 	// ── Convenience helpers that call HTTP APIs on this gateway ──
 
@@ -104,6 +106,7 @@ export interface TestGateway {
 	/** Create a goal. */
 	createGoal(opts: {
 		title: string;
+		projectId?: string;
 		cwd?: string;
 		spec?: string;
 		team?: boolean;
@@ -114,7 +117,7 @@ export interface TestGateway {
 	/** Delete a goal (best-effort). */
 	deleteGoal(id: string): Promise<void>;
 	/** Create a session. */
-	createSession(opts?: { cwd?: string; goalId?: string }): Promise<string>;
+	createSession(opts?: { projectId?: string; cwd?: string; goalId?: string }): Promise<string>;
 	/** Delete a session (best-effort). */
 	deleteSession(id: string): Promise<void>;
 	/** Signal a gate with optional content/metadata. */
@@ -169,6 +172,7 @@ export async function createTestGateway(opts?: {
 
 	let baseURL = "";
 	let wsBase = "";
+	let projectId = "";
 	if (startHttp) {
 		const port = await gw.start();
 		baseURL = `http://127.0.0.1:${port}`;
@@ -189,8 +193,9 @@ export async function createTestGateway(opts?: {
 			if (createRes.ok) {
 				const project = await createRes.json() as { id?: string };
 				if (project?.id) {
+					projectId = project.id;
 					const { seedTestWorkflows } = await import("../../e2e/seed-workflows.js");
-					await seedTestWorkflows({ baseURL, token, projectId: project.id });
+					await seedTestWorkflows({ baseURL, token, projectId });
 				}
 			}
 		} catch { /* best-effort */ }
@@ -267,12 +272,13 @@ export async function createTestGateway(opts?: {
 		sessionManager: gw.sessionManager,
 		token,
 		baseURL,
+		projectId,
 		fetch: doFetch,
 
 		async createGoal(opts) {
 			const res = await doFetch("/api/goals", {
 				method: "POST",
-				body: { cwd: dir, worktree: false, ...opts },
+				body: { cwd: dir, worktree: false, ...opts, projectId: opts.projectId ?? projectId },
 			});
 			if (res.status !== 201) throw new Error(`createGoal failed (${res.status}): ${JSON.stringify(res.body)}`);
 			return res.body;
@@ -285,7 +291,11 @@ export async function createTestGateway(opts?: {
 		async createSession(opts) {
 			const res = await doFetch("/api/sessions", {
 				method: "POST",
-				body: { cwd: opts?.cwd ?? dir, goalId: opts?.goalId },
+				body: {
+					projectId: opts?.projectId ?? projectId,
+					cwd: opts?.cwd ?? dir,
+					goalId: opts?.goalId,
+				},
 			});
 			if (res.status !== 201) throw new Error(`createSession failed (${res.status}): ${JSON.stringify(res.body)}`);
 			return res.body.id;

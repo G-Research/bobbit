@@ -426,13 +426,22 @@ test.describe("CT-19: First-run and single-project UX", () => {
 			"toolbar New Goal must be disabled in zero-project state",
 		).toBeDisabled({ timeout: 5_000 });
 
-		// API creation without a visible project still resolves to Headquarters,
-		// which remains usable internally while hidden.
+		// Project-scoped APIs no longer infer Headquarters from a missing
+		// projectId, even when Headquarters is hidden from presentation lists.
+		const missingProjectResp = await rawApiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({ title: "GR-09 missing projectId", worktree: false, team: false, autoStartTeam: false }),
+		});
+		expect(missingProjectResp.status, "goal creation without projectId must fail clearly").toBe(400);
+		const missingProjectBody = await missingProjectResp.json();
+		expect(missingProjectBody.code).toBe("PROJECT_ID_REQUIRED");
+
+		// Hidden Headquarters remains usable when selected explicitly.
 		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "GR-09 hidden HQ goal", worktree: false, team: false, autoStartTeam: false }),
+			body: JSON.stringify({ title: "GR-09 hidden HQ goal", projectId: HEADQUARTERS_PROJECT_ID, worktree: false, team: false, autoStartTeam: false }),
 		});
-		expect(resp.status, "goal creation should resolve to hidden Headquarters").toBe(201);
+		expect(resp.status, "explicit hidden Headquarters goal creation should succeed").toBe(201);
 		const created = await resp.json();
 		expect(created.projectId).toBe(HEADQUARTERS_PROJECT_ID);
 		await apiFetch(`/api/goals/${created.id}`, { method: "DELETE" }).catch(() => {});

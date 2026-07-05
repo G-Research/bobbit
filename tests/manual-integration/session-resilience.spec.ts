@@ -153,7 +153,11 @@ async function stopGW(gw: GW): Promise<void> {
 // ---------------------------------------------------------------------------
 function api(gw: GW, path: string, opts: RequestInit = {}) {
 	// Auto-inject projectId for endpoints that now require it (eliminate-default-project).
-	if ((opts.method || "GET").toUpperCase() === "POST" && PROJECT_REQUIRED_POST.has(path) && gw.defaultProjectId) {
+	const method = (opts.method || "GET").toUpperCase();
+	if (method === "GET" && path === "/api/sandbox-status" && gw.defaultProjectId) {
+		path = `/api/sandbox-status?projectId=${encodeURIComponent(gw.defaultProjectId)}`;
+	}
+	if (method === "POST" && PROJECT_REQUIRED_POST.has(path) && gw.defaultProjectId) {
 		try {
 			const body = typeof opts.body === "string" && opts.body ? JSON.parse(opts.body) : {};
 			if (body && typeof body === "object" && !body.projectId) {

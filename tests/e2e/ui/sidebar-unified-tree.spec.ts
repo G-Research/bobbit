@@ -11,7 +11,6 @@ import {
 	createSession,
 	deleteGoal,
 	deleteSession,
-	nonGitCwd,
 	registerProject,
 	startTeam,
 	teardownTeam,
@@ -98,12 +97,12 @@ async function createChildGoal(projectId: string, parentGoalId: string, title: s
 	return (await resp.json()).id as string;
 }
 
-async function createFirstClassChild(projectId: string, parentSessionId: string): Promise<string> {
+async function createFirstClassChild(project: ProjectFixture, parentSessionId: string): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify({
-			projectId,
-			cwd: nonGitCwd(),
+			projectId: project.id,
+			cwd: project.rootPath,
 			worktree: false,
 			parentSessionId,
 			childKind: "host-agents",
@@ -114,13 +113,14 @@ async function createFirstClassChild(projectId: string, parentSessionId: string)
 	return (await resp.json()).id as string;
 }
 
-async function createDelegate(parentSessionId: string, label: string): Promise<string> {
+async function createDelegate(project: ProjectFixture, parentSessionId: string, label: string): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify({
+			projectId: project.id,
 			delegateOf: parentSessionId,
 			instructions: `${label} delegate fixture`,
-			cwd: nonGitCwd(),
+			cwd: project.rootPath,
 		}),
 	});
 	expect(resp.status, `create delegate failed: ${await resp.clone().text().catch(() => "")}`).toBe(201);
@@ -193,11 +193,11 @@ async function createFixture(gateway: GatewayInfo): Promise<UnifiedTreeFixture> 
 
 	const parentSessionId = await createSession({ projectId: project.id });
 	await waitForSessionStatus(parentSessionId, "idle");
-	const firstClassChildId = await createFirstClassChild(project.id, parentSessionId);
+	const firstClassChildId = await createFirstClassChild(project, parentSessionId);
 	await waitForSessionStatus(firstClassChildId, "idle");
-	const liveDelegateId = await createDelegate(parentSessionId, `live-${stamp}`);
+	const liveDelegateId = await createDelegate(project, parentSessionId, `live-${stamp}`);
 	await waitForSessionStatus(liveDelegateId, "idle");
-	const archivedDelegateId = await createDelegate(parentSessionId, `archived-${stamp}`);
+	const archivedDelegateId = await createDelegate(project, parentSessionId, `archived-${stamp}`);
 	await waitForSessionStatus(archivedDelegateId, "idle");
 	await deleteSession(archivedDelegateId);
 	await waitForArchivedSession(archivedDelegateId);

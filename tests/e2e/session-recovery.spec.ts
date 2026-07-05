@@ -78,6 +78,8 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	mkdirSync(agentDir, { recursive: true });
 
 	process.env.BOBBIT_DIR = bobbitDir;
+	// Isolate live server secrets so they never land in the real OS home dir.
+	process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.NODE_ENV = "test";
@@ -156,7 +158,7 @@ async function listSessionIds(gw: StartedGateway): Promise<string[]> {
 }
 
 async function createNonGitSession(gw: StartedGateway, label: string): Promise<string> {
-	const cwd = join(tmpdir(), `bobbit-recovery-${gw.port}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+	const cwd = join(gw.defaultProjectRoot, ".e2e-workspaces", `recovery-${gw.port}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 	mkdirSync(cwd, { recursive: true });
 
 	// Resolve default projectId from the live registry (the in-process server

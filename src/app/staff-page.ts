@@ -74,7 +74,7 @@ export async function loadStaffPageData(): Promise<void> {
 async function ensureRolesLoaded(): Promise<void> {
 	if (roles.length > 0) return;
 	try {
-		roles = await fetchRoles();
+		roles = await fetchRoles(state.activeProjectId ?? undefined);
 		renderApp();
 	} catch {
 		/* roles are optional; leave list empty */

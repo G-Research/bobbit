@@ -18,7 +18,7 @@ process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });
 
-const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
+const { ProjectRegistry, SpecialProjectMutationError } = await import("../src/server/agent/project-registry.ts");
 const { resolveEntities, resolveScalarConfig, resolveConfig } = await import("../src/server/agent/config-resolver.ts");
 
 after(() => {
@@ -48,6 +48,71 @@ describe("ProjectRegistry", () => {
 	it("starts empty when no projects.json exists", () => {
 		const reg = new ProjectRegistry(stateDir);
 		assert.deepStrictEqual(reg.list(), []);
+	});
+
+	// Regression: a MISSING file is a fresh start (empty), but a PRESENT-but-
+	// unparseable authoritative registry is FATAL. Previously load() collapsed
+	// both cases to "start empty", so a malformed projects.json was silently
+	// discarded and then overwritten with only synthetic records on startup,
+	// permanently losing every normal project.
+	it("throws fatally and preserves a backup when projects.json is present but malformed", () => {
+		const file = path.join(stateDir, "projects.json");
+		const corrupt = "{ this is: not valid json";
+		fs.writeFileSync(file, corrupt, "utf-8");
+
+		assert.throws(
+			() => new ProjectRegistry(stateDir),
+			/malformed/i,
+			"a present-but-unparseable registry must throw fatally instead of starting empty",
+		);
+
+		// The corrupt file is left intact — never overwritten with synthetic records.
+		assert.strictEqual(
+			fs.readFileSync(file, "utf-8"),
+			corrupt,
+			"corrupt projects.json must not be overwritten",
+		);
+
+		// A timestamped raw-bytes backup was preserved.
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "exactly one .corrupt-* backup should be created");
+		assert.strictEqual(
+			fs.readFileSync(path.join(stateDir, backups[0]), "utf-8"),
+			corrupt,
+			"backup must hold the raw corrupt bytes",
+		);
+	});
+
+	it("throws fatally when projects.json parses to a non-array value", () => {
+		const file = path.join(stateDir, "projects.json");
+		fs.writeFileSync(file, JSON.stringify({ not: "an array" }), "utf-8");
+		assert.throws(() => new ProjectRegistry(stateDir), /malformed/i);
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "a non-array registry is corrupt and must be backed up");
+	});
+
+	it("does not spam duplicate backups across repeated boots on the same corrupt file", () => {
+		const file = path.join(stateDir, "projects.json");
+		fs.writeFileSync(file, "not json", "utf-8");
+		assert.throws(() => new ProjectRegistry(stateDir));
+		assert.throws(() => new ProjectRegistry(stateDir));
+		const backups = fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-"));
+		assert.strictEqual(backups.length, 1, "identical corrupt bytes must reuse the existing backup");
+	});
+
+	it("loads a valid projects.json normally after a clean write", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const root = freshProjectRoot();
+		reg.register("valid-proj", root);
+		// A fresh instance reads the same file cleanly (no throw, no backup).
+		const reg2 = new ProjectRegistry(stateDir);
+		assert.strictEqual(reg2.list().length, 1);
+		assert.strictEqual(reg2.list()[0].name, "valid-proj");
+		assert.strictEqual(
+			fs.readdirSync(stateDir).filter(n => n.startsWith("projects.json.corrupt-")).length,
+			0,
+			"a valid registry must never produce a corrupt backup",
+		);
 	});
 
 	it("register creates a project and persists to disk", () => {
@@ -159,6 +224,115 @@ describe("ProjectRegistry", () => {
 	it("update throws for unknown id", () => {
 		const reg = new ProjectRegistry(stateDir);
 		assert.throws(() => reg.update("nonexistent", { name: "x" }), /not found/i);
+	});
+
+	it("update rejects changing rootPath onto another normal project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootB = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+		reg.register("b", rootB);
+
+		assert.throws(() => reg.update(projA.id, { rootPath: rootB }), /already registered/i);
+
+		// The rejected update must not have mutated the in-memory record.
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+		// And it must not have partially applied a co-supplied field change.
+		assert.throws(() => reg.update(projA.id, { name: "renamed", rootPath: rootB }), /already registered/i);
+		assert.strictEqual(reg.get(projA.id)?.name, "a");
+	});
+
+	it("update rejects changing rootPath onto a provisional project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootProv = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+		reg.registerProvisional("prov", rootProv);
+
+		assert.throws(() => reg.update(projA.id, { rootPath: rootProv }), /already registered/i);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("update rejects changing rootPath onto the Headquarters directory", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const hqRoot = freshProjectRoot();
+		reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		assert.throws(
+			() => reg.update(projA.id, { rootPath: hqRoot }),
+			(err: unknown) => err instanceof SpecialProjectMutationError && err.code === "HEADQUARTERS_IMMUTABLE",
+		);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("ensureHeadquartersProject records carry NO hidden key (hide/show is preference-only)", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const hqRoot = freshProjectRoot();
+		const hq = reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		// Repair must delete the field entirely, never pin `hidden: false`.
+		assert.ok(!("hidden" in hq), "fresh HQ record must not carry a hidden key");
+
+		// A legacy record with `hidden` set (either value) must be stripped on
+		// the next ensure pass — not preserved and not pinned to false.
+		(hq as { hidden?: boolean }).hidden = true;
+		const hq2 = reg.ensureHeadquartersProject(hqRoot, {
+			stateDir: path.join(hqRoot, "state"),
+			configDir: path.join(hqRoot, "config"),
+		});
+		assert.ok(!("hidden" in hq2), "re-ensured HQ record must have hidden removed");
+
+		// And the persisted record on disk must not carry a hidden key either
+		// (projects.json is a flat array of project records).
+		const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf8")) as Array<{ id: string }>;
+		const hqPersisted = persisted.find((p) => p.id === "headquarters");
+		assert.ok(hqPersisted, "HQ record must be persisted");
+		assert.ok(!("hidden" in hqPersisted!), "persisted HQ record must not carry a hidden key");
+	});
+
+	it("update rejects changing rootPath onto the hidden system project's root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const sysRoot = freshProjectRoot();
+		reg.registerSystemProject(sysRoot);
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		assert.throws(
+			() => reg.update(projA.id, { rootPath: sysRoot }),
+			(err: unknown) => err instanceof SpecialProjectMutationError && err.code === "SYSTEM_PROJECT_IMMUTABLE",
+		);
+		assert.strictEqual(reg.get(projA.id)?.rootPath, rootA);
+	});
+
+	it("update allows changing rootPath to a non-conflicting directory", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const rootC = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		const updated = reg.update(projA.id, { rootPath: rootC });
+		assert.strictEqual(updated.rootPath, path.resolve(rootC));
+
+		// Persisted across reload.
+		const reg2 = new ProjectRegistry(stateDir);
+		assert.strictEqual(reg2.get(projA.id)?.rootPath, path.resolve(rootC));
+	});
+
+	it("update accepts a no-op rootPath change to the project's own root", () => {
+		const reg = new ProjectRegistry(stateDir);
+		const rootA = freshProjectRoot();
+		const projA = reg.register("a", rootA);
+
+		const updated = reg.update(projA.id, { rootPath: rootA, name: "renamed" });
+		assert.strictEqual(updated.rootPath, path.resolve(rootA));
+		assert.strictEqual(updated.name, "renamed");
 	});
 
 	it("remove deletes a project from registry", () => {

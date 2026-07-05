@@ -13,6 +13,7 @@
  */
 
 import path from "node:path";
+import { headquartersDir } from "../bobbit-dir.js";
 
 // ── Scopes & kinds ───────────────────────────────────────────────
 
@@ -221,13 +222,25 @@ export function buildConflictsFor<T>(type: EntityType, resolved: ResolvedEntity<
  * BOTH `buildPackList()` and `installPack()`/`uninstallPack()` derive paths via
  * this helper so install and resolution can never diverge (design §1.3.1).
  *
- * `base` per scope: global-user = `os.homedir()`; server = `<server-cwd>`;
+ * `base` per scope: global-user = `os.homedir()`; server = Headquarters dir;
  * project = `<project root>`.
  */
+function samePath(a: string, b: string): boolean {
+	const normalize = (value: string): string => {
+		const resolved = path.resolve(value).replace(/\\/g, "/");
+		const trimmed = resolved.length > 1 ? resolved.replace(/\/+$/g, "") : resolved;
+		return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+	};
+	return normalize(a) === normalize(b);
+}
+
 export function scopePaths(
 	_scope: PackScope,
 	base: string,
 ): { userPackRoot: string; marketPacksRoot: string } {
-	const cfg = path.join(base, ".bobbit", "config"); // = bobbit-dir.ts configDir(base)
+	const isHeadquartersServerScope = _scope === "server" && samePath(base, headquartersDir());
+	const cfg = isHeadquartersServerScope
+		? path.join(base, "config")
+		: path.join(base, ".bobbit", "config");
 	return { userPackRoot: cfg, marketPacksRoot: path.join(cfg, "market-packs") };
 }

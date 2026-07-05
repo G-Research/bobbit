@@ -10,9 +10,10 @@
  *   - sessionShutdown  — fired server-side from the archive seam.
  *
  * Fixture-pack install pattern mirrors provider-session-setup.spec.ts: the
- * provider-demo pack is layered as a SERVER-SCOPE market pack on top of the real
- * built-in band (NOT via BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling
- * specs sharing the worker-scoped in-process gateway).
+ * provider-demo pack is layered as a SERVER-SCOPE market pack under the
+ * per-gateway Headquarters config dir on top of the real built-in band (NOT via
+ * BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling specs sharing the
+ * worker-scoped in-process gateway).
  *
  * NON-NEGOTIABLE invariant pinned here: the user's message text is never mutated
  * by the per-turn hooks — recall lands in a hidden custom/user-side message, not
@@ -28,9 +29,9 @@ import {
 	messageEndPredicate,
 	waitForCondition,
 	assertStaysFalse,
+	nonGitCwd,
 } from "./e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -60,8 +61,8 @@ function writeMeta(packDir: string): void {
 	].join("\n") + "\n", "utf-8");
 }
 
-function installPack(bobbitDir: string): string {
-	const packDir = path.join(bobbitDir, ".bobbit", "config", "market-packs", PACK_NAME);
+function installPack(headquartersDir: string): string {
+	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(fixturePackDir, packDir, { recursive: true });
 	writeMeta(packDir);
@@ -155,7 +156,7 @@ test.describe("provider per-turn hooks", () => {
 	let packDir: string;
 
 	function freshCwd(label: string): string {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `provider-turn-${label}-`));
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `provider-turn-${label}-`));
 		cwds.push(cwd);
 		return cwd;
 	}

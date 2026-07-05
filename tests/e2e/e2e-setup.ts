@@ -12,7 +12,6 @@
 import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +44,17 @@ export function harnessDefaultProjectRoot(): string {
 
 export function projectStateDirForRoot(rootPath: string): string {
 	return join(rootPath, ".bobbit", "state");
+}
+
+/**
+ * Live server secrets (admin token, TLS, sandbox-agent auth) now live under
+ * serverSecretsDir(), which the test harnesses pin via BOBBIT_SECRETS_DIR to a
+ * temp dir so they never touch the real OS home. Mirror that resolution here so
+ * token readers look in the right place. Falls back to `<bobbitDir>/.secrets`
+ * (the harness default) when the env is not set for this worker.
+ */
+export function secretsDir(): string {
+	return process.env.BOBBIT_SECRETS_DIR || join(bobbitDir(), ".secrets");
 }
 
 /**
@@ -87,30 +97,38 @@ E2E_PI_DIR = bobbitDir();
  * This avoids creating real git worktrees (slow, leaky, conflicts between
  * parallel test runs that share the same repo).
  */
-let _nonGitCwd: string | undefined;
+const _nonGitCwdByHarnessRoot: Record<string, string> = {};
 export function nonGitCwd(): string {
-	if (!_nonGitCwd) {
-		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${port()}-${Date.now()}`);
-		mkdirSync(_nonGitCwd, { recursive: true });
+	const defaultRoot = harnessDefaultProjectRoot();
+	const key = `${port()}|${defaultRoot}`;
+	let cwd = _nonGitCwdByHarnessRoot[key];
+	if (!cwd) {
+		cwd = join(defaultRoot, ".e2e-workspaces", `non-git-${port()}`);
+		_nonGitCwdByHarnessRoot[key] = cwd;
 	}
-	return _nonGitCwd;
+	mkdirSync(cwd, { recursive: true });
+	try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 /**
  * A cwd that IS a git repository (minimal, no package-lock.json).
  * Used by tests that need worktree creation (e.g. staff agents).
  */
-let _gitCwd: string | undefined;
+const _gitCwdByHarnessRoot: Record<string, string> = {};
 export function gitCwd(): string {
-	if (!_gitCwd) {
-		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${port()}-${Date.now()}`);
-		mkdirSync(_gitCwd, { recursive: true });
-		writeFileSync(join(_gitCwd, "README.md"), "# E2E test repo\n");
-		execFileSync("git", ["init"], { cwd: _gitCwd, stdio: "pipe" });
-		execFileSync("git", ["add", "."], { cwd: _gitCwd, stdio: "pipe" });
-		execFileSync("git", ["commit", "-m", "init"], { cwd: _gitCwd, stdio: "pipe" });
+	const defaultRoot = harnessDefaultProjectRoot();
+	const key = `${port()}|${defaultRoot}`;
+	let cwd = _gitCwdByHarnessRoot[key];
+	if (!cwd) {
+		cwd = join(defaultRoot, ".e2e-workspaces", `git-${port()}-${Date.now()}`);
+		_gitCwdByHarnessRoot[key] = cwd;
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(cwd, "README.md"), "# E2E test repo\n");
+		execFileSync("git", ["init"], { cwd, stdio: "pipe" });
+		execFileSync("git", ["add", "."], { cwd, stdio: "pipe" });
+		execFileSync("git", ["commit", "-m", "init"], { cwd, stdio: "pipe" });
 	}
-	return _gitCwd;
+	try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 /**
@@ -140,21 +158,29 @@ function envToken(): string | undefined {
 }
 
 export function readE2EToken(): string {
-	const p = join(bobbitDir(), "state", "token");
-	try {
-		return readFileSync(p, "utf-8").trim();
-	} catch (err: any) {
-		if (err?.code === "ENOENT") {
-			const fallback = envToken();
-			if (fallback) return fallback;
-			throw new Error(
-				`E2E token missing at ${p}. ` +
-				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
-				`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
-			);
+	// The live token lives under serverSecretsDir(); fall back to the legacy
+	// Headquarters-state location for older fixtures / pre-migration boots.
+	const candidates = [join(secretsDir(), "token"), join(bobbitDir(), "state", "token")];
+	let lastErr: any;
+	for (const p of candidates) {
+		try {
+			return readFileSync(p, "utf-8").trim();
+		} catch (err: any) {
+			lastErr = err;
+			if (err?.code !== "ENOENT") throw err;
 		}
-		throw err;
 	}
+	const fallback = envToken();
+	if (fallback) return fallback;
+	if (lastErr?.code === "ENOENT") {
+		throw new Error(
+			`E2E token missing at ${candidates.join(" or ")}. ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR/BOBBIT_SECRETS_DIR ` +
+			`point at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}, ` +
+			`BOBBIT_SECRETS_DIR=${process.env.BOBBIT_SECRETS_DIR ?? "<unset>"}.`
+		);
+	}
+	throw lastErr;
 }
 
 /**
@@ -166,28 +192,30 @@ export function readE2EToken(): string {
  * inside an `async` function (which is essentially every test).
  */
 export async function readE2ETokenAsync(): Promise<string> {
-	const p = join(bobbitDir(), "state", "token");
+	// Live token under serverSecretsDir(), legacy Headquarters-state fallback.
+	const candidates = [join(secretsDir(), "token"), join(bobbitDir(), "state", "token")];
 	let lastErr: any;
 	for (let attempt = 0; attempt < 6; attempt++) {
-		try {
-			return readFileSync(p, "utf-8").trim();
-		} catch (err: any) {
-			lastErr = err;
-			const code = err?.code;
-			if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") {
-				if (attempt < 5) await new Promise(r => setTimeout(r, 30));
-				continue;
+		for (const p of candidates) {
+			try {
+				return readFileSync(p, "utf-8").trim();
+			} catch (err: any) {
+				lastErr = err;
+				const code = err?.code;
+				if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") continue;
+				throw err;
 			}
-			throw err;
 		}
+		if (attempt < 5) await new Promise(r => setTimeout(r, 30));
 	}
 	if (lastErr?.code === "ENOENT") {
 		const fallback = envToken();
 		if (fallback) return fallback;
 		throw new Error(
-			`E2E token missing at ${p} (after 6 retries). ` +
-			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
-			`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+			`E2E token missing at ${candidates.join(" or ")} (after 6 retries). ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR/BOBBIT_SECRETS_DIR ` +
+			`point at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}, ` +
+			`BOBBIT_SECRETS_DIR=${process.env.BOBBIT_SECRETS_DIR ?? "<unset>"}.`
 		);
 	}
 	throw lastErr;
@@ -362,13 +390,32 @@ function maybeInjectAcceptCanonical(path: string, opts: RequestInit): RequestIni
  * the URL (workflow customize/override/PUT/DELETE on /:id). Returns the path
  * unchanged if it already carries projectId or no default project is registered.
  */
+function needsHeadquartersConfigProjectId(path: string, method: string): boolean {
+	const bare = path.split("?")[0];
+	if (method === "GET" && /^\/api\/(tools|roles|sandbox-status)(\?|$)/.test(path)) return true;
+	if (method === "POST" && /^\/api\/sandbox-image\/build(\?|$)/.test(path)) return true;
+	if ((method === "GET" || method === "PUT") && /^\/api\/tools\/[^/]+$/.test(bare)) return true;
+	if (method === "GET" && /^\/api\/tools\/[^/]+\/renderer$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/ext/contributions") return true;
+	if (method === "GET" && /^\/api\/ext\/packs\/[^/]+\/panels\/[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/tools\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "POST" && bare === "/api/roles") return true;
+	if ((method === "GET" || method === "PUT" || method === "DELETE") && /^\/api\/roles\/(?!assistant\/prompts(?:\/|$))[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/roles\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/tool-group-policies") return true;
+	if (method === "PUT" && /^\/api\/tool-group-policies\/[^/]+$/.test(bare)) return true;
+	return false;
+}
+
 async function maybeInjectProjectIdQuery(path: string, method: string): Promise<string> {
 	// /api/workflows root GET also needs projectId now (returns [] without one).
 	// /api/workflows/:id and /:id/customize|/override require projectId on every method.
 	const rootGet = method === "GET" && WORKFLOWS_BODY_INJECT.test(path);
 	const idRoute = WORKFLOWS_QUERY_INJECT.test(path) && (method === "GET" || method === "POST" || method === "PUT" || method === "DELETE");
-	if (!rootGet && !idRoute) return path;
+	const hqDiscoveryRoute = needsHeadquartersConfigProjectId(path, method);
+	if (!rootGet && !idRoute && !hqDiscoveryRoute) return path;
 	if (/[?&]projectId=/.test(path)) return path;
+	if (hqDiscoveryRoute) return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
 	const pid = await defaultProjectId();
 	if (!pid) return path;
 	return path + (path.includes("?") ? "&" : "?") + "projectId=" + encodeURIComponent(pid);
@@ -968,6 +1015,24 @@ export async function defaultProjectStateDir(): Promise<string> {
 	return projectStateDirForRoot(await defaultProjectRootPath());
 }
 
+async function projectRootForId(projectId: string): Promise<string | undefined> {
+	const state = await readLiveProjectState();
+	if (!state.ok) return undefined;
+	return state.projects.find(pr => pr.id === projectId && !pr.hidden)?.rootPath;
+}
+
+async function defaultExecutionCwdForProject(projectId: string | undefined): Promise<string> {
+	if (projectId) {
+		const rootPath = await projectRootForId(projectId);
+		if (rootPath) {
+			const canonicalRoot = canonicalPathForMatch(rootPath);
+			const canonicalDefaultRoot = canonicalPathForMatch(harnessDefaultProjectRoot());
+			return canonicalRoot === canonicalDefaultRoot ? nonGitCwd() : rootPath;
+		}
+	}
+	return nonGitCwd();
+}
+
 /**
  * Create a session via REST, return its ID. Defaults cwd to a non-git temp dir.
  *
@@ -977,19 +1042,13 @@ export async function defaultProjectStateDir(): Promise<string> {
  * failures still surface via the second attempt.
  */
 export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
+	const projectId = opts?.projectId || (await defaultProjectId());
 	const body: Record<string, unknown> = {
-		cwd: opts?.cwd || nonGitCwd(),
+		cwd: opts?.cwd || await defaultExecutionCwdForProject(projectId),
 		goalId: opts?.goalId,
 	};
-	if (opts?.projectId) {
-		body.projectId = opts.projectId;
-	} else {
-		// Server requires an explicit project (or cwd matching a registered
-		// project). Auto-inject the harness default projectId whenever the
-		// caller didn't specify one — safe because the server prefers
-		// projectId over cwd. Tests that deliberately exercise the 400 path
-		// call rawApiFetch("/api/sessions", ...) and bypass this helper.
-		body.projectId = await defaultProjectId();
+	if (projectId) {
+		body.projectId = projectId;
 	}
 	// Retry on transient server 500s. Under heavy parallel test load the
 	// server occasionally fails session creation with a 500 (e.g. worktree
@@ -1103,12 +1162,15 @@ export async function createGoal(opts: {
 	// helper supplies a sensible default. Tests that exercise SPEC_REQUIRED call
 	// apiFetch("/api/goals", ...) directly and bypass this helper.
 	const defaultSpec = "E2E harness goal — spec autopopulated by createGoal() helper for tests that do not exercise spec content.";
-	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, spec: defaultSpec, ...opts };
+	const body: Record<string, unknown> = { worktree: false, spec: defaultSpec, ...opts };
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path
 		// call rawApiFetch("/api/goals", ...) and bypass this helper.
 		body.projectId = await defaultProjectId();
+	}
+	if (!body.cwd) {
+		body.cwd = await defaultExecutionCwdForProject(typeof body.projectId === "string" ? body.projectId : undefined);
 	}
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",

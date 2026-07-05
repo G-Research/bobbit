@@ -43,7 +43,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
@@ -169,7 +169,7 @@ function _onSplashSessionClick(e: Event): void {
 	}
 	if (projects.length === 1) {
 		const p = projects[0];
-		createAndConnectSession(undefined, undefined, p.rootPath, undefined, undefined, p.id);
+		createAndConnectSession(undefined, undefined, defaultCwdForProjectSession(p), undefined, undefined, p.id);
 		return;
 	}
 	// ≥2 projects — open the splash project picker, anchored at the button.
@@ -245,7 +245,7 @@ function _splashProjectPicker() {
 						data-testid="splash-project-picker-item"
 						@click=${() => {
 							state.splashProjectPickerOpen = false;
-							createAndConnectSession(undefined, undefined, p.rootPath, undefined, undefined, p.id);
+							createAndConnectSession(undefined, undefined, defaultCwdForProjectSession(p), undefined, undefined, p.id);
 						}}
 					>
 						<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(p)} data-project-icon=${projectIconKind(p)} style="color:${color};">${icon(projectIconComponent(p), "sm")}</span>
@@ -692,7 +692,10 @@ function renderMobileLanding() {
 														<span class="sidebar-chevron-slot sidebar-chevron-slot--inline text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${effectiveExpanded ? "▾" : "▸"}</span></span>
 														${renderProjectReorderHandle(project)}
 														<span class="shrink-0 inline-flex items-center" data-testid=${projectIconTestId(project)} data-project-icon=${projectIconKind(project)} style="color:${color};">${icon(projectIconComponent(project), "sm")}</span>
-													<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
+													<span class="flex-1 min-w-0 flex flex-col leading-tight">
+														<span class="truncate text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
+														${isHeadquartersProject(project) ? html`<span class="truncate text-xs text-muted-foreground normal-case tracking-normal">${HEADQUARTERS_HELPER_TEXT}</span>` : nothing}
+													</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
@@ -728,7 +731,7 @@ function renderMobileLanding() {
 																<button
 																	class="p-1 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
 																	style="line-height:0;"
-																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
+																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, defaultCwdForProjectSession(project), undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
 																>
 																	<span class="sidebar-compound-icon sidebar-compound-icon--lg" data-testid="sidebar-add-session-icon">
@@ -741,7 +744,7 @@ function renderMobileLanding() {
 																<button
 																	class="p-1 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
 																	style="line-height:0;"
-																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
+																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: defaultCwdForProjectSession(project) }); }}
 																	title="New session with role"
 																><span class="sidebar-scale-icon">${icon(ChevronDown, "sm")}</span></button>
 																${renderRolePickerDropdown()}

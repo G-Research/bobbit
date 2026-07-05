@@ -32,15 +32,19 @@ function assertSamePath(actual: string, expected: string, message?: string): voi
 	assert.equal(path.normalize(actual), path.normalize(expected), message);
 }
 
+function expectedDefaultAgentDir(projectRoot: string): string {
+	return path.join(projectRoot, ".bobbit", "headquarters", "agent");
+}
+
 describe("agent directory resolver", () => {
-	it("defaults to <projectRoot>/.bobbit/agent", async () => {
+	it("defaults to <projectRoot>/.bobbit/headquarters/agent", async () => {
 		const mod = await loadAgentDirConfigModule();
 		assert.equal(typeof mod.resolveAgentDir, "function", "resolveAgentDir must be exported");
 		const projectRoot = tempProjectRoot("default");
 		const resolved = mod.resolveAgentDir({ env: {}, projectRoot }) as AgentDirResolution;
 		assert.equal(resolved.source, "default");
-		assertSamePath(resolved.dir, path.join(projectRoot, ".bobbit", "agent"));
-		assertSamePath(resolved.defaultDir!, path.join(projectRoot, ".bobbit", "agent"));
+		assertSamePath(resolved.dir, expectedDefaultAgentDir(projectRoot));
+		assertSamePath(resolved.defaultDir!, expectedDefaultAgentDir(projectRoot));
 	});
 
 	it("uses exact precedence BOBBIT_AGENT_DIR > persisted > default and ignores PI_CODING_AGENT_DIR", async () => {
@@ -61,7 +65,7 @@ describe("agent directory resolver", () => {
 		);
 		assert.deepEqual(
 			pick(mod.resolveAgentDir({ env: { PI_CODING_AGENT_DIR: pi }, projectRoot })),
-			{ source: "default", dir: path.normalize(path.join(projectRoot, ".bobbit", "agent")), raw: undefined },
+			{ source: "default", dir: path.normalize(expectedDefaultAgentDir(projectRoot)), raw: undefined },
 		);
 		assert.deepEqual(
 			pick(mod.resolveAgentDir({ env: {}, projectRoot, persisted })),
@@ -69,7 +73,7 @@ describe("agent directory resolver", () => {
 		);
 		assert.deepEqual(
 			pick(mod.resolveAgentDir({ env: {}, projectRoot })),
-			{ source: "default", dir: path.normalize(path.join(projectRoot, ".bobbit", "agent")), raw: undefined },
+			{ source: "default", dir: path.normalize(expectedDefaultAgentDir(projectRoot)), raw: undefined },
 		);
 	});
 
@@ -128,7 +132,7 @@ describe("agent directory resolver", () => {
 		const projectRoot = path.join(root, "project");
 		const tempHome = path.join(root, "home");
 		const legacyAgentDir = path.join(tempHome, ".pi", "agent");
-		const bobbitAgentDir = path.join(projectRoot, ".bobbit", "agent");
+		const bobbitAgentDir = expectedDefaultAgentDir(projectRoot);
 		fs.mkdirSync(path.join(legacyAgentDir, "sessions", "--legacy-project--"), { recursive: true });
 		fs.mkdirSync(projectRoot, { recursive: true });
 		fs.writeFileSync(path.join(legacyAgentDir, "auth.json"), JSON.stringify({ token: "raw-pi-auth" }), "utf-8");
@@ -177,7 +181,7 @@ describe("agent directory resolver", () => {
 
 		assert.deepEqual(snapshotTree(legacyAgentDir), before, "raw pi-owned ~/.pi/agent tree must remain byte-for-byte unchanged");
 		assert.ok(!fs.existsSync(path.join(tempHome, ".pi", "agent.pre-bobbit")), "startup must not write a ~/.pi/agent.pre-bobbit marker");
-		assert.ok(!fs.existsSync(path.join(tempHome, ".bobbit", "agent", "auth.json")), "startup must not copy auth.json out of ~/.pi/agent");
+		assert.ok(!fs.existsSync(path.join(bobbitAgentDir, "auth.json")), "startup must not copy auth.json out of ~/.pi/agent");
 		assertSamePath(state.startup.dir, bobbitAgentDir, "PI_CODING_AGENT_DIR must not become Bobbit's active agent dir");
 		assert.equal(state.startup.source, "default");
 		assert.ok(
