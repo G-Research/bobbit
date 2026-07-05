@@ -920,16 +920,22 @@ exit code. The same summary line, plus an
 `test-results/e2e-summary/<runId>.json` for gate tooling that wants
 machine-readable counts without re-parsing stdout.
 
-The unit phase has its own, simpler analogue: `scripts/run-unit.mjs` derives a
+The unit phase has its own analogue in `scripts/run-unit.mjs`: it derives a
 `[unit-summary] node=<pass|fail|skip> browser=<pass|fail|skip>` line from the
-two spawned sub-runners' own exit codes (`computeUnitSummary()` /
+two spawned sub-runners' exit codes (`computeUnitSummary()` /
 `formatUnitSummaryLine()` in
 [`scripts/unit-summary.mjs`](../scripts/unit-summary.mjs), pinned by
-`tests/unit-summary.test.ts`). It never greps decorated stdout for pass/fail —
-each sub-runner's exit code is already authoritative — so the ANSI-masking
-failure mode that motivated the E2E JSON-summary mechanism does not apply to
-the unit phase; the unit summary line exists purely to give gate tooling one
-stable, greppable status per sub-phase instead of free-text runner lines.
+`tests/unit-summary.test.ts`). On top of that, a **masked-failure
+cross-check** runs in the opposite direction from the E2E mechanism: a
+sub-runner reporting exit 0 is not trusted blindly — its captured output tail
+is scanned by `detectMaskedFailureCount()` for an unambiguous failure count
+(node's TAP `# fail N` for `node-logic`, Playwright's `N failed` for
+`browser-fixtures`), and a reported-0 result is promoted to a failing exit
+with a `[run-unit] ... masked-failure guard` warning if one is found. It
+never overrides an already-failing code. The motivating incident: 13 real
+browser-fixture failures were observed alongside a 0 exit code on a loaded
+shared machine (pinned by `tests/run-unit-wrapper.test.ts` and
+`tests/unit-summary.test.ts`).
 
 ### Windows temp root
 
