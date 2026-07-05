@@ -26,6 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SESSION_REVIVE_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
+const SESSION_STEERING_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-steering.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
@@ -783,11 +784,11 @@ describe("controlled model fallback policy — direct host provider env", () => 
 
 	it("normal setup, restore/respawn, and legacy verification use the fallback provider allowlist", () => {
 		const setupSrc = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
-		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const steeringSrc = readFileSync(SESSION_STEERING_SOURCE, "utf-8");
 		const verificationSrc = readFileSync(VERIFICATION_HARNESS_SOURCE, "utf-8");
 
 		assert.match(setupSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\)/);
-		assert.match(managerSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
+		assert.match(steeringSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 		assert.match(verificationSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 	});
 });
