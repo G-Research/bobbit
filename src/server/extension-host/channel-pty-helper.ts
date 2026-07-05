@@ -251,6 +251,12 @@ const POSIX_ENV_ALLOWLIST = new Set([
 	"LOGNAME",
 	"SHELL",
 	"TMPDIR",
+	// Shell-config-location variable in the same family as SHELL/HOME: zsh
+	// resolves its rc files from $ZDOTDIR. Stripping it silently loads the
+	// wrong (HOME-based) config for users whose environment relocates it, and
+	// the E2E harness relies on it to point spawned shells at a hermetic,
+	// rc-free directory so terminal specs never execute developer dotfiles.
+	"ZDOTDIR",
 ]);
 
 const WINDOWS_ENV_ALLOWLIST = new Set([

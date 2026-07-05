@@ -355,6 +355,18 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		} else {
 			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 		}
+		// Hermetic shell for terminal-pack PTYs: point zsh's rc-file directory at
+		// an empty dir so spawned interactive shells never execute developer
+		// dotfiles (oh-my-zsh/powerlevel10k prompt cycles measured at 5-12s per
+		// prompt under the E2E env — slow enough that a scripted `exit` typed as
+		// TTY type-ahead never executes inside a 20s assertion window). The PTY
+		// helper deliberately passes ZDOTDIR through its env allowlist for this.
+		const previousZdotdir = process.env.ZDOTDIR;
+		if (process.platform !== "win32") {
+			const hermeticZdotdir = join(bobbitDir, ".zdotdir-hermetic");
+			mkdirSync(hermeticZdotdir, { recursive: true });
+			process.env.ZDOTDIR = hermeticZdotdir;
+		}
 
 		const {
 			setProjectRoot,
@@ -570,6 +582,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 		if (previousToolApproveClf === undefined) delete process.env.BOBBIT_CLF_TOOL_APPROVE;
 		else process.env.BOBBIT_CLF_TOOL_APPROVE = previousToolApproveClf;
+		if (previousZdotdir === undefined) delete process.env.ZDOTDIR;
+		else process.env.ZDOTDIR = previousZdotdir;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

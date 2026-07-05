@@ -57,7 +57,7 @@ test.describe("terminal pack panel", () => {
 		await expect.poll(() => channelSendCount(page, "ext_channel_open"), { timeout: 20_000 }).toBeGreaterThan(0);
 
 		const marker1 = `bobbit_terminal_e2e_${Date.now()}`;
-		await typeCommand(page, `echo ${marker1}`);
+		await typeCommand(page, markerEchoCommand(marker1));
 		await expect(page.locator(terminalHost())).toContainText(marker1, { timeout: 20_000 });
 		await assertTerminalLayoutStable(page, "after first marker output");
 
@@ -76,7 +76,7 @@ test.describe("terminal pack panel", () => {
 		await assertTerminalHistoryAndLayout(page, [marker1], "browser reload reattach should replay prior marker before follow-up input");
 
 		const marker2 = `${marker1}_reattach`;
-		await typeCommand(page, `echo ${marker2}`);
+		await typeCommand(page, markerEchoCommand(marker2));
 		await expect(page.locator(terminalHost())).toContainText(marker2, { timeout: 20_000 });
 
 		const killBeforeHide = await killFrameCount(page);
@@ -88,7 +88,7 @@ test.describe("terminal pack panel", () => {
 		await expect.poll(() => killFrameCount(page), { timeout: 5_000 }).toBe(killBeforeHide);
 		await assertTerminalHistoryAndLayout(page, [marker1, marker2], "reopened live terminal should show existing markers before new input");
 		const marker3 = `${marker1}_hidden_live`;
-		await typeCommand(page, `echo ${marker3}`);
+		await typeCommand(page, markerEchoCommand(marker3));
 		await expect(page.locator(terminalHost())).toContainText(marker3, { timeout: 20_000 });
 		await assertTerminalLayoutStable(page, "after hidden-panel reattach marker output");
 
@@ -212,6 +212,12 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalPanel())).toBeVisible({ timeout: 20_000 });
 		await waitForTerminalMountedForFrameInjection(page);
 		await assertTerminalLayoutStable(page, "touch scroll setup initial terminal open");
+		// Deterministic-fixture reproducer, like the ConPTY test below: live PTY
+		// repaint frames (e.g. the shell's ZLE prompt redraw after the panel's
+		// initial resize send) race with the injected burst/marker fixtures and
+		// can overwrite the wrapped marker row mid-assertion. Mute real frames
+		// for the live channel before injecting anything.
+		await muteRealTerminalFrames(page);
 
 		const run = `bobbit_touch_scroll_${Date.now()}`;
 		await injectTerminalJsonFrame(page, { op: "status", state: "open" });
@@ -1044,6 +1050,23 @@ async function typeCommand(page: import("@playwright/test").Page, command: strin
 	await page.keyboard.insertText(command);
 	await page.keyboard.press("Enter");
 	await expect.poll(() => textFrameCount(page), { timeout: 5_000 }).toBeGreaterThan(textFramesBefore);
+}
+
+// Type a command whose OUTPUT contains `marker` while the typed line itself
+// does not: POSIX shells drop the empty "" quotes during expansion, so the
+// marker string can only appear in the terminal once the shell has actually
+// EXECUTED the line. Plain `echo ${marker}` is ambiguous — the kernel TTY
+// echoes typed characters immediately, even while the shell is still busy or
+// initializing, so a toContainText(marker) wait can be satisfied by the echo
+// alone with the command still sitting unexecuted in the type-ahead buffer.
+// That ambiguity let this spec type `exit` several commands ahead of a slow
+// interactive shell and time out waiting for an exit that was still queued.
+// cmd.exe echoes quotes verbatim (the split form would break the assertion),
+// so Windows keeps the plain form — it has no rc-file/prompt-plugin startup
+// latency to race against.
+function markerEchoCommand(marker: string): string {
+	if (process.platform === "win32") return `echo ${marker}`;
+	return `echo ${marker.slice(0, 3)}""${marker.slice(3)}`;
 }
 
 async function assertTerminalHistoryAndLayout(page: import("@playwright/test").Page, markers: string[], reason: string): Promise<void> {

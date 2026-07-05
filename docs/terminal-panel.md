@@ -68,6 +68,13 @@ Use the reported metrics to narrow the cause:
 
 If the test flakes only in the full suite, preserve these outcome predicates instead of adding retries or larger sleeps. The invariant is that output injected after a stable, hidden-tail detached state must not force-follow until the user returns to bottom.
 
+## Hermetic shell and echo-vs-output marker sync in E2E
+
+Two properties keep the live-shell E2E tests deterministic; both were derived from an instrumented byte-level timeline of a real ~10% smoke-test failure (`data-terminal-state` stuck at `attached` after typing `exit`):
+
+- **The E2E gateway pins `ZDOTDIR` to an empty directory** (`tests/e2e/gateway-harness.ts`), and the PTY env allowlist passes `ZDOTDIR` through (`src/server/extension-host/channel-pty-helper.ts`). The terminal channel deliberately spawns the developer's real `$SHELL` as an interactive shell; without the pin, a dotfile stack like oh-my-zsh + powerlevel10k was measured at **5–12 seconds per prompt cycle** under the stripped E2E environment. The channel/PTY layer was exonerated byte-for-byte: every keystroke reached `pty.write()` in order and every PTY byte flowed back — the shell itself was simply many commands behind, replaying type-ahead input one slow prompt at a time, and a scripted `exit` never executed inside the 20s assertion window. `ZDOTDIR` passthrough is also product-correct on its own: stripping it silently loads the wrong (HOME-based) zsh config for users whose environment relocates their rc directory.
+- **Marker waits gate on command execution, not the input echo.** The kernel TTY echoes typed characters immediately — even while the shell is busy or still initializing — so `toContainText(marker)` after typing `echo <marker>` can pass on the echo alone with the command still queued as type-ahead. `markerEchoCommand()` in `tests/e2e/ui/terminal-pack.spec.ts` types `echo bob""bit_…` so the contiguous marker string only ever appears as executed output. Never "fix" a terminal-timing flake by growing timeouts around a plain `echo <marker>` wait; keep the marker unobservable in the typed line instead.
+
 ## Windows ConPTY reproducer
 
 `tests/e2e/ui/terminal-pack.spec.ts` includes a targeted browser E2E test tagged `@terminal-repro` for the Windows `cmd.exe`/ConPTY startup artifact. It injects a deterministic synthetic startup stream shaped like the observed Windows PTY output:
