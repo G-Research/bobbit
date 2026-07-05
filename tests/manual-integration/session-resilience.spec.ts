@@ -693,6 +693,21 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		}
 		gw.defaultProjectId = (await regRes.json()).id;
 
+		// Since Headquarters (#925) the gateway-cwd registration takes the
+		// upsert path, which returns the existing HQ project and IGNORES the
+		// components/workflows in the POST body. Install them explicitly so
+		// workflowId:"feature" is resolvable — without this the goal assistant
+		// answers "This project has no workflows yet" and propose_goal never
+		// renders the proposal form (broke test B).
+		const regBody = projectRegistrationBody("default", dir);
+		const cfgRes = await api(gw, `/api/projects/${gw.defaultProjectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ components: regBody.components, workflows: regBody.workflows }),
+		});
+		if (cfgRes.status !== 200) {
+			throw new Error(`Failed to install workflows on default project: ${cfgRes.status} ${await cfgRes.text()}`);
+		}
+
 		if (HAS_DOCKER) {
 			const ss = await (await api(gw, "/api/sandbox-status")).json();
 			sandboxAvailable = ss.configured && ss.available;
