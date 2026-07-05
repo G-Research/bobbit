@@ -6,7 +6,7 @@
  * to run `git diff` itself. A gate with 3-4 concurrent reviewers therefore
  * re-derived the identical branch diff 3-4x (verification-harness.ts, prior
  * `buildReviewPrompt` — see docs/goals-workflows-tasks.md "Gate verification
- * baselines" and ~/Documents/dev/bobbit-fable-refactor/FINDINGS.md VER-03).
+ * baselines" and the Fable program's finding VER-03).
  *
  * Fix: `computeReviewDiffArtifact` derives the diff ONCE per verification run
  * (`verifyGateSignal`, before the phase fan-out) and threads the same

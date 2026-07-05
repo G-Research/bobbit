@@ -12,7 +12,7 @@
 //   3. A registered ("fake") classifier's `select` is returned, traced, and
 //      distinguishable from abstain.
 //
-// See ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md
+// See the Fable program's classifier-framework design note
 // §10 (Wave 0) and §12 (pinning-test invariants) for the design this
 // implements a deliberately narrow slice of.
 import { describe, it } from "node:test";

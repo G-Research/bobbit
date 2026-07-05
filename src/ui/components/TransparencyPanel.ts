@@ -21,8 +21,8 @@ export interface TransparencyDecision {
 
 /**
  * CLF-W1a — Transparency Panel (decisions rows only; per-turn injected
- * context blocks are a separate, deferred item — see
- * `~/Documents/dev/bobbit-fable-refactor/design/transparency-panel.md`).
+ * context blocks are a separate, deferred item — see the Fable program's
+ * transparency-panel design note).
  *
  * Renders NOTHING when there are zero decisions for the turn — no layout
  * shift, no DOM, byte-identical to before this component existed (pinned by
