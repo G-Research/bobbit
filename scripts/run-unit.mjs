@@ -28,12 +28,13 @@
  */
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, tmpdir } from "node:os";
+import { availableParallelism, loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveUnitSelection } from "./test-unit-args.mjs";
 import { computeUnitSummary, formatUnitSummaryLine } from "./unit-summary.mjs";
 import { readHeartbeatDiagnostics } from "./lib/unit-heartbeat.mjs";
+import { computeAdaptiveConcurrency } from "./lib/adaptive-concurrency.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -129,6 +130,25 @@ const testEnv = {
 	BOBBIT_UNIT_NODE_HEARTBEAT_FILE: nodeHeartbeatFile,
 };
 
+// V8 code cache (NODE_COMPILE_CACHE, Node >= 22.1) for the node-logic runner
+// AND every child process it spawns — it's set on testEnv, which every
+// spawned runner (and anything THEY spawn via `...process.env`) inherits.
+// Node reads this env var at startup and transparently persists/reuses
+// compiled bytecode across runs; no code changes needed beyond pointing it
+// at a cache dir. Opt-in via BOBBIT_TEST_COMPILE_CACHE=1 rather than default:
+// measured cold/warm/baseline wall time for the node-logic phase (tsx +
+// ~1540 tests under node --test) on this machine and found no measurable win
+// — run-to-run variance from background load (12-20+ loadavg on this shared
+// box) was consistently larger (tens of seconds) than any plausible V8
+// compile-cache effect. Kept available because it may help more on a quiet,
+// cold-disk, or much larger CI machine — re-measure before flipping the
+// default. See docs/testing-strategy.md for the raw numbers.
+if (process.env.BOBBIT_TEST_COMPILE_CACHE === "1") {
+	const compileCacheDir = process.env.BOBBIT_TEST_COMPILE_CACHE_DIR || join(projectRoot, ".cache", "node-compile");
+	mkdirSync(compileCacheDir, { recursive: true });
+	testEnv.NODE_COMPILE_CACHE = compileCacheDir;
+}
+
 // The two runners are BOTH CPU-bound and each parallelises internally. Running
 // them concurrently while each grabs all cores oversubscribes the box (node's
 // availableParallelism()-wide run + Playwright's worker pool = ~2x cores) and
@@ -145,9 +165,21 @@ const cpus = availableParallelism();
 // intentional local stress runs.
 const half = Math.max(1, Math.floor(cpus / 2));
 const defaultConcurrency = Math.min(6, half);
-const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(defaultConcurrency);
+
+// Adaptive scale-down: on a machine also running other test lanes (e.g. this
+// repo's merge-gate conveyor, scripts/gate-pr.sh in the sibling
+// bobbit-fable-refactor checkout), the half-core split above still assumes
+// the box is idle. Scale defaultConcurrency down using the 1-minute load
+// average so a busy box doesn't oversubscribe further — see
+// scripts/lib/adaptive-concurrency.mjs for the formula and its unit test.
+// BOBBIT_TEST_CONCURRENCY (both runners) and the existing per-runner
+// overrides (BOBBIT_UNIT_NODE_CONCURRENCY / BOBBIT_UNIT_BROWSER_WORKERS,
+// most specific first) always win over this calculation.
+const [load1] = loadavg();
+const adaptiveConcurrency = computeAdaptiveConcurrency({ base: defaultConcurrency, cores: cpus, load1 });
+const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || process.env.BOBBIT_TEST_CONCURRENCY || String(adaptiveConcurrency);
 // Passed to Playwright via --workers (CLI overrides the config's default).
-const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(defaultConcurrency);
+const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || process.env.BOBBIT_TEST_CONCURRENCY || String(adaptiveConcurrency);
 
 const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FAILURE_TAIL_LINES || "240", 10) || 240);
 const exitCloseGraceMs = Math.max(1000, Number.parseInt(process.env.BOBBIT_UNIT_EXIT_CLOSE_GRACE_MS || "5000", 10) || 5000);
@@ -322,7 +354,7 @@ const browserArgs = selection.browserTestArgs === null ? null : [
 	...selection.browserTestArgs,
 ];
 
-console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency} --test-timeout=${nodeTestTimeoutMs}ms, browser --workers=${browserWorkers}`);
+console.log(`[run-unit] ${cpus} cores, load1=${load1.toFixed(2)} (base ${defaultConcurrency} → adaptive ${adaptiveConcurrency}) → node --test-concurrency=${nodeConcurrency} --test-timeout=${nodeTestTimeoutMs}ms, browser --workers=${browserWorkers}`);
 if (nodeArgs === null) console.log("[run-unit] node-logic phase skipped (no matching args)");
 if (browserArgs === null) console.log("[run-unit] browser-fixtures phase skipped (no matching args)");
 

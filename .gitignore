@@ -74,3 +74,8 @@ bundle-stats.json
 graphify-out/
 **/graphify-out/
 .graphify_*
+
+# Node compile cache (V8 code cache for the unit-phase node runner + its
+# spawned children) — see scripts/run-unit.mjs BOBBIT_TEST_COMPILE_CACHE.
+# Per-machine, per-Node-version; never commit.
+.cache/

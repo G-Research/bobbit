@@ -267,6 +267,8 @@ npm run test:unit     # Unit tests — Node test runner + Playwright file:// fix
 npm run test:e2e      # E2E tests — API (in-process) + browser (spawned gateway)
 ```
 
+Running fleet-parallel (another lane may be testing concurrently, e.g. a merge-gate conveyor)? Use `npm run test:unit:queued` instead of `npm run test:unit` — see [docs/testing-strategy.md § Cross-lane test mutex](testing-strategy.md#cross-lane-test-mutex-fleet-parallel-machines).
+
 E2E tests use `playwright-e2e.config.ts` which defines two projects:
 
 - **`api`** (4 workers): API-only tests import from `in-process-harness.js` — the gateway runs in the same Node process, eliminating child process spawn overhead. Covers HTTP/WS API tests, CRUD, agent protocol.

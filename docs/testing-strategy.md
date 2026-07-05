@@ -496,6 +496,55 @@ The right answer is to **extract what makes manual tests valuable** (crash resil
 
 ## Test Infrastructure Reference
 
+### Node compile cache for the unit node-logic phase (opt-in, measured no-win)
+
+`scripts/run-unit.mjs` can point `NODE_COMPILE_CACHE` (Node >= 22.1, persists
+V8 bytecode across runs) at `.cache/node-compile/` for the node-logic runner
+and everything it spawns, via `BOBBIT_TEST_COMPILE_CACHE=1`. It defaults OFF
+because measurement did not show a reliable win on this machine:
+
+| Run | Wall time (node-logic phase, ~1540 tests, `--test-concurrency=6`) |
+|---|---|
+| baseline (no cache), run 1 | 74.7s |
+| baseline (no cache), run 2 | 83.0s |
+| baseline (no cache), run 3 | 97.7s |
+| cold cache, run 1 | 82.2s |
+| cold cache, run 2 | 117.6s |
+| warm cache, run 1 | 132.6s |
+| warm cache, run 2 | 76.0s |
+| warm cache, run 3 (fully warm) | 124.0s |
+
+The spread within each condition (baseline: 74.7-97.7s; warm: 76.0-132.6s) is
+larger than any difference between conditions — this machine runs a
+merge-gate conveyor and multiple language-server/dev processes concurrently
+(1-minute loadavg sat at 12-21 throughout, never near idle), which dominates
+node-phase wall time far more than V8 bytecode compilation does for ~1540
+small test files. Re-measure on a quiet or much larger machine before
+considering a default flip.
+
+### Cross-lane test mutex (fleet-parallel machines)
+
+On a machine that also runs other test lanes concurrently (e.g. a merge-gate
+conveyor plus dev/agent loops), two full `npm run test:unit` invocations
+racing for the same cores at once produces contention-induced timeouts that
+look like regressions but aren't — see [`scripts/lib/adaptive-concurrency.mjs`](../scripts/lib/adaptive-concurrency.mjs)
+for the load-aware concurrency scale-down `run-unit.mjs` already applies, and
+[`scripts/test-mutex.sh`](../scripts/test-mutex.sh) for a stronger guarantee:
+a machine-wide, `mkdir`-based lock (with 90-minute stale reclaim) that
+serializes an arbitrary wrapped command.
+
+When running in a fleet-parallel context, use the queued variant instead of
+the bare command:
+
+```bash
+npm run test:unit:queued   # scripts/test-mutex.sh npm run test:unit
+```
+
+It waits (foreground, with a progress line every 60s) for any other lane's
+test run to finish before starting, then behaves identically to
+`npm run test:unit`. Not needed for a single interactive dev loop — only when
+you know another lane may be running tests at the same time.
+
 ### Harness selection
 
 The E2E suite provides two harnesses. Choose based on what your test needs:
