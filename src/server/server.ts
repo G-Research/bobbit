@@ -8481,8 +8481,10 @@ async function handleApiRoute(
 			const existingGateForCache = gateStore.getGate(goalId, gateId);
 			if (existingGateForCache) {
 				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
+				const incomingContent = typeof body?.content === "string" ? body.content : "";
 				const priorPassed = existingGateForCache.signals.find(s =>
 					s.commitSha === commitSha
+					&& ((typeof s.content === "string" ? s.content : "") === incomingContent)
 					&& s.verification?.status === "passed"
 					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
 					&& !s.verification.steps.some(step => step.type === "human-signoff")
