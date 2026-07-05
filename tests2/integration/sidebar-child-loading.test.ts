@@ -12,7 +12,7 @@
  * Both tests are expected to FAIL against the current (unfixed) codebase.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 
 /** Terminate (archive) a session via DELETE. */
 async function terminateSession(id: string): Promise<void> {

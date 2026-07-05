@@ -203,7 +203,7 @@ describe("PR walkthrough GitHub export mapper", () => {
 			const result = await submitExportForTesting("github:SuuBro/bobbit#42:bbbbbbb", {
 				changesetId: "github:SuuBro/bobbit#42:bbbbbbb",
 				changeset: draft().changeset,
-				cards,
+				cards: cards as any,
 				warnings: [],
 				export: { provider: "github", available: true },
 			}, { draft: draft(), event: "REQUEST_CHANGES" });

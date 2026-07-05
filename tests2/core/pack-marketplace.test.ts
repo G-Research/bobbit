@@ -97,7 +97,7 @@ describe("#1 pack discovery & manifest parsing", () => {
 		assert.equal(readManifest(noPack), null);
 		const withPack = path.join(TMP, "withpack");
 		fs.mkdirSync(withPack, { recursive: true });
-		writeManifest(withPack, { name: "p1", description: "d", version: "1", contents: { roles: [], tools: [], skills: [] } });
+		writeManifest(withPack, { name: "p1", description: "d", version: "1", contents: { roles: [], tools: [], skills: [], entrypoints: [] } });
 		assert.equal(readManifest(withPack)!.name, "p1");
 	});
 
@@ -193,7 +193,7 @@ describe("#4 three-scope resolution", () => {
 	function marketPack(base: string, scope: string, packName: string, role: string, model: string) {
 		const dir = path.join(base, ".bobbit", "config", "market-packs", packName);
 		w(path.join(dir, "roles", role + ".yaml"), roleYaml(role, model));
-		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [role], tools: [], skills: [] } });
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [role], tools: [], skills: [], entrypoints: [] } });
 		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: scope as any });
 	}
 	beforeAll(() => {
@@ -322,7 +322,7 @@ describe("finding #1 — legacy/user skill dirs outrank market packs", () => {
 	function marketSkillPack(cwd: string, packName: string, skills: Array<[string, string]>) {
 		const dir = path.join(cwd, ".bobbit", "config", "market-packs", packName);
 		for (const [n, body] of skills) w(path.join(dir, "skills", n, "SKILL.md"), skillMd(n, body));
-		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: skills.map((s) => s[0]) } });
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: skills.map((s) => s[0]), entrypoints: [] } });
 		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: "project" as any });
 	}
 
@@ -421,7 +421,7 @@ describe("finding #3 — server-scope skill pack resolves for a non-default proj
 	function serverSkillPack(serverBase: string, packName: string, skill: string, body: string) {
 		const dir = path.join(serverBase, ".bobbit", "config", "market-packs", packName);
 		w(path.join(dir, "skills", skill, "SKILL.md"), skillMd(skill, body));
-		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: [skill] } });
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: [skill], entrypoints: [] } });
 		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: "server" as any });
 	}
 

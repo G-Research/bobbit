@@ -109,17 +109,17 @@ describe("PR walkthrough YAML schema", () => {
 		const design = payload.cards.find(card => card.phaseId === "design");
 		assert.ok(design);
 		assert.equal(design.navLabel, "Agent submits YAML");
-		assert.deepEqual(design.diffBlocks.map(block => block.id), ["block-src-a"]);
+		assert.deepEqual(design.diffBlocks.map((block: any) => block.id), ["block-src-a"]);
 
 		const review = payload.cards.find(card => card.id === "significant-chunk-api");
 		assert.ok(review);
-		assert.deepEqual(review.diffBlocks.map(block => block.id), ["block-src-a"]);
+		assert.deepEqual(review.diffBlocks.map((block: any) => block.id), ["block-src-a"]);
 		assert.equal(review.suggestedComments?.length, 1);
 		assert.equal(review.suggestedComments?.[0]?.cardId, review.id);
 		assert.equal(review.suggestedComments?.[0]?.lineId, "block-src-a:h0:l1");
 
 		const finalAudit = payload.cards.find(card => card.title === "Audit and review checklist");
-		assert.ok(finalAudit?.diffBlocks.some(block => block.id === "block-src-b"));
+		assert.ok(finalAudit?.diffBlocks.some((block: any) => block.id === "block-src-b"));
 
 		assert.ok(payload.cards.some(card => card.title === "Omissions and follow-ups"));
 		assert.ok(payload.cards.some(card => card.title === "Audit and review checklist"));
@@ -254,7 +254,7 @@ describe("PR walkthrough YAML schema", () => {
 
 		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 		const design = payload.cards.find(card => card.id === "design-context-design");
-		assert.deepEqual(design?.diffBlocks.map(block => block.id), ["block-context"]);
+		assert.deepEqual(design?.diffBlocks.map((block: any) => block.id), ["block-context"]);
 		const review = payload.cards.find(card => card.id === "significant-context-review");
 		assert.equal(review?.suggestedComments?.length, 1);
 		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
@@ -319,7 +319,7 @@ describe("PR walkthrough YAML schema", () => {
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@")] });
 		const review = payload.cards.find(card => card.id === "significant-context-review");
 
-		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
+		assert.deepEqual(review?.diffBlocks.map((block: any) => block.id), ["block-context"]);
 		assert.equal(review?.diffBlocks[0]?.hunks.length, 1);
 		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 	});
@@ -348,7 +348,7 @@ describe("PR walkthrough YAML schema", () => {
 		if (!validation.ok) return;
 
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiLogicalDiffBlock(1)] }, { readReceipts: [{ schemaVersion: 1, id: "receipt-1", mode: "file", hunkIds: ["block-multi:h0"], truncated: false }] });
-		const record = payload.coverage?.records?.find(item => item.hunkId === "block-multi:h0");
+		const record = (payload as any).coverage?.records?.find((item: any) => item.hunkId === "block-multi:h0");
 		assert.equal(record?.primaryState, "primary-reviewed");
 		assert.deepEqual(record?.secondaryCardIds, ["significant-repeat"]);
 		assert.equal(record?.repeatedReferenceCount, 1);
@@ -492,14 +492,14 @@ describe("PR walkthrough YAML schema", () => {
 			files: [logicalDiffBlock("block-a", "src/a.ts", 1), binaryDiffBlock("block-bin", "assets/logo.png")],
 		});
 
-		const record = payload.coverage?.records?.find(item => item.filePath === "assets/logo.png");
+		const record = (payload as any).coverage?.records?.find((item: any) => item.filePath === "assets/logo.png");
 		assert.ok(record, "expected the hunkless binary block to appear in coverage records");
 		assert.equal(record?.binary, true);
 		assert.equal(record?.primaryState, "completion-sweep-remaining");
-		assert.equal(payload.coverage?.majorRemaining?.some(item => item.filePath === "assets/logo.png"), false);
+		assert.equal((payload as any).coverage?.majorRemaining?.some((item: any) => item.filePath === "assets/logo.png"), false);
 
 		const audit = payload.cards.find(card => card.title === "Audit and review checklist");
-		assert.ok(audit?.diffBlocks.some(block => block.filePath === "assets/logo.png"), "expected the binary block on the audit/completion-sweep card");
+		assert.ok(audit?.diffBlocks.some((block: any) => block.filePath === "assets/logo.png"), "expected the binary block on the audit/completion-sweep card");
 	});
 
 	it("lets reviewers explicitly skip a hunkless binary block with a reason", () => {
@@ -514,7 +514,7 @@ describe("PR walkthrough YAML schema", () => {
 			files: [logicalDiffBlock("block-a", "src/a.ts", 1), binaryDiffBlock("block-bin", "assets/logo.png")],
 		});
 
-		const record = payload.coverage?.records?.find(item => item.filePath === "assets/logo.png");
+		const record = (payload as any).coverage?.records?.find((item: any) => item.filePath === "assets/logo.png");
 		assert.equal(record?.primaryState, "skipped");
 		assert.equal(record?.skippedReason, "binary");
 		const audit = payload.cards.find(card => card.title === "Audit and review checklist");
@@ -555,7 +555,7 @@ describe("PR walkthrough YAML schema", () => {
 		const authoredDiff = diffEntries.find(entry => entry.id === "diff-one");
 		assert.deepEqual(authoredDiff?.hunkIds, ["block-multi:h0"]);
 		assert.ok(diffEntries.some(entry => entry.hunkIds.includes("block-multi:h1")), "expected an appended narrative diff entry for the orphaned top-level ref");
-		assert.ok(card?.diffBlocks.some(block => block.hunks.some(hunk => hunk.id === "block-multi:h1")), "orphaned top-level ref should still be present in diffBlocks");
+		assert.ok(card?.diffBlocks.some((block: any) => block.hunks.some((hunk: any) => hunk.id === "block-multi:h1")), "orphaned top-level ref should still be present in diffBlocks");
 	});
 });
 

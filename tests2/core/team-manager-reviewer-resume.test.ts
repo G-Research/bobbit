@@ -33,6 +33,7 @@ const TEST_PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-reviewer-resum
 process.env.BOBBIT_DIR = TEST_PI_DIR;
 
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 
 function clearTeamStore() {
@@ -125,7 +126,7 @@ function makeFakeSession(id: string, status = "idle") {
 }
 
 describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
-	it("does NOT fire notifyTeamLead for a persisted reviewer agent on agent_end after restart", async (t) => {
+	it("does NOT fire notifyTeamLead for a persisted reviewer agent on agent_end after restart", async () => {
 		// The worker idle nudge is debounced 5s (agent_end schedules a one-shot
 		// timer cancelled by agent_start). Use fake timers to advance past that
 		// window deterministically instead of waiting in real time.
@@ -163,7 +164,7 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 			colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
 			taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [], createTask: (_g: any, t: any) => t, getTask: () => undefined, updateTask: () => true, deleteTask: () => true },
 		};
-		const tm = new TeamManager(sm, config);
+		const tm = new TeamManager(sm, config as unknown as TeamManagerConfig);
 		_created.push(tm);
 
 		// Verify restore reconstructed the kind field correctly.
@@ -234,7 +235,7 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 			colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
 			taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [], createTask: (_g: any, t: any) => t, getTask: () => undefined, updateTask: () => true, deleteTask: () => true },
 		};
-		const tm = new TeamManager(sm, config);
+		const tm = new TeamManager(sm, config as unknown as TeamManagerConfig);
 		_created.push(tm);
 
 		// Even though restore now defaults absent kind to "worker", the role

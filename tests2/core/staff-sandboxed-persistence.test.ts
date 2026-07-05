@@ -41,6 +41,7 @@ function baseStaff(id: string, sandboxed: boolean) {
 		id,
 		name: `bot-${id}`,
 		description: "",
+		accessory: "",
 		systemPrompt: "x",
 		cwd: tmpRoot,
 		state: "active" as const,

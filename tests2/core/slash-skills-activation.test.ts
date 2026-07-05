@@ -152,7 +152,7 @@ describe("slash-skill discovery honors pack_activation (pack-schema-v1 §7)", ()
 
 	it("disabling a skill in the WRONG pack/scope does not filter it", () => {
 		// Disable `dup` but for pack-low / project scope — pack-high's `dup` is untouched.
-		const disabled: DisabledLookup = (scope, packName) =>
+		const disabled: DisabledLookup = (_scope, packName) =>
 			packName === "pack-low" ? { skills: ["dup"] } : {};
 		const skills = resolveWith(disabled);
 		// pack-high's dup wins (it is not disabled); pack-low's would-be shadow is the

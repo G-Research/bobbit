@@ -26,6 +26,7 @@ function okResult(branch = "main"): GitStatusResult {
 		data: {
 			branch,
 			primaryBranch: "master",
+			primaryRef: "origin/master",
 			isOnPrimary: false,
 			summary: "",
 			clean: true,
@@ -35,6 +36,8 @@ function okResult(branch = "main"): GitStatusResult {
 			aheadOfPrimary: 0,
 			behindPrimary: 0,
 			mergedIntoPrimary: false,
+			insertionsVsPrimary: 0,
+			deletionsVsPrimary: 0,
 			unpushed: false,
 			status: [],
 		},

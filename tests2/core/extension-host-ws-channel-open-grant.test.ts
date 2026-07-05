@@ -174,7 +174,7 @@ describe("WebSocket extension channel open grants", () => {
 			error: "pack-bound surface-token mint requires app surface-token key",
 		});
 
-		const grant = await requestOpenGrant(raw.ws, "grant", forged.token, "terminal");
+		const grant = await requestOpenGrant(raw.ws, "grant", (forged as any).token, "terminal");
 		assert.deepEqual(grant, {
 			type: "ext_channel_open_grant_result",
 			requestId: "grant",

@@ -169,7 +169,7 @@ describe("session-setup _resolveTools preserves explicit empty allowlist (F2)", 
 		ctx: unknown,
 		ceat: (...a: unknown[]) => unknown[],
 		scope: (projectId: string | undefined, cwd: string | undefined) => unknown,
-		lookup = defaultLookupRole,
+		lookup: (name: string, plan: unknown, ctx: unknown) => unknown = defaultLookupRole,
 	) => runExtractedBlock(plan, ctx, ceat, scope, lookup);
 
 	const sentinel = [{ name: "ROLE_FALLBACK" }];

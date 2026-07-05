@@ -37,7 +37,6 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ChildProcess } from "node:child_process";
 
 import {
 	BgProcessManager,
@@ -89,7 +88,7 @@ function hostRecord(stateDir: string, sessionId: string, id: string, processPid:
 		outSpool: path.join(dir, `${id}.out.spool`),
 		errSpool: path.join(dir, `${id}.err.spool`),
 		pidFile: path.join(dir, `${id}.pid`),
-		nonce, inContainer: false,
+		inContainer: false,
 		outOffset: 0, errOffset: 0,
 	};
 }

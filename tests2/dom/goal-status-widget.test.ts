@@ -64,7 +64,7 @@ beforeEach(() => {
 	signalsByGate = new Map();
 	openReviewEvents = [];
 	vi.stubGlobal("WebSocket", MockWebSocket as any);
-	vi.stubGlobal("fetch", async (url: any, init: any = {}) => {
+	vi.stubGlobal("fetch", async (url: any, _init: any = {}) => {
 		const textUrl = String(url);
 		if (/\/gates\/[^/]+\/signals/.test(textUrl)) {
 			const gateId = decodeURIComponent(textUrl.match(/\/gates\/([^/]+)\/signals/)?.[1] || "");

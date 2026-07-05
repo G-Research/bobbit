@@ -19,6 +19,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import type { ToolManager } from "../../src/server/agent/tool-manager.ts";
+import type { GroupPolicyProvider } from "../../src/server/agent/tool-activation.ts";
 
 const { resolveGrantPolicy } = await import("../../src/server/agent/tool-activation.ts");
 const { ToolGroupPolicyStore } = await import("../../src/server/agent/tool-group-policy-store.ts");
@@ -26,22 +28,22 @@ const { ToolGroupPolicyStore } = await import("../../src/server/agent/tool-group
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /** Minimal mock ToolManager — only needs getToolByName() */
-function mockToolManager(tools: Record<string, { grantPolicy?: string }>) {
+function mockToolManager(tools: Record<string, { grantPolicy?: string }>): ToolManager {
 	return {
 		getToolByName(name: string) {
 			const key = Object.keys(tools).find(k => k.toLowerCase() === name.toLowerCase());
 			return key ? tools[key] : undefined;
 		},
-	};
+	} as unknown as ToolManager;
 }
 
 /** Minimal mock GroupPolicyProvider */
-function mockGroupPolicyStore(policies: Record<string, string>) {
+function mockGroupPolicyStore(policies: Record<string, string>): GroupPolicyProvider {
 	return {
 		getGroupPolicy(group: string) {
 			return policies[group] ?? null;
 		},
-	};
+	} as unknown as GroupPolicyProvider;
 }
 
 // ── resolveGrantPolicy — 5-layer resolution ─────────────────────────

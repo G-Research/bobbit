@@ -212,9 +212,11 @@ describe("MCP gateway catalogue primitives", () => {
 			const parsed = await fetchMcpGatewayWithDiagnostics(source(url));
 			assert.deepEqual(parsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
 			const jira = parsed.providers.find((p: any) => p.id === "jira");
-			assert.deepEqual(jira.operations.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
+			assert.ok(jira);
+			assert.deepEqual(jira.operations!.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
 			const confluence = parsed.providers.find((p: any) => p.id === "confluence");
-			assert.deepEqual(confluence.operations.map((op: any) => op.name), ["confluence_get_page"]);
+			assert.ok(confluence);
+			assert.deepEqual(confluence.operations!.map((op: any) => op.name), ["confluence_get_page"]);
 			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "initialize"));
 			assert.ok(requests.some((r) => r.method === "POST" && r.path === "/readonly/mcp" && r.rpcMethod === "tools/list"));
 			assert.equal(requests.some((r) => r.path === "/signin/aigateway"), false);
@@ -281,7 +283,8 @@ describe("MCP gateway catalogue primitives", () => {
 		}, SOURCE_URL);
 		assert.deepEqual(toolsParsed.providers.map((p: any) => p.id).sort(), ["confluence", "jira"]);
 		const jira = toolsParsed.providers.find((p: any) => p.id === "jira");
-		assert.deepEqual(jira.operations.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
+		assert.ok(jira);
+		assert.deepEqual(jira.operations!.map((op: any) => op.name), ["jira_search", "jira_get_issue"]);
 	});
 
 	it("builds provider-scoped virtual packs", () => {

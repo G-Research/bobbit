@@ -66,6 +66,9 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 			name: "synthesis-reviewer",
 			label: "Synthesis Reviewer",
 			promptTemplate: "Review the synthesis.",
+			accessory: "",
+			createdAt: 0,
+			updatedAt: 0,
 		};
 		const parent = await gm.createGoal("Parent", tmpRoot, {
 			workflowId: "feature",
@@ -112,7 +115,7 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 		const parent = await gm.createGoal("Parent", tmpRoot, {
 			workflowId: "feature",
 			workflowStore: wfStore,
-			inlineRoles: { reviewer: { name: "reviewer", label: "R", promptTemplate: "v1" } },
+			inlineRoles: { reviewer: { name: "reviewer", label: "R", promptTemplate: "v1", accessory: "", createdAt: 0, updatedAt: 0 } },
 		});
 
 		const inherited = JSON.parse(JSON.stringify(parent.inlineRoles));

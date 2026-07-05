@@ -263,7 +263,7 @@ async function withMockedFetch<T>(handler: (url: string, init?: any) => Response
 
 describe("PR walkthrough compact bundle formatting", () => {
 	it("formats an added file as compact diff text with file status and additions", () => {
-		const output = formatCompact(fileRead(addedFile()), { mode: "file", path: "src/added.ts" });
+		const output = formatCompact(fileRead(addedFile() as any), { mode: "file", path: "src/added.ts" });
 
 		assert.match(output, /PR walkthrough bundle file \(compact\)/i);
 		assert.match(output, /bundle:\s*job-compact-1/i);

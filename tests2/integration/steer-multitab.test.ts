@@ -47,7 +47,7 @@ test.describe("Steer multi-tab convergence (AC §4)", () => {
 					latestStatus(B.messages) === "idle" &&
 					latestQueueLen(A.messages) === 0 &&
 					latestQueueLen(B.messages) === 0,
-				{ timeout: 30_000, intervals: [200, 500, 1000] },
+				{ timeout: 30_000, interval: 200 },
 			).toBe(true);
 			expect(latestQueueLen(A.messages)).toBe(latestQueueLen(B.messages));
 			// Each of M1/M2/M3 appears as a user message exactly once on A.

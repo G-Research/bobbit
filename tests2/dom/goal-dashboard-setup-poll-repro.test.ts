@@ -7,7 +7,7 @@ __syncBeforeAll(() => __syncCE());
 // loadDashboardData() path starts polling for "preparing" goals, so the banner
 // auto-updates to ready without manual intervention. Recreated under happy-dom
 // with real timers (element presence == visibility, render swaps innerHTML).
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 
 type Status = "preparing" | "ready" | "error";
 

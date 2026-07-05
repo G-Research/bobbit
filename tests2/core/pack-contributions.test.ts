@@ -52,9 +52,9 @@ describe("Extension Host channel contract", () => {
 			attach: async (id) => ({ id, name: "terminal", state: "open", send: async () => {}, close: async () => {}, onFrame: () => () => {}, onClose: () => () => {} }),
 			list: async () => [{ id: "c1", name: "terminal", packId: "terminal", sessionId: "s1", state: "open", createdAt: 1, lastActiveAt: 2, attached: true }],
 		};
-		const host = { capabilities: { channels: true, has: (name: string) => name === "channels" }, channels } as HostApi;
+		const host = { capabilities: { channels: true, has: (name: string) => name === "channels" }, channels } as unknown as HostApi;
 		assert.equal(host.capabilities.has("channels"), true);
-		assert.equal(typeof host.channels.open, "function");
+		assert.equal(typeof host.channels!.open, "function");
 	});
 });
 

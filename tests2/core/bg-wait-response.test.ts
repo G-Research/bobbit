@@ -95,7 +95,7 @@ describe("streamBgWaitResponse", () => {
 		const res = fakeRes();
 
 		// Start the stream but DO NOT resolve the wait yet.
-		const done = streamBgWaitResponse(res, () => d.promise, { heartbeatMs: 5 });
+		const done = streamBgWaitResponse(res as any, () => d.promise, { heartbeatMs: 5 });
 
 		// Let any synchronous/microtask work settle while the wait is pending.
 		await tick(15);
@@ -120,7 +120,7 @@ describe("streamBgWaitResponse", () => {
 		const d = deferred<BgWaitResult>();
 		const res = fakeRes();
 
-		const done = streamBgWaitResponse(res, () => d.promise, { heartbeatMs: 5 });
+		const done = streamBgWaitResponse(res as any, () => d.promise, { heartbeatMs: 5 });
 
 		// Allow several heartbeat intervals to elapse while still pending.
 		await tick(25);
@@ -138,7 +138,7 @@ describe("streamBgWaitResponse", () => {
 		const res = fakeRes();
 		const result = { info: sampleInfo(), timedOut: false, aborted: false };
 
-		const done = streamBgWaitResponse(res, () => d.promise, { heartbeatMs: 5 });
+		const done = streamBgWaitResponse(res as any, () => d.promise, { heartbeatMs: 5 });
 		// Let a heartbeat or two land before resolving, then resolve.
 		await tick(12);
 		d.resolve(result);
@@ -150,7 +150,7 @@ describe("streamBgWaitResponse", () => {
 
 	it("C2: null result produces a 404 'Process not found' JSON body", async () => {
 		const res = fakeRes();
-		await streamBgWaitResponse(res, async () => null, { heartbeatMs: 5 });
+		await streamBgWaitResponse(res as any, async () => null, { heartbeatMs: 5 });
 
 		assert.equal(res.statusCode, 404, "unknown process must respond 404");
 		assert.equal(res.ended, true);

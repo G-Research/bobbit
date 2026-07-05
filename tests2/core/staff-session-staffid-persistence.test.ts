@@ -209,6 +209,7 @@ describe("staff session staffId backfill migration", () => {
 		// Seed a staff
 		staffStore.put({
 			id: "staff-guardian",
+			accessory: "",
 			name: "Unit Test Guardian",
 			description: "",
 			systemPrompt: "x",
@@ -250,6 +251,7 @@ describe("staff session staffId backfill migration", () => {
 		const { sessionStore, staffStore, runBackfill } = makeBackfillRunner();
 		staffStore.put({
 			id: "staff-real",
+			accessory: "",
 			name: "Some Staff",
 			description: "",
 			systemPrompt: "",
@@ -287,6 +289,7 @@ describe("staff session staffId backfill migration", () => {
 		const { sessionStore, staffStore, runBackfill } = makeBackfillRunner();
 		staffStore.put({
 			id: "staff-elsewhere",
+			accessory: "",
 			name: "Ambiguous Name",
 			description: "",
 			systemPrompt: "",

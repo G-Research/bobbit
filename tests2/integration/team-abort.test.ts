@@ -91,12 +91,11 @@ test.describe("team abort — membership enforcement", () => {
 
 test.describe("team abort — stuck agent", () => {
 	let goalId: string;
-	let teamLeadId: string;
 
 	test.beforeAll(async () => {
 		const goal = await createGoal({ title: "abort-stuck", team: true });
 		goalId = goal.id;
-		teamLeadId = await startTeam(goalId);
+		await startTeam(goalId);
 	});
 
 	test.afterAll(async () => {

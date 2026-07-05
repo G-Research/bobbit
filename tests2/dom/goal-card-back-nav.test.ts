@@ -71,7 +71,6 @@ function setup() {
 		}
 	}
 
-	let connectedSessionId: string | null = null;
 	let connectingSessionId: string | null = null;
 
 	function showView(viewName: string) {
@@ -82,15 +81,12 @@ function setup() {
 	function handleHashChange() {
 		const route = getRouteFromHash();
 		if (route.view === "session" && route.sessionId) {
-			connectedSessionId = route.sessionId;
 			document.getElementById("connected-session-id")!.textContent = route.sessionId;
 			showView("session");
 		} else if (route.view === "goal-dashboard" && route.goalId) {
-			connectedSessionId = null;
 			document.getElementById("dashboard-title")!.textContent = "Goal Dashboard: " + route.goalId;
 			showView("goal-dashboard");
 		} else {
-			connectedSessionId = null;
 			showView("landing");
 		}
 	}
@@ -102,7 +98,6 @@ function setup() {
 		connectingSessionId = sessionId;
 		const startingRoute = getRouteFromHash();
 		await new Promise((r) => setTimeout(r, 50));
-		connectedSessionId = sessionId;
 		connectingSessionId = null;
 		const currentRoute = getRouteFromHash();
 		const replaceHistory = startingRoute.view === "goal-dashboard" || currentRoute.view === "goal-dashboard";

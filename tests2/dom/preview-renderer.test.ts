@@ -354,7 +354,7 @@ describe("PreviewOpenRenderer", () => {
 		resetPreviewState();
 		setPreviewWorkspace(SESSION_ID, HASH, "inline.html", [oldHash]);
 		renderPreview(container(), { html: "<p>latest</p>" }, makePreviewResultWithSnapshot("inline.html", HASH, ARTIFACT_ID), false);
-		responder = (url, init) => {
+		responder = (_url, init) => {
 			if (init?.method === "POST") return { status: 500, body: { error: "unexpected restore" } };
 			return { status: 200, body: { ok: true } };
 		};
@@ -438,7 +438,7 @@ describe("PreviewOpenRenderer", () => {
 		resetPreviewState();
 		setPreviewWorkspace(SESSION_ID, oldHash);
 		renderPreview(container(), {}, makePreviewResultWithoutArtifact("inline.html", HASH), false);
-		responder = (url, init) => {
+		responder = (_url, init) => {
 			if (init?.method === "POST") return { status: 500, body: { error: "unexpected restore" } };
 			return { status: 200, body: { ok: true } };
 		};

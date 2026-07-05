@@ -57,7 +57,7 @@ describe("deliverSessionPrompt", () => {
 	it("prompt mode on an idle session enqueues a normal prompt without isSteered", async () => {
 		const mock = deps(session({ status: "idle" }));
 
-		const result = await deliverSessionPrompt(mock.api, "sess-1", "hello", {
+		const result: any = await deliverSessionPrompt(mock.api, "sess-1", "hello", {
 			mode: "prompt",
 			defaultMode: "steer",
 			source: "agent",
@@ -89,7 +89,7 @@ describe("deliverSessionPrompt", () => {
 	it("steer mode on a streaming session uses the live-steer path", async () => {
 		const mock = deps(session({ status: "streaming" }));
 
-		const result = await deliverSessionPrompt(mock.api, "sess-1", "redirect now", {
+		const result: any = await deliverSessionPrompt(mock.api, "sess-1", "redirect now", {
 			mode: "steer",
 			defaultMode: "prompt",
 			source: "agent",
@@ -107,7 +107,7 @@ describe("deliverSessionPrompt", () => {
 	it("steer mode on an idle session enqueues a steered prompt", async () => {
 		const mock = deps(session({ status: "idle" }));
 
-		const result = await deliverSessionPrompt(mock.api, "sess-1", "next steer", {
+		const result: any = await deliverSessionPrompt(mock.api, "sess-1", "next steer", {
 			mode: "steer",
 			defaultMode: "prompt",
 		});
@@ -184,7 +184,7 @@ describe("deliverSessionPrompt", () => {
 	it("allows steer mode to redirect a streaming non-interactive session", async () => {
 		const mock = deps(session({ status: "streaming", nonInteractive: true }));
 
-		const result = await deliverSessionPrompt(mock.api, "sess-1", "review redirect", {
+		const result: any = await deliverSessionPrompt(mock.api, "sess-1", "review redirect", {
 			mode: "steer",
 			defaultMode: "prompt",
 		});

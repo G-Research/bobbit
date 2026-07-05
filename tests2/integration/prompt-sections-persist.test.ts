@@ -28,7 +28,7 @@ test.describe("Persisted prompt sections", () => {
 		}
 	});
 
-	test("prompt sections returned with createdAt after session creation", async ({ gateway }) => {
+	test("prompt sections returned with createdAt after session creation", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {

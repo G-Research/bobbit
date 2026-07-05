@@ -83,7 +83,7 @@ describe("changesetIdForTarget host-qualified ids", () => {
 });
 
 describe("numberOnlyTargetFromInferred host-qualified identity", () => {
-	const numberOnlyTarget = (number) => ({ provider: "github", number, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` });
+	const numberOnlyTarget = (number: number) => ({ provider: "github", number, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` });
 
 	it("keeps the legacy key/id for an inferred github.com origin", () => {
 		const t = numberOnlyTargetFromInferred(numberOnlyTarget(42), { owner: "acme", repo: "widgets", host: "github.com" });

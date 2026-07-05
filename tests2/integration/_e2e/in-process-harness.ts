@@ -241,7 +241,7 @@ interface CompatTest {
 		serial: (name: string, body: DescribeBody) => void;
 		parallel: (name: string, body: DescribeBody) => void;
 		only: (name: string, body: DescribeBody) => void;
-		skip: (name: string, body: DescribeBody) => void;
+		skip: ((name: string, body: DescribeBody) => void) & { configure: (opts?: unknown) => void; serial: (name: string, body: DescribeBody) => void };
 		configure: (opts?: unknown) => void;
 	};
 	beforeAll: (fn?: HookFn) => void;
@@ -280,7 +280,7 @@ const describeSkip = ((name: string, body: DescribeBody) => { (vDescribe as any)
 describeSkip.configure = () => { /* no-op */ };
 describeSkip.serial = (name: string, body: DescribeBody) => { (vDescribe as any).skip(name, body); };
 describeImpl.skip = describeSkip;
-describeImpl.serial.skip = describeSkip as any;
+(describeImpl.serial as any).skip = describeSkip;
 describeImpl.configure = () => { /* no-op: vitest handles concurrency via config */ };
 testImpl.describe = describeImpl;
 

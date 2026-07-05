@@ -316,7 +316,7 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 		}
 	});
 
-	it("uses the pending timer to call the existing auto retry path after the first 1s generic retry", async (t) => {
+	it("uses the pending timer to call the existing auto retry path after the first 1s generic retry", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const { session, prompt } = putRetryStateSession(manager, {

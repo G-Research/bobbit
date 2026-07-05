@@ -112,20 +112,6 @@ function connectWs(sessionId: string): Promise<{
 	});
 }
 
-/** Wait for a tool_execution_start event with the given tool name (case-insensitive) */
-function toolStartPredicate(toolName: string): (m: WsMsg) => boolean {
-	const lower = toolName.toLowerCase();
-	return (m) =>
-		m.type === "event" &&
-		m.data?.type === "tool_execution_start" &&
-		(m.data?.toolName || "").toLowerCase() === lower;
-}
-
-/** Wait for agent_end (turn finished) */
-function agentEndPredicate(): (m: WsMsg) => boolean {
-	return (m) => m.type === "event" && m.data?.type === "agent_end";
-}
-
 // Wait for the server to be fully ready (replaces fixed sleep)
 test.beforeAll(async () => {
 	await waitForHealth();

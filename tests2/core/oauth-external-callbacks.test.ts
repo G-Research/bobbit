@@ -39,7 +39,7 @@ mkdirSync(path.join(tmp, "agent"), { recursive: true });
 process.env.BOBBIT_AGENT_DIR = path.join(tmp, "agent");
 
 const piOAuth = await import("@earendil-works/pi-ai/oauth");
-const { oauthStart, oauthFlowStatus, stopFlowCleanup } = await import("../../src/server/auth/oauth.js");
+const { oauthStart, stopFlowCleanup } = await import("../../src/server/auth/oauth.js");
 
 type Callbacks = Parameters<NonNullable<ReturnType<typeof piOAuth.getOAuthProvider>>["login"]>[0];
 

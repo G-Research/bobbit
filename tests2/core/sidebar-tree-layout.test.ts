@@ -43,7 +43,7 @@ function installLocalStorageShim(): Map<string, string> {
 
 function installThrowingLocalStorageShim(): void {
 	(globalThis as any).localStorage = {
-		get length() { throw new DOMException("denied", "SecurityError"); },
+		get length(): number { throw new DOMException("denied", "SecurityError"); },
 		clear: () => { throw new DOMException("denied", "SecurityError"); },
 		getItem: () => { throw new DOMException("denied", "SecurityError"); },
 		key: () => { throw new DOMException("denied", "SecurityError"); },

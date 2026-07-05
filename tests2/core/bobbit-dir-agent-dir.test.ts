@@ -102,7 +102,7 @@ describe("agent directory resolver", () => {
 		);
 	});
 
-	it("globalAgentDir stays pinned to startup resolution after env changes", async (t) => {
+	it("globalAgentDir stays pinned to startup resolution after env changes", async () => {
 		const mod = await loadAgentDirConfigModule();
 		const startupDir = path.join(os.tmpdir(), "bobbit-agent-dir-startup");
 		const laterDir = path.join(os.tmpdir(), "bobbit-agent-dir-later");
@@ -135,7 +135,7 @@ describe("agent directory resolver", () => {
 		);
 	});
 
-	it("scaffold and agent-dir runtime leave existing ~/.pi/agent untouched", async (t) => {
+	it("scaffold and agent-dir runtime leave existing ~/.pi/agent untouched", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-agent-untouched-"));
 		const projectRoot = path.join(root, "project");
 		const tempHome = path.join(root, "home");
@@ -199,7 +199,7 @@ describe("agent directory resolver", () => {
 		assertSamePath(bobbitDirMod.globalAgentDir(), bobbitAgentDir, "runtime global agent dir stays on Bobbit's resolved directory");
 	});
 
-	it("filters stale persisted ~/.pi/agent history but preserves explicit config", async (t) => {
+	it("filters stale persisted ~/.pi/agent history but preserves explicit config", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-history-filter-"));
 		const projectRoot = path.join(root, "project");
 		const tempHome = path.join(root, "home");

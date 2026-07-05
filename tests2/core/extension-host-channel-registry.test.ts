@@ -47,7 +47,7 @@ async function open(registry: ChannelRegistry, opts: { clientId?: string; single
 }
 
 function assertChannelReject(fn: () => unknown | Promise<unknown>, code: string): Promise<void> {
-	return assert.rejects(fn, (err) => err instanceof ChannelError && err.code === code);
+	return assert.rejects(fn as () => Promise<unknown>, (err: unknown) => err instanceof ChannelError && err.code === code);
 }
 
 function noopDispatcher(): ChannelDispatcher {
@@ -280,7 +280,6 @@ export const channels = {
 };
 `, "utf-8");
 			let dataCb: ((data: string) => void) | undefined;
-			let exitCb: ((event: { code: number | null; reason?: string }) => void) | undefined;
 			const writes: string[] = [];
 			const frames: unknown[] = [];
 			const moduleHost = new WorkerChannelModuleHost({
@@ -293,7 +292,7 @@ export const channels = {
 								resize: () => {},
 								kill: (_reason?: string) => {},
 								onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
-								onExit: (cb: (event: { code: number | null; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+								onExit: (_cb: (event: { code: number | null; reason?: string }) => void) => { return () => {}; },
 							};
 						},
 					},

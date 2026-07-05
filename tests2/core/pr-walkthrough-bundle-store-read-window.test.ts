@@ -44,7 +44,7 @@ function jobRecord(jobId: string): PrWalkthroughJobRecord {
 		title: "Window test",
 		createdAt: "2026-06-01T00:00:00.000Z",
 		updatedAt: "2026-06-01T00:00:00.000Z",
-	} as PrWalkthroughJobRecord;
+	} as unknown as PrWalkthroughJobRecord;
 }
 
 function jobRecordWithPrMetadata(jobId: string): PrWalkthroughJobRecord {

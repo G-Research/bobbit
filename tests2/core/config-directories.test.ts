@@ -6,7 +6,7 @@
  * Unit tests for config-directories.ts: parseCustomDirectories,
  * getAllConfigDirectories, saveCustomDirectories.
  */
-import { describe, it, beforeEach } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";

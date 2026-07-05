@@ -32,7 +32,6 @@ import {
 	getFdPath,
 	getRgPath,
 	getFdResolution,
-	getRgResolution,
 	stageBundledBinaries,
 	_resetBinaryCacheForTests,
 } from "../../src/server/binaries.ts";

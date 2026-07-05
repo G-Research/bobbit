@@ -24,8 +24,8 @@ function makeStore() {
 	const map = new Map<string, unknown>();
 	return {
 		map,
-		get: async (k: string) => (map.has(k) ? structuredClone(map.get(k)) : null),
-		put: async (k: string, v: unknown) => {
+		get: async <T = unknown>(k: string): Promise<T | null> => (map.has(k) ? (structuredClone(map.get(k)) as T) : null),
+		put: async <T = unknown>(k: string, v: T): Promise<void> => {
 			map.set(k, structuredClone(v));
 		},
 		list: async (prefix = "") => [...map.keys()].filter((k) => k.startsWith(prefix)),
@@ -260,7 +260,7 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 
 		// sessionShutdown does a one-pass drain of the rest.
 		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "s" });
-		q = (await store.get(QUEUE_KEY)) as unknown[];
+		q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 0, "shutdown drained the remaining queue");
 	} finally {
 		__setClientFactory(null);

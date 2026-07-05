@@ -159,7 +159,7 @@ async function waitForSyntheticHit(
 					matchedHit = hits[0];
 					return hits.length;
 				},
-				{ timeout: 5_000, intervals: [50, 100, 250] },
+				{ timeout: 5_000, interval: 50 },
 			)
 			.toBe(1);
 	} catch (err) {
@@ -380,8 +380,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 		await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("weak-match goal row is kept and tagged matchedOn=metadata", async ({ gateway }) => {
-		const gw: any = gateway;
+	test("weak-match goal row is kept and tagged matchedOn=metadata", async () => {
 		// Create a real goal so existence check passes.
 		const goalResp = await apiFetch("/api/goals", {
 			method: "POST",

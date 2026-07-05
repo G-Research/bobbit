@@ -12,12 +12,14 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import type { ToolManager } from "../../src/server/agent/tool-manager.js";
+import type { GroupPolicyProvider } from "../../src/server/agent/tool-activation.js";
 
 const { mcpPolicyPrefix, resolveGrantPolicy, computeEffectiveAllowedTools, writeMcpProxyExtensions } = await import(
 	"../../src/server/agent/tool-activation.ts"
 );
 
-function mockToolManager(tools: Record<string, { grantPolicy?: string }> = {}) {
+function mockToolManager(tools: Record<string, { grantPolicy?: string; tool?: { name: string; group: string } }> = {}): ToolManager {
 	const availableTools = Object.keys(tools).map(name => ({ name, group: "Test" }));
 	return {
 		getToolByName(name: string) {
@@ -27,10 +29,10 @@ function mockToolManager(tools: Record<string, { grantPolicy?: string }> = {}) {
 		getAvailableTools() {
 			return availableTools;
 		},
-	};
+	} as unknown as ToolManager;
 }
 
-function mockGroupPolicyStore(policies: Record<string, string> = {}) {
+function mockGroupPolicyStore(policies: Record<string, string> = {}): GroupPolicyProvider {
 	return {
 		getGroupPolicy(group: string) {
 			return policies[group] || null;
@@ -38,7 +40,7 @@ function mockGroupPolicyStore(policies: Record<string, string> = {}) {
 		getAll() {
 			return policies;
 		},
-	};
+	} as unknown as GroupPolicyProvider;
 }
 
 function mockMcpManager(infos: Array<{ name: string; serverName: string; group: string; mcpToolName?: string; description?: string; inputSchema?: unknown }>) {

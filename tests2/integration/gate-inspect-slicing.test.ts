@@ -341,7 +341,7 @@ test.describe("gate inspect slicing", () => {
 				goalId,
 				gateId: "failed-retained-diagnostics-gate",
 				signalId: post.signal.id,
-				verification: reloadedSignal.verification,
+				verification: reloadedSignal!.verification,
 				selectionOptions: { mode: "grep", pattern: "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER", context: 1 },
 			});
 			expect(snapshot.steps).toHaveLength(1);

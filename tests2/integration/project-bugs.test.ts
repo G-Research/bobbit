@@ -9,7 +9,7 @@
  * Bug 3b: PUT /api/projects/:id/config should validate atomically.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";

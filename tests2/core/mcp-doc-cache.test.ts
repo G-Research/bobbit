@@ -177,10 +177,6 @@ describe("MCP doc cache (_updateDocCache)", () => {
 		const firstCacheContent = fs.readFileSync(cacheFile, "utf-8");
 		const firstMdContent = fs.readFileSync(mdFile, "utf-8");
 
-		// Get mtime before second call
-		const cacheMtimeBefore = fs.statSync(cacheFile).mtimeMs;
-		const mdMtimeBefore = fs.statSync(mdFile).mtimeMs;
-
 		// Small delay to ensure mtime would differ if rewritten
 		// (use synchronous approach — just check content equality)
 		(mgr as any)._updateDocCache("test-server", mockTools);

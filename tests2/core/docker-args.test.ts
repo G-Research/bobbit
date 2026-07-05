@@ -19,7 +19,7 @@ import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 describe("buildDockerRunArgs", () => {
 	it("includes resource limits", () => {
 		const args = buildDockerRunArgs({
-			mode: "pool", image: "test", workspaceDir: "/tmp/test",
+			image: "test", workspaceDir: "/tmp/test",
 			label: "test", labelPrefix: "bobbit-sandbox",
 		});
 		assert.ok(args.includes("--memory=32g"));
@@ -29,7 +29,7 @@ describe("buildDockerRunArgs", () => {
 
 	it("allows custom resource limits", () => {
 		const args = buildDockerRunArgs({
-			mode: "pool", image: "test", workspaceDir: "/tmp/test",
+			image: "test", workspaceDir: "/tmp/test",
 			label: "test", labelPrefix: "bobbit-sandbox",
 			memoryLimit: "8g", cpuLimit: "4", pidsLimit: "512",
 		});
@@ -40,7 +40,7 @@ describe("buildDockerRunArgs", () => {
 
 	it("blackholes cloud metadata endpoints when sandboxNetwork is set", () => {
 		const args = buildDockerRunArgs({
-			mode: "pool", image: "test", workspaceDir: "/tmp/test",
+			image: "test", workspaceDir: "/tmp/test",
 			sandboxNetwork: "bobbit-sandbox-net",
 		});
 		assert.ok(args.some(a => a.includes("169.254.169.254")));
@@ -81,7 +81,7 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
 			});
-			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(
 				mounts.some((m) => m.includes(":/bobbit-state/google-code-assist")),
 				`expected a /bobbit-state/google-code-assist mount, got: ${JSON.stringify(mounts)}`,
@@ -107,7 +107,7 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
 			});
-			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			for (const sub of ["google-code-assist", "tool-result-error-bridge"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
@@ -144,7 +144,7 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test",
 				toolManager: { getBuiltinToolsDir: () => builtinToolsDir } as any,
 			});
-			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(mounts.some((m) => m.endsWith(":/tools:ro")), "config tools mount stays /tools:ro");
 			assert.ok(mounts.some((m) => m.endsWith(":/tools-builtin:ro")), "builtin tools mount stays /tools-builtin:ro");
 			assert.ok(mounts.some((m) => m.endsWith(":/market-packs-builtin:ro")), "builtin first-party packs mount read-only");
@@ -176,7 +176,7 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
 			});
-			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			const hostSessionsDir = path.join(agentDir, "sessions");
 			const hostModelsJson = path.join(agentDir, "models.json");
 			const hostAuthJson = path.join(agentDir, "auth.json");
@@ -237,6 +237,7 @@ describe("buildDockerRunArgs", () => {
 
 			const cloneSource = resolveSandboxCloneSource({ originUrl: undefined, mountSourcePath: sanitizedSource });
 			assert.equal(cloneSource.kind, "mounted");
+			if (cloneSource.kind !== "mounted") throw new Error("expected mounted clone source");
 
 			process.env.BOBBIT_DIR = path.join(projectDir, ".bobbit");
 			process.env.BOBBIT_AGENT_DIR = agentDir;
@@ -249,7 +250,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 				extraReadonlyMounts: [{ hostPath: cloneSource.hostPath, mountPath: cloneSource.mountPath }],
 			});
-			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(
 				mounts.includes(`${toDockerPath(sanitizedSource)}:/workspace-src:ro`),
 				`expected sanitized /workspace-src mount, got: ${JSON.stringify(mounts)}`,

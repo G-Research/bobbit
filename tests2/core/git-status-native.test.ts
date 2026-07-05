@@ -12,7 +12,7 @@
  * `test:unit`). Each fixture is created in a `before` hook and cleaned up in
  * `after`.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

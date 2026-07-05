@@ -332,10 +332,10 @@ describe("hindsight pack — external mode (stub)", () => {
 		expect(before.blocks).toEqual([]);
 
 		// A non-fatal diagnostic is recorded against the memory provider.
-		await waitForCondition(async () => {
+		await waitForCondition((async () => {
 			const trace = await readContextTrace(id);
 			return trace.some((e) => e.providers.some((p) => p.id === PROVIDER_ID && !!p.error));
-		}, { timeoutMs: 10_000, message: "memory provider diagnostic in context-trace" });
+		}) as unknown as () => boolean, { timeoutMs: 10_000, message: "memory provider diagnostic in context-trace" });
 
 		stub.setHealthy(true);
 	});
@@ -369,7 +369,7 @@ describe("hindsight pack — external mode (stub)", () => {
 		const res = await callBeforeCompact(id, { span });
 		expect(res.status).toBe(200);
 
-		await waitForCondition(async () => stub.retained("bobbit").length > before, {
+		await waitForCondition((async () => stub.retained("bobbit").length > before) as unknown as () => boolean, {
 			timeoutMs: 10_000,
 			message: "beforeCompact span retained on the stub",
 		});

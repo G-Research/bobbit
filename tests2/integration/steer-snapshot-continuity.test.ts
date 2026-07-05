@@ -185,7 +185,6 @@ test.describe("Steer snapshot/queue continuity", () => {
 			conn.send({ type: "steer", text: DIRECT_STEER });
 
 			let sawInSnapshot = false;
-			let sawEcho = false;
 			const startedAt = Date.now();
 			while (Date.now() - startedAt < 6_000) {
 				const echoMsg = conn.messages
@@ -197,7 +196,6 @@ test.describe("Steer snapshot/queue continuity", () => {
 							userMsgHasText(m.data?.message, DIRECT_STEER),
 					);
 				if (echoMsg) {
-					sawEcho = true;
 					break;
 				}
 				const reqCursor = conn.messageCount();

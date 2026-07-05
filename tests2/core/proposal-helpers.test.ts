@@ -87,7 +87,8 @@ const {
 	metadataRowsToObject,
 } = helpers;
 
-const TYPES = ["goal", "project", "workflow", "role", "tool", "staff"] as const;
+import type { ProposalType } from "../../src/app/proposal-registry.ts";
+const TYPES = ["goal", "project", "workflow", "role", "tool", "staff"] as unknown as readonly ProposalType[];
 
 describe("proposal-helpers — goal metadata editor", () => {
 	it("metadataRowsToObject drops blank keys and trims keys", () => {
@@ -318,7 +319,7 @@ describe("proposal-helpers — draft load/save/delete", () => {
 
 	it("save uses the namespaced draft type", async () => {
 		const sid = "sess-namespace";
-		saveProposalDraft(sid, "workflow", { id: "wf" });
+		saveProposalDraft(sid, "workflow" as ProposalType, { id: "wf" });
 		await flushDebounceWait();
 		const put = fetchCalls.find((c) => c.method === "PUT" && c.url.includes(sid));
 		assert.ok(put, "expected a PUT for the workflow draft");

@@ -6,7 +6,6 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
-	apiFetch,
 	createGoal,
 	createSession,
 	deleteGoal,
@@ -71,9 +70,6 @@ test.describe("task_changed WS notifications", () => {
 
 	test("task_update state to in-progress broadcasts task_changed event", async () => {
 		expect(taskId).toBeDefined();
-
-		// Clear previously received messages for clean waiting
-		const prevCount = wsConn.messages.length;
 
 		// Update task state to in-progress via WS
 		wsConn.send({

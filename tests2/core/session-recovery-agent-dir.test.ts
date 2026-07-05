@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -35,6 +35,25 @@ const bobbitDirModule = await import("../../src/server/bobbit-dir.ts");
 bobbitDirModule.setProjectRoot(projectRoot);
 const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { formatAgentTimestamp, slugifyCwd } = await import("../../src/server/agent/agent-session-path.ts");
+
+// Re-assert this file's RUN-time invariants. Both the temp env AND the recorded
+// agent-dir history are established at module (collect) time, but under
+// pool:"forks"+isolate:false a sibling file's env-guard afterAll runs BETWEEN
+// collect and this file's tests and (a) restores HOME/USERPROFILE (breaking
+// os.homedir()-based legacy ~/.bobbit / ~/.pi recovery) and (b) calls
+// resetAgentDirStateForTests(), wiping the in-memory history that the historical
+// / sandbox-remap recoveries depend on. Re-apply both here (beforeAll runs
+// immediately before this file's tests, with no cross-file hook interleaving).
+// recordAgentDirHistory accumulates into the in-memory history, so re-recording
+// the active + historical roots restores trustedAgentSessionsRoots.
+beforeAll(async () => {
+	process.env.BOBBIT_AGENT_DIR = activeAgentDir;
+	process.env.BOBBIT_DIR = path.join(tmpRoot, ".bobbit");
+	process.env.HOME = tmpHome;
+	process.env.USERPROFILE = tmpHome;
+	await recordHistoryIfAvailable(activeAgentDir);
+	await recordHistoryIfAvailable(historicalAgentDir);
+});
 
 const managers: any[] = [];
 

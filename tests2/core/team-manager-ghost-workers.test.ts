@@ -23,6 +23,7 @@ const TEST_BOBBIT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ghost-work
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_BOBBIT_DIR, "state", "team-state.json");
 const createdManagers: any[] = [];
@@ -144,7 +145,7 @@ function createConfig(overrides: Record<string, any> = {}) {
 }
 
 function createTeamManager(sm: any, config = createConfig()): any {
-	const tm = new TeamManager(sm, config);
+	const tm = new TeamManager(sm, config as unknown as TeamManagerConfig);
 	createdManagers.push(tm);
 	return tm;
 }

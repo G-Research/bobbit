@@ -20,7 +20,7 @@
  *
  * See issue-analysis gate for full context.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 const { computeToolActivationArgs } = await import("../../src/server/agent/tool-activation.ts");

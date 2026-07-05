@@ -31,7 +31,7 @@ type GateStoreCall =
 	| { kind: "updateSignalVerification"; signalId: string; update: any }
 	| { kind: "updateGateStatus"; goalId: string; gateId: string; status: string };
 
-function makeHarness(t: TestContext) {
+function makeHarness(_t: TestContext) {
 	const root = makeTmpDir("verif-command-restart-repro-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });

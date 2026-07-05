@@ -14,7 +14,8 @@ import path from "node:path";
 import teamExtension from "../../defaults/tools/team/extension.ts";
 import agentExtension from "../../defaults/tools/agent/extension.ts";
 import { __clearCredsCacheForTesting } from "../../defaults/tools/_shared/gateway.ts";
-import { __clearCredsCacheForTesting as __clearAgentCredsCacheForTesting } from "../../defaults/tools/agent/gateway.js";
+const __agentGatewayMod: any = await import("../../defaults/tools/agent/gateway" + ".js");
+const __clearAgentCredsCacheForTesting = __agentGatewayMod.__clearCredsCacheForTesting as () => void;
 
 type RegisteredTool = {
 	name: string;

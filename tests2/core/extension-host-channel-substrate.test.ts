@@ -158,7 +158,7 @@ async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => numb
 				};
 			},
 		},
-	});
+	}, "channel registry");
 	return { registry, permitStore, opened, inbound, outbound, audits, get closed() { return closed; }, tick: (ms: number) => { now += ms; } };
 }
 

@@ -60,10 +60,6 @@ test.describe("Tool Config Cascade", () => {
 
 		// Pick a tool — prefer one from a group we haven't touched yet
 		const toolsConfigDir = join(bobbitDir(), "config", "tools");
-		const existingOverrides = existsSync(toolsConfigDir)
-			? new Set(readdirSync(toolsConfigDir, { withFileTypes: true })
-				.filter(e => e.isDirectory()).map(e => e.name))
-			: new Set<string>();
 
 		// Find a tool whose group isn't already in config/tools/
 		const targetTool = before.find((t: any) => {

@@ -13,7 +13,7 @@ guardProcessEnv();
  * mocked on globalThis (the module + its dependency-free gatewayFetch read
  * those bare globals).
  */
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import {
 	PLAY_FINISH_SOUND_CHANGED,

@@ -226,7 +226,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		assert.equal(capturedOptions?.env?.OPENAI_API_KEY, undefined, "restored OpenRouter sessions must not receive unrelated saved provider keys");
 	});
 
-	it("provider-auth prompt failures clear wasStreaming/streamingStartedAt and surface a credential fix or retry action", async (t) => {
+	it("provider-auth prompt failures clear wasStreaming/streamingStartedAt and surface a credential fix or retry action", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const updates: any[] = [];
 		const client = makeClient();

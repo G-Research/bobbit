@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeAll, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { describe, it, beforeEach, afterEach, afterAll, vi } from "vitest";
 // __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
 afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
@@ -26,6 +26,7 @@ process.env.BOBBIT_DIR = TEST_PI_DIR;
 
 // Import AFTER setting env var so bobbitDir() picks it up
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 function clearTeamStore() { try { fs.unlinkSync(TEAM_STORE_FILE); } catch { /* ignore */ } }
@@ -83,9 +84,9 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 		},
 		createSession: async (
 			cwd: string,
-			args?: string[],
+			_args?: string[],
 			goalId?: string,
-			goalAssistant?: boolean,
+			_goalAssistant?: boolean,
 			opts?: any,
 		) => {
 			const id = `session-${nextSessionId++}`;
@@ -179,7 +180,7 @@ const DEFAULT_CONFIG = {
 	roleStore: createMockRoleStore(),
 	colorStore: createMockColorStore(),
 	taskManager: createMockTaskManager(),
-};
+} as unknown as TeamManagerConfig;
 
 /** Track managers to clean up idle-nudge timers after tests */
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
@@ -1169,7 +1170,7 @@ describe("TeamManager", () => {
 					resultSummary: "Branch goal/f1b2cd81/test-engineer-5dac pushed at dca79a31d4ab72a3bc10abda358e6a98d19d7798. Updated `docs/testing-metrics/e2e-inventory.md`. Validation passed: `git diff --check`; tests skipped (docs-only). Working copy clean after push.",
 				}],
 			};
-			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, taskManager });
+			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, taskManager: taskManager as any });
 			const teamLead = await team.startTeam("goal-1");
 			(teamLead as any).status = "idle";
 
@@ -1405,7 +1406,6 @@ describe("TeamManager", () => {
 
 			assert.throws(
 				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
-				undefined,
 				"origin must not have the goal branch before spawn",
 			);
 
@@ -1441,11 +1441,10 @@ describe("TeamManager", () => {
 			const agent = team.findAgentBySessionId(result.sessionId);
 			assert.ok(agent?.branch, "agent branch should be recorded");
 			assert.match(agent.branch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
-			assert.ok(fs.existsSync(result.worktreePath), "member worktree should be created from the local goal branch");
+			assert.ok(fs.existsSync(result.worktreePath!), "member worktree should be created from the local goal branch");
 			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
 			assert.throws(
 				() => execSync(`git show-ref --verify --quiet refs/heads/${agent.branch}`, { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
-				undefined,
 				"local-only team member branch must not be published to origin",
 			);
 		});
@@ -1458,7 +1457,6 @@ describe("TeamManager", () => {
 
 			assert.throws(
 				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
-				undefined,
 				"origin must not have the goal branch before sandboxed member spawn",
 			);
 
@@ -1599,7 +1597,7 @@ describe("TeamManager", () => {
 			const result = await team.spawnRole("goal-1", "tester", "Run test suite");
 
 			// Verify worktree exists
-			assert.ok(fs.existsSync(result.worktreePath));
+			assert.ok(fs.existsSync(result.worktreePath!));
 
 			// Dismiss
 			const dismissed = await team.dismissRole(result.sessionId);
@@ -1610,7 +1608,7 @@ describe("TeamManager", () => {
 
 			// Worktree is preserved for archived session review (cleanup at purge time)
 			assert.ok(
-				fs.existsSync(result.worktreePath),
+				fs.existsSync(result.worktreePath!),
 				"worktree should be preserved after dismissal",
 			);
 
@@ -1667,12 +1665,12 @@ describe("TeamManager", () => {
 			await team.startTeam("goal-1");
 			const r1 = await team.spawnRole("goal-1", "coder", "Code stuff");
 
-			assert.ok(fs.existsSync(r1.worktreePath));
+			assert.ok(fs.existsSync(r1.worktreePath!));
 
 			await team.completeTeam("goal-1");
 
 			// Worktree is preserved for archived session review (cleanup at purge time)
-			assert.ok(fs.existsSync(r1.worktreePath), "worktree should be preserved after completeTeam");
+			assert.ok(fs.existsSync(r1.worktreePath!), "worktree should be preserved after completeTeam");
 			assert.equal(goal.state, "complete");
 			// Team state persists (team lead stays alive for reporting)
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
@@ -1741,12 +1739,12 @@ describe("TeamManager", () => {
 			// team-lead is not valid for spawnRole (it's the orchestrator started via startTeam)
 			// coder, reviewer, tester are valid roles for spawning
 			const roles = ["coder", "reviewer", "tester"];
-			const results: { sessionId: string; worktreePath: string }[] = [];
+			const results: { sessionId: string; worktreePath?: string }[] = [];
 
 			for (const role of roles) {
 				const r = await team.spawnRole("goal-1", role, `${role} task`);
 				results.push(r);
-				assert.ok(fs.existsSync(r.worktreePath), `worktree for ${role} should exist`);
+				assert.ok(fs.existsSync(r.worktreePath!), `worktree for ${role} should exist`);
 			}
 
 			const agents = team.listAgents("goal-1");

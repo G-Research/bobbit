@@ -253,7 +253,7 @@ describe("Marketplace MCP gateway integration", () => {
 			assert.equal(jira.sourceType, "mcp-gateway");
 			assert.deepEqual(jira.contents.mcp, ["jira"]);
 			assert.equal(jira.serverName, "gr");
-			const { operations, ...jiraMcp } = jira.mcp[0];
+			const { operations, ...jiraMcp } = jira.mcp![0];
 			assert.deepEqual(jiraMcp, { ref: "jira", listName: "jira", serverName: "gr", subNamespace: "jira", label: "Jira", description: "Jira issue tools", transport: "http", url });
 			assert.deepEqual(operations, [{ name: "jira_search", description: "Search issues", inputSchema: { type: "object", properties: {} } }]);
 			assert.deepEqual(jira.mcpGatewayDiagnostics?.skippedEntries.map((entry: any) => entry.id), ["bad/id"]);
@@ -281,7 +281,7 @@ describe("Marketplace MCP gateway integration", () => {
 		const source = store.get("old-registry")!;
 		assert.equal(source.type, "mcp-registry");
 		assert.equal(source.ref, undefined);
-		assert.match(source.unsupportedReason, /mcp-registry sources are no longer supported/i);
+		assert.match(source.unsupportedReason!, /mcp-registry sources are no longer supported/i);
 		assert.throws(() => store.add({ url: "https://registry.example.com/v1", type: "mcp-registry" as any }), /use type mcp-gateway/);
 
 		const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });

@@ -15,7 +15,6 @@ import { join } from "node:path";
 import {
 	apiFetch,
 	bobbitDir,
-	createSession,
 	deleteSession,
 	nonGitCwd,
 	waitForSessionStatus,
@@ -53,7 +52,7 @@ test.beforeAll(async () => {
 	const role = await getResp.json();
 	expect(role.toolPolicies).toEqual({ bash_bg: "ask" });
 	// With only "ask" policies and no "allow", the role should not have toolPolicies with "allow"
-	expect(Object.values(role.toolPolicies).every((v: string) => v !== "allow")).toBe(true);
+	expect(Object.values(role.toolPolicies).every((v: unknown) => v !== "allow")).toBe(true);
 });
 
 test.afterAll(async () => {

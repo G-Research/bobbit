@@ -104,7 +104,7 @@ describe("host.agents — capability flag + surface shape", () => {
 		const keys = Object.keys(host.agents).sort();
 		assert.deepEqual(keys, ["dismiss", "list", "prompt", "read", "spawn", "status"]);
 		// No blocking `wait`, and no method that targets the user / a foreign session.
-		const surface = host.agents as Record<string, unknown>;
+		const surface = host.agents as unknown as Record<string, unknown>;
 		assert.equal(surface.wait, undefined);
 		assert.equal(surface.postMessage, undefined);
 		assert.equal(surface.promptSession, undefined);

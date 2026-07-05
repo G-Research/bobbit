@@ -1,6 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
-	readE2EToken,
 	apiFetch,
 	connectWs,
 	deleteSession,
@@ -20,12 +19,7 @@ import {
 test.describe("Wizard greeting regression", () => {
 	test.setTimeout(120_000);
 
-	let token: string;
 	const cleanupSessionIds: string[] = [];
-
-	test.beforeAll(() => {
-		token = readE2EToken();
-	});
 
 	test.afterAll(async () => {
 		for (const id of cleanupSessionIds) {

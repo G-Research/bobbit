@@ -157,7 +157,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await sendPromise;
 	});
 
-	it("recovers a failed direct prompt by restoring idle status and requeueing", async (t) => {
+	it("recovers a failed direct prompt by restoring idle status and requeueing", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: false, error: "preflight failed" }));
 		const { session, client } = putSession(manager, { rpcClient: { prompt } });
@@ -176,7 +176,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-2).status, "idle");
 	});
 
-	it("schedules visible auto retry when direct prompt delivery rejects with fetch failed before message_end", async (t) => {
+	it("schedules visible auto retry when direct prompt delivery rejects with fetch failed before message_end", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -201,13 +201,13 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for dispatch-time fetch failed");
 		assert.equal(pending.attempt, 1, "expected first bounded retry attempt for dispatch-time fetch failed");
 		assert.equal(
-			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"),
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "auto_retry_pending"),
 			true,
 			"expected client-visible auto_retry_pending event for dispatch-time fetch failed",
 		);
 	});
 
-	it("schedules visible auto retry when queued drain dispatch rejects with fetch failed before message_end", async (t) => {
+	it("schedules visible auto retry when queued drain dispatch rejects with fetch failed before message_end", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -227,10 +227,10 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const pending = autoRetryPendingEvents(session).at(-1);
 		assert.ok(pending, "expected auto_retry_pending for queued fetch failed");
 		assert.equal(pending.retryDelayMs, 1000, "expected first bounded retry delay for queued fetch failed");
-		assert.equal(client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_pending"), true);
+		assert.equal(client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "auto_retry_pending"), true);
 	});
 
-	it("auto retry consumes the recovered direct prompt row before redispatch", async (t) => {
+	it("auto retry consumes the recovered direct prompt row before redispatch", async () => {
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -251,12 +251,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await Promise.resolve();
 
 		assert.equal(prompt.mock.calls.length, 2, "expected only the initial failure plus one auto retry dispatch");
-		assert.equal(prompt.mock.calls[1][0], "retry once without duplicate queue replay");
+		assert.equal((prompt.mock.calls[1] as any[])[0], "retry once without duplicate queue replay");
 		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered row before redispatching");
 		assert.equal(session.status, "streaming");
 	});
 
-	it("fresh prompt before dispatch auto retry drops the recovered failed prompt", async (t) => {
+	it("fresh prompt before dispatch auto retry drops the recovered failed prompt", async () => {
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -276,13 +276,13 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await manager.enqueuePrompt(session.id, "fresh prompt B");
 
 		assert.equal(prompt.mock.calls.length, 2, "fresh prompt should dispatch immediately without retrying prompt A");
-		assert.match(prompt.mock.calls[1][0], /fresh prompt B/);
-		assert.doesNotMatch(prompt.mock.calls[1][0], /stale prompt A/);
+		assert.match((prompt.mock.calls[1] as any[])[0], /fresh prompt B/);
+		assert.doesNotMatch((prompt.mock.calls[1] as any[])[0], /stale prompt A/);
 		assert.equal(session.pendingAutoRetryTimer, undefined, "fresh prompt should cancel pending auto retry");
 		assert.equal(session.promptQueue.length, 0, "fresh prompt should drop the recovered stale prompt A row");
 		assert.equal(autoRetryCancelledEvents(session).length, 1, "fresh prompt should emit auto_retry_cancelled");
 		assert.equal(
-			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
 			true,
 			"expected client-visible auto_retry_cancelled event for superseding prompt",
 		);
@@ -296,7 +296,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0, "queue should remain empty after later drain");
 	});
 
-	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async (t) => {
+	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async () => {
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -320,12 +320,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 2, "expected initial failed delivery plus one auto retry");
 		assert.equal(
-			prompt.mock.calls[1][0],
+			(prompt.mock.calls[1] as any[])[0],
 			"retry the newly failed prompt, not old tool work",
 			"auto retry should re-send the recovered failed prompt",
 		);
 		assert.doesNotMatch(
-			prompt.mock.calls[1][0],
+			(prompt.mock.calls[1] as any[])[0],
 			/continue where you left off/i,
 			"auto retry must not use stale mid-work continuation text",
 		);
@@ -333,7 +333,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.status, "streaming");
 	});
 
-	it("emits auto_retry_cancelled when dispatch-time auto retries exhaust before agent_start", async (t) => {
+	it("emits auto_retry_cancelled when dispatch-time auto retries exhaust before agent_start", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -368,7 +368,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.pendingAutoRetryTimer, undefined, "exhausted retries should leave no active timer");
 		assert.equal(autoRetryCancelledEvents(session).length, 1, "exhaustion should clear the last visible pending banner");
 		assert.equal(
-			client.sent.some((msg) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "auto_retry_cancelled"),
 			true,
 			"expected client-visible auto_retry_cancelled event on exhausted dispatch retries",
 		);
@@ -446,7 +446,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		await manager.deliverLiveSteer(session.id, "fresh live steer");
 		assert.equal(steer.mock.calls.length, 1, "fresh live steer dispatches immediately");
-		assert.equal(steer.mock.calls[0][0], "fresh live steer");
+		assert.equal((steer.mock.calls[0] as any[])[0], "fresh live steer");
 
 		const queued = session.promptQueue.enqueue("promoted queued steer");
 		manager.steerQueued(session.id, queued.id);
@@ -456,7 +456,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			2,
 			"promoting a queued message to steer should dispatch immediately, not wait for a later tool boundary/agent_end",
 		);
-		assert.equal(steer.mock.calls[1][0], "promoted queued steer");
+		assert.equal((steer.mock.calls[1] as any[])[0], "promoted queued steer");
 	});
 
 	it("persists in-flight steer ledger until the user echo arrives", async () => {
@@ -543,11 +543,11 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await assert.rejects(steerPromise, /steer rejected after idle/);
 
 		assert.equal(prompt.mock.calls.length, 1, "recovered steer should redrain without a fresh user prompt");
-		assert.equal(prompt.mock.calls[0][0], "redrain rejected steer");
+		assert.equal((prompt.mock.calls[0] as any[])[0], "redrain rejected steer");
 		assert.equal(session.promptQueue.length, 0);
 	});
 
-	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
+	it("does not replay a queued steered task notification after its prompt has started", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -559,7 +559,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		manager.drainQueue(session);
 
 		assert.equal(prompt.mock.calls.length, 1);
-		assert.equal(prompt.mock.calls[0][0], taskNotice);
+		assert.equal((prompt.mock.calls[0] as any[])[0], taskNotice);
 		assert.equal(session.promptQueue.length, 0);
 
 		// The agent has accepted the prompt and begun processing it. A late bridge
@@ -581,7 +581,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0);
 	});
 
-	it("recovers a queued prompt when local abort status changes before prompt rejection", async (t) => {
+	it("recovers a queued prompt when local abort status changes before prompt rejection", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -607,12 +607,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 1);
 		assert.equal(session.promptQueue.peek()?.text, "recover after abort-before-acceptance");
 		assert.deepEqual(
-			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["streaming", "aborting", "idle"],
 		);
 	});
 
-	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async (t) => {
+	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -634,10 +634,10 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.status, "terminated", "recovery must not broadcast idle over process_exit termination");
 		assert.equal(session.promptQueue.length, 0, "prompt rejected by a dead child must not be requeued");
 		assert.deepEqual(
-			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["streaming", "terminated"],
 		);
-		assert.equal(client.sent.some((msg) => msg.type === "queue_update"), false);
+		assert.equal(client.sent.some((msg: any) => msg.type === "queue_update"), false);
 	});
 
 	it("closes extension channels when process_exit terminates a session", () => {
@@ -652,7 +652,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(closeSession.mock.calls[0], [session.id, "session-process-exit"]);
 		assert.equal(session.status, "terminated");
 		assert.deepEqual(
-			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["terminated"],
 		);
 	});

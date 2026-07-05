@@ -23,8 +23,6 @@ import {
 	createSession,
 	deleteSession,
 	signalAndWaitForGate,
-	nonGitCwd,
-	type WsMsg,
 	type WsConnection,
 } from "./_e2e/e2e-setup.js";
 
@@ -94,7 +92,7 @@ test.describe("Command verification WS event lifecycle", () => {
 			expect(signalResp.status).toBe(201);
 
 			// Collect all key events
-			const signalReceived = await ws.waitFor(
+			await ws.waitFor(
 				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
 				30_000,
 			);
@@ -118,7 +116,7 @@ test.describe("Command verification WS event lifecycle", () => {
 				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
 				30_000,
 			);
-			const statusChanged = await ws.waitFor(
+			await ws.waitFor(
 				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc",
 				30_000,
 			);
