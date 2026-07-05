@@ -101,16 +101,46 @@ workflows:
             timeout: 600
             component: bobbit
             command: build
+            cacheInputGlobs:
+              - src/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - public/**
+              - index.html
+              - package.json
+              - package-lock.json
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - vite.config.ts
           - name: Type check passes
             type: command
             phase: 1
             component: bobbit
             command: check
+            cacheInputGlobs:
+              - src/**
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - package.json
+              - package-lock.json
           - name: Unit tests
             type: command
             phase: 1
             component: bobbit
             command: unit
+            cacheInputGlobs:
+              - src/**
+              - tests/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - index.html
+              - vite.config.ts
+              - package.json
+              - package-lock.json
           - name: E2E tests
             type: command
             phase: 2
@@ -451,16 +481,46 @@ workflows:
             timeout: 600
             component: bobbit
             command: build
+            cacheInputGlobs:
+              - src/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - public/**
+              - index.html
+              - package.json
+              - package-lock.json
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - vite.config.ts
           - name: Type check passes
             type: command
             phase: 1
             component: bobbit
             command: check
+            cacheInputGlobs:
+              - src/**
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - package.json
+              - package-lock.json
           - name: Unit tests
             type: command
             phase: 1
             component: bobbit
             command: unit
+            cacheInputGlobs:
+              - src/**
+              - tests/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - index.html
+              - vite.config.ts
+              - package.json
+              - package-lock.json
           - name: E2E tests
             type: command
             phase: 2
@@ -598,11 +658,31 @@ workflows:
             timeout: 600
             component: bobbit
             command: build
+            cacheInputGlobs:
+              - src/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - public/**
+              - index.html
+              - package.json
+              - package-lock.json
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - vite.config.ts
           - name: Type check
             type: command
             phase: 1
             component: bobbit
             command: check
+            cacheInputGlobs:
+              - src/**
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - package.json
+              - package-lock.json
           - name: Repro test passes (bug fixed)
             type: command
             phase: 1
@@ -613,6 +693,16 @@ workflows:
             phase: 1
             component: bobbit
             command: unit
+            cacheInputGlobs:
+              - src/**
+              - tests/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - index.html
+              - vite.config.ts
+              - package.json
+              - package-lock.json
           - name: E2E tests
             type: command
             phase: 2
@@ -718,16 +808,46 @@ workflows:
             timeout: 600
             component: bobbit
             command: build
+            cacheInputGlobs:
+              - src/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - public/**
+              - index.html
+              - package.json
+              - package-lock.json
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - vite.config.ts
           - name: Type check passes
             type: command
             phase: 1
             component: bobbit
             command: check
+            cacheInputGlobs:
+              - src/**
+              - tsconfig.json
+              - tsconfig.server.json
+              - tsconfig.web.json
+              - package.json
+              - package-lock.json
           - name: Unit tests
             type: command
             phase: 1
             component: bobbit
             command: unit
+            cacheInputGlobs:
+              - src/**
+              - tests/**
+              - defaults/**
+              - market-packs/**
+              - scripts/**
+              - index.html
+              - vite.config.ts
+              - package.json
+              - package-lock.json
           - name: E2E tests
             type: command
             phase: 2
