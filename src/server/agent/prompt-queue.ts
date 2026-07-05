@@ -20,6 +20,9 @@ export class PromptQueue {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
+		/** CLF-W1b: stamp the thinking-router Decision computed at submit
+		 *  time onto this row — see `QueuedMessage.thinkingDecision`'s doc. */
+		thinkingDecision?: QueuedMessage["thinkingDecision"];
 	}): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
@@ -29,6 +32,7 @@ export class PromptQueue {
 		};
 		if (opts?.images?.length) msg.images = opts.images;
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
+		if (opts?.thinkingDecision) msg.thinkingDecision = opts.thinkingDecision;
 
 		this.queue.push(msg);
 		if (msg.isSteered) this.reorder();

@@ -73,8 +73,10 @@ import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-ma
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { selectAigwModelForRoleTier } from "./model-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
-import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import type { Decision } from "./decision-types.js";
+import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID } from "./thinking-router-classifier.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -3111,6 +3113,45 @@ export class SessionManager {
 	 * than letting the caller hold onto a stale reference.
 	 */
 	/**
+	 * CLF-W1b — consult the built-in F14 thinking-level router (registered at
+	 * construction, see `registerThinkingRouterClassifier` in `server.ts`) for
+	 * this submitted prompt. OBSERVE MODE ONLY: the caller must not apply the
+	 * returned `Decision` (no `setThinkingLevel`) — it exists purely so the
+	 * outcome gets traced (`dispatchDecision` → `ContextTraceStore.appendDecision`)
+	 * and, when the message goes on to be queued rather than dispatched
+	 * directly, can be stamped onto the `QueuedMessage` row for a later wave.
+	 *
+	 * Returns `undefined` (rather than throwing) when the (point,kind) pair
+	 * isn't registered on the hub (e.g. a bare test `LifecycleHub` built
+	 * without `registerThinkingRouterClassifier`) or the classifier itself
+	 * errors — this consult must never block a prompt from dispatching.
+	 *
+	 * Callers MUST guard `if (this.lifecycleHub)` themselves rather than
+	 * calling this unconditionally: `await`ing a promise always yields at
+	 * least one microtask tick, even one that resolves synchronously inside
+	 * this method, and the no-hub case (the overwhelming majority of today's
+	 * unit tests, which construct a bare `SessionManager`) must stay
+	 * byte-identical down to the same tick — no new await point at all — not
+	 * merely "resolves quickly". See the direct-dispatch tests in
+	 * tests/session-manager-direct-prompt-lifecycle.test.ts that assert
+	 * `rpcClient.prompt` was already called synchronously before the caller
+	 * awaits `enqueuePrompt`'s own returned promise.
+	 */
+	private async consultThinkingRouterHub(session: SessionInfo, text: string): Promise<Decision<ThinkingLevel> | undefined> {
+		try {
+			return await this.lifecycleHub!.dispatchDecision<ThinkingLevel>(
+				THINKING_ROUTER_POINT,
+				THINKING_ROUTER_KIND,
+				{ sessionId: session.id, projectId: session.projectId, goalId: session.goalId, cwd: session.cwd },
+				{ text },
+			);
+		} catch (err) {
+			console.warn(`[session-manager] thinking-router dispatchDecision failed for session ${session.id} (non-fatal, observe-mode only): ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+	}
+
+	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
@@ -3179,6 +3220,34 @@ export class SessionManager {
 
 		session.lastPromptSource = opts?.source ?? "user";
 
+		// CLF-W1b — F14 thinking-level router, OBSERVE MODE ONLY. Consulted once
+		// per `enqueuePrompt` call (the single pre-dispatch funnel design doc §3
+		// names — direct/queued/extension/steer paths all converge here), on the
+		// user's verbatim `text` (never `dispatchText`, since the keyword rules
+		// describe user intent, not model-facing/expanded content). The returned
+		// Decision is recorded into the transparency trace by `dispatchDecision`
+		// itself (`ContextTraceStore.appendDecision`) — NOTHING here applies it;
+		// the session's live thinking level is untouched this wave (design doc
+		// §10 Wave 1 vs Wave 2). Fail-open/non-fatal: absence of a hub, an
+		// unregistered (point,kind) pair (e.g. a bare test `LifecycleHub` that
+		// never wired the router), or any classifier error must never block a
+		// prompt from dispatching — see design doc §6.1 (advisory kinds default
+		// fail-open).
+		// Guarded HERE (not inside the helper): when there is no hub at all —
+		// true for the overwhelming majority of today's tests and any deployment
+		// that never wires one — this must introduce ZERO extra microtask ticks
+		// before the pre-existing synchronous fast path (idle+empty direct
+		// dispatch) reaches `rpcClient.prompt()`. `await`ing a promise always
+		// yields at least once even if the awaited async function resolves
+		// synchronously, so the guard has to live outside the `await`, not just
+		// inside it.
+		const thinkingRouterDecision = this.lifecycleHub ? await this.consultThinkingRouterHub(session, text) : undefined;
+		// Stamped onto the QueuedMessage row at BOTH enqueue call sites below
+		// (the queued-path fix) — data-only, read by no code yet.
+		const thinkingDecisionStamp: QueuedMessage["thinkingDecision"] = thinkingRouterDecision
+			? { decision: thinkingRouterDecision, classifierId: THINKING_ROUTER_CLASSIFIER_ID, ts: Date.now() }
+			: undefined;
+
 		// modelText is what the model sees; text is the user's verbatim input.
 		// When no expansions, both are equal and dispatch is byte-equal to today.
 		// Synthesize a non-blank body for attachment-only prompts (image-only OR
@@ -3233,6 +3302,7 @@ export class SessionManager {
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
+					thinkingDecision: thinkingDecisionStamp,
 				});
 				this.broadcastQueue(session);
 				return { status: "queued" };
@@ -3310,6 +3380,7 @@ export class SessionManager {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
+			thinkingDecision: thinkingDecisionStamp,
 		});
 		this.broadcastQueue(session);
 
