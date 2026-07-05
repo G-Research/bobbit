@@ -12,10 +12,15 @@ protocol future cohorts should follow, and what's left after cohort 1.
 
 ## Status
 
-- **Cohort 1 (this change): `/api/projects*`** — 14 routes migrated. See
+- **Cohort 1: `/api/projects*` CRUD** — 14 routes migrated
+  (`src/server/routes/projects-routes.ts`). See
   [Cohort list](#cohort-1-projects) below.
-- Everything else in `handleApiRoute` (~410 remaining routes) is unchanged,
-  still in the legacy if/else chain.
+- **Cohort 2: `/api/projects/:id/config(...)`** — the per-project config
+  family (`src/server/routes/project-config-routes.ts`). See
+  [Cohort 2](#cohort-2-per-project-config) below.
+- Everything else in `handleApiRoute` is unchanged, still in the legacy
+  if/else chain (the marketplace family is being migrated in a parallel
+  cohort branch).
 
 ## The seam
 
@@ -178,18 +183,64 @@ status codes; same error shapes):
 | POST | `/api/projects/:id/promote` |
 | GET | `/api/projects/:id/base-ref/detect` |
 
-**Deliberately NOT migrated** (still in the legacy chain), even though
-lexically adjacent to the family above in `server.ts`:
+**Deliberately NOT migrated in cohort 1** (still in the legacy chain), even
+though lexically adjacent to the family above in `server.ts`:
 
 - `GET`/`PUT` `/api/projects/:id/config`, `/config/defaults`, `/config/resolved`
   — its own, much larger review unit (base_ref validation, secrets
   redaction, legacy-key migration — hundreds of lines of branching logic);
-  migrating it belongs in its own cohort/PR.
+  **migrated as cohort 2, below**.
 - `POST /api/create-directory`, `GET /api/browse-directory` — lexically
   interleaved with the projects family but not part of it (generic
   filesystem helpers).
 - `GET /api/projects/:id/qa-testing-config` — unrelated feature, happens to
   share the `/api/projects/:id/...` path shape.
+
+## Cohort 2: per-project config
+
+`src/server/routes/project-config-routes.ts`. The four real routes, moved
+verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/projects/:id/config` |
+| PUT | `/api/projects/:id/config` |
+| GET | `/api/projects/:id/config/defaults` |
+| GET | `/api/projects/:id/config/resolved` |
+
+Two cohort-2 wrinkles worth knowing for future cohorts:
+
+- **Legacy fall-through parity shims.** The legacy block matched the PATH
+  first (`if (projectConfigMatch)`), resolved the project context (404
+  `"Project not found"` when missing) and only then branched on
+  method/suffix — an unhandled combination (e.g. `DELETE .../config`,
+  `PUT .../config/defaults`) fell out of the block and continued down the
+  whole remaining legacy chain to its terminal 404 `"Not found"`. A
+  method-keyed registry can't "fall through after matching", so those
+  method/path combinations are registered explicitly against a shim that
+  reproduces the exact terminal behavior. Pinned by
+  `tests/project-config-route-parity.test.ts` (every representable method
+  on every family pattern must be registered). When migrating a future
+  path-first/method-inside legacy block, audit its unhandled-method
+  fall-through the same way — and write the shims as LITERAL
+  `register("METHOD", ...)` calls (not a loop) so the route-surface
+  extractor sees them.
+- **Helper disposition.** The five sandbox-secret helpers
+  (`redactSandboxSecrets`, `redactSandboxSecretsResolved`,
+  `mergeSecretsIntoTokens`, `mergeSandboxTokensStructured`,
+  `mergeSandboxSecrets`) had their only call sites in this family and moved
+  with it. `LEGACY_QA_TOP_LEVEL_KEYS` is also used by the not-yet-migrated
+  `PUT /api/project-config` legacy route, so it stays defined once in
+  `server.ts` and flows through the new `ctx.legacyQaTopLevelKeys`; the
+  server-scope store flows through `ctx.serverProjectConfigStore`. New ctx
+  fields are **append-only** (each cohort appends its block at the end of
+  the interface/literal) so parallel cohort branches merge without
+  conflicts.
+
+Still not migrated from this region: `GET /api/projects/:id/qa-testing-config`
+(unrelated feature) and the server-level `/api/project-config` trio (its PUT
+is lexically adjacent to the marketplace block being migrated in a parallel
+cohort; deferred to stay conflict-free).
 
 ## Pins
 

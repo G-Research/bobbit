@@ -18,6 +18,7 @@ import type { SessionManager } from "../agent/session-manager.js";
 import type { ProjectRegistry, RegisteredProject } from "../agent/project-registry.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
 import type { ProjectContext } from "../agent/project-context.js";
+import type { ProjectConfigStore } from "../agent/project-config-store.js";
 
 export interface CoreRouteCtx {
 	req: http.IncomingMessage;
@@ -55,4 +56,15 @@ export interface CoreRouteCtx {
 	validateComponentsConfig(components: unknown): string | null;
 	isValidBaseRefBranchGrammar(name: string): boolean;
 	detectedRefExistsInAllComponents(rootPath: string, comps: Array<{ repo: string }>, ref: string): Promise<boolean>;
+
+	// ── Cohort 2 (project-config) additions — append-only from here down ──
+	// Parallel cohorts each append their new fields at the END of this
+	// interface (alphabetical within their own cohort block) so concurrent
+	// cohort branches never collide on the same lines. Never reorder
+	// existing fields.
+
+	/** server.ts's LEGACY_QA_TOP_LEVEL_KEYS — shared with the not-yet-migrated PUT /api/project-config legacy route, so it stays defined once in server.ts and flows through here. */
+	legacyQaTopLevelKeys: readonly string[];
+	/** The SERVER-scope ProjectConfigStore (handleApiRoute's `projectConfigStore` param) — the middle rung of the "resolved" view's project → server → default source cascade. */
+	serverProjectConfigStore: ProjectConfigStore;
 }
