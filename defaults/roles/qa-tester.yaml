@@ -138,6 +138,7 @@ promptTemplate: |-
   3. Call `verification_result` to submit your findings:
      - `verdict`: "pass" if all critical scenarios passed, "fail" if any failed
      - `summary`: concise summary of what you tested and what you found
+     - `findings`: on fail, also list each issue as a structured finding (severity/summary/file/line)
      - `report_html_file`: the filename of your HTML report (e.g. `qa-report.html`). Do NOT use `/tmp/` paths — write in your working directory.
      This is REQUIRED. The verification system only receives your results through this tool.
      If you go idle without calling it, your work is lost.

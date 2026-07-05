@@ -522,8 +522,8 @@ describe("getPromptSections", () => {
 		assert.ok(!sysSection!.content.includes("@docs/extra.md"), "raw @ref should be expanded");
 	});
 
-	// F22 — the "Tools" section records the active BOBBIT_TOOLS_MD mode so the
-	// persisted <sessionId>-prompt.json breakdown can A/B measure the flag.
+	// F22 — the "Tools" section records the active tools-md mode so the
+	// persisted <sessionId>-prompt.json breakdown can A/B measure the setting.
 	it("Tools section reports toolsMdMode 'full' by default", () => {
 		delete process.env.BOBBIT_TOOLS_MD;
 		const sections = getPromptSections({
@@ -548,6 +548,18 @@ describe("getPromptSections", () => {
 		} finally {
 			delete process.env.BOBBIT_TOOLS_MD;
 		}
+	});
+
+	it("Tools section reports toolsMdMode 'index' when tools_md config is index", () => {
+		delete process.env.BOBBIT_TOOLS_MD;
+		const sections = getPromptSections({
+			cwd: cwdDir,
+			toolDocs: "# Tools\n\n## Shell\n- bash — Execute a shell command",
+			projectConfigStore: { get: (key: string) => key === "tools_md" ? "index" : undefined, getConfigDirectories: () => [] },
+		});
+		const toolsSection = sections.find(s => s.label === "Tools");
+		assert.ok(toolsSection);
+		assert.equal(toolsSection!.toolsMdMode, "index");
 	});
 });
 

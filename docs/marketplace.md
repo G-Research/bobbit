@@ -777,7 +777,12 @@ Field rules and defaults:
   error (`PackContributionError`) that aborts that pack's contribution load so the registry
   surfaces it loudly rather than silently registering an ambiguous provider.
 - **`kind`** — `memory`, `selector`, or `generic`. Absent ⇒ `generic`. An unknown kind drops
-  the provider (warn) without failing the pack.
+  the provider (warn) without failing the pack. A `selector` provider is DATA-ONLY config read
+  once at construction (never dispatched through a hook) for a classifier that needs to stay
+  off the moduleHost/worker path — e.g. the F14 thinking-router's pack-declared rule-table
+  override (`id: thinking-router-rules`, `hooks: []`; see
+  `src/server/agent/thinking-router-classifier.ts`'s header). Its `module`/`hooks` fields exist
+  only to satisfy this shared schema and are never invoked when `hooks` is empty.
 - **`module`** (required) — an ESM module path resolved **relative to the provider YAML** and
   re-validated (realpath-aware) to stay **inside the pack root** — the same containment guard
   used for routes/entrypoints. A module that resolves outside the pack root drops the provider.
@@ -1009,7 +1014,7 @@ The resolver is a single, type-agnostic pipeline (`src/server/agent/pack-resolve
 
 - `PackResolver.resolve<T>(type)` walks the ordered `PackEntry[]` low→high and merges by name. A later entry shadows an earlier same-name entry; shadowed entries are retained in `ResolvedEntity.shadows[]` to drive conflict UI.
 - Type-specific reading is delegated to **`EntityLoader<T>`** plugins — `RoleLoader`, `ToolLoader`, `SkillLoader`. Loaders are pure `(entry) → entities`; they contain **no** precedence logic. Roles/tools read the `defaults-tree` layout; the skill loader additionally handles `skills-flat` (a directory that is itself a skills root) and `commands-flat` (`.claude/commands/*.md`).
-- Adding a future name-merged entity type is *adding a loader*, not touching the ordering core. MCP uses a separate pack-contribution path because it resolves to scoped runtime managers rather than role/tool/skill name-merged entities.
+- Adding a future name-merged entity type is *adding a loader*, not touching the ordering core. MCP uses a separate pack-contribution path because it resolves to scoped runtime managers rather than role/tool/skill name-merged entities. Whether `providers`/`mcp`/`channels`/`runtimes` (and the other `pack-contributions.ts` kinds) should unify onto this pipeline is evaluated — and recommended against — in [docs/design/pack-loader-unification.md](design/pack-loader-unification.md).
 
 Key types are in `src/server/agent/pack-types.ts`: `PackManifest`, `PackMeta`, `PackEntry`, `EntityLoader<T>`, `ResolvedEntity<T>`, and the `scopePaths()` helper that both resolution and install derive paths from.
 

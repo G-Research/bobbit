@@ -4,6 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
+import { resolveScalarConfig, type ScalarConfigSource } from "./config-resolver.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
 import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
@@ -160,13 +161,32 @@ function parseParamsField(value: unknown): string[] | undefined {
  * noting that full parameter schemas already ship with the tool definitions.
  */
 export type ToolsMdMode = "full" | "index";
+export const TOOLS_MD_CONFIG_KEY = "tools_md";
+const TOOLS_MD_DEFAULT: ToolsMdMode = "full";
 
 /** Resolve the effective `# Tools` markdown mode. `override` (e.g. a future
  *  per-session preference) wins when it is a valid mode value; otherwise
- *  falls back to the `BOBBIT_TOOLS_MD` env var. Any other/unset value ⇒ `"full"`. */
-export function resolveToolsMdMode(override?: ToolsMdMode): ToolsMdMode {
+ *  falls back to the `BOBBIT_TOOLS_MD` env var (highest-precedence external
+ *  override), then the scalar config cascade key `tools_md`. Any other/unset
+ *  value ⇒ `"full"`. */
+export function resolveToolsMdMode(
+	override?: ToolsMdMode,
+	config?: { projectConfigStore?: ScalarConfigSource; serverConfigStore?: ScalarConfigSource },
+): ToolsMdMode {
 	if (override === "full" || override === "index") return override;
-	return process.env.BOBBIT_TOOLS_MD === "index" ? "index" : "full";
+	if (Object.prototype.hasOwnProperty.call(process.env, "BOBBIT_TOOLS_MD")) {
+		return process.env.BOBBIT_TOOLS_MD === "index" ? "index" : "full";
+	}
+	const projectConfig = config?.projectConfigStore ?? { get: () => undefined };
+	const serverConfig = config?.serverConfigStore ?? { get: () => undefined };
+	const resolved = resolveScalarConfig(
+		TOOLS_MD_CONFIG_KEY,
+		projectConfig,
+		serverConfig,
+		null,
+		{ [TOOLS_MD_CONFIG_KEY]: TOOLS_MD_DEFAULT },
+	).value;
+	return resolved === "index" ? "index" : "full";
 }
 
 import { bobbitConfigDir } from "../bobbit-dir.js";
@@ -910,14 +930,20 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 *
 	 * `modeOverride` (F22, see `resolveToolsMdMode`) selects the rendering mode.
-	 * Default (`"full"`, unset `BOBBIT_TOOLS_MD`) is byte-identical to pre-F22
-	 * output. `"index"` drops the `(params)` name list from each bullet — those
+	 * Default (`"full"`, unset env/config) is byte-identical to pre-F22 output.
+	 * `"index"` drops the `(params)` name list from each bullet — those
 	 * are parameter NAMES only; full types/required/descriptions already ship
 	 * in the tool's JSON schema sent to the model separately — and adds one
 	 * pointer line saying so.
 	 */
-	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext, modeOverride?: ToolsMdMode): string {
-		const mode = resolveToolsMdMode(modeOverride);
+	getToolDocsForPrompt(
+		toolNames?: string[],
+		stateDir?: string,
+		scopedContext?: ScopedToolContext,
+		modeOverride?: ToolsMdMode,
+		config?: { projectConfigStore?: ScalarConfigSource; serverConfigStore?: ScalarConfigSource },
+	): string {
+		const mode = resolveToolsMdMode(modeOverride, config);
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		type Entry = { name: string; summary: string; params?: string[] };

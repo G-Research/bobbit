@@ -15,6 +15,12 @@ export interface GateStatusSummaryGate {
 	signalCount: number;
 	updatedAt?: number;
 	failedSteps?: string[];
+	/**
+	 * Compact "severity: summary" lines for structured findings (F3) on the
+	 * latest signal's failed steps. Absent when no failed step reported
+	 * findings — always additive to `failedSteps`.
+	 */
+	failedFindings?: string[];
 }
 
 export interface GateStatusSummary {
@@ -45,6 +51,23 @@ function failedStepNames(gate: GateState): string[] | undefined {
 		?.filter(step => !step.passed && !step.skipped)
 		.map(step => step.name) ?? [];
 	return failed.length > 0 ? failed : undefined;
+}
+
+const MAX_SUMMARY_FINDINGS = 10;
+
+/** Compact "severity: summary" lines pulled from failed steps' structured findings (F3). */
+function failedFindingLines(gate: GateState): string[] | undefined {
+	if (gate.status !== "failed") return undefined;
+	const latest = gate.signals[gate.signals.length - 1];
+	const lines: string[] = [];
+	for (const step of latest?.verification?.steps ?? []) {
+		if (step.passed || step.skipped || !step.findings) continue;
+		for (const f of step.findings) {
+			lines.push(`${f.severity}: ${f.summary}`);
+			if (lines.length >= MAX_SUMMARY_FINDINGS) return lines;
+		}
+	}
+	return lines.length > 0 ? lines : undefined;
 }
 
 /**
@@ -87,6 +110,8 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 		if (stored?.signals.length) gate.updatedAt = stored.updatedAt;
 		const failedSteps = stored ? failedStepNames(stored) : undefined;
 		if (failedSteps) gate.failedSteps = failedSteps;
+		const failedFindings = stored ? failedFindingLines(stored) : undefined;
+		if (failedFindings) gate.failedFindings = failedFindings;
 		return gate;
 	});
 
