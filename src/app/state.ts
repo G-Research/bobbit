@@ -585,6 +585,14 @@ export const state = {
 	/** Count of agent-CLI transcripts on disk not tracked in sessions.json. >0 shows a splash banner. */
 	orphanedTranscriptsCount: 0,
 
+	/**
+	 * CON-05: session-store stale-snapshot-guard status from `GET /api/health`.
+	 * `recoveries > 0` (or `tripped`) shows a splash banner — the store may
+	 * have already self-healed via merge-recovery, but the event is still
+	 * worth surfacing so the user can spot-check recent session activity.
+	 */
+	sessionStoreStaleRecovery: null as { tripped: boolean; recoveries: number; lastRecoveredAt: number | null } | null,
+
 
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,

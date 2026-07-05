@@ -168,6 +168,27 @@ export class ProjectContextManager {
     return sessions;
   }
 
+  /**
+   * CON-05: aggregate the stale-snapshot-guard status across every project's
+   * `SessionStore`, for `/api/health` and the splash-screen banner. Iterates
+   * ALL contexts (not just `visible()`) — a hidden/headquarters project's
+   * store recovering from a stale snapshot is just as worth surfacing.
+   */
+  getStaleSessionStoreStatus(): { tripped: boolean; recoveries: number; lastRecoveredAt: number | null } {
+    let tripped = false;
+    let recoveries = 0;
+    let lastRecoveredAt: number | null = null;
+    for (const ctx of this.contexts.values()) {
+      const status = ctx.sessionStore.getStaleGuardStatus();
+      if (status.tripped) tripped = true;
+      recoveries += status.recoveries;
+      if (status.lastRecoveredAt !== null && (lastRecoveredAt === null || status.lastRecoveredAt > lastRecoveredAt)) {
+        lastRecoveredAt = status.lastRecoveredAt;
+      }
+    }
+    return { tripped, recoveries, lastRecoveredAt };
+  }
+
   /** Aggregate search across all (or filtered) project indexes. */
   async searchAll(
     query: string,
