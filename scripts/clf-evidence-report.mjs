@@ -227,31 +227,64 @@ function extractRuleId(rationale) {
 
 /**
  * Section (c) — generic proposed-label distribution for a single-choice
- * `(point, decisionKind)` classifier (model-tier, gate-risk). Note:
- * `DecisionOutcome` does not carry the classifier's input `arg` (only its
- * output `decision`), so a role/gate BREAKDOWN of the label distribution is
- * not derivable from this data source at all — see this file's header and
- * the model-tier/gate-risk classifier files' `Arg` types
- * (`ModelTierArg.roleName`, `GateRiskArg.changedFiles`) for where that
- * identity lives today (in the consult call, never persisted to the trace).
- * This function reports the AGGREGATE label distribution only; the report's
- * "by role/gate" framing is downgraded to an explicit limitation note.
+ * `(point, decisionKind)` classifier (model-tier, gate-risk). Newer
+ * `DecisionOutcome` rows may carry `argSummary`, a privacy-safe identity/
+ * shape-only snapshot of the consult input. Those rows can be grouped by the
+ * requested summary keys; older rows without it remain aggregate-only.
  */
-export function aggregateLabelDistribution(decisions) {
-	const result = { total: decisions.length, selects: 0, abstains: 0, byLabel: {}, appliedTrue: 0, appliedFalse: 0, appliedUnknown: 0 };
+export function aggregateLabelDistribution(decisions, opts = {}) {
+	const groupKeys = opts.groupKeys ?? [];
+	const result = { ...emptyLabelDistribution(decisions.length), missingArgSummary: 0, byArgSummary: {} };
 	for (const d of decisions) {
-		if (d.decision?.kind === "select") {
-			result.selects++;
-			const label = String(d.decision.choice);
-			result.byLabel[label] = (result.byLabel[label] ?? 0) + 1;
-			if (d.applied === true) result.appliedTrue++;
-			else if (d.applied === false) result.appliedFalse++;
-			else result.appliedUnknown++;
-		} else if (d.decision?.kind === "abstain") {
-			result.abstains++;
+		addLabelDistributionRow(result, d);
+		const group = formatArgSummaryGroup(d.argSummary, groupKeys);
+		if (!group) {
+			result.missingArgSummary++;
+			continue;
 		}
+		const grouped = result.byArgSummary[group] ?? emptyLabelDistribution(0);
+		result.byArgSummary[group] = grouped;
+		grouped.total++;
+		addLabelDistributionRow(grouped, d);
 	}
 	return result;
+}
+
+function emptyLabelDistribution(total) {
+	return { total, selects: 0, abstains: 0, byLabel: {}, appliedTrue: 0, appliedFalse: 0, appliedUnknown: 0 };
+}
+
+function addLabelDistributionRow(result, d) {
+	if (d.decision?.kind === "select") {
+		result.selects++;
+		const label = String(d.decision.choice);
+		result.byLabel[label] = (result.byLabel[label] ?? 0) + 1;
+		if (d.applied === true) result.appliedTrue++;
+		else if (d.applied === false) result.appliedFalse++;
+		else result.appliedUnknown++;
+	} else if (d.decision?.kind === "abstain") {
+		result.abstains++;
+	}
+}
+
+function formatArgSummaryGroup(argSummary, groupKeys) {
+	if (!argSummary || typeof argSummary !== "object" || Array.isArray(argSummary)) return undefined;
+	const entries = [];
+	for (const key of groupKeys) {
+		const value = argSummary[key];
+		if (isSummaryScalar(value)) entries.push([key, value]);
+	}
+	if (entries.length === 0) {
+		for (const [key, value] of Object.entries(argSummary).sort(([a], [b]) => a.localeCompare(b))) {
+			if (isSummaryScalar(value)) entries.push([key, value]);
+		}
+	}
+	if (entries.length === 0) return undefined;
+	return entries.map(([key, value]) => `${key}=${String(value)}`).join(", ");
+}
+
+function isSummaryScalar(value) {
+	return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
 /**
@@ -465,24 +498,23 @@ export function renderReport(data, meta) {
 	lines.push("## (c) Model-tier + gate-risk: proposed-label distributions");
 	lines.push("");
 	lines.push(
-		"_Limitation: `DecisionOutcome` records the classifier's OUTPUT label only, never its input `arg` " +
-			"(`ModelTierArg.roleName`, `GateRiskArg.changedFiles`) — a by-role or by-gate breakdown is not derivable " +
-			"from this data source. Reporting the aggregate label distribution only; a role/gate breakdown would require " +
-			"the producer to persist (or re-derive) that identity, which is out of scope for this offline consumer._",
+		"_Rows with `DecisionOutcome.argSummary` include a privacy-safe consult-input identity summary and can be " +
+			"broken down below. Older rows lacking `argSummary` remain aggregate-only; their by-role/by-gate " +
+			"breakdown is not derivable._",
 	);
 	lines.push("");
 	lines.push("### model-tier (`session-spawn` / `model-tier`)");
 	if (data.modelTier.total === 0) {
 		lines.push(noDataLine("2026-07-05 (model-tier-classifier.ts, CLF-W4)"));
 	} else {
-		lines.push(renderLabelDist(data.modelTier));
+		lines.push(renderLabelDist(data.modelTier, { groupHeading: "By role (`argSummary.roleName`, when present):" }));
 	}
 	lines.push("");
 	lines.push("### gate-risk (`gate-verify` / `risk`)");
 	if (data.gateRisk.total === 0) {
 		lines.push(noDataLine("2026-07-05 (gate-risk-classifier.ts, CLF-W5)"));
 	} else {
-		lines.push(renderLabelDist(data.gateRisk));
+		lines.push(renderLabelDist(data.gateRisk, { groupHeading: "By gate/change identity (`argSummary`, when present):" }));
 	}
 	lines.push("");
 
@@ -523,7 +555,7 @@ export function renderReport(data, meta) {
 	return lines.join("\n") + "\n";
 }
 
-function renderLabelDist(agg) {
+function renderLabelDist(agg, opts = {}) {
 	const lines = [];
 	lines.push(`Total consults: ${agg.total} — select rate: ${pct(agg.selects, agg.total)} (${agg.selects} selects, ${agg.abstains} abstains).`);
 	lines.push(
@@ -540,7 +572,30 @@ function renderLabelDist(agg) {
 			lines.push(`- \`${label}\`: ${count} (${pct(count, agg.selects)})`);
 		}
 	}
+	if (agg.missingArgSummary > 0) {
+		lines.push("");
+		lines.push(`_Rows lacking \`argSummary\`: ${agg.missingArgSummary}; by-role/by-gate breakdown is not derivable for those older rows._`);
+	}
+	const groups = Object.entries(agg.byArgSummary ?? {}).sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
+	if (groups.length > 0) {
+		lines.push("");
+		lines.push(opts.groupHeading ?? "By argSummary:");
+		lines.push("");
+		lines.push("| argSummary | total | selects | abstains | labels |");
+		lines.push("|---|---|---|---|---|");
+		for (const [group, stats] of groups) {
+			const groupLabels = Object.entries(stats.byLabel)
+				.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+				.map(([label, count]) => `${label}: ${count}`)
+				.join(", ") || "—";
+			lines.push(`| ${mdCell(group)} | ${stats.total} | ${stats.selects} | ${stats.abstains} | ${mdCell(groupLabels)} |`);
+		}
+	}
 	return lines.join("\n");
+}
+
+function mdCell(value) {
+	return String(value).replaceAll("|", "\\|");
 }
 
 // ---------------------------------------------------------------------------
@@ -619,8 +674,8 @@ function main() {
 	const data = {
 		toolApprove: aggregateToolApprove(auditEntries),
 		thinkingRouter: aggregateThinkingRouter(thinkingDecisions),
-		modelTier: aggregateLabelDistribution(modelTierDecisions),
-		gateRisk: aggregateLabelDistribution(gateRiskDecisions),
+		modelTier: aggregateLabelDistribution(modelTierDecisions, { groupKeys: ["roleName"] }),
+		gateRisk: aggregateLabelDistribution(gateRiskDecisions, { groupKeys: ["gateLabel", "label", "changedFileCount"] }),
 		cost: {
 			outliers: computeCostOutliers(costTurns),
 			compaction: computeCompactionShare(costTurns),

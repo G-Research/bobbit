@@ -314,10 +314,10 @@ accumulates and emits a markdown report —
   (`tool-permission-audit-log.ts`).
 - **(b) thinking-router** — select/applied rates and a by-rule breakdown
   (`session-context-trace`'s `decisions[]`, CLF-W1a/W1b).
-- **(c) model-tier + gate-risk** — proposed-label distributions. **Known
-  limitation:** `DecisionOutcome` never persists the classifier's input
-  `arg`, so a by-role or by-gate breakdown is not derivable from this data
-  source at all — only the aggregate label distribution is reported.
+- **(c) model-tier + gate-risk** — proposed-label distributions, plus
+  by-role/by-gate breakdowns for newer `DecisionOutcome` rows that include
+  privacy-safe `argSummary` identity fields. Older rows without `argSummary`
+  remain aggregate-only; their role/gate breakdown is still not derivable.
 - **(d) cost** — per-session Tukey-fence spike outliers and compaction-
   tagged share, over `session-cost-turns.json`'s per-turn rows.
 

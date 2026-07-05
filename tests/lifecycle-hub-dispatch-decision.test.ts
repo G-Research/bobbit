@@ -67,6 +67,7 @@ describe("LifecycleHub.dispatchDecision (CLF-W0b, select-only)", () => {
 		assert.equal(trace[0].decisionKind, "context");
 		assert.deepEqual(trace[0].consulted, []);
 		assert.deepEqual(trace[0].decision, { kind: "abstain" });
+		assert.equal("argSummary" in trace[0], false);
 	});
 
 	it("returns a registered fake classifier's select decision", async () => {
@@ -84,6 +85,66 @@ describe("LifecycleHub.dispatchDecision (CLF-W0b, select-only)", () => {
 		assert.equal(trace.length, 1);
 		assert.deepEqual(trace[0].consulted, ["fake-classifier"]);
 		assert.equal(trace[0].decision.kind, "select");
+	});
+
+	it("records only the privacy-safe allowlisted arg summary", async () => {
+		const h = hub();
+		const fake: DecisionClassifier<string> = {
+			id: "fake-classifier",
+			evaluate: () => ({ kind: "select", choice: "xhigh" }),
+		};
+		h.registerDecisionClassifier("user-prompt-submit", "thinking", fake);
+
+		await h.dispatchDecision<string>("user-prompt-submit", "thinking", ctx, {
+			roleName: "docs-writer",
+			toolName: "bash",
+			toolGroup: "shell",
+			hasVerifyCommand: true,
+			requestedFanOut: 3,
+			changedFiles: ["src/server/server.ts", "docs/readme.md"],
+			modelTier: "frontier",
+			gateLabel: "implementation",
+			text: "ultrathink please",
+			prompt: "copy me never",
+			content: "secret content",
+			spec: "goal spec",
+			longLabel: "x".repeat(101),
+			other: "ignored",
+		});
+
+		assert.deepEqual(h.getDecisionTrace()[0].argSummary, {
+			changedFileCount: 2,
+			roleName: "docs-writer",
+			toolName: "bash",
+			toolGroup: "shell",
+			hasVerifyCommand: true,
+			requestedFanOut: 3,
+			modelTier: "frontier",
+			gateLabel: "implementation",
+		});
+	});
+
+	it("omits argSummary fail-open when summary derivation throws", async () => {
+		const h = hub();
+		const fake: DecisionClassifier<string> = {
+			id: "fake-classifier",
+			evaluate: () => ({ kind: "select", choice: "xhigh" }),
+		};
+		h.registerDecisionClassifier("user-prompt-submit", "thinking", fake);
+
+		const arg = {};
+		Object.defineProperty(arg, "roleName", {
+			enumerable: true,
+			get() {
+				throw new Error("getter exploded");
+			},
+		});
+
+		await h.dispatchDecision<string>("user-prompt-submit", "thinking", ctx, arg);
+
+		const recorded = h.getDecisionTrace()[0];
+		assert.equal(recorded.decision.kind, "select");
+		assert.equal("argSummary" in recorded, false);
 	});
 
 	it("polls past an abstaining classifier to a later selecting one", async () => {

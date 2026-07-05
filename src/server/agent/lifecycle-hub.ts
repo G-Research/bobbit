@@ -647,6 +647,8 @@ export class LifecycleHub {
 		}
 		const ms = Math.round(performance.now() - t0);
 		const outcome: DecisionOutcome = { ts: Date.now(), point, decisionKind: kind, consulted, decision, ms };
+		const argSummary = summarizeDecisionArg(arg);
+		if (argSummary) outcome.argSummary = argSummary;
 		if (decision.kind === "select" && opts?.applyIfSelected !== undefined) outcome.applied = opts.applyIfSelected;
 		this.recordDecisionOutcome(ctx.sessionId, outcome);
 		return decision;
@@ -710,4 +712,54 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (!value || typeof value !== "object") return false;
 	const proto = Object.getPrototypeOf(value);
 	return proto === Object.prototype || proto === null;
+}
+
+const DECISION_ARG_STRING_MAX = 100;
+const DECISION_ARG_SAFE_STRING_KEYS = new Set(["roleName", "toolName", "toolGroup"]);
+const DECISION_ARG_DENY_KEYS = new Set(["text", "prompt", "content", "spec"]);
+
+function summarizeDecisionArg(arg: unknown): Record<string, string | number | boolean> | undefined {
+	if (!arg || typeof arg !== "object") return undefined;
+	try {
+		const summary: Record<string, string | number | boolean> = {};
+		const source = arg as Record<string, unknown>;
+		const changedFiles = source.changedFiles;
+		if (Array.isArray(changedFiles)) summary.changedFileCount = changedFiles.length;
+
+		for (const [key, value] of Object.entries(source)) {
+			if (key === "changedFiles" || DECISION_ARG_DENY_KEYS.has(key)) continue;
+			if (DECISION_ARG_SAFE_STRING_KEYS.has(key)) {
+				if (isShortString(value)) summary[key] = value;
+				continue;
+			}
+			if (key === "hasVerifyCommand") {
+				if (typeof value === "boolean") summary[key] = value;
+				continue;
+			}
+			if (key === "requestedFanOut") {
+				if (typeof value === "number" && Number.isFinite(value)) summary[key] = value;
+				continue;
+			}
+			if (isTierOrLabelKey(key) && !hasDeniedTokenInKey(key) && isShortString(value)) {
+				summary[key] = value;
+			}
+		}
+
+		return Object.keys(summary).length > 0 ? summary : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function isShortString(value: unknown): value is string {
+	return typeof value === "string" && value.length <= DECISION_ARG_STRING_MAX;
+}
+
+function isTierOrLabelKey(key: string): boolean {
+	return key === "tier" || key === "label" || key.endsWith("Tier") || key.endsWith("Label");
+}
+
+function hasDeniedTokenInKey(key: string): boolean {
+	const lower = key.toLowerCase();
+	return lower.includes("text") || lower.includes("prompt") || lower.includes("content") || lower.includes("spec");
 }
