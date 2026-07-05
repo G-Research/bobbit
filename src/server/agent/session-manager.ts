@@ -7229,6 +7229,18 @@ export class SessionManager {
 		goalId?: string;
 		teamGoalId?: string;
 		projectId?: string;
+		/** Eligibility-signal census (in-process-bridge-eligibility.ts step 2):
+		 *  the derived read-only-ness of the RPC bridge already constructed by
+		 *  the caller (`isReadOnlyToolPolicy` over `allowedTools`, computed
+		 *  before this bridge existed — see verification-harness.ts's legacy
+		 *  `runLlmReviewDirect`). Recorded as session metadata for display/
+		 *  persistence parity with SessionManager-spawned reviewer sessions;
+		 *  this bridge was already constructed by the caller, so it cannot
+		 *  retroactively change which bridge class backs it. */
+		readOnly?: boolean;
+		/** The resolved tool allowlist behind `readOnly` above, for the same
+		 *  metadata-parity reason. */
+		allowedTools?: string[];
 	}): () => void {
 		const eventBuffer = new EventBuffer();
 		const now = Date.now();
@@ -7250,6 +7262,8 @@ export class SessionManager {
 			goalId: opts.goalId,
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			promptQueue: new PromptQueue(),
 		};
 
@@ -7289,6 +7303,8 @@ export class SessionManager {
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
 			nonInteractive: true,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			projectId: extProjectId,
 		});
 

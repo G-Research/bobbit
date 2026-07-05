@@ -180,7 +180,8 @@ import { verifyBestOfNGroup } from "./swarm-verifier.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
-import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
+import { buildVerificationReviewerMeta, type VerificationKind } from "./verification-reviewer-meta.js";
+import { isReadOnlyToolPolicy } from "./read-only-tool-policy.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -308,6 +309,43 @@ export function buildVerificationToolActivation(
 		toolManager: deps.toolManager,
 		allowedTools: allowedToolNames,
 	};
+}
+
+/**
+ * In-process-bridge eligibility census (docs/design/in-process-bridge-spike.md,
+ * "Go/no-go recommendation for step-2 productionization" — this is that step
+ * 2): derive whether a verification reviewer/QA session's RESOLVED tool
+ * allowlist is read-only via `isReadOnlyToolPolicy` (NOT from role name —
+ * `defaults/roles/reviewer.yaml`'s `role: "reviewer"` says nothing about
+ * whether `bash`/`write` actually made it into the resolved grant set), and
+ * emit a debug-level census log line so the eligible-population telemetry for
+ * the highest-volume reviewer fan-out (gate-verify's 3-4 llm-review/agent-qa
+ * spawns per phase) finally accumulates — before this, nothing logged this
+ * signal anywhere, so "how many reviewers would route through the in-process
+ * bridge" was unanswerable without re-deriving it by hand.
+ *
+ * Pure derivation + a `console.debug` side effect — no eligibility decision
+ * is made or re-made here. `isInProcessBridgeEligible` (in-process-bridge-
+ * eligibility.ts) already derives the identical signal from
+ * `bridgeOptions.allowedTools` (threaded by session-setup.ts's `_resolveTools`
+ * for every session, verification reviewers included — see PR #162's
+ * eligibility-signal fix) at spawn time, before this function ever runs.
+ * This function does not feed back into that decision; it only makes the
+ * decision that already happened observable. Exported so the derivation
+ * itself is unit-testable without spinning up a harness/SessionManager.
+ */
+export function reviewerEligibilityCensus(
+	kind: VerificationKind,
+	roleName: string,
+	sessionId: string,
+	allowedTools: readonly string[] | undefined,
+): boolean {
+	const readOnly = isReadOnlyToolPolicy(allowedTools);
+	console.debug(
+		`[verification] in-proc-bridge census: kind=${kind} role=${roleName} session=${sessionId} ` +
+		`tools=${allowedTools === undefined ? "unrestricted" : allowedTools.length} readOnly=${readOnly}`,
+	);
+	return readOnly;
 }
 
 /**
@@ -4515,6 +4553,17 @@ export class VerificationHarness {
 				initialThinkingLevel: _preInitialThinking,
 			});
 
+			// Eligibility-signal census (docs/design/in-process-bridge-spike.md
+			// "step 2"): `session.allowedTools` is the RESOLVED allowlist
+			// session-setup.ts's `_resolveTools` already computed for this spawn
+			// (role-based fallback, since we never pass `allowedTools` in opts
+			// above) — the SAME list `isInProcessBridgeEligible` already OR'd into
+			// its readOnly check during `createSession`. Recording the derived
+			// signal here doesn't change what already happened; it makes the
+			// eligible-population telemetry for the highest-volume reviewer
+			// fan-out visible for the first time. See `reviewerEligibilityCensus`.
+			const llmReviewReadOnly = reviewerEligibilityCensus("llm-review", roleName, sessionId, session.allowedTools);
+
 			// Set title and metadata. `step.name` is optional — many inline
 			// workflows skip it. Fall back to step.role / "Review" so the
 			// sidebar never shows "undefined: <name>" as the title prefix.
@@ -4528,7 +4577,16 @@ export class VerificationHarness {
 			// and the archived render path lumps them under "unmapped" — they
 			// only surface under the LAST archived team-lead. Pure-helper
 			// contract pinned by tests/verification-reviewer-meta.test.ts.
-			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
+			// `readOnly` is appended here (not inside `buildVerificationReviewerMeta`,
+			// which is team/accessory metadata unrelated to tool policy) — it is
+			// `false` for every built-in reviewer role today (bash+write
+			// default-allow — see read-only-tool-policy.ts), so this is a no-op
+			// against `session.readOnly`'s prior `undefined` default in every
+			// consumer (claude-code-bridge's plan-mode gate, orchestration-core's
+			// child-tool stripping, session-manager's sandbox-cleanup check — all
+			// falsy-check `readOnly`, `undefined` and `false` behave identically)
+			// until a role narrows enough to genuinely qualify.
+			this.sessionManager!.updateSessionMeta(sessionId, { ...reviewerMeta, readOnly: llmReviewReadOnly });
 
 			// Register in team store (if team manager available)
 			if (this.teamManager) {
@@ -4887,6 +4945,10 @@ export class VerificationHarness {
 			});
 			qaSessionId = session.id;
 
+			// Eligibility-signal census — see the identical comment on the
+			// llm-review path above (runLlmReviewViaSession).
+			const qaReadOnly = reviewerEligibilityCensus("agent-qa", qaRoleName, qaSessionId, session.allowedTools);
+
 			// Set title and metadata — same fallback as llm-review above.
 			// Same teamLeadSessionId stamp so the sidebar can nest this QA
 			// session under its triggering team-lead (see runLlmReviewStep
@@ -4896,7 +4958,7 @@ export class VerificationHarness {
 			const qaTitlePrefix = step.name?.trim()
 				|| (step.role ? `QA (${step.role})` : "QA");
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
-			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
+			this.sessionManager!.updateSessionMeta(qaSessionId, { ...qaReviewerMeta, readOnly: qaReadOnly });
 
 			// Register in team store
 			if (this.teamManager) {
@@ -5089,11 +5151,25 @@ export class VerificationHarness {
 			role,
 			this.resolveToolActivationDeps(goalId),
 		);
+		// Eligibility-signal census — see the identical comment on the
+		// session-based llm-review path above (runLlmReviewViaSession). This
+		// legacy path builds `new RpcBridge()` directly (below), never
+		// `createSessionBridge()`, so it never actually reaches
+		// `isInProcessBridgeEligible` — threading `allowedTools`/`readOnly`
+		// onto `bridgeOptions` here is inert for THIS bridge instance
+		// (`RpcBridgeOptions.allowedTools`'s own doc comment: "Not consumed by
+		// RpcBridge/ClaudeCodeBridge themselves"), but keeps the census log
+		// accurate for this (SessionManager-unavailable, effectively
+		// unreachable in a real gateway — `runLlmReviewStep` only falls
+		// through here when `this.sessionManager` is absent) population too.
+		const legacyReadOnly = reviewerEligibilityCensus("llm-review", roleName ?? "reviewer", subSessionId, toolActivation.allowedTools);
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
 			args: toolActivation.args,
 			env: toolActivation.env,
 			toolManager: toolActivation.toolManager,
+			allowedTools: toolActivation.allowedTools,
+			readOnly: legacyReadOnly,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
@@ -5139,6 +5215,8 @@ export class VerificationHarness {
 						cwd,
 						role: "reviewer",
 						projectId: reviewProjectId,
+						readOnly: legacyReadOnly,
+						allowedTools: toolActivation.allowedTools,
 					});
 				}
 			}
