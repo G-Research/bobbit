@@ -454,11 +454,16 @@ export interface SessionInfo {
 	 * `spawnPinnedThinkingLevel` but is not a human decision. Consulted by
 	 * `canApplyThinkingRouterDecision` so the F14 thinking-router's apply mode
 	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`) can never silently override a
-	 * setting the user picked on purpose. In-memory only — does not currently
-	 * survive a session restore/respawn (flagged as a known gap, not fixed
-	 * this wave; re-setting it is one click).
+	 * setting the user picked on purpose. Persisted via `SessionStore` so the
+	 * precedence survives restore/respawn.
 	 */
 	thinkingLevelUserPinned?: boolean;
+	/**
+	 * Baseline level to restore after CLF-W3 thinking-router apply mode
+	 * transiently escalates the live runtime. In-memory only: it describes the
+	 * currently running process, not durable user/session config.
+	 */
+	thinkingRouterAppliedBaseline?: ThinkingLevel;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -3093,6 +3098,39 @@ export class SessionManager {
 		return true;
 	}
 
+	private clampThinkingLevelForSession(session: SessionInfo, level: ThinkingLevel): ThinkingLevel {
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.modelId) {
+				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
+				if (clamped) return clamped;
+			}
+		} catch { /* best-effort; keep fail-open thinking-level discipline */ }
+		return level;
+	}
+
+	private resolveCurrentThinkingRouterBaseline(session: SessionInfo): ThinkingLevel {
+		const candidate = session.spawnPinnedThinkingLevel ?? this.resolveInitialThinkingLevel(session.role, session.projectId) ?? "medium";
+		return this.clampThinkingLevelForSession(session, (isKnownThinkingLevel(candidate) ?? "medium") as ThinkingLevel);
+	}
+
+	private async restoreThinkingRouterAppliedBaseline(session: SessionInfo): Promise<void> {
+		const baseline = session.thinkingRouterAppliedBaseline;
+		if (!baseline) return;
+		session.thinkingRouterAppliedBaseline = undefined;
+		try {
+			const levelToRestore = this.clampThinkingLevelForSession(session, baseline);
+			await session.rpcClient.setThinkingLevel(levelToRestore);
+			console.log(`[session-manager] CLF-W3 thinking-router RESTORED "${levelToRestore}" for session ${session.id}`);
+		} catch (err) {
+			console.warn(`[session-manager] CLF-W3 thinking-router restore failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private clearThinkingRouterAppliedBaseline(session: SessionInfo): void {
+		session.thinkingRouterAppliedBaseline = undefined;
+	}
+
 	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
@@ -3200,16 +3238,19 @@ export class SessionManager {
 					// so a classifier "xhigh" select degrades gracefully on a model that
 					// doesn't support it instead of sending an unsupported level to the
 					// runtime. Falls back to the raw choice when no model is known yet.
-					let levelToApply: ThinkingLevel = thinkingRouterDecision.choice;
-					const persisted = this.resolveStoreForSession(session.id).get(session.id);
-					if (persisted?.modelId) {
-						const clamped = clampThinkingLevelForModel(levelToApply, persisted.modelProvider, persisted.modelId);
-						if (clamped) levelToApply = clamped;
-					}
+					const baseline = session.thinkingRouterAppliedBaseline ?? this.resolveCurrentThinkingRouterBaseline(session);
+					const levelToApply = this.clampThinkingLevelForSession(session, thinkingRouterDecision.choice);
 					await session.rpcClient.setThinkingLevel(levelToApply);
+					session.thinkingRouterAppliedBaseline = baseline;
 					console.log(`[session-manager] CLF-W3 thinking-router APPLIED "${levelToApply}" for session ${session.id} (turn-scoped, not persisted)`);
 				} catch (err) {
 					console.warn(`[session-manager] CLF-W3 thinking-router apply failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else if (session.thinkingRouterAppliedBaseline && isThinkingRouterApplyMode()) {
+				if (canApplyThinking) {
+					await this.restoreThinkingRouterAppliedBaseline(session);
+				} else {
+					this.clearThinkingRouterAppliedBaseline(session);
 				}
 			}
 		}
@@ -5725,6 +5766,7 @@ export class SessionManager {
 			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+			thinkingLevelUserPinned: ps.thinkingLevelUserPinned,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreePushPolicy: ps.worktreePushPolicy,
@@ -7327,6 +7369,7 @@ export class SessionManager {
 		claudeCodeModelAlias?: string;
 		modelProvider?: string;
 		modelId?: string;
+		thinkingLevelUserPinned?: boolean;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -7374,6 +7417,7 @@ export class SessionManager {
 				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
 				modelProvider: ps?.modelProvider,
 				modelId: ps?.modelId,
+				thinkingLevelUserPinned: s.thinkingLevelUserPinned,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 				repoPath: ps?.repoPath || s.repoPath,
@@ -7694,10 +7738,11 @@ export class SessionManager {
 			readOnly: respawnPersisted?.readOnly ?? session.readOnly,
 		}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-		const rpcClient = createSessionBridge(bridgeOptions);
-		session.spawnPinnedModel = bridgeOptions.initialModel;
-		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		let switchingSession = true;
+			const rpcClient = createSessionBridge(bridgeOptions);
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+			session.thinkingRouterAppliedBaseline = undefined;
+			let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			if (isUserVisibleActivity(event)) {
@@ -7946,6 +7991,10 @@ export class SessionManager {
 			throw new Error("unknown image model");
 		}
 		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
+	}
+
+	persistSessionThinkingUserPinned(sessionId: string, pinned: boolean): void {
+		this.resolveStoreForSession(sessionId).update(sessionId, { thinkingLevelUserPinned: pinned });
 	}
 
 	/** True when (provider, modelId) is registered as an available image model. */
@@ -8670,10 +8719,11 @@ export class SessionManager {
 				readOnly: forceRespawnPersisted?.readOnly ?? session.readOnly,
 			}, this.readClaudeCodeConfigForProject(session.projectId)));
 
-			const rpcClient = createSessionBridge(bridgeOptions);
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-			let switchingSession = true;
+		const rpcClient = createSessionBridge(bridgeOptions);
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		session.thinkingRouterAppliedBaseline = undefined;
+		let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				if (isUserVisibleActivity(event)) {
