@@ -1,28 +1,50 @@
 {
   "generatedBy": "scripts/testing-v2/codemod.mjs",
-  "generatedAt": "2026-07-05T13:18:46.333Z",
+  "generatedAt": "2026-07-05T13:25:51.387Z",
   "argv": [
-    "tests/aigw-user-agent.test.ts",
-    "tests/error-modal-call-sites.test.ts",
-    "tests/gesture-context.test.ts",
-    "tests/child-ready-to-merge-helper.test.ts",
-    "tests/delegate-helper-policy-plumbing.test.ts"
+    "<pilot set>"
   ],
   "dryRun": false,
   "methods": [
     "codemod"
   ],
   "counts": {
-    "total": 5,
-    "clean": 5,
-    "needsWithEnv": 0,
+    "total": 31,
+    "clean": 23,
+    "needsWithEnv": 8,
     "needsManual": 0,
-    "written": 5
+    "written": 31
   },
   "files": [
     {
       "file": "tests/aigw-user-agent.test.ts",
       "target": "tests2/core/aigw-user-agent.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/ask-envelope.test.ts",
+      "target": "tests2/core/ask-envelope.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/backoff-delay.test.ts",
+      "target": "tests2/core/backoff-delay.test.ts",
       "method": "codemod",
       "bucket": "v2-core",
       "classification": "clean",
@@ -47,6 +69,45 @@
       "written": true
     },
     {
+      "file": "tests/compaction-types.test.ts",
+      "target": "tests2/core/compaction-types.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/context-blocks.test.ts",
+      "target": "tests2/core/context-blocks.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/context-trace-store.test.ts",
+      "target": "tests2/core/context-trace-store.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
       "file": "tests/delegate-helper-policy-plumbing.test.ts",
       "target": "tests2/core/delegate-helper-policy-plumbing.test.ts",
       "method": "codemod",
@@ -55,6 +116,58 @@
       "reasons": [],
       "transforms": [
         "node:test→vitest imports"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/depends-on-validation.test.ts",
+      "target": "tests2/core/depends-on-validation.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/docker-args-sanitize.test.ts",
+      "target": "tests2/core/docker-args-sanitize.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/dynamic-context-section.test.ts",
+      "target": "tests2/core/dynamic-context-section.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/error-helpers.test.ts",
+      "target": "tests2/core/error-helpers.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
       ],
       "written": true
     },
@@ -71,6 +184,86 @@
       "written": true
     },
     {
+      "file": "tests/event-buffer.test.ts",
+      "target": "tests2/core/event-buffer.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/file-mentions-enumerate.test.ts",
+      "target": "tests2/core/file-mentions-enumerate.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/gate-dependency-enforcement.test.ts",
+      "target": "tests2/core/gate-dependency-enforcement.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/gate-signal-step-enumeration.test.ts",
+      "target": "tests2/core/gate-signal-step-enumeration.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/gate-status-summary.test.ts",
+      "target": "tests2/core/gate-status-summary.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/gate-verification-snapshot.test.ts",
+      "target": "tests2/core/gate-verification-snapshot.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
       "file": "tests/gesture-context.test.ts",
       "target": "tests2/core/gesture-context.test.ts",
       "method": "codemod",
@@ -82,6 +275,173 @@
         "relative import paths"
       ],
       "written": true
+    },
+    {
+      "file": "tests/goal-metadata-second-review-fixes.test.ts",
+      "target": "tests2/core/goal-metadata-second-review-fixes.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/goal-store-metadata-migration.test.ts",
+      "target": "tests2/core/goal-store-metadata-migration.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/inbox-store.test.ts",
+      "target": "tests2/core/inbox-store.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/is-setup-complete.test.ts",
+      "target": "tests2/core/is-setup-complete.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/output-path-containment.test.ts",
+      "target": "tests2/core/output-path-containment.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/plan-mutation-store.test.ts",
+      "target": "tests2/core/plan-mutation-store.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "clean",
+      "reasons": [],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/propose-project-validation.test.ts",
+      "target": "tests2/core/propose-project-validation.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/scaffold-agent-gitignore.test.ts",
+      "target": "tests2/core/scaffold-agent-gitignore.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/system-prompt-resolver.test.ts",
+      "target": "tests2/core/system-prompt-resolver.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/system-prompt-skills-budget.test.ts",
+      "target": "tests2/core/system-prompt-skills-budget.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    },
+    {
+      "file": "tests/token-dir.test.ts",
+      "target": "tests2/core/token-dir.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "hook/mock call sites",
+        "relative import paths"
+      ],
+      "written": true
     }
-  ]
+  ],
+  "note": "Pilot codemod classification (Gate 4C). Files were codemod-generated then manually finalized (needs-withEnv wrapped with withEnv; store tests converted to the memfs fsImpl seam). Regenerated read-only over the pilot set."
 }
