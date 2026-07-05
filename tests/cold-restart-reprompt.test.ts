@@ -38,6 +38,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { makeTmpDir } from "./helpers/tmp.ts";
+import { stubMcp } from "./helpers/mcp-stub.ts";
 
 const tmpRoot = makeTmpDir("cold-restart-reprompt-test-");
 const stateDir = path.join(tmpRoot, "state");
@@ -91,6 +92,9 @@ function makeManager(bridge: any): any {
 	const m: any = new SessionManager();
 	m._testStore = { update: () => {}, get: () => undefined, archive: () => {} };
 	managers.push(m);
+	// restoreSession() (exercised via boot-resume below) reaches real ambient
+	// MCP infrastructure unless stubbed — see tests/helpers/mcp-stub.ts.
+	stubMcp(m);
 	return m;
 }
 

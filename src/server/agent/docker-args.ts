@@ -43,7 +43,48 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "google-code-assist", readOnly: true },
 	{ sub: "openai-orphan-tool-result", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
+	// Per-turn provider-hook bridge (provider-bridge-extension.ts). Without this
+	// mount, sandboxed sessions whose project has a lifecycle provider with
+	// beforePrompt/beforeCompact hooks get a host-only --extension path and pi
+	// exits 1 at spawn ("Extension path does not exist") — the session shows
+	// as `terminated` immediately. Pinned by tests/docker-args.test.ts.
+	{ sub: "provider-bridge", readOnly: true },
 ];
+
+/**
+ * Does this error indicate the sandbox Docker network vanished between
+ * `docker network create` and `docker run --network=...`?
+ *
+ * The sandbox network (`bobbit-sandbox-net`) is a machine-global singleton
+ * shared by every gateway on the host, and each gateway's shutdown path runs
+ * `docker network rm` on it (non-fatal when containers are attached). When two
+ * gateways overlap — dev harness + test gateway, or a test gateway booting
+ * while the previous one drains — the shutting-down gateway can remove the
+ * network in the window between the booting gateway's create and its first
+ * `docker run`, which then fails with "network bobbit-sandbox-net not found".
+ * Callers detect that case with this predicate, re-ensure the network, and
+ * retry the run once. Pinned by tests/docker-args.test.ts.
+ */
+export function isMissingDockerNetworkError(err: unknown, networkName: string): boolean {
+	const msg = err instanceof Error
+		? `${err.message}\n${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}`
+		: String(err);
+	return msg.includes(`network ${networkName} not found`);
+}
+
+/**
+ * Canonical `docker network create` args for the sandbox network — single
+ * source of truth shared by SessionManager.ensureSandboxNetwork() and the
+ * missing-network retry in ProjectSandbox._createContainer(), so the two
+ * sites can never drift on driver/ICC flags.
+ */
+export function sandboxNetworkCreateArgs(name: string): string[] {
+	return [
+		"network", "create", name,
+		"--driver", "bridge",
+		"--opt", "com.docker.network.bridge.enable_icc=false",
+	];
+}
 
 export interface DockerRunConfig {
 	image: string;

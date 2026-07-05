@@ -96,8 +96,16 @@ export default function globalTeardown() {
 }
 
 /**
- * Remove Docker containers and volumes whose bind-mounts reference E2E or
- * manual-test temp directories. Skips the live project sandbox.
+ * Remove Docker containers and volumes whose bind-mounts reference E2E temp
+ * directories. Skips the live project sandbox.
+ *
+ * Deliberately does NOT touch `.bobbit-manual*` containers: those belong to
+ * the manual-integration phase, which cleans up after itself
+ * (tests/manual-integration/<spec>.ts::cleanTestDockerContainers). E2E and
+ * manual runs overlap on shared dev machines, and an E2E global teardown that
+ * reaps `.bobbit-manual` binds force-removes a LIVE manual-suite container
+ * mid-agent-turn (the agent's `docker exec` dies with 137 and the session is
+ * reported `terminated`). Never reintroduce `.bobbit-manual` here.
  */
 function cleanTestDockerContainers() {
 	try {
@@ -112,7 +120,7 @@ function cleanTestDockerContainers() {
 					"inspect", "--format", "{{json .HostConfig.Binds}}", id,
 				], { encoding: "utf-8", timeout: 5_000 }).trim();
 				// Only remove containers bound to test temp dirs
-				if (/\.e2e-worker-|\.e2e-bobbit-|\.e2e-fullstack-|\.e2e-inproc-|\.e2e-resilience-|\.bobbit-manual/.test(binds)) {
+				if (/\.e2e-worker-|\.e2e-bobbit-|\.e2e-fullstack-|\.e2e-inproc-|\.e2e-resilience-/.test(binds)) {
 					const projectId = execFileSync("docker", [
 						"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
 					], { encoding: "utf-8", timeout: 5_000 }).trim();

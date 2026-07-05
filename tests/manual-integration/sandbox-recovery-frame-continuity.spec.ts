@@ -329,12 +329,14 @@ test("sandbox-recovery preserves WS frame continuity (seq + statusVersion carry 
 	let sessionId: string | null = null;
 
 	try {
-		// 1. Register the project
+		// 1. Register the project. `dir` is the gateway's own cwd — since
+		// Headquarters (#925) the server workspace only registers via upsert,
+		// which returns the existing HQ project with 200 (a plain POST is 409).
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "Recovery Frame", rootPath: dir }),
+			body: JSON.stringify({ name: "Recovery Frame", rootPath: dir, upsert: true }),
 		});
-		expect(regRes.status).toBe(201);
+		expect([200, 201]).toContain(regRes.status);
 		gw.defaultProjectId = ((await regRes.json()) as any).id;
 
 		// 2. Create a sandboxed session

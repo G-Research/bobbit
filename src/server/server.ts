@@ -75,6 +75,11 @@ import { registerProjectRoutes } from "./routes/projects-routes.js";
 // STR-01 cohort 2: the per-project config family (/api/projects/:id/config*).
 import { registerProjectConfigRoutes } from "./routes/project-config-routes.js";
 import { registerMarketplaceRoutes } from "./routes/marketplace-routes.js";
+// STR-01 cohort 5: the staff-inbox family (/api/staff/:id/inbox*).
+import { registerStaffInboxRoutes } from "./routes/staff-inbox-routes.js";
+// STR-01 cohort 4: /api/pack-runtimes* and the server-scope /api/project-config trio.
+import { registerPackRuntimesRoutes } from "./routes/pack-runtimes-routes.js";
+import { registerServerProjectConfigRoutes } from "./routes/project-config-server-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -88,11 +93,6 @@ import {
 	PackRuntimeSupervisor,
 	FilePortStore,
 	getOrCreatePackRuntimeServerIdentity,
-	encodePackRuntimeId,
-	decodePackRuntimeId,
-	PackRuntimeNotFoundError,
-	PackRuntimeBadRequestError,
-	PackRuntimeDockerUnavailableError,
 	type PackRuntimeStatus,
 	type PackRuntimeCapabilitySummary,
 } from "./runtimes/index.js";
@@ -101,6 +101,7 @@ import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscovery
 import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
 import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
+import { registerToolApproveHeuristicClassifier, isToolApproveHeuristicEnabled } from "./agent/tool-approve-heuristic.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1133,8 +1134,10 @@ export interface GatewayConfig {
 
 /** The structural contract the REST routes depend on (the concrete
  *  PackRuntimeSupervisor implements a superset). Unknown-runtime failures surface
- *  as {@link PackRuntimeNotFoundError} (→ 404); malformed id/mode/tail as
- *  {@link PackRuntimeBadRequestError} (→ 400); anything else → 500. */
+ *  as `PackRuntimeNotFoundError` (→ 404); malformed id/mode/tail as
+ *  `PackRuntimeBadRequestError` (→ 400); anything else → 500 (both classes and
+ *  their REST-route callers now live in src/server/routes/pack-runtimes-routes.ts,
+ *  STR-01 cohort 4). */
 export interface PackRuntimeSupervisorLike {
 	list(projectId?: string): Promise<PackRuntimeStatus[]>;
 	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
@@ -1825,6 +1828,18 @@ export function createGateway(config: GatewayConfig) {
 	// See tool-approve-classifier.ts's header for the full scope/rationale —
 	// a real production classifier is a deliberately separate follow-up PR.
 	sessionManager.lifecycleHub.allowDecisionPoint(TOOL_APPROVE_POINT, TOOL_APPROVE_KIND);
+	// CLF-W2.5 — register the real, conservative rule-based tool-approve
+	// heuristic (tool-approve-heuristic.ts) ONLY when BOBBIT_CLF_TOOL_APPROVE
+	// is set at all (any value, including "observe"). Unset stays exactly
+	// CLF-W2's harness-only state above — zero classifiers registered, every
+	// consult abstains, byte-identical to before this file existed. See
+	// `isToolApproveHeuristicEnabled`'s doc comment for why this is a
+	// SEPARATE gate from `isToolApproveEnforceMode` (which only controls
+	// whether a produced `deny` auto-applies, not whether the classifier
+	// itself runs at all).
+	if (isToolApproveHeuristicEnabled()) {
+		registerToolApproveHeuristicClassifier(sessionManager.lifecycleHub);
+	}
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;
@@ -3265,6 +3280,9 @@ const coreRouteTable = new RouteTable<CoreRouteCtx>();
 registerProjectRoutes(coreRouteTable);
 registerProjectConfigRoutes(coreRouteTable);
 registerMarketplaceRoutes(coreRouteTable);
+registerStaffInboxRoutes(coreRouteTable);
+registerPackRuntimesRoutes(coreRouteTable);
+registerServerProjectConfigRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3502,7 +3520,11 @@ async function handleApiRoute(
 	// family (src/server/routes/projects-routes.ts); cohort 2, the per-project
 	// config family (src/server/routes/project-config-routes.ts); cohort 3,
 	// the /api/marketplace/* + GET /api/packs/conflicts family
-	// (src/server/routes/marketplace-routes.ts).
+	// (src/server/routes/marketplace-routes.ts); cohort 5, the staff-inbox
+	// family (src/server/routes/staff-inbox-routes.ts); cohort 4, the
+	// /api/pack-runtimes* family (src/server/routes/pack-runtimes-routes.ts)
+	// and the server-scope /api/project-config trio
+	// (src/server/routes/project-config-server-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3523,6 +3545,10 @@ async function handleApiRoute(
 				loadPiExtensionContributionsFromRuntime, piExtensionDiagnostic, normalisePiExtensionCatalogueRefs,
 				activationMcpContributionId, operationMetadataForMcpContribution,
 				resolveRuntimeStartPlan, providerCarriesDeploymentMode,
+				// Cohort 5 (staff inbox) additions — append-only, see core-route-ctx.ts.
+				staffManager, inboxManager,
+				// Cohort 4 (pack-runtimes) additions — append-only, see core-route-ctx.ts.
+				packContributionRegistry, readBodyText,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -4197,14 +4223,9 @@ async function handleApiRoute(
 	// docs/design/route-registry.md (including the fall-through-parity shims
 	// for unhandled methods on those paths).
 
-	// GET /api/projects/:id/qa-testing-config
-	const evConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/qa-testing-config$/);
-	if (evConfigMatch && req.method === "GET") {
-		const ctx = projectContextManager.getOrCreate(evConfigMatch[1]);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		json({ configured: ctx.projectConfigStore.isQaConfiguredOnAnyComponent() });
-		return;
-	}
+	// GET /api/projects/:id/qa-testing-config moved to the core route registry
+	// (STR-01 cohort 4) — see src/server/routes/projects-routes.ts and
+	// docs/design/route-registry.md.
 
 	// GET /api/search
 	if (url.pathname === "/api/search" && req.method === "GET") {
@@ -6361,286 +6382,12 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── P2: pack managed-runtime (Docker-backed) supervisor REST surface ──────
-	// GET  /api/pack-runtimes?projectId=          → { runtimes: PackRuntimeStatus[] }
-	// POST /api/pack-runtimes/:id/start           → status (after ensure/start)
-	// POST /api/pack-runtimes/:id/stop            → status (after stop)
-	// POST /api/pack-runtimes/:id/restart         → status (after restart)
-	// GET  /api/pack-runtimes/:id/logs?tail=      → { logs, status? }
-	// The `:id` is the URL-safe encodePackRuntimeId(packId, runtimeId). Admin-bearer
-	// only (gated before handleApiRoute). All Docker execution lives in the
-	// supervisor; tests inject a fully-mocked supervisor (no daemon).
-	if (url.pathname === "/api/pack-runtimes" && req.method === "GET") {
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		try {
-			const statuses = await packRuntimeSupervisor.list(projectId);
-			// Re-derive the API id from {packId, runtimeId} so it always round-trips
-			// through decodePackRuntimeId regardless of the supervisor's internal id.
-			const runtimes = statuses.map((s) => ({ ...s, id: encodePackRuntimeId(s.packId, s.runtimeId) }));
-			json({ runtimes });
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// GET  /api/pack-runtimes/:id/capabilities?projectId=&mode= → capability summary
-	//   Pre-start consent disclosure (P3 §8): images/services, host ports, the
-	//   managed data/volume path, the start policy, and the memory/trust copy. Pure
-	//   (no Docker), so the Market UI can render it BEFORE the user consents.
-	const packRuntimeCapMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/capabilities$/);
-	if (packRuntimeCapMatch) {
-		if (req.method !== "GET") { json({ error: "method not allowed" }, 405); return; }
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		let packId: string, runtimeId: string;
-		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeCapMatch[1])); }
-		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const rawMode = url.searchParams.get("mode");
-		const requestedMode = rawMode !== null && rawMode.trim().length > 0 ? rawMode.trim() : undefined;
-		// The disclosure is DEPLOYMENT-mode aware (external / managed / managed-external-
-		// postgres). The caller may pass an explicit mode; absent that, resolve the
-		// EFFECTIVE deployment mode from the pack's provider config so the external
-		// (no-Docker) setup path is reachable even when the UI does not know the mode.
-		// Build the EFFECTIVE deployment config the SAME way the activation path does
-		// (each provider's flat schema defaults overlaid with its persisted store
-		// config), so the consent disclosure reflects custom settings — most importantly
-		// a custom `dataDir` bind path — rather than schema defaults that would diverge
-		// from what activation actually mounts.
-		const deploymentConfig: Record<string, unknown> = {};
-		let hasDeploymentSurface = false;
-		{
-			// Read RAW (activation-UNFILTERED) contributions, NOT `getPack` — the latter
-			// drops a provider whose activation gate is still unsatisfied (e.g. Hindsight's
-			// external-mode `memory` provider before `externalUrl` is set), which would
-			// misclassify fresh/default Hindsight as provider-less and disclose the Docker
-			// default mode instead of the external (no-Docker) setup path.
-			const pack = packContributionRegistry.getRawPack(projectId, packId);
-			for (const p of pack?.providers ?? []) {
-				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-				if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-				Object.assign(deploymentConfig, merged);
-				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-			}
-		}
-		// Resolve the EFFECTIVE deployment mode. With NO deployment surface (a provider-
-		// less runtime pack, or a pack whose only provider carries no deployment mode)
-		// there is no external/managed concept to honour, so the disclosure must show the
-		// runtime's manifest DEFAULT (Docker) mode/services/ports — the SAME no-surface
-		// fallback the activation/start paths use (they start such runtimes in the
-		// manifest default mode). Only fall back to `external` when a deployment surface
-		// exists but selects no managed mode.
-		const deploymentMode = requestedMode
-			?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
-				? deploymentConfig.mode
-				: (hasDeploymentSurface ? "external" : undefined));
-		// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
-		const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
-			managed: "managed-postgres",
-			"managed-external-postgres": "external-postgres",
-		};
-		try {
-			if (deploymentMode === undefined) {
-				// No deployment surface: disclose the runtime's manifest DEFAULT (Docker)
-				// mode/services/ports (capabilitySummary with no mode picks the first
-				// manifest mode). dockerRequired:true mirrors the start path bringing this
-				// runtime up in its default mode.
-				const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, config: deploymentConfig });
-				json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
-				return;
-			}
-			if (deploymentMode === "external") {
-				// External: derive descriptor/trust from the default manifest mode but disclose
-				// NO services/ports and flag dockerRequired:false, so the UI shows setup
-				// guidance instead of a Docker start disclosure. Works without Docker.
-				const base = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId });
-				json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
-				return;
-			}
-			const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
-			const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
-			json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
-		} catch (err) {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/pack-runtimes/:id/down { volumes?: boolean, removeState?: boolean }
-	//   `docker compose down`. Default (no volumes/removeState) preserves bind-mounted
-	//   data — the uninstall primitive. `volumes: true` + `removeState: true` is the
-	//   explicit purge. Admin-bearer only (gated before handleApiRoute).
-	const packRuntimeDownMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/down$/);
-	if (packRuntimeDownMatch) {
-		if (req.method !== "POST") { json({ error: "method not allowed" }, 405); return; }
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-		let packId: string, runtimeId: string;
-		try { ({ packId, runtimeId } = decodePackRuntimeId(packRuntimeDownMatch[1])); }
-		catch (err) { if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; } jsonError(500, err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const bodyText = await readBodyText(req);
-		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
-		let body: Record<string, unknown> = {};
-		const trimmed = bodyText.trim();
-		if (trimmed.length > 0) {
-			let parsed: unknown;
-			try { parsed = JSON.parse(trimmed); } catch { json({ error: "malformed JSON body" }, 400); return; }
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
-			body = parsed as Record<string, unknown>;
-		}
-		const volumes = body.volumes === true;
-		const removeState = body.removeState === true;
-		try {
-			const status = await packRuntimeSupervisor.down(packId, runtimeId, { projectId, volumes, removeState });
-			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-		} catch (err) {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
-	if (packRuntimeMatch) {
-		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
-		const wantsGet = action === "logs";
-		if (wantsGet ? req.method !== "GET" : req.method !== "POST") {
-			json({ error: "method not allowed" }, 405);
-			return;
-		}
-		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
-
-		// Map supervisor failures to status codes: NotFound → 404, BadRequest → 400.
-		const handleErr = (err: unknown): void => {
-			if (err instanceof PackRuntimeNotFoundError) { jsonError(404, err); return; }
-			if (err instanceof PackRuntimeBadRequestError) { jsonError(400, err); return; }
-			jsonError(500, err);
-		};
-
-		// Decode the URL-safe id (raw path segment — decodePackRuntimeId percent-
-		// decodes the halves itself). Malformed → PackRuntimeBadRequestError → 400.
-		let packId: string;
-		let runtimeId: string;
-		try {
-			({ packId, runtimeId } = decodePackRuntimeId(packRuntimeMatch[1]));
-		} catch (err) { handleErr(err); return; }
-		const projectId = url.searchParams.get("projectId") || undefined;
-
-		if (action === "logs") {
-			// Tail validation/clamping is owned by the supervisor (clampTail): a
-			// non-numeric tail throws PackRuntimeBadRequestError → 400; out-of-range
-			// values are clamped. Pass the raw query value through.
-			const rawTail = url.searchParams.get("tail");
-			const tail = rawTail !== null && rawTail !== "" ? (Number(rawTail) as number) : undefined;
-			try {
-				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
-				json({ logs });
-			} catch (err) {
-				// Surface a missing-Docker install as a consistent docker-unavailable
-				// shape (200 with empty logs + status) rather than hiding it behind an
-				// empty body or a generic 500.
-				if (err instanceof PackRuntimeDockerUnavailableError) {
-					json({ logs: "", status: "docker-unavailable", message: err.message });
-					return;
-				}
-				handleErr(err);
-			}
-			return;
-		}
-
-		// start | stop | restart — optional `mode` from the POST body. An EMPTY body
-		// is valid (default mode); a NON-EMPTY but malformed-JSON body is a client
-		// error — answer 400 and do NOT invoke the supervisor (never silently treat
-		// garbage as `{}` and mutate the default mode).
-		const bodyText = await readBodyText(req);
-		if (bodyText === null) { json({ error: "request body unreadable or too large" }, 400); return; }
-		let body: Record<string, unknown> = {};
-		const trimmedBody = bodyText.trim();
-		if (trimmedBody.length > 0) {
-			let parsed: unknown;
-			try { parsed = JSON.parse(trimmedBody); } catch { json({ error: "malformed JSON body" }, 400); return; }
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { json({ error: "malformed JSON body" }, 400); return; }
-			body = parsed as Record<string, unknown>;
-		}
-		let mode: string | undefined;
-		let explicitMode = false;
-		let startConfig: Record<string, unknown> | undefined;
-		if (action !== "stop") {
-			const rawMode = (body as { mode?: unknown }).mode;
-			if (rawMode !== undefined && rawMode !== null) {
-				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
-				mode = rawMode;
-				explicitMode = true;
-			}
-			// Derive the saved provider deployment config and remap it onto the
-			// runtime's env keys EXACTLY like marketplace activation start does
-			// (resolveRuntimeStartPlan — the shared source of truth). Without this the
-			// route would forward only {projectId, mode} and a managed start would fail
-			// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
-			const deploymentConfig: Record<string, unknown> = {};
-			let hasDeploymentSurface = false;
-			{
-				// Read RAW (activation-UNFILTERED) contributions — see the /capabilities route
-				// above for why getRawPack (not getPack) is required here.
-				const pack = packContributionRegistry.getRawPack(projectId, packId);
-				for (const p of pack?.providers ?? []) {
-					const merged: Record<string, unknown> = { ...(p.config ?? {}) };
-					const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
-					if (persisted && typeof persisted === "object") Object.assign(merged, persisted);
-					Object.assign(deploymentConfig, merged);
-					// A deployment surface requires a provider that ACTUALLY carries a
-					// deployment mode — an unrelated provider (no mode) must behave like a
-					// provider-less runtime so the no-surface fallback below applies.
-					if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
-				}
-			}
-			const plan = resolveRuntimeStartPlan(deploymentConfig);
-			startConfig = plan.config;
-			// Respect a saved EXTERNAL (or default/unset) deployment mode: that is the
-			// non-Docker setup path (plan.start === false), so there is NO managed
-			// runtime to bring up. Without an explicit body mode the route must NOT
-			// silently fall through to the runtime's first manifest mode (managed) and
-			// start Docker — activation already gates on plan.start, and the REST surface
-			// must agree. Answer 409 with a clear external/no-runtime shape; a caller that
-			// genuinely wants to start a managed stack must pass an explicit `mode`.
-			//
-			// The guard applies ONLY when the pack actually exposes a deployment-config
-			// surface (a provider whose config carries the mode). A runtime with no such
-			// surface has no external/managed concept to honor, so it keeps the legacy
-			// supervisor-default-mode behaviour and an unknown pack still reaches the
-			// supervisor (→ 404) rather than being masked by this 409.
-			if (hasDeploymentSurface && !plan.start && !explicitMode) {
-				const deploymentMode = typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
-					? deploymentConfig.mode
-					: "external";
-				json({
-					error: "runtime is configured for external (non-managed) mode; no Docker runtime to start",
-					mode: deploymentMode,
-					status: "stopped",
-					started: false,
-					id: encodePackRuntimeId(packId, runtimeId),
-				}, 409);
-				return;
-			}
-			// An explicit body mode (a runtime manifest mode) overrides the
-			// deployment-derived plan mode; otherwise use the plan's mapped mode.
-			if (mode === undefined) mode = plan.mode;
-		}
-		try {
-			const status = action === "stop"
-				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
-				: action === "start"
-					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode, config: startConfig })
-					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode, config: startConfig });
-			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
-		} catch (err) { handleErr(err); }
-		return;
-	}
+	// GET /api/pack-runtimes, GET /api/pack-runtimes/:id/capabilities,
+	// POST /api/pack-runtimes/:id/down, POST /api/pack-runtimes/:id/{start,stop,
+	// restart}, GET /api/pack-runtimes/:id/logs moved to the core route registry
+	// (STR-01 cohort 4) — see src/server/routes/pack-runtimes-routes.ts and
+	// docs/design/route-registry.md (including the fall-through-parity shims
+	// for unhandled methods on those paths).
 
 	// Fix B: there is NO server-side own-session message poster — driving the agent
 	// is a client-only, user-activation + session-secret gated capability. A server
@@ -7771,17 +7518,10 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/project-config — return project settings
-	if (url.pathname === "/api/project-config" && req.method === "GET") {
-		json(projectConfigStore.getWithDefaults());
-		return;
-	}
-
-	// GET /api/project-config/defaults — return just the defaults
-	if (url.pathname === "/api/project-config/defaults" && req.method === "GET") {
-		json(projectConfigStore.getDefaults());
-		return;
-	}
+	// GET /api/project-config, GET /api/project-config/defaults, and (below)
+	// PUT /api/project-config moved to the core route registry (STR-01
+	// cohort 4) — see src/server/routes/project-config-server-routes.ts and
+	// docs/design/route-registry.md.
 
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
@@ -7830,80 +7570,9 @@ async function handleApiRoute(
 	// marketplace-routes.ts's resolvePackRuntimeContext/buildActivationCatalogue
 	// rather than reintroduced here.
 
-	// PUT /api/project-config — update server-scope project config fields
-	if (url.pathname === "/api/project-config" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const bodyMap = body as Record<string, unknown>;
-
-		// Reject legacy top-level qa_* keys — they have moved into
-		// `components[<name>].config`.
-		for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
-			if (key in bodyMap) {
-				json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
-				return;
-			}
-		}
-
-		// Native-YAML migrated fields: must be sent as structured types.
-		const MIGRATED_FIELDS = [
-			{ key: "config_directories", expect: "array" as const },
-			{ key: "sandbox_tokens", expect: "array" as const },
-		];
-		const migratedExtracted: Record<string, unknown> = {};
-		for (const { key, expect } of MIGRATED_FIELDS) {
-			if (!(key in bodyMap)) continue;
-			const v = bodyMap[key];
-			if (v === null || v === "") { migratedExtracted[key] = null; delete bodyMap[key]; continue; }
-			if (typeof v === "string") {
-				json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
-				return;
-			}
-			if (expect === "array" && !Array.isArray(v)) { json({ error: `Field "${key}" must be an array` }, 400); return; }
-			migratedExtracted[key] = v;
-			delete bodyMap[key];
-		}
-
-		for (const [key, value] of Object.entries(bodyMap)) {
-			if (key.includes(".")) {
-				json({ error: `Config key "${key}" must not contain dots` }, 400);
-				return;
-			}
-			if (value === null || value === "") {
-				projectConfigStore.remove(key);
-			} else if (typeof value === "string") {
-				projectConfigStore.set(key, value);
-			}
-		}
-
-		// Apply migrated structured fields via typed setters.
-		if ("config_directories" in migratedExtracted) {
-			const v = migratedExtracted.config_directories;
-			if (v === null) projectConfigStore.remove("config_directories");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setConfigDirectories(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
-						path: String(e.path),
-						types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
-					})),
-				);
-			}
-		}
-		if ("sandbox_tokens" in migratedExtracted) {
-			const v = migratedExtracted.sandbox_tokens;
-			if (v === null) projectConfigStore.remove("sandbox_tokens");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setSandboxTokens(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
-						key: String(e.key), enabled: e.enabled !== false,
-					})),
-				);
-			}
-		}
-
-		json({ ok: true });
-		return;
-	}
+	// PUT /api/project-config moved to the core route registry (STR-01
+	// cohort 4) — see src/server/routes/project-config-server-routes.ts and
+	// docs/design/route-registry.md.
 
 	// ── Unified Model Registry ──
 
@@ -14019,148 +13688,6 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
-	}
-
-	// ── Staff inbox endpoints ──────────────────────────────────────
-	// `POST /api/staff/:id/wake` was deleted as part of the staff-inbox migration
-	// (see docs/design/staff-inbox.md §7.2). UI/external integrations now hit
-	// `POST /api/staff/:id/inbox` with `source.type = "manual_ui" | "manual_api"`.
-
-	// GET /api/staff/:id/inbox?state=pending&limit=50
-	const staffInboxListMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox$/);
-	if (staffInboxListMatch && req.method === "GET") {
-		const id = staffInboxListMatch[1];
-		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
-		const staff = staffManager.getStaff(id);
-		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const rawState = url.searchParams.get("state");
-		const allowedStates: ReadonlyArray<InboxEntry["state"]> = ["pending", "completed", "failed", "cancelled"];
-		const state = rawState && (allowedStates as readonly string[]).includes(rawState)
-			? (rawState as InboxEntry["state"])
-			: undefined;
-		const limitRaw = url.searchParams.get("limit");
-		const limit = limitRaw != null ? Math.max(0, parseInt(limitRaw, 10) || 0) : undefined;
-		const entries = inboxManager.listForStaff(id, state, limit);
-		json({ entries });
-		return;
-	}
-
-	// POST /api/staff/:id/inbox
-	if (staffInboxListMatch && req.method === "POST") {
-		const id = staffInboxListMatch[1];
-		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
-		const staff = staffManager.getStaff(id);
-		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body || typeof body.title !== "string" || !body.title.trim()) {
-			json({ error: "Missing title" }, 400);
-			return;
-		}
-		if (typeof body.prompt !== "string" || !body.prompt.trim()) {
-			json({ error: "Missing prompt" }, 400);
-			return;
-		}
-		const sourceType = body.source?.type === "manual_ui" || body.source?.type === "trigger"
-			? body.source.type
-			: "manual_api";
-		const actorId = typeof body.source?.actorId === "string" ? body.source.actorId : undefined;
-		try {
-			const entry = inboxManager.enqueue(id, {
-				title: body.title,
-				prompt: body.prompt,
-				context: typeof body.context === "string" ? body.context : undefined,
-				source: { type: sourceType, actorId },
-			});
-			json({ entry }, 201);
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/staff/:id/inbox/:entryId/complete
-	const staffInboxCompleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/complete$/);
-	if (staffInboxCompleteMatch && req.method === "POST") {
-		const [, id, entryId] = staffInboxCompleteMatch;
-		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
-		const staff = staffManager.getStaff(id);
-		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
-		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
-		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
-		if (existing.state !== "pending") {
-			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
-			return;
-		}
-		try {
-			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body.summary === "string" ? body.summary : undefined);
-			json({ entry });
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/staff/:id/inbox/:entryId/dismiss
-	const staffInboxDismissMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/dismiss$/);
-	if (staffInboxDismissMatch && req.method === "POST") {
-		const [, id, entryId] = staffInboxDismissMatch;
-		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
-		const staff = staffManager.getStaff(id);
-		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
-		if (body.outcome !== "failed" && body.outcome !== "cancelled") {
-			json({ error: "outcome must be 'failed' or 'cancelled'" }, 400);
-			return;
-		}
-		if (typeof body.reason !== "string" || !body.reason.trim()) {
-			json({ error: "Missing reason" }, 400);
-			return;
-		}
-		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
-		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
-		if (existing.state !== "pending") {
-			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
-			return;
-		}
-		try {
-			const entry = inboxManager.transitionToTerminal(id, entryId, body.outcome, body.reason);
-			json({ entry });
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// DELETE /api/staff/:id/inbox/:entryId
-	const staffInboxDeleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)$/);
-	if (staffInboxDeleteMatch && req.method === "DELETE") {
-		const [, id, entryId] = staffInboxDeleteMatch;
-		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
-		const staff = staffManager.getStaff(id);
-		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const ok = inboxManager.remove(id, entryId);
-		if (!ok) { json({ error: "Inbox entry not found" }, 404); return; }
-		json({ ok: true });
-		return;
 	}
 
 	// GET /api/staff/:id/sessions — DEPRECATED (staff agents have a single permanent session)

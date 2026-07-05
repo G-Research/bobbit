@@ -21,9 +21,15 @@
 // NOT migrated in this cohort (still in the legacy chain): the huge
 // GET/PUT /api/projects/:id/config(/defaults|/resolved) handler (own review
 // unit — far larger and riskier than the rest of this family) and the
-// unrelated /api/create-directory, /api/browse-directory, and
-// /api/projects/:id/qa-testing-config routes that are lexically interleaved
-// with this family in server.ts but are not part of it.
+// unrelated /api/create-directory, /api/browse-directory routes that are
+// lexically interleaved with this family in server.ts but are not part of it.
+//
+// STR-01 cohort 4 addition: GET /api/projects/:id/qa-testing-config — an
+// unrelated feature (QA-testing config detection) that merely shares this
+// family's `/api/projects/:id/...` path shape (same reason cohort 1 first
+// left it out). Folded into this module rather than a dedicated one-route
+// file since it's a single trivial handler using only fields this module
+// already destructures from `ctx`.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -655,6 +661,14 @@ async function handleProjectBaseRefDetect(ctx: CoreRouteCtx, params: Record<stri
 	}
 }
 
+// GET /api/projects/:id/qa-testing-config
+async function handleProjectQaTestingConfig(ctx: CoreRouteCtx, params: Record<string, string>): Promise<void> {
+	const { json, projectContextManager } = ctx;
+	const c = projectContextManager.getOrCreate(params.id);
+	if (!c) { json({ error: "Project not found" }, 404); return; }
+	json({ configured: c.projectConfigStore.isQaConfiguredOnAnyComponent() });
+}
+
 // Collection-level / other-verb literal segments under /api/projects/ that
 // must never be swallowed by the generic /api/projects/:id handlers below
 // (mirrors the legacy `projectGetMatch` regex's negative lookahead —
@@ -682,4 +696,5 @@ export function registerProjectRoutes(table: RouteTable<CoreRouteCtx>): void {
 	table.register("DELETE", "/api/projects/:id", handleProjectDelete, idOpts);
 	table.register("POST", "/api/projects/:id/promote", handleProjectPromote);
 	table.register("GET", "/api/projects/:id/base-ref/detect", handleProjectBaseRefDetect);
+	table.register("GET", "/api/projects/:id/qa-testing-config", handleProjectQaTestingConfig);
 }

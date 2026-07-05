@@ -53,6 +53,30 @@ export interface SwarmRestartResumeResult {
  * Call once, at boot, after `projectContextManager.initAll()` and the
  * `VerificationHarness` construction have both completed (server.ts wires
  * this right after `verificationHarness` is constructed).
+ *
+ * SWARM-W3 note (design/swarm-orchestration.md; the scheduler-hook gap this
+ * wave closed — see `swarm-orchestration-w3.md`): `createBestOfNSwarm` no
+ * longer registers a capacity-blocked sibling with the governor at
+ * creation/request time — registration is now deferred to actual team-start
+ * via `ChildTeamScheduler`'s `onStart` hook. `goal.createdAt` therefore is
+ * NOT necessarily a proxy for "when this sibling's governor node was
+ * originally registered" the way it was in W2 — it undercounts elapsed
+ * governed time for a sibling that spent real time capacity-blocked before
+ * starting. This sweep deliberately keeps using `createdAt` regardless: the
+ * ALTERNATIVE in-memory queue state (`ChildTeamScheduler`'s FIFO) does NOT
+ * survive a restart either (a separate, pre-existing, non-swarm-specific gap
+ * — no boot-time re-drive of `state: 'blocked'` children exists anywhere in
+ * the codebase today), so a sibling that was still genuinely capacity-blocked
+ * (never actually started) at restart time is otherwise permanently
+ * orphaned — no future event will ever start OR terminate it, and the
+ * barrier would never converge. Re-arming it here (conservatively, against
+ * `createdAt`) trades "may straggler-kill a moment early" for "the swarm
+ * always converges" — the same priority ordering the design's §6/§7
+ * guarantee already establishes. In the common case (a sibling that got a
+ * free permit immediately, i.e. did NOT spend meaningful time queued)
+ * `createdAt` is still an accurate proxy, since registration now happens
+ * synchronously inside the same `requestChildStart` call `createBestOfNSwarm`
+ * makes right after creating the goal.
  */
 export function reArmSwarmGovernorsOnBoot(
 	projectContextManager: ProjectContextManager,

@@ -1,7 +1,7 @@
 // CLF-W1b: pinning tests for the F14 deterministic thinking-level router's
 // rule table (`classifyThinkingLevel`) and its `DecisionClassifier` wrapper
-// (`thinkingRouterClassifier`). See
-// ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md §7/§9
+// (`thinkingRouterClassifier`). See the Fable program's classifier-framework
+// design note §7/§9
 // ("Regex `ultrathink`→xhigh (0 tokens)") and
 // src/server/agent/thinking-router-classifier.ts's header comment for why
 // there are no further heuristic tiers this wave — every rule not below MUST

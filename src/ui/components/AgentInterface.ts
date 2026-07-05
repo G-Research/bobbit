@@ -1868,7 +1868,7 @@ export class AgentInterface extends LitElement {
 				void openModelSelector(model, (nextModel) => {
 					session?.setModel?.(nextModel);
 					this.requestUpdate();
-				});
+				}, { projectId: this.projectId });
 			}
 			return;
 		}
@@ -2197,7 +2197,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); });
+					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); }, { projectId: this.projectId });
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
@@ -2551,7 +2551,7 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); });
+								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); }, { projectId: this.projectId });
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector

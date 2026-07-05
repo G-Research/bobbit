@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildDockerRunArgs } from "../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, isMissingDockerNetworkError, sandboxNetworkCreateArgs } from "../src/server/agent/docker-args.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../src/server/agent/rpc-bridge.js";
 
@@ -100,7 +100,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			});
 			const mounts = args.filter((a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "openai-orphan-tool-result", "tool-result-error-bridge"]) {
+			for (const sub of ["google-code-assist", "openai-orphan-tool-result", "tool-result-error-bridge", "provider-bridge"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
@@ -295,3 +295,32 @@ async function configureAgentDirForDockerTest(agentDir: string, projectRoot: str
 		mod.initializeAgentDirRuntimeState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
 	}
 }
+
+describe("sandbox network race helpers", () => {
+	it("isMissingDockerNetworkError matches the daemon's missing-network failure (and only it)", () => {
+		const daemonErr = new Error(
+			"Command failed: docker run -d --network=bobbit-sandbox-net ...\n" +
+			"docker: Error response from daemon: failed to set up container networking: network bobbit-sandbox-net not found",
+		);
+		assert.equal(isMissingDockerNetworkError(daemonErr, "bobbit-sandbox-net"), true);
+
+		// stderr-only shape (execFile attaches stderr as a property, message may omit it)
+		const stderrErr = Object.assign(new Error("Command failed: docker run"), {
+			stderr: "docker: Error response from daemon: network bobbit-sandbox-net not found",
+		});
+		assert.equal(isMissingDockerNetworkError(stderrErr, "bobbit-sandbox-net"), true);
+
+		// Different network name must not match — retrying the wrong failure would loop.
+		assert.equal(isMissingDockerNetworkError(daemonErr, "other-net"), false);
+		// Unrelated docker failures must not trigger the retry.
+		assert.equal(isMissingDockerNetworkError(new Error("No such image: bobbit-agent"), "bobbit-sandbox-net"), false);
+	});
+
+	it("sandboxNetworkCreateArgs is the single source for network create flags (bridge + icc off)", () => {
+		assert.deepEqual(sandboxNetworkCreateArgs("bobbit-sandbox-net"), [
+			"network", "create", "bobbit-sandbox-net",
+			"--driver", "bridge",
+			"--opt", "com.docker.network.bridge.enable_icc=false",
+		]);
+	});
+});

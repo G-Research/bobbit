@@ -369,6 +369,17 @@ export class RemoteAgent {
 	 *  the live <live-timer> ticker). */
 	private _compactionStartedAt: number | null = null;
 
+	/** Model the session was on before an in-flight optimistic `setModel()`.
+	 *  `setModel()` mutates `_state.model` before the server has confirmed
+	 *  the switch (so the footer updates instantly on the happy path).
+	 *  If the server rejects it — `SET_MODEL_FAILED` (e.g. unknown/unavailable
+	 *  model) or `RUNTIME_SWITCH_REQUIRES_NEW_SESSION` (Pi <-> Claude Code
+	 *  live-switch rejected by `assertRuntimeSwitchAllowed()` server-side) —
+	 *  the `case "error"` handler restores this so the footer doesn't keep
+	 *  showing a model the agent never actually bound to. Cleared once a
+	 *  `state` frame lands with a confirmed model. */
+	private _pendingModelRollback: any = null;
+
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
 	// This lets us fire requestMessages() early for fast loading while
@@ -1287,6 +1298,7 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any): void {
+		this._pendingModelRollback = this._state.model;
 		this._state.model = model;
 		this._clearProviderAuthRequired();
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
@@ -1649,6 +1661,25 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
+					// A confirmed model landed (spawn, resume, or a successful
+					// set_model) — any optimistic switch this state reflects is
+					// no longer rollback-eligible.
+					this._pendingModelRollback = null;
+				}
+				// Runtime metadata (Pi vs Claude Code local runtime) — pushed on
+				// initial attach, the `getState()` fallback path, and archived-session
+				// snapshots (see `sendFallbackModelState()`/`buildArchivedStateData()`
+				// in `ws/handler.ts`). AgentInterface's `_currentRuntime()` falls back
+				// to `session.state.runtime` when the `sessionRuntime` property hasn't
+				// been threaded through yet, so this must be captured here too.
+				if (typeof msg.data?.runtime === "string") {
+					this._state.runtime = msg.data.runtime;
+				}
+				if (typeof msg.data?.claudeCodeSessionId === "string") {
+					this._state.claudeCodeSessionId = msg.data.claudeCodeSessionId;
+				}
+				if (typeof msg.data?.claudeCodeModelAlias === "string") {
+					this._state.claudeCodeModelAlias = msg.data.claudeCodeModelAlias;
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -2126,6 +2157,15 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				// A rejected set_model (unknown/unavailable model, or a Pi <-> Claude
+				// Code runtime-boundary crossing rejected server-side) must not leave
+				// the footer showing the optimistically-set model forever — roll it
+				// back to what the agent is actually still bound to.
+				if ((msg.code === "SET_MODEL_FAILED" || msg.code === "RUNTIME_SWITCH_REQUIRES_NEW_SESSION") && this._pendingModelRollback) {
+					this._state.model = this._pendingModelRollback;
+					this._pendingModelRollback = null;
+					state.chatPanel?.agentInterface?.requestUpdate();
+				}
 				// Status mutation is the server's job — it broadcasts a matching
 				// `session_status` frame in the same termination path. We only
 				// clear local-only fields here.

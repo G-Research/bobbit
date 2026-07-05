@@ -3668,3 +3668,80 @@ export function getPackRuntimeLogs(opts: { packId: string; runtimeId: string; pr
 	const qs = params.toString();
 	return marketFetch(`/api/pack-runtimes/${encodeRuntimeApiId(opts.packId, opts.runtimeId)}/logs${qs ? `?${qs}` : ""}`);
 }
+
+// ── Sessionless BUILT-IN pack route access (Hindsight Marketplace config home) ──
+// `GET/POST /api/ext/pack-route/:packId/:routeName` — admin-bearer, built-in-packs-
+// only seam (server.ts) that lets the Marketplace read/write a built-in pack's own
+// route surface WITHOUT a bound chat session. GET works for any route name; POST is
+// allowlisted to `config` only (the built-in config write). Never used for
+// third-party packs.
+
+/** Redacted Hindsight `config` GET/POST response (`market-packs/hindsight/src/routes.ts::config`). */
+export interface HindsightConfigWire {
+	ok: boolean;
+	configured?: boolean;
+	config?: Record<string, unknown>;
+	/** Present only when the call carries a `projectId` — the project-overlay-free
+	 *  GLOBAL effective config (redacted), so the Marketplace's main Configure form
+	 *  never shows a per-project-overridden value as if it were global. */
+	globalConfig?: Record<string, unknown>;
+	/** The raw stored per-project overlay (memory-quality keys only), or `null`
+	 *  when none is set. Present only when the call carries a `projectId`. */
+	projectOverride?: Record<string, unknown> | null;
+	error?: string;
+	errors?: string[];
+}
+
+/** Hindsight `status` GET response (`market-packs/hindsight/src/routes.ts::status`) —
+ *  the single source of truth the Marketplace state badge derives from. */
+export interface HindsightStatusWire {
+	configured: boolean;
+	mode: string;
+	bank: string;
+	namespace: string;
+	recallScope: "project" | "all";
+	tagsMatch?: string;
+	autoRecall: boolean;
+	autoRetain: boolean;
+	projectOverrideActive: boolean;
+	queueDepth: number;
+	externalUrl: string;
+	uiUrl: string;
+	timeoutMs: number;
+	recallBudget: number;
+	lastError?: unknown;
+	healthy: boolean;
+}
+
+/** GET a built-in pack's route (sessionless). `routeName` addresses any route the
+ *  pack declares (`config`/`status`/…); this is a pure read. */
+export function getExtPackRoute<T = Record<string, unknown>>(packId: string, routeName: string, projectId?: string): Promise<MarketResult<T>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/ext/pack-route/${encodeURIComponent(packId)}/${encodeURIComponent(routeName)}${qs}`);
+}
+
+/** GET the Hindsight `status` route (sessionless, pure read — never starts Docker). */
+export function getHindsightStatus(projectId?: string): Promise<MarketResult<HindsightStatusWire>> {
+	return getExtPackRoute<HindsightStatusWire>("hindsight", "status", projectId);
+}
+
+/** GET the Hindsight `config` route (sessionless, pure read). */
+export function getHindsightConfig(projectId?: string): Promise<MarketResult<HindsightConfigWire>> {
+	return getExtPackRoute<HindsightConfigWire>("hindsight", "config", projectId);
+}
+
+/** POST a GLOBAL Hindsight config write (sessionless). `body` carries only the
+ *  changed top-level config keys — never `projectOverride` (see
+ *  {@link saveHindsightProjectOverride} for the per-project overlay write). */
+export function saveHindsightConfig(body: Record<string, unknown>): Promise<MarketResult<HindsightConfigWire>> {
+	return marketFetch("/api/ext/pack-route/hindsight/config", jsonInit("POST", body));
+}
+
+/** POST a per-project Hindsight config OVERLAY write (sessionless, full-replace —
+ *  see `validateProjectOverride` in `market-packs/hindsight/src/shared.ts`). Only
+ *  memory-quality keys (`recallScope` etc.) may be set; an empty/`""` value clears
+ *  that key from the overlay. */
+export function saveHindsightProjectOverride(projectOverride: Record<string, unknown>, projectId: string): Promise<MarketResult<HindsightConfigWire>> {
+	const qs = `?projectId=${encodeURIComponent(projectId)}`;
+	return marketFetch(`/api/ext/pack-route/hindsight/config${qs}`, jsonInit("POST", { projectOverride }));
+}

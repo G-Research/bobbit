@@ -349,6 +349,8 @@ interface SwarmGroupStatus {
 	capturedCount: number;
 	barrierFired: boolean;
 	allFailed: boolean;
+	/** Per-sibling TERMINAL status, one entry per captured artifact (SWARM-W3: rendered per-sibling in the strip, not just as an aggregate count — transparency into which candidate did what). Absent siblings are still non-terminal (running or capacity-blocked); their live state comes from `dashboardDescendants`, not this array. */
+	artifacts?: Array<{ goalId: string; status: "done" | "failed" | "killed"; branch?: string; commitSha?: string; capturedAt: number }>;
 	lastVerify?: { outcome: string; winnerGoalId?: string; scores: Array<{ goalId: string; passed: boolean; score: number }> };
 	integratedGoalId?: string;
 	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string };
@@ -368,6 +370,21 @@ function swarmGroupIdsForCurrentGoal(): string[] {
 		}
 	}
 	return [...ids];
+}
+
+/**
+ * SWARM-W3 transparency slice: the direct children carrying `swarmGroup`,
+ * sorted stably by `createdAt` (candidate-1, candidate-2, ... order) — reused
+ * to render a per-sibling row in the strip (title + live/terminal state +
+ * verifier verdict), not just the aggregate captured/expected count. Derived
+ * client-side from the already-fetched `dashboardDescendants`, same as
+ * `swarmGroupIdsForCurrentGoal` — no new cross-goal query.
+ */
+function swarmGroupSiblingsForCurrentGoal(swarmGroup: string): Goal[] {
+	if (!currentGoal) return [];
+	return dashboardDescendants
+		.filter(g => g.parentGoalId === currentGoal!.id && (g as any).swarmGroup === swarmGroup)
+		.sort((a, b) => a.createdAt - b.createdAt);
 }
 
 async function fetchSwarmGroupStatus(parentGoalId: string, swarmGroup: string): Promise<void> {
@@ -464,6 +481,48 @@ function renderSwarmGovernorStrip(): TemplateResult | typeof nothing {
 						${status?.lastVerify
 							? html`<div class="swarm-governor-scores">verify outcome: ${status.lastVerify.outcome}${status.lastVerify.winnerGoalId ? ` — pick: ${status.lastVerify.winnerGoalId.slice(0, 8)}` : ""}</div>`
 							: nothing}
+						${renderSwarmSiblingRows(swarmGroup, status)}
+					</div>
+				`;
+			})}
+		</div>
+	`;
+}
+
+/**
+ * SWARM-W3 transparency slice: one row per sibling — title, live/terminal
+ * state, and (once available) the deterministic verifier's per-candidate
+ * pass/score — under the existing aggregate strip. Previously the strip only
+ * showed an aggregate "N/M candidates terminal" count with no way to tell
+ * WHICH candidate did what without leaving the dashboard; this renders the
+ * same already-fetched data (`dashboardDescendants` for live state,
+ * `status.artifacts` for terminal outcome, `status.lastVerify.scores` for the
+ * verifier verdict) the strip already has, so it costs zero extra requests.
+ */
+function renderSwarmSiblingRows(swarmGroup: string, status: SwarmGroupStatus | undefined): TemplateResult | typeof nothing {
+	const siblings = swarmGroupSiblingsForCurrentGoal(swarmGroup);
+	if (siblings.length === 0) return nothing;
+	const artifactByGoalId = new Map((status?.artifacts ?? []).map(a => [a.goalId, a]));
+	const scoreByGoalId = new Map((status?.lastVerify?.scores ?? []).map(s => [s.goalId, s]));
+	return html`
+		<div class="swarm-governor-siblings">
+			${siblings.map((sib) => {
+				const artifact = artifactByGoalId.get(sib.id);
+				const score = scoreByGoalId.get(sib.id);
+				const isWinner = status?.integratedGoalId === sib.id;
+				const stateLabel = artifact
+					? artifact.status // "done" | "failed" | "killed"
+					: sib.state === "blocked"
+						? "queued (capacity)"
+						: sib.state; // "todo" | "in-progress" | "complete" | "shelved"
+				return html`
+					<div class="swarm-governor-sibling" data-sibling-goal-id="${sib.id}" data-sibling-state="${stateLabel}">
+						<span class="swarm-governor-sibling-title">${sib.title}</span>
+						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}</span>
+						${score
+							? html`<span class="swarm-governor-sibling-score">verify: ${score.passed ? "pass" : "fail"}${typeof score.score === "number" ? ` (${score.score})` : ""}</span>`
+							: nothing}
+						${isWinner ? html`<span class="swarm-governor-sibling-winner">winner</span>` : nothing}
 					</div>
 				`;
 			})}

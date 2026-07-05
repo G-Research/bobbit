@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { makeTmpDir } from "./helpers/tmp.ts";
+import { stubMcp } from "./helpers/mcp-stub.ts";
 
 const tmpRoot = makeTmpDir("force-abort-grace-test-");
 process.env.BOBBIT_DIR = tmpRoot;
@@ -32,27 +33,9 @@ afterEach(() => {
 	}
 });
 
-/**
- * forceAbort's respawn path unconditionally calls ensureMcpManagerForContext()
- * (session-manager.ts, force-kill branch) to rebuild tool-activation args after
- * killing the wedged bridge. That builds a REAL McpManager and connects it —
- * discovering and connecting to whatever MCP servers happen to be configured
- * in the ambient ~/.claude.json / ~/.claude/.mcp.json / ~/.bobbit/.mcp.json on
- * the machine running the test (real stdio child processes, real HTTP
- * sockets — entirely unrelated to this test's fixtures). Nothing tears those
- * connections down afterward, so the real handles they open keep this file's
- * event loop alive well past every `it()` block completing: the file "hangs"
- * (or, under `--test-force-exit`, the leaked connect/spawn latency can blow
- * past timing assertions like S8's `elapsed < 5000`) even though every
- * subtest itself reports green. Stub the MCP manager lookup to a no-op so
- * forceAbort's respawn path never reaches out to real ambient infrastructure.
- * buildToolActivationArgs() already tolerates a null MCP manager (mcpManager
- * ? ... : undefined), so this is a pure test seam with no product change.
- */
-function stubMcp(manager: any): void {
-	manager.ensureMcpManagerForContext = async () => null;
-}
-
+// forceAbort's respawn path reaches real ambient MCP infrastructure unless
+// stubbed — see tests/helpers/mcp-stub.ts for the full explanation. Every
+// SessionManager instance below is stubbed via stubMcp() for this reason.
 describe("SessionManager.forceAbort grace race (S8)", () => {
 	it("force-kills within the grace period when abort() hangs and no agent_end arrives", async () => {
 		// Respawn must not spawn a real process — a throwing factory is caught by

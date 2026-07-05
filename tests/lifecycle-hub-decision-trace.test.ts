@@ -2,7 +2,7 @@
 // `TraceEntry.decisions[]` migration (see the TODO(CLF-W1a) comment
 // `LifecycleHub.recordDecisionOutcome` replaced, and `ContextTraceStore.appendDecision`).
 //
-// Design: ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md
+// Design: Fable program's classifier-framework design note,
 // Wave 1(a) — "Transparency first: TraceEntry.decisions[] + panel rows +
 // browser E2E ... before any classifier."
 import { describe, it } from "node:test";

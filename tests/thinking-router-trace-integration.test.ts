@@ -4,8 +4,8 @@
 // when consulted through `LifecycleHub.dispatchDecision` during an active
 // turn, and that the "not a registered pair" throw never fires once
 // `registerThinkingRouterClassifier` has run (this is what `server.ts` does
-// at gateway construction). See
-// ~/Documents/dev/bobbit-fable-refactor/design/classifier-framework.md §9
+// at gateway construction). See the Fable program's classifier-framework
+// design note §9
 // (F14 unification row) and §12 ("trace rows == decisions applied" pinning
 // invariant — here: trace rows == decisions RECORDED, since W1b is
 // observe-mode only).

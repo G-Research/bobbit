@@ -371,9 +371,14 @@ test.describe("Nested project root — integration", () => {
 		const archiveBtn = page.locator('.nav button[title="Archive goal"]').first();
 		await archiveBtn.waitFor({ timeout: 15_000 });
 		await archiveBtn.click();
-		// Confirm dialog: Enter accepts the default destructive action.
 		await page.locator('text=Archive Goal').first().waitFor({ timeout: 5_000 });
-		await page.keyboard.press("Enter");
+		// UX-03 removed the document-level Enter confirm — click the confirm
+		// button explicitly (same adaptation as tests/e2e/ui/goal-archive-always-on.spec.ts).
+		// The dialog has two variants depending on whether the goal team is
+		// still active at archive time: "Archive Goal" (confirm: "Archive") or
+		// "Stop team and archive goal?" (confirm: "Stop & Archive"). Both end
+		// with the goal archived — accept either confirm label.
+		await page.locator('[role="dialog"]').last().getByRole("button", { name: /^(Archive|Stop & Archive)$/ }).click();
 
 		// Server-side state pinned via API: archived flag must flip.
 		const deadline = Date.now() + 30_000;

@@ -11,10 +11,17 @@
  *   2. The expected-sibling set is persisted (`SwarmGroupStore.createGroup`)
  *      BEFORE any `requestChildStart` call — the SWARM-W0 carry-forward fix
  *      this module exists to close (§14 item 4).
- *   3. Every sibling is registered with the governor BEFORE its start is
- *      requested (§6 must-fix #1 depends on this ordering — a straggler
- *      clock that starts ticking after the team already exists would be a
- *      false negative window).
+ *   3. Every sibling that gets a free permit is registered with the governor
+ *      by the time its team actually starts (§6 must-fix #1). SWARM-W3
+ *      (design/swarm-orchestration.md; the scheduler-hook gap flagged by
+ *      docs/design/swarm-orchestration-w2.md) overturned the ORIGINAL
+ *      version of this invariant — "every sibling is registered with the
+ *      governor BEFORE its start is requested" — because that unconditional
+ *      eager registration started a capacity-blocked sibling's straggler
+ *      wall-clock deadline at request time, before its team ever ran. The
+ *      governor is now armed via `requestChildStart`'s `onStart` hook, which
+ *      fires exactly at actual team-start: immediately for a sibling with a
+ *      free permit, or later (once dequeued) for a capacity-blocked one.
  *   4. `N > cap` (scheduler-invariant, §7): siblings the fake scheduler
  *      reports capacity-blocked are stamped `state:"blocked"` and returned
  *      in `capacityBlocked` — mirrors the real `requestChildStart` contract.
@@ -60,26 +67,34 @@ beforeEach(() => {
 	swarmGroupStore = new SwarmGroupStore(stateDir);
 });
 
-/** Fake scheduler surface: reports capacity-blocked once `cap` starts are in flight, mirroring `ChildTeamScheduler.requestStart`'s real contract. */
+/**
+ * Fake scheduler surface: reports capacity-blocked once `cap` starts are in
+ * flight, mirroring `ChildTeamScheduler.requestStart`'s real contract —
+ * including its `onStart` hook, which fires immediately for a sibling with a
+ * free "permit" and is stashed in `pendingOnStart` (keyed by goalId) for a
+ * capacity-blocked one, to be invoked later by the test to simulate the real
+ * scheduler draining its FIFO queue once a permit frees.
+ */
 function makeFakeHarness(cap: number) {
 	const swarmGovernor = new SwarmGovernor({ schedule: () => ({} as any), clear: () => {} });
-	const registeredBeforeStart: string[] = [];
 	const startedOrder: string[] = [];
+	const pendingOnStart = new Map<string, () => void>();
 	let running = 0;
 	const harness: any = {
 		swarmGovernor,
-		requestChildStart(goalId: string): "started" | "capacity-blocked" {
-			// Registration must have already happened for this goalId by the
-			// time start is requested — pins ordering requirement #3.
-			if (swarmGovernor.isRegistered(goalId)) registeredBeforeStart.push(goalId);
-			if (running >= cap) return "capacity-blocked";
+		requestChildStart(goalId: string, onStart?: () => void): "started" | "capacity-blocked" {
+			if (running >= cap) {
+				if (onStart) pendingOnStart.set(goalId, onStart);
+				return "capacity-blocked";
+			}
 			running++;
 			startedOrder.push(goalId);
+			onStart?.();
 			return "started";
 		},
 		hardKillSwarmNode: async () => {},
 	};
-	return { harness, registeredBeforeStart, startedOrder };
+	return { harness, startedOrder, pendingOnStart };
 }
 
 function fakeDeps(harness: any) {
@@ -120,10 +135,10 @@ describe("createBestOfNSwarm", () => {
 		const { harness } = makeFakeHarness(8);
 		let sawGroupBeforeStart = false;
 		const originalRequestChildStart = harness.requestChildStart.bind(harness);
-		harness.requestChildStart = (goalId: string) => {
+		harness.requestChildStart = (goalId: string, onStart?: () => void) => {
 			const rec = swarmGroupStore.getAll().find(g => g.expectedSiblingIds && g.expectedSiblingIds.length === 3);
 			if (rec) sawGroupBeforeStart = true;
-			return originalRequestChildStart(goalId);
+			return originalRequestChildStart(goalId, onStart);
 		};
 		const result = await createBestOfNSwarm(fakeDeps(harness), {
 			parentGoalId: parent.id, title: "T", spec: "A shared prompt for every candidate to attempt independently.",
@@ -134,14 +149,23 @@ describe("createBestOfNSwarm", () => {
 		assert.deepEqual(new Set(rec.expectedSiblingIds), new Set(result.siblingGoalIds));
 	});
 
-	it("registers every sibling with the governor BEFORE requesting its start", async () => {
+	it("registers an immediately-started sibling with the governor at start time; defers a capacity-blocked sibling's registration until its team actually starts (SWARM-W3 scheduler-hook fix)", async () => {
 		const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
-		const { harness, registeredBeforeStart } = makeFakeHarness(8);
+		const { harness, pendingOnStart } = makeFakeHarness(1);
 		const result = await createBestOfNSwarm(fakeDeps(harness), {
 			parentGoalId: parent.id, title: "T", spec: "A shared prompt for every candidate to attempt independently.",
 			siblings: [{}, {}], tokenBudgetPerNode: 1000, wallClockMsPerNode: 1000, verifyCommand: "true",
 		});
-		assert.equal(registeredBeforeStart.length, result.siblingGoalIds.length, "EVERY sibling must already be governor-registered by the time its start is requested");
+		assert.equal(result.capacityBlocked.length, 1, "cap 1, 2 siblings — exactly one must be capacity-blocked");
+		const blockedId = result.capacityBlocked[0];
+		const startedId = result.siblingGoalIds.find(id => id !== blockedId)!;
+
+		assert.ok(harness.swarmGovernor.isRegistered(startedId), "the immediately-started sibling must be governor-registered by the time createBestOfNSwarm returns");
+		assert.ok(!harness.swarmGovernor.isRegistered(blockedId), "the capacity-blocked sibling must NOT be registered while merely queued — its straggler clock must not tick before its team runs");
+
+		// Simulate the real scheduler later draining its FIFO queue once a permit frees.
+		pendingOnStart.get(blockedId)!();
+		assert.ok(harness.swarmGovernor.isRegistered(blockedId), "once its team actually starts, the previously-queued sibling is registered");
 	});
 
 	it("N > cap: siblings the scheduler reports capacity-blocked are stamped state='blocked' and returned in capacityBlocked", async () => {

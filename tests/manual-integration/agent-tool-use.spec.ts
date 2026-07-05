@@ -38,7 +38,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync } from "node:fs";
+import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync, openSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
@@ -118,8 +118,15 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
-	proc.stderr!.on("data", (c: Buffer) => { stderr += c; });
-	proc.stdout!.on("data", () => {});
+	// Optional gateway log tap (same contract as restart-minimal.spec.ts):
+	// BOBBIT_TEST_GW_LOG=/path/to/log appends both stdio streams for post-mortem.
+	const logTap = process.env.BOBBIT_TEST_GW_LOG;
+	let logFh: number | null = null;
+	if (logTap) {
+		try { logFh = openSync(logTap, "a"); writeSync(logFh, `\n=== agent-tool-use gateway :${port} ===\n`); } catch {}
+	}
+	proc.stderr!.on("data", (c: Buffer) => { stderr += c; if (logFh !== null) { try { writeSync(logFh, c); } catch {} } });
+	proc.stdout!.on("data", (c: Buffer) => { if (logFh !== null) { try { writeSync(logFh, c); } catch {} } });
 	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
@@ -342,7 +349,7 @@ function cleanTestDockerContainers() {
 				const binds = execFileSync("docker", [
 					"inspect", "--format", "{{json .HostConfig.Binds}}", id,
 				], { encoding: "utf-8", timeout: 5_000 }).trim();
-				if (/\.bobbit-manual|\.e2e-resilience/.test(binds)) {
+				if (/\.bobbit-manual|\.bobbit-manint|\.e2e-resilience/.test(binds)) {
 					const projectId = execFileSync("docker", [
 						"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
 					], { encoding: "utf-8", timeout: 5_000 }).trim();
@@ -458,7 +465,14 @@ test.describe.serial("Agent tool use", () => {
 		ti.setTimeout(180_000);
 		port = await freePort();
 		const tmp = manualTmpRoot();
-		dir = join(tmp, `.bobbit-manual-${port}`);
+		// `.bobbit-manint-` (NOT `.bobbit-manual-`): older checkouts' E2E global
+		// teardown (tests/e2e/e2e-teardown.ts) reaped any container whose binds
+		// matched `.bobbit-manual`, force-removing this suite's LIVE sandbox
+		// container when a concurrent `test:e2e` in another worktree finished.
+		// The current teardown no longer matches manual binds (pinned by
+		// tests/e2e-teardown-scope.test.ts), but stale worktrees keep the old
+		// regex — so the manual suite's dirs must not share that namespace.
+		dir = join(tmp, `.bobbit-manint-${port}`);
 		rmSync(dir, { recursive: true, force: true });
 		initRepo(dir);
 

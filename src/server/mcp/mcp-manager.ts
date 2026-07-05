@@ -474,11 +474,25 @@ export class McpManager {
       this._mergeConfigFile(merged, path.join(proj.cwd, ".bobbit", "config", "mcp.json"), "mcpServers");
     }
 
-    const home = os.homedir();
-    this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
-    this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"));
-    this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
-    this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
+    // User-scope AMBIENT machine config. Under the test wrappers'
+    // BOBBIT_TEST_NO_EXTERNAL seam (set by scripts/run-unit.mjs and
+    // scripts/run-playwright-e2e.mjs, and honored by aigw-manager /
+    // pr-walkthrough github-adapter / skills git.ts for the same reason),
+    // skip these sources entirely: a test that reaches connectAll() without
+    // stubbing MCP would otherwise discover and connect to whatever real MCP
+    // servers the HOST machine has in ~/.claude.json / ~/.claude/.mcp.json /
+    // ~/.bobbit/.mcp.json — spawning real stdio child processes and opening
+    // real network sockets from a unit test (the PR #105 hang class). Tests
+    // exercise MCP discovery via cwd-scope files, custom directories, or the
+    // marketplace resolver — never via the developer's real home directory.
+    // Pinned by tests/session-manager-ambient-mcp-isolation.test.ts.
+    if (process.env.BOBBIT_TEST_NO_EXTERNAL !== "1") {
+      const home = os.homedir();
+      this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
+      this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"));
+      this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
+      this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
+    }
 
     this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");

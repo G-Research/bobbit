@@ -84,6 +84,34 @@ export class ChildTeamScheduler {
 	private holding = new Map<string, Set<string>>();
 	/** Reverse index childGoalId → rootGoalId so terminal events can find the root even post-archive. */
 	private childRoot = new Map<string, string>();
+	/**
+	 * Callbacks fired every time `startChildTeam` is actually ATTEMPTED for a
+	 * childGoalId — i.e. the moment its team REALLY starts (or re-starts),
+	 * whether immediately (a permit was free at `requestStart` time) or later
+	 * once dequeued from the capacity-blocked FIFO by `_startNextEligible`.
+	 *
+	 * SWARM-W3 (design/swarm-orchestration.md; the scheduler-hook gap
+	 * explicitly flagged by `docs/design/swarm-orchestration-w2.md`: "Fixing
+	 * this requires plumbing a 'team actually started' callback from
+	 * `ChildTeamScheduler` back into the registration path"). Lets a caller
+	 * (`swarm-best-of-n.ts`) defer governor registration — in particular the
+	 * straggler wall-clock deadline — until the team is REALLY running,
+	 * instead of at `requestStart` call time. Without this a capacity-blocked
+	 * sibling's wall-clock deadline started ticking at (or before)
+	 * `requestStart` time, so under `fanOut > cap` with a long queue a
+	 * sibling could be straggler-killed before it ever got to run.
+	 *
+	 * Deliberately NOT one-shot-consumed on invocation: if a start attempt
+	 * fails (sync throw or async reject) the child is released + re-enqueued
+	 * for a later retry, and that retry is itself a fresh "team actually
+	 * starting" moment the caller should be told about again (e.g. so the
+	 * governor's clock re-arms fresh rather than the node going permanently
+	 * ungoverned after one failed attempt). `registerNode` is idempotent, so
+	 * a caller that re-arms on every attempt is safe. Cleared only when the
+	 * child goes genuinely terminal (`notifyTerminal`) or is dropped as a
+	 * stale/archived queue entry before it ever starts.
+	 */
+	private startCallbacks = new Map<string, () => void>();
 
 	constructor(private deps: ChildTeamSchedulerDeps) {}
 
@@ -123,13 +151,21 @@ export class ChildTeamScheduler {
 	 * responsible for stamping the child's `state` to `blocked` on the
 	 * capacity-blocked outcome (the scheduler flips it back when it later
 	 * starts the team).
+	 *
+	 * `onStart`, if supplied, fires exactly once — the instant
+	 * `startChildTeam` is actually invoked for `childGoalId` — regardless of
+	 * whether that happens synchronously inline (permit was free) or later,
+	 * asynchronously, once the child is dequeued from the capacity-blocked
+	 * FIFO (see `startCallbacks` above). Never fired for a child that never
+	 * actually starts (e.g. dropped from the queue as stale/archived).
 	 */
-	requestStart(childGoalId: string): StartOutcome {
+	requestStart(childGoalId: string, onStart?: () => void): StartOutcome {
 		const rootGoalId = this._rootOf(childGoalId);
 		if (!rootGoalId) {
 			// No resolvable root (should not happen for a child) — start without
 			// a cap rather than strand the child. No permit to leak here.
 			try {
+				onStart?.();
 				this.deps.startChildTeam(childGoalId);
 			} catch (err) {
 				console.warn(`[scheduler] rootless startChildTeam failed for ${childGoalId} (non-fatal):`, err);
@@ -137,6 +173,7 @@ export class ChildTeamScheduler {
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
+		if (onStart) this.startCallbacks.set(childGoalId, onStart);
 		const sem = this.getSemaphore(rootGoalId);
 		if (sem.tryAcquire()) {
 			// `_startHolding` releases the permit + re-enqueues if the start fails
@@ -163,6 +200,7 @@ export class ChildTeamScheduler {
 		const wasHolding = held?.delete(childGoalId) ?? false;
 		this._removePending(rootGoalId, childGoalId);
 		this.childRoot.delete(childGoalId);
+		this.startCallbacks.delete(childGoalId);
 		if (wasHolding) {
 			const sem = this.semaphores.get(rootGoalId);
 			if (sem) sem.release();
@@ -217,6 +255,14 @@ export class ChildTeamScheduler {
 	 */
 	private _startHolding(rootGoalId: string, childGoalId: string, sem: Semaphore): boolean {
 		this._markHolding(rootGoalId, childGoalId);
+		const onStart = this.startCallbacks.get(childGoalId);
+		if (onStart) {
+			try {
+				onStart();
+			} catch (err) {
+				console.warn(`[scheduler] onStart callback threw for ${childGoalId} (non-fatal):`, err);
+			}
+		}
 		let result: void | Promise<void>;
 		try {
 			result = this.deps.startChildTeam(childGoalId);
@@ -294,6 +340,7 @@ export class ChildTeamScheduler {
 				// Stale pending entry — drop it, do not consume a permit.
 				q.splice(i, 1);
 				this.childRoot.delete(next);
+				this.startCallbacks.delete(next);
 				continue;
 			}
 			if (c.paused === true) {

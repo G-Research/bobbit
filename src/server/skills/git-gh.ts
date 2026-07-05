@@ -3,9 +3,9 @@
  * commit/diff helpers, branch publish, remote-branch cleanup, and PR-status
  * (gh CLI) caching + merge-permission checks.
  *
- * Extracted verbatim from src/server/server.ts (STR-04/W4.1 — see
- * bobbit-fable-refactor/FINDINGS.md "STR-02 — A self-contained git/gh
- * subsystem ... embedded inside the server.ts entrypoint"): this surface only
+ * Extracted verbatim from src/server/server.ts (STR-04/W4.1 — see the Fable
+ * program's finding STR-02, "A self-contained git/gh subsystem ... embedded
+ * inside the server.ts entrypoint"): this surface only
  * shells out to `git`/`gh` and depends on node builtins + each other, not on
  * handleApiRoute's closure state, so it lives here as a leaf module that
  * server.ts imports from instead of defining inline.

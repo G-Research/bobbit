@@ -13,19 +13,26 @@ protocol future cohorts should follow, and what's left after cohort 1.
 ## Status
 
 - **Cohort 1: `/api/projects*` CRUD** — 14 routes migrated
-  (`src/server/routes/projects-routes.ts`). See
+  (`src/server/routes/projects-routes.ts`), plus (as of cohort 4)
+  `GET /api/projects/:id/qa-testing-config`. See
   [Cohort list](#cohort-1-projects) below.
 - **Cohort 2: `/api/projects/:id/config(...)`** — the per-project config
   family (`src/server/routes/project-config-routes.ts`). See
   [Cohort 2](#cohort-2-per-project-config) below.
-- Everything else in `handleApiRoute` is unchanged, still in the legacy
-  if/else chain (the marketplace family is being migrated in a parallel
-  cohort branch).
-- **Cohort 1: `/api/projects*`** — 14 routes migrated. See
-  [Cohort list](#cohort-1-projects) below.
-- **Cohort 2: `/api/marketplace/*` + `GET /api/packs/conflicts`** — see
+- **Cohort 3 (labelled "cohort 2" in its own file headers; merged from a
+  parallel branch): `/api/marketplace/*` + `GET /api/packs/conflicts`** — see
   [Cohort 2: marketplace](#cohort-2-marketplace) below.
-- Everything else in `handleApiRoute` (~390 remaining routes) is unchanged,
+- **Cohort 5: staff inbox** — `GET`/`POST` `/api/staff/:id/inbox`,
+  `POST /api/staff/:id/inbox/:entryId/{complete,dismiss}`,
+  `DELETE /api/staff/:id/inbox/:entryId` — see
+  [Cohort 5: staff inbox](#cohort-5-staff-inbox) below.
+- **Cohort 4: `/api/pack-runtimes*`**
+  (`src/server/routes/pack-runtimes-routes.ts`) and the **server-scope
+  `/api/project-config` trio**
+  (`src/server/routes/project-config-server-routes.ts`), plus the
+  qa-testing-config one-liner above. See
+  [Cohort 4](#cohort-4-pack-runtimes--server-scope-project-config) below.
+- Everything else in `handleApiRoute` (~375 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -305,6 +312,134 @@ specs (`market-activation`, `marketplace-conflicts`, `marketplace-mcp`,
 (`marketplace.spec.ts`'s "Sources menu filters..." package-count assertion,
 confirmed to fail identically on the unmigrated baseline).
 
+## Cohort 5: staff inbox
+
+`src/server/routes/staff-inbox-routes.ts`. The five staff-inbox routes,
+moved verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/staff/:id/inbox` |
+| POST | `/api/staff/:id/inbox` |
+| POST | `/api/staff/:id/inbox/:entryId/complete` |
+| POST | `/api/staff/:id/inbox/:entryId/dismiss` |
+| DELETE | `/api/staff/:id/inbox/:entryId` |
+
+Chosen for this cohort because it's small (5 handlers, ~150 lines),
+lexically self-contained (its own comment-delimited block, distinct from the
+surrounding `/api/staff` CRUD family), and has the strongest test coverage
+of any candidate in the remaining chain: unit coverage
+(`tests/inbox-manager.test.ts`, `tests/inbox-nudger.test.ts`,
+`tests/inbox-store.test.ts`), a dedicated API E2E spec
+(`tests/e2e/inbox-api.spec.ts`, 11 cases covering every route's happy path,
+404/403/409 branches, and the deleted `/wake` shim), and a browser E2E spec
+(`tests/e2e/ui/staff-inbox.spec.ts`). It's also explicitly NOT a
+session/steer/WS hot path — it's an async task-queue CRUD surface staff
+agents poll, not part of live session streaming.
+
+**No unhandled-method parity shim needed** (unlike cohort 2's
+project-config family): every legacy block here gated on the path regex AND
+the method in the SAME `if` condition (e.g.
+`if (staffInboxListMatch && req.method === "GET")`), so a method mismatch
+never even entered the "path matched" branch — it fell straight through to
+the same generic terminal 404 as a wholly-unmatched path. `RouteTable`'s
+`:param` entries are method-scoped the same way (`match()` filters by method
+before testing the regex), so simply not registering other methods on these
+path shapes reproduces that fall-through exactly.
+
+**Scope note**: only the inbox sub-family was migrated, not the rest of
+`/api/staff*` (list, create, get/patch/put/delete by `:id` — its own larger
+review unit involving project reassignment, worktree/sandbox provisioning,
+and role-cascade validation) or the lexically-adjacent deprecated
+`GET /api/staff/:id/sessions` 410 stub (unrelated one-liner that merely
+sits next to the inbox block in `server.ts`).
+
+`staffManager` and `inboxManager` were appended to `CoreRouteCtx` — both
+already existed as `handleApiRoute` params shared with the not-yet-migrated
+rest of the `/api/staff*` family, so they're threaded through by reference
+rather than duplicated.
+
+## Cohort 4: pack-runtimes + server-scope project-config
+
+Two new modules plus one addition to an existing one, all registered after
+cohort 3's in `server.ts`:
+
+### `src/server/routes/pack-runtimes-routes.ts`
+
+The P2 pack managed-runtime (Docker-backed supervisor) REST family, moved
+verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/pack-runtimes` |
+| GET | `/api/pack-runtimes/:id/capabilities` |
+| POST | `/api/pack-runtimes/:id/down` |
+| POST | `/api/pack-runtimes/:id/start` |
+| POST | `/api/pack-runtimes/:id/stop` |
+| POST | `/api/pack-runtimes/:id/restart` |
+| GET | `/api/pack-runtimes/:id/logs` |
+
+The legacy `start|stop|restart|logs` alternation regex became four literal
+`:id`-param registrations sharing one handler (`RouteTable` has no
+in-segment alternation; the shared body is byte-identical, with the action
+passed explicitly).
+
+**Fall-through parity, the 405 variant.** Unlike cohort 2's family (which
+fell through to the terminal 404 on unhandled methods), each `:id`-scoped
+sub-route here matched the PATH first and answered any mismatched method
+with an immediate `405 "method not allowed"` inside its own block. Those
+combinations are registered explicitly against a `handleMethodNotAllowed`
+shim (literal `register()` calls, not a loop — extractor-visible). The bare
+`GET /api/pack-runtimes` list route gated path+method together (cohort-1
+shape), so its other methods fall through exactly as before, and are NOT
+registered. Pinned by `tests/pack-runtimes-route-parity.test.ts`.
+
+**Helper disposition.** `encodePackRuntimeId`/`decodePackRuntimeId` and the
+three `PackRuntime*Error` classes are leaf-module exports
+(`src/server/runtimes/index.ts`) — imported directly by the new module and
+REMOVED from server.ts's import list (its remaining code no longer uses
+them). Two new `CoreRouteCtx` fields (append-only, cohort-4 block):
+`packContributionRegistry` (per-gateway singleton, needed for
+`getRawPack`) and `readBodyText` (still used by the not-yet-migrated
+sessionless `/api/ext/pack-route/...` route, so it stays defined once in
+server.ts). `resolveRuntimeStartPlan`/`providerCarriesDeploymentMode`
+were already threaded through by cohort 3.
+
+### `src/server/routes/project-config-server-routes.ts`
+
+The server-scope trio cohort 2 deliberately deferred (its PUT was lexically
+adjacent to the then-in-flight marketplace cohort; that's merged, so the
+adjacency concern is moot), moved verbatim:
+
+| Method | Path |
+|---|---|
+| GET | `/api/project-config` |
+| GET | `/api/project-config/defaults` |
+| PUT | `/api/project-config` |
+
+All three gated path+method together in the legacy chain (cohort-1 shape) —
+no parity shims needed; unmatched methods fall through exactly as before.
+Uses cohort 2/3's existing ctx fields (`projectConfigStore`,
+`legacyQaTopLevelKeys`) — `LEGACY_QA_TOP_LEVEL_KEYS` stays defined in
+server.ts (the projects-family GET/PUT config routes' shim threading
+already references it). Pinned by
+`tests/project-config-server-route-parity.test.ts`.
+
+### `GET /api/projects/:id/qa-testing-config`
+
+A single trivial handler folded into cohort 1's `projects-routes.ts`
+(rather than a dedicated one-route file) — it shares the family's path
+shape and uses only ctx fields that module already destructures. GET-only
+in the legacy chain (path+method gated together), so no shims; pinned in
+`tests/project-config-server-route-parity.test.ts` alongside the trio.
+
+Parity evidence: `tests/e2e/pack-runtimes-api.spec.ts`,
+`tests/e2e/pack-runtimes-start-config.spec.ts`,
+`tests/e2e/marketplace-runtime-activation.spec.ts`,
+`tests/e2e/project-config-component-config.spec.ts`,
+`tests/e2e/headquarters-api.spec.ts` and the four sandbox API specs (the
+`/api/project-config` writers) — 107 tests — pass unchanged.
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -377,9 +512,11 @@ confirmed to fail identically on the unmigrated baseline).
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~390 routes, including the largest/highest-traffic families
+- The other ~375 routes, including the largest/highest-traffic families
   (sessions, goals inline in `server.ts`, tools/roles/skills customization,
-  MCP, `/api/pack-runtimes/*`). Cohort 2 migrated marketplace using the `/*`
+  MCP). `/api/pack-runtimes/*` and the server-scope `/api/project-config`
+  trio were migrated in cohort 4, and the staff-inbox family in cohort 5
+  (both above). Cohort 2 migrated marketplace using the `/*`
   prefix kind `RouteTable` already supports (built and unit-tested in cohort
   1, unused until cohort 2 needed it for exactly this shape — see
   [Cohort 2: marketplace](#cohort-2-marketplace) above); a future cohort

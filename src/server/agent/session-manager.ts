@@ -12,6 +12,7 @@ import type {
 	AutoRetryPendingEvent,
 	AutoRetryCancelledEvent,
 } from "../ws/protocol.js";
+import { sandboxNetworkCreateArgs } from "./docker-args.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -1900,11 +1901,7 @@ export class SessionManager {
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
 		try {
-			await execFileAsync("docker", [
-				"network", "create", name,
-				"--driver", "bridge",
-				"--opt", "com.docker.network.bridge.enable_icc=false",
-			], { timeout: 15_000 });
+			await execFileAsync("docker", sandboxNetworkCreateArgs(name), { timeout: 15_000 });
 			console.log(`[session-manager] Created Docker network "${name}"`);
 		} catch (err: any) {
 			const msg = err.stderr || err.message || "";

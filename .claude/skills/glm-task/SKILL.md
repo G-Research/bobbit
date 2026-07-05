@@ -67,8 +67,16 @@ node scripts/glm-worker.mjs --spec <spec.json> --workdir <dir>
 - Reads `NVIDIA_BUILD_KEY` from the environment, or (checked in order) `--env-file <path>`, `.env` in
   `<dir>` or any of its ancestors, or the primary git worktree's `.env`. **Never** hardcode or print the
   key; if you ever see the literal key value in your own output, treat that as an incident, not a log line.
-- Emits one JSON log line per round to stdout (round number, files changed, token usage, elapsed ms), and
-  a final `RESULT {"passed": bool, "rounds": n, "wallSeconds": n, "usage": {...}, "filesChanged": [...]}`.
+- **Reasoning effort defaults to high.** Every request sends `chat_template_kwargs: { thinking: true }` —
+  verified empirically against NVIDIA NIM's `z-ai/glm-5.2` endpoint (accepted with no 400, and produced a
+  `reasoning_content` field plus ~4-5x completion tokens vs. the same call without it). `reasoning_effort`
+  and a top-level `reasoning: {...}` object were also tried: the former is silently accepted but is a
+  no-op (no behavior change) on this endpoint, the latter is rejected with HTTP 400 — neither is used.
+  Override with `BOBBIT_GLM_EFFORT=off` (or `low`/`false`) in the environment to disable thinking mode,
+  e.g. for a cheap smoke call.
+- Emits one JSON log line per round to stdout (round number, files changed, token usage,
+  `reasoningContentLen`, elapsed ms), and a final `RESULT {"passed": bool, "rounds": n, "wallSeconds": n,
+  "usage": {...}, "filesChanged": [...]}`.
 - Exit code 0 iff tests passed within `maxRounds`. A non-zero exit with `passed: false` means: stop, do not
   merge, do not silently retry with a bigger round cap — read the log, decide whether the task was
   actually GLM-shaped (see above) or needs a human/Claude/GPT-5.5 pass instead.
@@ -86,7 +94,10 @@ bash scripts/gpt55-review.sh <workdir>                     # review uncommitted 
 Prints `VERDICT: approve|needs-attention|no-changes|error` followed by the full JSON (schema:
 `scripts/gpt55-review-schema.json` — `verdict`, `summary`, `findings[]` with severity/file/line/
 recommendation, `next_steps[]`). This runs through the ChatGPT-subscription-backed `codex` CLI
-(`codex exec -m gpt-5.5`), not metered API billing.
+(`codex exec -m gpt-5.5`), not metered API billing. **Reasoning effort defaults to high**: the
+script passes `-c model_reasoning_effort="high"` explicitly (belt-and-suspenders on top of the
+global `model_reasoning_effort = "high"` set in `~/.codex/config.toml`), so it stays correct on
+a machine without that global default.
 
 This deliberately does **not** use codex's own `codex exec review` subcommand — that routes through
 codex's built-in app-server review prompt and silently ignores `--output-schema` (verified: it always
