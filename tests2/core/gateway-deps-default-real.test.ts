@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createGateway, defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs } from "../../src/server/server.js";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, type RpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 const previousBobbitDir = process.env.BOBBIT_DIR;
 
 function setTempBobbitDir(): string {
