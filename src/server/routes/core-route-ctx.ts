@@ -40,6 +40,7 @@ import type { RoleManager } from "../agent/role-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
+import type { TsServerSupervisor } from "../lsp/supervisor.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -245,4 +246,11 @@ export interface CoreRouteCtx {
 	roleManager: RoleManager;
 	serverRoleStore: RoleStore;
 	writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void;
+
+	// ── Wave 1 LSP routes (docs/design/lsp-product-tools.md) additions —
+	// append-only. Per-gateway-instance singleton, threaded exactly like
+	// bgProcessManager above. Optional so gateways that opt out of LSP (e.g.
+	// some lightweight test harnesses) leave routes fail-open rather than
+	// throwing on a missing field.
+	lspSupervisor?: TsServerSupervisor;
 }

@@ -1,0 +1,59 @@
+name: code_hover
+description: "Show type/doc info for a TypeScript symbol at a file position"
+summary: "Get the type/doc text for a TS symbol (TS-only)"
+params: [file, line, col]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code
+docs: |-
+  Shows the resolved type signature and doc comment for the TypeScript symbol at `file:line:col` (1-based), via a gateway-owned tsserver instance for the session's worktree. TS-only; requires a `tsconfig.json` reachable from the file. Content is capped (~4KB) with a truncation note. Returns `[unavailable]` with a reason (not an error) when LSP can't serve the request.
+detail_docs: |-
+  ## Purpose
+
+  `code_hover` wraps `textDocument/hover` against a gateway-owned
+  `typescript-language-server` instance kept warm per worktree. It returns
+  exactly what an editor's hover tooltip shows: the symbol's fully-resolved
+  type (including generics tsserver has already expanded) and its doc
+  comment, without re-reading and mentally re-deriving the type from source.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `file` | string | Yes | File path — relative to your worktree, or absolute. |
+  | `line` | number | Yes | 1-based line number of the symbol. |
+  | `col` | number | Yes | 1-based column number of the symbol. |
+
+  ## Output
+
+  Plain hover text (markdown/plaintext, as tsserver returns it), e.g.:
+
+  ```
+  (property) SessionInfo.worktreePath?: string | undefined
+  ```
+
+  Deeply generic types can produce multi-KB of expanded text — content is
+  capped (~4000 chars) with a `[truncated, N more chars ...]` note appended
+  rather than silently cut. `(no hover info at this position)` means tsserver
+  had nothing to say there (e.g. whitespace, a keyword). `[unavailable]
+  <reason>` replaces the text when LSP can't serve the request at all
+  (design doc §6).
+
+  ## When to Use
+
+  - You need a variable/parameter/return type that isn't written explicitly
+  in source (inferred types, generic instantiations) instead of re-deriving
+  it by hand.
+
+  ## When NOT to Use
+
+  - **You already have the type from a `: Type` annotation in source** — just
+  read it, no tool call needed.
+
+  ## Notes / Gotchas
+
+  - Same worktree/tsconfig/cold-start caveats as `code_definition`.
+  - Hover content reflects tsserver's live in-memory model, which can
+  occasionally lag a very recent edit until it re-parses — if in doubt,
+  re-read the file directly.

@@ -81,6 +81,8 @@ import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
 import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
 // STR-01 cohort 7: background-process, draft, abort, and prompt-section routes.
 import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
+import { registerLspRoutes } from "./routes/lsp-routes.js";
+import { TsServerSupervisor } from "./lsp/supervisor.js";
 // STR-01 cohort 8: maintenance and search-admin routes.
 import { registerMaintenanceRoutes } from "./routes/maintenance-routes.js";
 // STR-01 cohort 9: early server/system status routes.
@@ -2149,6 +2151,11 @@ export function createGateway(config: GatewayConfig) {
 	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
+	// Wave 1 of the `code_*` product tool group (docs/design/lsp-product-tools.md):
+	// one gateway-owned tsserver instance per worktree root, lazily spawned on
+	// first use. See src/server/routes/lsp-routes.ts for the HTTP surface
+	// `defaults/tools/code/extension.ts` proxies to.
+	const lspSupervisor = new TsServerSupervisor();
 	const rateLimiter = new RateLimiter();
 
 	const cleanupInterval = setInterval(() => {
@@ -2297,7 +2304,7 @@ export function createGateway(config: GatewayConfig) {
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
 			try {
-				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, getActivePackRuntimeSupervisor());
+				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, getActivePackRuntimeSupervisor(), lspSupervisor);
 			} catch (err) {
 				// Central backstop: a route handler that throws (e.g. a durable
 				// store refusing to save over a corrupt file — ProjectConfigStore's
@@ -3286,6 +3293,7 @@ export function createGateway(config: GatewayConfig) {
 				await sandboxManager.shutdownAll();
 			}
 			await sessionManager.cleanupSandboxNetwork();
+			await lspSupervisor.shutdownAll();
 		},
 	};
 }
@@ -3389,6 +3397,7 @@ registerOauthAccountRoutes(coreRouteTable);
 registerPreferencesRoutes(coreRouteTable);
 registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
+registerLspRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3429,6 +3438,7 @@ async function handleApiRoute(
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionChannelServices?: ExtensionChannelServices,
 	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
+	lspSupervisor?: TsServerSupervisor,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -3668,6 +3678,8 @@ async function handleApiRoute(
 				broadcastPreferencesChanged, claudeCodeConfirmationBinding, firstHeader, getSafePreferences, isHumanOperatorRequest,
 				// STR-05 roles route-hoist additions — append-only.
 				clampRoleThinking, resolveRequiredConfigProjectScope, roleManager, serverRoleStore, writeConfigProjectScopeError,
+				// Wave 1 LSP routes additions — append-only.
+				lspSupervisor,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
