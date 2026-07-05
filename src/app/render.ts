@@ -680,6 +680,7 @@ function renderMobileLanding() {
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											const projectSettingsTarget = isHeadquartersProject(project) ? "system/general" : `${project.id}/general`;
+											const mobileUngroupedExpanded = projectTree.sessionsSectionNode.expanded;
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 												<div data-project-reorder-id=${isHeadquartersProject(project) ? nothing : project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
@@ -719,11 +720,11 @@ function renderMobileLanding() {
 													${renderMobileGoalForest(projectTree.goalForest)}
 													${projectTree.goalForest.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														${(() => { const _mobileUngroupedExp = projectTree.sessionsSectionNode.expanded; return html`<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														<div class="flex items-center gap-1 pl-0 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															data-testid="sidebar-sessions-header"
 															data-tree-key=${projectTree.sessionsSectionNode.key}
-															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
-															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${_mobileUngroupedExp ? "▾" : "▸"}</span></span>
+															@click=${() => { setUngroupedExpanded(project.id, !mobileUngroupedExpanded); renderApp(); }}>
+															<span class="sidebar-chevron-slot sidebar-chevron-slot--header text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${mobileUngroupedExpanded ? "▾" : "▸"}</span></span>
 															<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;margin-right:2px;">${icon(MessagesSquare, "sm")}</span>
 															<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
@@ -749,12 +750,12 @@ function renderMobileLanding() {
 																${renderRolePickerDropdown()}
 															</div>
 														</div>
-														${_mobileUngroupedExp && projectTree.ungroupedSessionNodes.length > 0 ? html`
+														${mobileUngroupedExpanded && projectTree.ungroupedSessionNodes.length > 0 ? html`
 															<div class="flex flex-col gap-0.5" style="${sidebarTreeBaseIndentStyle()}">
 																${projectTree.ungroupedSessionNodes.map(node => renderTreeSessionNode(node))}
 															</div>
 														` : ""}
-													</div>`; })()}
+													</div>
 													${renderStaffSidebarSection(projectTree.staffRows as typeof state.staffList, project.id, projectTree.staffSectionNode?.key, projectTree.staffSectionNode?.expanded)}
 													${renderMobileArchivedTreeSection(projectTree)}
 												</div>` : ""}

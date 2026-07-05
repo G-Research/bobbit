@@ -21,7 +21,7 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 
 **The guard**: [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) enumerates every `tests/**/*.{test,spec}.ts`, derives the bucket globs from the same configs/constant the runners use, and fails if any file is claimed by zero phases (orphan) or more than one (double-claim), or violates the runner convention. There is **no fourth bucket**: a spec that some other config (e.g. the manual `docker` project) happens to collect but that does not physically live under `tests/manual-integration/` is treated as an orphan — which is why the real-Docker and real-LLM specs physically live under `tests/manual-integration/` rather than under `tests/e2e/` with an ignore.
 
-**Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
+**Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~6.4k tests (grown from ~3.4k as the suite has grown — see the updated [Test Inventory](#test-inventory) below), and at a half-core split (`--test-concurrency=12`) it is the long pole while the browser fixtures finish faster. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`. The ~90s/~76s wall-time figures above are the original measurement and have not been re-measured against the current, larger test count — re-measure before relying on them for a specific budget decision.
 
 **Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, and would also degrade robustness when up to ~4 suites run concurrently — so it is not a free lever. A sub-5-min single-suite wall is a deliberately-superseded non-goal; see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
 
@@ -31,10 +31,10 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 
 | Layer | Files | Tests | Runtime | Parallelism |
 |-------|-------|-------|---------|-------------|
-| Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
-| Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
-| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min typical, longer under verification/concurrent load | api 2 / browser 3 workers |
-| Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
+| Unit · node (node:test logic) | ~650 | ~6.4k | long pole of the unit wall | `--test-concurrency=N/2` |
+| Unit · browser (file:// fixtures) | ~150 | ~1.3k | finishes within the unit wall | `--workers=N/2` |
+| E2E (in-process API + spawned browser) | ~440 | ~1.8k | ~6.5–7 min typical, longer under verification/concurrent load | api 2 / browser 3 workers |
+| Manual integration (real agent/LLM + Docker) | ~14 | serial | ~5 min | **None** |
 
 (Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
 
@@ -886,6 +886,56 @@ and the bootstrap can derive one when preloaded with the cache-root env vars.
 That protects worker startup, but it is weaker than the npm wrapper because the
 direct `npx` runner may have already imported Playwright's default transform
 cache before the config executes.
+
+### E2E summary and exit code (masked-failure guard)
+
+`scripts/run-playwright-e2e.mjs` spawns Playwright with `stdio: "inherit"` and
+its exit code is **exactly** Playwright's own process exit code (or the
+re-raised signal) — nothing in the wrapper changes pass/fail based on parsed
+output. The reason that matters: on a run with heavy scrollback, an ANSI
+cursor-movement/erase sequence can land immediately before Playwright's own
+human-readable `list`/`line` reporter's "N failed" line, so a naive
+substring/regex match over raw stdout can see nothing where a human eye sees
+the failure plainly — this silently masked real failures across five merge
+windows before it was root-caused.
+
+The fix is a second, independent signal, never used to gate the exit code but
+always used for the human-facing pass/fail summary: the wrapper also asks
+Playwright for its built-in `json` reporter (written to a run-scoped file via
+`BOBBIT_E2E_JSON_REPORT_PATH`, wired in `playwright-e2e.config.ts`), reads that
+file back after the child exits, and derives one plain, ANSI-free line —
+`[e2e-summary] passed=<n> failed=<n> flaky=<n> skipped=<n> didNotRun=<n>
+total=<n>` — via the pure `summarizePlaywrightReport()` /
+`formatE2ESummaryLine()` functions in
+[`scripts/playwright-json-summary.mjs`](../scripts/playwright-json-summary.mjs)
+(unit-tested in `tests/playwright-json-summary.test.ts`). `didNotRun` is split
+out from Playwright's own `stats.skipped` by walking the suite tree for tests
+with zero results — an interrupted run (e.g. `--max-failures`) otherwise gets
+conflated with genuinely `.skip()`-marked tests. Reading and parsing the JSON
+report is best-effort: a parse failure logs `[e2e-summary] status=unavailable
+reason=...` (never the `passed=/failed=...` shape, so a gate parser can't
+mistake "unavailable" for "zero everywhere") and never changes the wrapper's
+exit code. The same summary line, plus an
+`exitCode`/`signal`/`generatedAt` artifact, is also written under
+`test-results/e2e-summary/<runId>.json` for gate tooling that wants
+machine-readable counts without re-parsing stdout.
+
+The unit phase has its own analogue in `scripts/run-unit.mjs`: it derives a
+`[unit-summary] node=<pass|fail|skip> browser=<pass|fail|skip>` line from the
+two spawned sub-runners' exit codes (`computeUnitSummary()` /
+`formatUnitSummaryLine()` in
+[`scripts/unit-summary.mjs`](../scripts/unit-summary.mjs), pinned by
+`tests/unit-summary.test.ts`). On top of that, a **masked-failure
+cross-check** runs in the opposite direction from the E2E mechanism: a
+sub-runner reporting exit 0 is not trusted blindly — its captured output tail
+is scanned by `detectMaskedFailureCount()` for an unambiguous failure count
+(node's TAP `# fail N` for `node-logic`, Playwright's `N failed` for
+`browser-fixtures`), and a reported-0 result is promoted to a failing exit
+with a `[run-unit] ... masked-failure guard` warning if one is found. It
+never overrides an already-failing code. The motivating incident: 13 real
+browser-fixture failures were observed alongside a 0 exit code on a loaded
+shared machine (pinned by `tests/run-unit-wrapper.test.ts` and
+`tests/unit-summary.test.ts`).
 
 ### Windows temp root
 

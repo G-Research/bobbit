@@ -29,6 +29,10 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 | `GET` | `/api/internal/orient` | Self-description ("whoami") for the calling session — see below |
+| `GET` | `/api/internal/lsp/definition` | Session-scoped TypeScript LSP definition lookup for the `code_definition` tool — see below |
+| `GET` | `/api/internal/lsp/references` | Session-scoped TypeScript LSP references lookup for the `code_references` tool — see below |
+| `GET` | `/api/internal/lsp/hover` | Session-scoped TypeScript LSP hover lookup for the `code_hover` tool — see below |
+| `GET` | `/api/internal/lsp/symbols` | Session-scoped TypeScript LSP symbol lookup for the `code_symbols` tool — see below |
 
 **`GET /api/internal/orient`** backs the `orient` agent tool (Finding W2.15). Requires the same `X-Bobbit-Session-Id` header as `/api/internal/mcp-describe` (403 if missing or unknown). Read-only assembly of state the gateway already holds — no new state, nothing hardcoded that can drift from a live session:
 
@@ -49,6 +53,8 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 ```
 
 `project`/`goal` are `null` when not applicable. `apiRouteFamilies` is a short, hand-curated pointer to top-level route families (pinned against the live route surface by `tests/orient-api-route-families.test.ts`, same idiom as `tests/prompt-api-drift.test.ts`) — **not** a generated OpenAPI catalog; this table remains the authoritative full REST reference. See `src/server/agent/orient.ts` for the assembly logic and design rationale.
+
+**`GET /api/internal/lsp/{definition,references,hover,symbols}`** backs the `code_*` product tool group in `defaults/tools/code/`. These routes require `X-Bobbit-Session-Id` (403 if missing/unknown), resolve the live or persisted session worktree, reject files outside that worktree, and return `200 { available: false, reason }` rather than throwing for unsupported sandboxed sessions. Position routes require `file`, 1-based `line`, and 1-based `col`; `symbols` requires `file` and accepts optional `query`. The implementation lives in `src/server/routes/lsp-routes.ts` and uses the gateway-owned `TsServerSupervisor` in `src/server/lsp/`.
 
 ### Dev harness
 
@@ -78,13 +84,21 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
+| `POST` | `/api/sessions/:id/abort` | Force-abort a `streaming` session (graceful, escalating to a force-kill). No-op returning the current status when the session isn't streaming. 404 for an unknown session. |
+| `GET` | `/api/sessions/:id/prompt-sections` | Return the session's system prompt broken into labeled, token-counted sections (`{ sections, totalTokens }`) for the prompt inspector. Reads a persisted snapshot when available, otherwise assembles one live from the session's prompt parts. 404 when the session or its prompt data is unavailable. |
+| `PUT` \| `POST` | `/api/sessions/:id/draft` | Upsert a persisted UI draft. Body `{ type, data }`; `type` is required. 404 for an unknown session. |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
+| `DELETE` | `/api/sessions/:id/draft?type=:type` | Clear a persisted UI draft. `type` query param is required; 404 for an unknown session. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/logs?tail=` | Return the last `tail` (default 15) lines of the combined, stdout-only, and stderr-only logs: `{ log, stdout, stderr }`. 404 if the process isn't found. |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/grep?pattern=&context=&max=` | Search a process's logs for `pattern` (required, 400 if missing), with `context` lines of surrounding context (default 0) and up to `max` results (default 50). 404 if the process isn't found. |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/head?lines=` | Return the first `lines` (default 50) lines of a process's logs. 404 if the process isn't found. |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/slice?from=&to=` | Return a 1-indexed inclusive line range (`from` default 1, `to` default 50) of a process's logs. 404 if the process isn't found. |
 | `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=kill` | Terminate a running process (whole tree / group); keep the now-terminal record until dismissed. `{ ok, killed }`; 404 if not found/not running |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=dismiss` | Remove the record **and** delete its persisted log/status/spool files; broadcasts `bg_process_dismissed`. `{ ok }`; 409 if still running |
@@ -572,6 +586,8 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | `GET` | `/api/tools` | List all available agent tools (with docs, renderer status) |
 | `GET` | `/api/tools/:name` | Get a single tool's full detail |
 | `PUT` | `/api/tools/:name` | Update tool metadata (`{ description?, group?, docs? }`) |
+| `POST` | `/api/tools/:name/customize?scope=server\|project&projectId=` | Copy the tool's whole group directory (YAML + any assets) from wherever it currently resolves (builtin/server/project) into the target scope's tools dir, so the group can be edited without touching a shared layer. 404 if the tool isn't found in the cascade or its group directory can't be located. |
+| `DELETE` | `/api/tools/:name/override?scope=server\|project&projectId=` | Remove a tool group override at the given scope. |
 
 ### Roles
 
@@ -582,6 +598,8 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies` and derived `allowedTools`) |
 | `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, clamped to the role's model capability when `model` is set). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
+| `POST` | `/api/roles/:name/customize?scope=server\|project&projectId=` | Copy the resolved role (same name) into the target scope's role store so it can be edited without touching the layer it was inherited from. 404 if the role doesn't resolve at all. Same `?scope=`/`?projectId=` shape as the `tools` and `workflows` customize routes below. |
+| `DELETE` | `/api/roles/:name/override?scope=server\|project&projectId=` | Remove a role override at the given scope, reverting to whatever the next layer down resolves to. |
 
 Role list/mutation routes that accept `projectId` treat `projectId=headquarters` as server/Headquarters scope for non-workflow config. Created or customized roles are stored in server config and appear with origin `server` (labelled Headquarters in the UI), not as a duplicate project override.
 
@@ -600,6 +618,7 @@ Tool and tool-policy resolution follows the same Headquarters alias rule as role
 |---|---|---|
 | `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
 | `GET` | `/api/slash-skills/details` | Full slash skill details including content, file paths, and `directories` array listing all scanned directories (default + custom) |
+| `POST` | `/api/skills` | Write a new `skills/:name/SKILL.md` (`{ name, description, content, argumentHint?, tools?, projectId? }`). `projectId` selects the target scope the same way as other config-project routes (`aliasSystem: true` — omitted/`headquarters` writes into Headquarters' own config dir); `tools` is a comma-separated string turned into an `allowedTools` array. Invalidates the slash-skills discovery cache so the new skill is immediately available. The only skill-*creation* write path today (the Skills page itself is read-only); backs the `propose_skill` tool's write half. Returns `201 { name, description, filePath }`; 400 on validation failure. |
 
 Slash-skill discovery normalizes `projectId=headquarters` to server/Headquarters config while using the Headquarters directory (`headquartersDir()`) as the discovery cwd.
 
@@ -643,6 +662,11 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `PUT` | `/api/projects/order` | Persist the full normal-project ID order for sidebar project drag reorder. Headquarters is anchored first and must not be included. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. For the server workspace, remediation that would archive gateway-owned `.bobbit` state is removed and the report explains that Headquarters already owns the path. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). Returns 403 `HEADQUARTERS_IMMUTABLE` for the server/Headquarters-owned `.bobbit` state. See [add-project-preflight.md](add-project-preflight.md). |
+| `POST` | `/api/projects/detect` | Add-Project probe for a candidate `{ path }`: whether it exists, is empty, already has a `.bobbit/config/project.yaml`, and package-manager markers (`package.json`/`Cargo.toml`/`go.mod`); derives a suggested project name from `package.json` when present. Does not register anything. 400 when `path` is missing. |
+| `POST` | `/api/projects/scan` | Scan a candidate `{ path }` (also accepted as `?path=`) for git sub-repos and monorepo workspace frameworks. Returns `{ repos: DetectedRepo[], monorepo: MonorepoScanResult }` — the multi-repo/component detection payload consumed by the V2 Add-Project flow. 400 when `path` is missing, 404 when it doesn't exist. |
+| `POST` | `/api/projects/:id/rescan-repos` | Re-run the same repo/monorepo scan as `POST /api/projects/scan` against an already-registered project's `rootPath`. Returns `{ repos, monorepo, rootPath }`. Backs the Settings "Re-scan repos" button. |
+| `GET` | `/api/projects/:id/structured` | Structured (non-string) `{ components, workflows, worktree_root }` for a project, read from `project.yaml` — spares the UI from parsing YAML. Backs the Settings → Components tab. |
+| `POST` | `/api/projects/:id/promote` | Promote a provisional project registration (created implicitly for a project-scaffolding session) into a normal registered project. Body `{ name? }`. Best-effort pins `base_ref` from the live remote the same way `POST /api/projects` does, once the promoted `rootPath` is confirmed to be a real git repo. |
 | `GET` | `/api/browse-directory?path=&prefix=&limit=` | Directory-only listing used by Add Project Browse and typeahead. See [Add Project directory helpers](#add-project-directory-helpers). |
 | `POST` | `/api/create-directory` | Create the typed Add Project directory's final path segment. See [Add Project directory helpers](#add-project-directory-helpers). |
 | `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
@@ -653,6 +677,7 @@ Staff records include a persisted `accessory` string as part of the staff identi
 #### Add Project directory helpers
 
 `GET /api/browse-directory` powers the Browse modal and directory-picker typeahead.
+The implementation is registered through `src/server/routes/directory-browser-routes.ts`.
 It accepts optional query parameters:
 
 | Parameter | Meaning |
@@ -791,6 +816,8 @@ Server-level fallback, labelled Headquarters in the UI (applied when no normal p
 | `GET` | `/api/project-config/defaults` | Built-in defaults. |
 | `PUT` | `/api/project-config` | Update server-level config fields. |
 | `GET` | `/api/config-directories` | List all config scan directories (skills, MCP, tools) with path, types, scope, exists, isRemovable. |
+| `DELETE` | `/api/config-directories` | Remove a built-in directory from scanning. Body `{ path, projectId? }`. 400 when `path` is missing. |
+| `POST` | `/api/config-directories/reset` | Reset config scan directories to defaults for the resolved scope. Body `{ projectId? }`. |
 
 ### Setup
 
@@ -839,7 +866,8 @@ Workflows are **project-scoped only** — there is no cascade and no system-scop
 | `POST` | `/api/workflows?projectId=X` | Create a workflow. **Requires `projectId`** — 400 otherwise. |
 | `PUT` | `/api/workflows/:id?projectId=X` | Update a workflow. **Requires `projectId`** — 400 otherwise. |
 | `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals). **Requires `projectId`** — 400 otherwise. |
-| `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID. **Requires `projectId`** — 400 otherwise. |
+| `POST` | `/api/workflows/:id/customize?projectId=X` | Copy the resolved workflow (same id) into the project's workflow store, so it can be edited without touching the layer it was inherited from. **Requires `projectId`** — 400 otherwise; 404 if the workflow doesn't resolve. |
+| `DELETE` | `/api/workflows/:id/override?projectId=X` | Remove the project-level workflow override, reverting to whatever the cascade resolves to next. **Requires `projectId`** — 400 otherwise. |
 
 There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated. Use `projectId=headquarters` for the visible server workspace workflow scope.
 
@@ -849,6 +877,7 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 |---|---|---|
 | `GET` | `/api/preferences` | Get all preferences |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
+| `POST` | `/api/preferences/claude-code/confirmation` | Mint a short-lived operator confirmation token for host-local Claude Code preference keys that affect process execution or permission bypass. Requires an operator (human) browser session — 403 otherwise. Body is the candidate preference patch; returns `{ confirmationRequired: false }` when no sensitive key is touched, or `{ confirmationRequired: true, confirmationToken, expiresAt, sensitiveKeys }` otherwise. The token is then sent as the `X-Bobbit-Operator-Confirmation` header on the follow-up `PUT /api/preferences` write; a Claude Code key patch missing/failing that confirmation is rejected with `403 { confirmationRequired: true, sensitiveKeys }`. |
 
 Model-related preference keys include `default.sessionModel`, `default.reviewModel`, `default.imageModel`, and `allowSessionModelFallback`. The fallback setting defaults to off when absent; see [Controlled session model fallback](session-model-fallback.md).
 
@@ -904,6 +933,8 @@ interface AgentDirApiState {
 `POST /api/agent-dir/migrate` is the Settings **Copy data** action. It accepts only user-selected sources known from the active or historical configured agent-directory set and destinations equal to the pending next-start directory. It does not auto-discover or special-case `~/.pi/agent`. It copies only `sessions/`, `auth.json`, `models.json`, `settings.json`, `google-code-assist.json`, and `bin/`; existing files are skipped unless `overwrite:true`. The response is an `AgentDirMigrationReport` with `copied`, `skipped`, `overwritten`, `missing`, `warnings`, `errors`, and `guidance`. Relationship/symlink violations return HTTP 400 with a report-level `error.code`.
 
 ### Models
+
+The model/provider HTTP surface is registered through `src/server/routes/model-provider-routes.ts`.
 
 | Method | Path | Description |
 |---|---|---|

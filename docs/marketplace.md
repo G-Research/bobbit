@@ -786,10 +786,16 @@ Field rules and defaults:
 - **`module`** (required) — an ESM module path resolved **relative to the provider YAML** and
   re-validated (realpath-aware) to stay **inside the pack root** — the same containment guard
   used for routes/entrypoints. A module that resolves outside the pack root drops the provider.
-- **`hooks`** — a subset of the **hook allowlist**: `sessionSetup`, `beforePrompt`,
-  `afterTurn`, `beforeCompact`, `sessionShutdown`. An **unknown hook name drops *that*
-  provider** (warn) — the rest of the pack still loads. (This is the tolerant
-  warn-and-drop contract; only the duplicate-id conflict is hard.)
+- **`hooks`** — a subset of the **hook allowlist**: the five generic-dispatch context hooks
+  (`sessionSetup`, `beforePrompt`, `afterTurn`, `beforeCompact`, `sessionShutdown`, all
+  documented in [docs/lifecycle-hub.md](lifecycle-hub.md)) plus two goal-scoped hooks with their
+  own dedicated dispatch methods rather than the generic `ContextBlock` pipeline: `goalProvisioned`
+  (fired on every worktree provisioning in a goal's subtree, for filesystem treatments rather than
+  prompt context — also documented in lifecycle-hub.md) and `goalCompleted` (`LifecycleHub
+  .dispatchGoalCompleted()`, fired once after a goal is marked complete; non-fatal — provider
+  errors/timeouts are recorded as diagnostics and never roll back the completion). An **unknown
+  hook name drops *that* provider** (warn) — the rest of the pack still loads. (This is the
+  tolerant warn-and-drop contract; only the duplicate-id conflict is hard.)
 - **`budget`** — `{ maxTokens, timeoutMs }`. Defaults `{ maxTokens: 1600, timeoutMs: 1500 }`;
   `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The budget exists
   so the (future) dispatch tier can bound how much a provider may contribute and how long it

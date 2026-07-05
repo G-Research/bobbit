@@ -16,7 +16,7 @@
 
 Bobbit has three layers:
 
-1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. The default runtime is Pi-backed; sessions can also use alternate runtimes such as local Claude Code when selected. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
+1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. The default runtime is Pi-backed; sessions can also use alternate runtimes such as local Claude Code when selected. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server. REST routing is progressively migrating off the single `handleApiRoute()` in `server.ts` onto per-family route modules in `src/server/routes/`, including the directory-browser, model-provider, and internal LSP route families (see [internals.md — REST route registry](internals.md#rest-route-registry)).
 
 2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
