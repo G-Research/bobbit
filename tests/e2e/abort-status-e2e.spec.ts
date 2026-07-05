@@ -152,6 +152,32 @@ test.describe("Abort status E2E", () => {
 		//   5. Assert a USER message_end with text "S_DIRECT" appears AFTER the
 		//      abort-induced agent_end — i.e. the steer survived and was drained
 		//      as the next user turn.
+		// Deterministic mock steer delivery (harness-timing fix, not a product
+		// change): the mock's default "steer" handling immediately self-aborts
+		// the busy turn and chains a follow-up handlePrompt onto its internal
+		// promise queue, independent of the *separate* WS "abort" message the
+		// test sends right after. Because that self-triggered echo can settle
+		// in as little as one microtask, it can race ahead of the "abort"
+		// message's own (separately scheduled) WS frame — sometimes the
+		// steered echo lands before the abort-induced agent_end is even
+		// broadcast, sometimes after. That race is purely an artifact of the
+		// mock's near-zero-latency default steer delivery: the real SDK parks
+		// a mid-tool steer until the next turn boundary (see the mock's own
+		// MOCK_STEER_QUEUE_DROP comment), so in production the redelivery is
+		// never in a position to race the abort teardown like this.
+		// MOCK_STEER_QUEUE_DROP=always removes that race by construction:
+		// the mock accepts the live-steer RPC but drops its own echo, leaving
+		// Bobbit's persisted in-flight steer ledger as the only path back —
+		// `_reconcileAfterAbort` (fired from the agent_end handler) then
+		// `drainQueue` redispatch it via a fresh `prompt()` RPC, which is
+		// causally *always* after the abort's agent_end. This is the same
+		// knob tests/e2e/ui/steer-during-bash-tool.spec.ts uses for the
+		// identical class of abort-reconcile scenario. The pinned product
+		// assertions below (ordering + a genuine follow-up turn) are
+		// unchanged — only the mock's non-deterministic default echo timing
+		// is removed.
+		const priorSteerQueueDrop = process.env.MOCK_STEER_QUEUE_DROP;
+		process.env.MOCK_STEER_QUEUE_DROP = "always";
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -238,6 +264,8 @@ test.describe("Abort status E2E", () => {
 			).toBeGreaterThanOrEqual(1);
 		} finally {
 			conn.close();
+			if (priorSteerQueueDrop === undefined) delete process.env.MOCK_STEER_QUEUE_DROP;
+			else process.env.MOCK_STEER_QUEUE_DROP = priorSteerQueueDrop;
 		}
 	});
 
