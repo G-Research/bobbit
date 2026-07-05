@@ -581,13 +581,15 @@ Inventory reconciliation: `tests2/tests-map.json` defines **31 journeys**, maps 
 - `tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts`
 - `tests/verification-dedup.spec.ts`
 
-## 6. Budget arithmetic and ledger math
+## 6. Budget arithmetic, full-run CPU enforcement, and atomic ledger
 
-Budget targets live in `tests2/budgets.json`:
+Budget targets live in `tests2/budgets.json` and are hard caps, not projections:
 
-- Tier 1 (`vitest` core + dom + integration): ≤100 s wall, ≤8 CPU-min.
-- Tier 2 (`playwright-v2` browser): ≤120 s wall, ≤6 CPU-min.
-- Full `npm run test:v2`: ≤180 s wall, ≤13 CPU-min.
+- Tier 1 (`vitest` core + dom + integration): ≤100 s wall, ≤7.5 CPU-min.
+- Tier 2 (`playwright-v2` browser): ≤120 s wall, ≤5.5 CPU-min.
+- Full `npm run test:v2`: ≤180 s wall, ≤13.0 CPU-min.
+
+The tier CPU caps intentionally sum to the full cap (`7.5 + 5.5 = 13.0`). A full run is not allowed to pass by satisfying two looser tier caps; `scripts/testing-v2/assert-budget.mjs --scope full` measures the actual process-tree CPU consumed by the whole `npm run test:v2` invocation and fails above 13.0 CPU-min.
 
 Projected tier-1 cost:
 
@@ -595,8 +597,8 @@ Projected tier-1 cost:
 |---|---:|---|---:|---:|
 | `v2-core` | 499 | node:test per-file `tsx` spawn/transform | 20-30 s | 1.5-2.0 CPU-min |
 | `v2-dom` | 151 | Chromium for non-geometry fixtures | 15-25 s | 0.8-1.2 CPU-min |
-| `v2-integration` | 198 | gateway per test file; now one source gateway per fork | 55-75 s | 3.5-4.5 CPU-min |
-| Tier-1 total | 848 | shared transform + shared gateway | ≤100 s | ≤8 CPU-min |
+| `v2-integration` | 198 | gateway per test file; now one source gateway per fork | 55-75 s | 3.5-4.3 CPU-min |
+| Tier-1 total | 848 | shared transform + shared gateway | ≤100 s | ≤7.5 CPU-min |
 
 Projection basis: the D1 spike measured a 12-test file at ~12 ms under vitest versus ~2.5 s under `tsx --test`; the D3 spike measured source server graph transform at ~9 s cold / ~6 s warm once per worker, amortized across integration files. If eight workers boot gateways, transform/boot is paid per fork, not per file.
 
@@ -604,36 +606,44 @@ Projected tier-2 cost:
 
 | Suite | Count | Projected wall | Projected CPU |
 |---|---:|---:|---:|
-| Chromium adapters kept for geometry/browser fidelity | 62 specs | 50-70 s | 2.5-3.5 CPU-min |
-| Consolidated smoke journeys | 31 journeys | 45-65 s | 2.0-2.5 CPU-min |
-| Tier-2 total | 93 Playwright specs/journeys | ≤120 s | ≤6 CPU-min |
+| Chromium adapters kept for geometry/browser fidelity | 62 specs | 50-70 s | 2.2-3.1 CPU-min |
+| Consolidated smoke journeys | 31 journeys | 45-65 s | 1.8-2.4 CPU-min |
+| Tier-2 total | 93 Playwright specs/journeys | ≤120 s | ≤5.5 CPU-min |
 
-`test:v2` orchestration runs tier 1 and tier 2 as registered child runners. The full-run wall target is not the sum of tier walls because the children overlap when the ledger grants capacity; it is capped at 180 s. CPU target is additive with overlap: tier1 ≤8 + tier2 ≤6, with shared setup/cache overlap expected to keep full CPU ≤13.
+`test:v2` orchestration runs tier 1 and tier 2 as registered child runners. The full-run wall target is not the sum of tier walls because the children overlap when the ledger grants capacity; it is capped at 180 s. CPU target is additive and measured directly: no shared-work or overlap deduction is credited unless the process-tree sampler observes lower CPU time in the full invocation.
 
-Ledger formulas:
+### 6.1 `assert-budget.mjs` CPU measurement contract
 
-```ts
-vitestMaxForks = clamp(Math.floor(cores / activeRuns), 2, 8);
-playwrightWorkers = clamp(Math.floor(cores / activeRuns / 2), 2, 4);
-```
+`scripts/testing-v2/assert-budget.mjs` consumes runner JSON reports for wall time, but CPU enforcement comes from a direct process-tree sampler started by the parent command:
 
-`activeRuns` counts registered runner processes, not just parent `npm run test:v2` invocations. A full `test:v2` starts one vitest runner and one Playwright runner, so five concurrent full runs register ten active runner processes.
+1. `npm run test:v2` launches `node scripts/testing-v2/run-v2.mjs`, which starts the sampler before spawning tier children.
+2. The sampler records the root PID, descendant PIDs, and per-process user+system CPU from the platform APIs already used by `scripts/metrics/`; on Windows it samples process times via CIM/PowerShell, and on POSIX it samples `/proc` or `ps`.
+3. Sampling continues until every descendant exits; final CPU is the monotonic sum of observed user+system deltas plus exit snapshots for short-lived children.
+4. `assert-budget --scope tier1` and `--scope tier2` check their tier caps; `assert-budget --scope full` checks the actual whole-run CPU against 13.0 CPU-min and fails even if both child reports individually passed.
+5. Each result writes `.profiles/testing-v2/budgets/<timestamp>-<scope>.json` with `wallMs`, `cpuMs`, `rootPid`, sampled process count, worker reservations, command argv, git SHA, and the budget used. The concurrency and switchover gates attach these artifacts.
 
-On the 24-core target machine with five concurrent `test:v2` invocations:
+### 6.2 Atomic lockfile reservation ledger
 
-- `activeRuns = 10`
-- vitest per runner: `clamp(floor(24 / 10), 2, 8) = 2`; total vitest workers if all five vitest runners are active: `5 × 2 = 10`.
-- Playwright per runner: `clamp(floor(24 / 10 / 2), 2, 4) = 2`; total Playwright workers if all five browser runners are active: `5 × 2 = 10`.
-- Worst-case unweighted worker sum: `10 + 10 = 20 ≤ 24`.
+The ledger is a reservation system, not an `activeRuns` estimator. This removes the start-stagger race where early runners see too few peers and over-allocate.
 
-Single full run:
+State lives under the OS temp root, e.g. `<tmp>/bobbit-test-v2-ledger/`:
 
-- `activeRuns = 2`
-- vitest: `clamp(floor(24 / 2), 2, 8) = 8`
-- Playwright: `clamp(floor(24 / 2 / 2), 2, 4) = 4`
-- unweighted worker sum: `12 ≤ 24`.
+- `ledger.lock` — acquired with atomic exclusive create/open (`O_CREAT|O_EXCL` / Node `fs.open(..., "wx")`). Lock acquisition retries with jitter and treats a lock as stale only if its owner PID is dead and its mtime is older than 30 s.
+- `reservations.json` — authoritative shared budget: `{ totalCores, generation, reservations: [{ id, parentRunId, pid, kind, workerSlots, startedAt, heartbeatAt }] }`.
+- `<id>.heartbeat` — touched every 2 s by live runners; used with PID liveness to sweep stale reservations.
 
-The ledger sweeps stale entries by PID liveness before computing `activeRuns`; dead PIDs cannot permanently depress worker counts.
+Reservation algorithm, always under `ledger.lock`:
+
+1. `run-v2.mjs` creates a parent-suite reservation before launching tier children, then waits a short coalescing window (default 1500 ms, configurable only by the concurrency-proof script) so simultaneous suites are visible before slots are assigned.
+2. Sweep dead/stale reservations first.
+3. Compute `remaining = totalCores - sum(active child reservation.workerSlots)`.
+4. For all waiting parent-suite reservations, compute `targetParentSlots = clamp(floor(totalCores / activeParentSuites), 4, 12)`, then grant from the shared remaining-core budget while holding the lock. A parent that cannot receive the minimum 4 slots waits with jitter and retries; no tier child starts before the parent has a committed bundle.
+5. Split a committed parent bundle into child reservations: 4 slots → vitest 2 + Playwright 2; 12 slots → vitest 8 + Playwright 4; intermediate bundles preserve both minima and cap vitest at 8 / Playwright at 4. The exact split is recorded in `reservations.json` before spawning children.
+6. The granted child `workerSlots` become vitest `maxForks` and Playwright `workers`. The parent and children remove their reservations on exit; stale reservations are swept on every read.
+
+Because every bundle subtracts from the same persisted remaining-core budget while holding an atomic lock, `sum(child.workerSlots) <= totalCores` is an invariant even if runs start milliseconds or minutes apart. A staggered late suite may receive fewer slots or wait for a phase to finish, but it can never cause oversubscription. The concurrency proof records every reservation generation and asserts this invariant for the whole run.
+
+For the 24-core target, five synchronized full runs settle to 20 reserved child slots: each parent sees five active suites, receives 4 slots, and splits them into vitest 2 + Playwright 2. A single full run may reserve up to 12 slots (8 vitest + 4 Playwright). If additional runs arrive while that single run is already active, they consume only remaining slots or wait; the invariant remains structural rather than arithmetic-by-assumption.
 
 ## 7. esbuild prebundle vs vitest SSR optimizer
 
@@ -644,18 +654,163 @@ Foundation gate decision procedure:
 3. If warm per-fork transform is **>5 s**, switch the gateway fixture to a content-hash-cached esbuild prebundle of the server graph. Target: ~1-2 s per worker after cache hit.
 4. Record the measured cold/warm numbers and chosen path in the v2 foundation gate output. Do not change the decision later without a new measurement.
 
-## 8. Sequencing and migration safety
+## 8. Parity proof mechanics
+
+`scripts/testing-v2/parity.mjs` is the gate command for the parity-proof gate. It fails closed and writes `.profiles/testing-v2/parity/<timestamp>.{json,md}`.
+
+Coverage comparison:
+
+1. Run v2 with V8 coverage enabled for all tier-1 projects and Playwright v2 coverage collection for browser journeys/adapters.
+2. Normalize paths to repo-relative source files and exclude generated/build outputs using the same filters as the refreshed baseline metrics.
+3. Aggregate line and branch coverage separately for the named areas `src/server`, `src/app`, and `src/ui`.
+4. Compare each area's line and branch percentages against the named baseline files in `docs/testing-metrics/` refreshed by the baseline-inventory gate. A regression in any area/metric fails the gate.
+5. Emit exact numerator/denominator deltas, not only percentages, so missing files cannot be hidden by rounding.
+
+Story-registry contract coverage:
+
+- Port the `tools/spec-check.ts` story-registry walk into parity as a reusable module instead of shelling to the legacy checker.
+- Enumerate every registered story, scenario id, required fixture, and route contract.
+- Assert each registry entry is covered by a v2 DOM test, a v2 browser adapter, or one of the 31 smoke journeys listed in `tests2/tests-map.json`.
+- Any new story without a v2 bucket entry fails with the missing story id and suggested bucket.
+
+Bucket and mapping guard:
+
+- Read `tests2/tests-map.json` and the live file tree.
+- Assert every legacy test file is claimed by exactly one bucket: `v2-core`, `v2-dom`, `v2-integration`, `v2-browser`, `daily`, or `legacy-pending` before switchover.
+- Assert every retired browser spec has at least one replacement journey id and every replacement path/id exists.
+- From the mass-migration gate onward, assert new tests land in `tests2/` unless explicitly classified as daily or legacy-pending with a reason.
+
+Baseline-history honesty check:
+
+- Read git history for the named baseline files with `git log --follow -- docs/testing-metrics/...`.
+- Verify the baseline commit SHA matches the baseline-inventory gate artifact or a later commit that explicitly contains `Baseline refresh` in the subject and includes the raw command output artifact.
+- Fail if a baseline denominator drops, a file disappears from a named area, or percentages are lowered without an accompanying inventory/gate artifact explaining the change.
+- The parity gate report includes the baseline file SHAs and the comparison commit range so review can detect bar-lowering.
+
+## 9. Chaos comparison proof
+
+The chaos proof is a switchover-blocking confidence check, not part of `npm run test:v2`. It consists of a curated mutant corpus, an ephemeral-worktree runner, integrity checks, reports, and a remediation loop.
+
+### 9.1 Mutant corpus
+
+`tests2/chaos/mutants.json` contains 50-70 curated entries. Schema:
+
+```json
+{
+  "id": "workflow-dependency-invert-001",
+  "area": "gate-workflow",
+  "file": "src/server/agent/gate-store.ts",
+  "patch": "unified diff text",
+  "description": "Invert dependency satisfaction check",
+  "operators": ["negated-conditional"],
+  "expectedLegacyCatchers": ["tests/e2e/gates.spec.ts"],
+  "expectedV2Catchers": ["tests2/integration/gates.test.ts"],
+  "fullV2SampleEligible": true
+}
+```
+
+Required area coverage: gate/workflow dependency logic, goal/session stores and persistence, team scheduler/orchestration, session lifecycle and WebSocket broadcast, git/worktree logic, verification harness, config cascade, message reducer/app state (`src/app`), and 2-3 renderer components (`src/ui`). Each major area has at least five mutants unless the area has fewer viable source files, in which case the report records the exception.
+
+Required operator diversity: negated conditional, off-by-one, swapped arguments, removed `await`, dropped event emit/broadcast, inverted boolean return, swallowed error, removed persistence write, wrong default value. At least one mutant per DI seam disables or weakens its fence (`CommandRunner`, `fetchImpl`, `Clock`, `agentBridgeFactory`, `fsImpl`) and must be caught by seam contract tests.
+
+Invalid mutants are allowed only as runner output, never as counted evidence. A mutant is `invalid` if the patch no longer applies, TypeScript cannot parse the changed file, or both suites fail to start before reaching the expected catcher. Invalid entries are excluded from kill-rate denominators and must be fixed or replaced before switchover acceptance.
+
+### 9.2 `chaos.mjs` ephemeral-worktree runner
+
+`scripts/testing-v2/chaos.mjs` runs each mutant in an isolated git worktree created from the current branch:
+
+1. Assert the source tree is clean.
+2. Create an ephemeral worktree under the OS temp root at the current HEAD.
+3. Apply the mutant patch with `git apply --index` and assert only the intended files changed.
+4. Run the targeted legacy catchers from `expectedLegacyCatchers` and targeted v2 catchers from `expectedV2Catchers` with retries disabled.
+5. Record `caught` when the targeted command fails with the expected test failure pattern; record `missed` when it passes; record `invalid` for patch/compile/harness failures unrelated to the mutant behavior.
+6. For at least five randomly selected valid mutants marked `fullV2SampleEligible`, also run the full `npm run test:v2`; if a non-listed v2 test catches the mutant, update the corpus/report so targeted catcher lists do not become over-narrow.
+7. Remove the worktree and assert the main branch remains clean so no mutant can leak into normal development.
+
+Integrity checks:
+
+- A null mutant entry applies no source change and must pass both legacy and v2 targeted commands. If it fails, the runner is broken and no chaos results are accepted.
+- The ≥5 full-v2 sample must include at least one server, one app, one UI, one DI-fence, and one browser/journey mutant when such mutants exist.
+- Targeted commands run with `retries: 0`; a flaky catcher is a test failure, not a mutant kill.
+
+### 9.3 Reports and acceptance loop
+
+`chaos.mjs` writes `.profiles/chaos/comparison-report.json` and `.profiles/chaos/comparison-report.md`; the switchover gate commits the stable summary to `docs/testing-v2/chaos-report.md`.
+
+Report contents:
+
+- Matrix of mutant id × area × operator × legacy result × v2 result × targeted commands × duration.
+- Overall and per-area kill rates, excluding invalid mutants.
+- List of legacy-caught/v2-missed mutants.
+- List of both-missed mutants with remediation status.
+- Null-mutant result and full-v2 sample ids/results.
+
+Acceptance loop:
+
+1. If any legacy-caught mutant is missed by v2, add or strengthen v2 coverage and rerun that mutant until v2 catches it.
+2. If v2 overall or per-area kill rate is below legacy, add v2 coverage in that area and rerun affected mutants.
+3. If both suites miss a mutant, add a v2 test within this goal or record a concrete justification in `docs/testing-v2/chaos-report.md` with owner and follow-up. Unjustified both-missed mutants fail switchover.
+4. Switchover requires: null mutant passed, invalid mutants fixed/replaced or excluded with reason, v2 catches 100% of legacy-caught mutants, and v2 kill rate is ≥ legacy overall and per area.
+
+## 10. Daily full-fidelity lane
+
+`npm run test:daily` is the one-command tier-3 lane. It runs after switchover as the daily real-fidelity backstop and also includes the legacy suite until the retirement rule is satisfied.
+
+### 10.1 Command composition and order
+
+`npm run test:daily` runs `node scripts/testing-v2/run-daily.mjs`, which executes in this order and stops on first failure:
+
+1. `npm run test:manual` — existing manual integration suite unchanged, including real agents/LLM/Docker paths where configured.
+2. `npm run test:daily:relocated` — relocated real-fidelity specs from `tests2/daily/`: worktree pool/lifecycle/continue-archived-worktree cluster, sandbox/Docker recovery, realpush bare-repo branch cleanup, spawned-process crash/restart and port auto-increment, real MCP subprocess integration, and per-project config-dir fidelity.
+3. `npm run test:unit && npm run test:e2e` — full legacy suite while `legacyRetired` is false in the daily state file.
+4. `npm run test:v2` — confirms the gate suite still passes in the daily environment and captures a comparable v2 budget artifact.
+
+The relocated daily list is generated from `tests2/tests-map.json` entries with bucket `daily`; the runner fails if a daily-mapped file is missing or if an unlisted file appears in `tests2/daily/`.
+
+### 10.2 Fourteen-green legacy retirement rule
+
+Daily state persists in `.bobbit/state/testing-v2/daily-lane.json`:
+
+```json
+{
+  "consecutiveGreen": 0,
+  "legacyRetired": false,
+  "lastRunAt": "ISO timestamp",
+  "lastGreenSha": "git sha",
+  "history": [{ "sha": "...", "status": "green|red", "legacyIncluded": true }]
+}
+```
+
+A run increments `consecutiveGreen` only when all enabled daily phases pass on the same SHA with retries disabled. Any red phase resets the counter to 0. When the counter reaches 14 after v2 is the project gate, `run-daily.mjs` flips `legacyRetired` to true, writes an evidence artifact, and opens/reminds the switchover follow-up to delete the daily legacy step. Until that flag is true, the legacy `test:unit` + `test:e2e` phase remains mandatory.
+
+### 10.3 Staff-agent daily trigger and triage
+
+The daily-lane gate creates a Bobbit staff agent named `testing-v2-daily` with a daily trigger. Its prompt is constrained to:
+
+- Run `npm run test:daily` from the project root.
+- Attach `.profiles/testing-v2/daily/<timestamp>.json` and the markdown summary to its report.
+- Classify failures as product regression, test flake, infrastructure/environment, or invalid daily mapping.
+- File a goal for product regressions and deterministic test bugs; include command, failing phase, log excerpt, SHA, and owner suggestion.
+- Never mark a red daily run green manually and never increment the retirement counter outside `run-daily.mjs`.
+
+### 10.4 Runbook and evidence artifact
+
+`docs/testing-v2.md` is the operator runbook. It includes manual invocation, required local services/secrets for real-fidelity phases, how to read daily artifacts, how to triage each failure class, how the 14-green retirement counter works, and how to reset only after an explicitly documented invalid run.
+
+Every daily run writes `.profiles/testing-v2/daily/<timestamp>.json` and `.profiles/testing-v2/daily/<timestamp>.md` with phase order, commands, exit codes, durations, budget artifacts, git SHA, daily counter before/after, legacy-included flag, and staff triage status. The daily-lane gate requires one full green artifact with `legacyIncluded: true` unless the 14-green retirement evidence already exists.
+
+## 11. Sequencing and migration safety
 
 1. Gate 2: land this design document only.
 2. DI runtime gate: add `GatewayDeps`, fences, `fsImpl`, contracts; legacy tests stay green.
-3. Foundation gate: add `tests2/` harness, vitest projects, Playwright v2 config, ledger, budgets, source-transform measurement, and a representative pilot.
+3. Foundation gate: add `tests2/` harness, vitest projects, Playwright v2 config, atomic reservation ledger, budgets, source-transform measurement, and a representative pilot.
 4. Mass migration: copy/codemod core/dom/integration files into `tests2/`; originals remain untouched.
 5. Browser tier: add Chromium keep adapters and 31 smoke journeys; retired specs stay in legacy until switchover.
-6. Parity proof: coverage, story-registry, bucket guard, and mapping guard must pass.
-7. Concurrency proof: 5 simultaneous `test:v2` runs × 3 reps, `retries: 0`.
-8. Chaos proof: mutant comparison report proves v2 catches every legacy-caught mutant and at least matches kill rates.
+6. Parity proof: V8 coverage, story-registry walk, bucket guard, mapping guard, and baseline-history honesty check must pass.
+7. Concurrency proof: 5 simultaneous `test:v2` runs × 3 reps, `retries: 0`, with reservation-ledger artifacts proving `sum(workerSlots) <= cores` for every generation.
+8. Chaos proof: mutant comparison report proves v2 catches every legacy-caught mutant and at least matches kill rates overall and per area.
 9. Switchover: short freeze window; flip `.bobbit/config/project.yaml` commands to v2, delete/retire test env flags, update docs/AGENTS pointers.
-10. Daily lane: run full tier-3 fidelity suite and staff-agent trigger.
+10. Daily lane: create the staff-agent trigger, land `docs/testing-v2.md`, run one full green `test:daily`, and persist the retirement counter.
 
 Safety rules:
 
@@ -664,12 +819,12 @@ Safety rules:
 - From mass migration onward, the v2 guard fails new unmapped tests and requires new tests to land in `tests2/`.
 - No assertion is weakened or skipped to meet budgets.
 
-## 9. Spec-auditor edge cases
+## 12. Spec-auditor edge cases
 
 - **Windows 32k command-line limit:** runners enumerate files in Node and pass bounded argv chunks or config-driven project globs; no shell-expanded 1105-file command line.
 - **Defender-scanned NTFS:** pure store tests use memfs through `fsImpl`; gateway tests keep real temp dirs but place them outside the repo and use bounded retry cleanup for file locks.
 - **TIME_WAIT port races:** gateway fixture uses `port: 0` with `portExplicit: true`, avoiding auto-increment scans and stale ports.
-- **Ledger stale PIDs:** every ledger read drops entries whose PID no longer exists; process exit also removes its own entry.
+- **Ledger stale PIDs and staggered starts:** every reservation read drops entries whose PID no longer exists; process exit also removes its own entry; atomic lockfile grants from a shared remaining-core budget make `sum(workerSlots) <= cores` structural.
 - **Env-mutating tests:** codemod reports `needs-withEnv`; `withEnv` restores in `finally`, preserving missing-vs-empty values. Single-fork stragglers are capped at ≤10 by switchover.
 - **CSS imports under vitest:** dom project config treats CSS as inert modules or uses vitest CSS handling so Lit components importing CSS do not require Vite browser bundling.
 - **Lit/happy-dom warnings:** lit dev-mode warnings are allowed only if they do not fail assertions; tests flush updates through `await el.updateComplete` / microtask helpers and avoid geometry APIs in happy-dom.
@@ -678,10 +833,11 @@ Safety rules:
 - **Local git fidelity:** v2 continues to use real local git for non-network operations; only remote/network edges are fenced.
 - **Docker fidelity:** v2 blocks Docker by default and uses fake ContainerRuntime maps; real Docker moves to daily tier.
 
-## 10. Acceptance checklist for later gates
+## 13. Acceptance checklist for later gates
 
-- `npm run test:v2` green within ≤180 s wall and ≤13 CPU-min, `retries: 0`.
-- Five concurrent full v2 runs × three reps: 15/15 green, ledger worker proof attached.
-- `scripts/testing-v2/parity.mjs` shows coverage non-regression and no unmapped/retired-without-replacement tests.
+- `npm run test:v2` green within ≤180 s wall and ≤13 CPU-min measured by full process-tree CPU, `retries: 0`.
+- Five concurrent full v2 runs × three reps: 15/15 green, reservation-ledger proof attached and `sum(workerSlots) <= cores` in every generation.
+- `scripts/testing-v2/parity.mjs` shows V8 per-area line+branch coverage non-regression against named baselines, story-registry non-regression, no unmapped tests, no retired-without-replacement tests, and a clean baseline-history honesty check.
 - `scripts/testing-v2/check-no-test-flags.mjs` finds no test-only env flags or `NODE_ENV === "test"` conditionals in `src/` at switchover.
-- `docs/testing-v2/chaos-report.md` shows v2 catches 100% of legacy-caught mutants and matches/exceeds kill rate overall and per area.
+- `docs/testing-v2/chaos-report.md` shows v2 catches 100% of legacy-caught mutants, matches/exceeds kill rate overall and per area, passes the null-mutant check, includes the ≥5 full-v2 sample, and remediates or justifies every both-missed mutant.
+- `npm run test:daily` has one full green evidence artifact, the staff-agent daily trigger exists, `docs/testing-v2.md` documents the runbook, and the 14-green legacy-retirement counter is persisted.
