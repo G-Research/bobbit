@@ -1476,7 +1476,15 @@ async function refreshCustomProviders(): Promise<void> {
 	try {
 		const res = await gatewayFetch("/api/custom-providers");
 		if (res.ok) {
-			customProviders = await res.json();
+			const data = await res.json();
+			// Guard against a non-array response (malformed JSON shape, an error
+			// object despite `res.ok`, etc.) — `renderCustomProvidersSection()`
+			// calls `customProviders.map(...)` on every render, so an unguarded
+			// non-array here would throw on the NEXT render and permanently break
+			// re-rendering of the whole Models tab until reload, not just this
+			// section. Same defensive pattern as `checkCustomProviderStatus`'s
+			// `Array.isArray(models) ? models : []` guard below.
+			customProviders = Array.isArray(data) ? data : [];
 		}
 	} catch (error) {
 		console.error("Failed to load custom providers:", error);

@@ -1882,7 +1882,11 @@ export function createGateway(config: GatewayConfig) {
 	// Deterministic-only, OBSERVE MODE ONLY: `enqueuePrompt` records the
 	// Decision into the transparency trace but never applies it (see that
 	// file's header comment for the full design-doc rationale).
-	registerThinkingRouterClassifier(sessionManager.lifecycleHub);
+	// S7 — `packContributionRegistry` lets a pack-declared `kind: selector`
+	// provider (id `thinking-router-rules`) override/extend the built-in RULES
+	// table; resolved ONCE here (synchronous, zero moduleHost) — see
+	// thinking-router-classifier.ts's header for the full rationale.
+	registerThinkingRouterClassifier(sessionManager.lifecycleHub, packContributionRegistry);
 	// CLF-W2 — tool auto-approve/deny decision seam HARNESS. Allow-lists the
 	// (tool-call, tool-approve) pair so `SessionManager.requestToolGrant`'s
 	// real consult never hits `dispatchDecision`'s allow-list-rejection throw
