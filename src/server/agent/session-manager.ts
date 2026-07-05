@@ -9504,6 +9504,23 @@ export class SessionManager {
 			this._statusHeartbeatTimer = null;
 		}
 
+		// CON-04: flush any already-debounced store writes BEFORE the per-session
+		// teardown loop below, which awaits closeExtensionChannelsForSession() and
+		// rpcClient.stop() (up to 3s each, SIGTERM->SIGKILL) sequentially per
+		// session. On a slow/unresponsive teardown the harness's own SIGKILL
+		// deadline (harness.ts) can preempt this function before it reaches the
+		// post-loop flush a few lines below. Flushing here first means whatever
+		// was pending before shutdown() started is durable even if the loop
+		// itself never finishes. The post-loop flush remains the final word for
+		// anything written during the loop (recovery-critical fields below are
+		// now synchronous regardless — see RECOVERY_CRITICAL_FIELDS).
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
+		} else if (this._testStore) {
+			this._testStore.flush();
+		}
+		try { (this as any).bgProcessManager?.flush(); } catch { /* best-effort */ }
+
 		// Don't remove from store on shutdown — sessions should survive restart.
 		// Persist the active/busy state for each session so interrupted agents
 		// can be re-driven on the next startup. The durable field is still named

@@ -602,6 +602,12 @@ export class SessionStore {
 	 * Lower-frequency by nature, so synchronous writes are not a perf concern.
 	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
 	 * every event and benefit from coalescing.
+	 *
+	 * `wasStreaming` / `streamingStartedAt` decide whether a mid-turn agent is
+	 * re-driven after a hard kill; `messageQueue` is the durable copy of a
+	 * user's queued-but-undispatched prompts. Both are written once per turn
+	 * / per enqueue-dequeue event (CON-04), not on a hot per-token path, so
+	 * synchronous flush here is not a perf concern either.
 	 */
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "worktreePushPolicy", "remotePublicationPolicy", "cwd", "repoPath",
@@ -614,6 +620,7 @@ export class SessionStore {
 		"claudeCodeExecutable", "claudeCodePermissionMode", "claudeCodeModelAlias",
 		"inFlightSteerTexts",
 		"sidePanelWorkspace",
+		"wasStreaming", "streamingStartedAt", "messageQueue",
 	];
 
 	/** Update a subset of fields for an existing session */
