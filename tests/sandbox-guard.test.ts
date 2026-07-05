@@ -5,13 +5,84 @@ import { isSandboxAllowed } from "../src/server/auth/sandbox-guard.ts";
 import type { SandboxScope } from "../src/server/auth/sandbox-token.ts";
 
 function scope(): SandboxScope {
-	return { projectId: "project-1", sessionIds: new Set(["session-1"]), goalIds: new Set() };
+	return { projectId: "project-1", sessionIds: new Set(["session-1"]), goalIds: new Set(["goal-1"]) };
 }
 
 describe("sandbox route guard", () => {
 	it("allows scoped PR walkthrough YAML submissions so the manager can validate session/job ownership", () => {
 		assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/submit-yaml", "POST", scope()), true);
 		assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/submit-yaml", "GET", scope()), false);
+	});
+
+	it("allows first-party direct-agent session tool endpoints only for the token's own session", () => {
+		const ownSessionRoutes: Array<[string, string]> = [
+			["GET", "/api/sessions/session-1"],
+			["PATCH", "/api/sessions/session-1"],
+			["POST", "/api/sessions/session-1/activate-skill"],
+			["GET", "/api/sessions/session-1/transcript"],
+			["POST", "/api/sessions/session-1/prompt"],
+			["GET", "/api/sessions/session-1/proposals"],
+			["POST", "/api/sessions/session-1/proposal/goal/seed"],
+			["GET", "/api/sessions/session-1/proposal/goal"],
+			["POST", "/api/sessions/session-1/proposal/goal/edit"],
+			["GET", "/api/sessions/session-1/proposal/goal/snapshot"],
+			["POST", "/api/sessions/session-1/orchestrate/delegate"],
+			["GET", "/api/sessions/session-1/orchestrate/children"],
+		];
+
+		for (const [method, pathname] of ownSessionRoutes) {
+			assert.equal(isSandboxAllowed(pathname, method, scope()), true, `${method} ${pathname}`);
+			assert.equal(
+				isSandboxAllowed(pathname.replace("session-1", "other-session"), method, scope()),
+				false,
+				`${method} ${pathname} must not cross sessions`,
+			);
+		}
+	});
+
+	it("allows first-party goal tools only for the token's own goal", () => {
+		const ownGoalRoutes: Array<[string, string]> = [
+			["GET", "/api/goals/goal-1"],
+			["POST", "/api/goals/goal-1/team/spawn"],
+			["GET", "/api/goals/goal-1/tasks"],
+			["POST", "/api/goals/goal-1/gates/design/signal"],
+			["POST", "/api/goals/goal-1/spawn-child"],
+			["PATCH", "/api/goals/goal-1/plan"],
+			["GET", "/api/goals/goal-1/plan"],
+			["POST", "/api/goals/goal-1/integrate-child/child-goal"],
+			["POST", "/api/goals/goal-1/pause"],
+			["POST", "/api/goals/goal-1/resume"],
+			["DELETE", "/api/goals/goal-1/archive-child/child-goal"],
+			["POST", "/api/goals/goal-1/mutation/request-1/decision"],
+			["PATCH", "/api/goals/goal-1/policy"],
+		];
+
+		for (const [method, pathname] of ownGoalRoutes) {
+			assert.equal(isSandboxAllowed(pathname, method, scope()), true, `${method} ${pathname}`);
+			assert.equal(
+				isSandboxAllowed(pathname.replace("goal-1", "other-goal"), method, scope()),
+				false,
+				`${method} ${pathname} must not cross goals`,
+			);
+		}
+	});
+
+	it("keeps human-only and admin-broad endpoints denied", () => {
+		assert.equal(isSandboxAllowed("/api/goals", "POST", scope()), false);
+		assert.equal(isSandboxAllowed("/api/goals/goal-1/gates/design/signoff", "POST", scope()), false);
+		assert.equal(isSandboxAllowed("/api/goals/goal-1/gates/design/reset", "POST", scope()), false);
+		assert.equal(isSandboxAllowed("/api/goals/goal-1/gates/design/bypass", "POST", scope()), false);
+		assert.equal(isSandboxAllowed("/api/sessions", "GET", scope()), false);
+		assert.equal(isSandboxAllowed("/api/preferences", "GET", scope()), false);
+		assert.equal(isSandboxAllowed("/api/project-config", "PUT", scope()), false);
+		assert.equal(isSandboxAllowed("/api/internal/mcp-call", "POST", scope()), false);
+	});
+
+	it("allows scoped internal read/callback endpoints used by first-party tools", () => {
+		assert.equal(isSandboxAllowed("/api/internal/mcp-describe", "POST", scope()), true);
+		assert.equal(isSandboxAllowed("/api/internal/mcp-describe", "GET", scope()), false);
+		assert.equal(isSandboxAllowed("/api/internal/verification-result", "POST", scope()), true);
+		assert.equal(isSandboxAllowed("/api/image-generation/generate", "POST", scope()), true);
 	});
 
 	describe("google-code-assist runtime token endpoint", () => {
