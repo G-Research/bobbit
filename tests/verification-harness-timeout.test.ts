@@ -95,28 +95,24 @@ function makeHarness() {
 
 /**
  * Inline JS payload (passed via `node -e`) that:
- *   - prints `PARENT_PID=<pid>`
- *   - spawns an inner `node -e` child that prints `CHILD_PID=<pid>` and idles
- *   - pipes the inner stdout through so the parent's stdout carries both
+ *   - spawns an inner `node -e` child that idles
+ *   - prints both `PARENT_PID=<pid>` and `CHILD_PID=<pid>` from the parent
+ *     immediately after spawn
  *   - idles forever (the test kills the parent via tree-kill)
  *
  * Works identically on POSIX and Windows.
  */
-// Inner script: print CHILD_PID then idle. The child writes through its own
-// piped stdout, which the parent forwards onto its own stdout. We wait for
-// the first chunk before printing PARENT_PID so the test always sees both
-// pids together (no timing window where only PARENT_PID is visible).
-// Three-level escaping (this TS source → outer node -e → inner node -e).
-// To get a real newline written by the innermost script, the inner-
-// inner JS source string must contain the literal sequence `\n` (two
-// chars). The outer payload is itself a JS string, so we double again
-// to `\\n`. That requires four backslashes in this TS source.
+// Inner script: idle forever. The parent reports both PIDs synchronously
+// immediately after spawn (`child.pid` is available as soon as the OS child
+// exists). Do not wait for the child to schedule and write stdout here: under
+// full-suite load on slow Windows workers a short timeout can fire before
+// that asynchronous round-trip, making the test fail before it has the PIDs
+// needed to verify tree-kill.
 const TREE_PAYLOAD = [
 	'var cp=require("child_process");',
-	'var inner=\'process.stdout.write("CHILD_PID="+process.pid+"\\\\n");setInterval(function(){},1000);\';',
-	'var c=cp.spawn(process.execPath,["-e",inner],{stdio:["ignore","pipe","inherit"]});',
-	'c.stdout.on("data",function(d){process.stdout.write(d);});',
-	'c.stdout.once("data",function(){process.stdout.write("PARENT_PID="+process.pid+"\\n");});',
+	'var inner=\'setInterval(function(){},1000);\';',
+	'var c=cp.spawn(process.execPath,["-e",inner],{stdio:["ignore","ignore","inherit"]});',
+	'process.stdout.write("PARENT_PID="+process.pid+"\\nCHILD_PID="+c.pid+"\\n");',
 	'setInterval(function(){},1000);',
 ].join("");
 

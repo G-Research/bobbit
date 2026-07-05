@@ -58,10 +58,13 @@ async function quiesceAutoStartedChildTeam(gateway: any, childId: string, projec
 	const tm = gateway?.teamManager;
 	if (!tm?.getTeamState) return;
 	try {
-		await waitForCondition(() => !!tm.getTeamState(childId), {
+		await waitForCondition(() => {
+			const st = tm.getTeamState(childId) as { teamLeadSessionId?: string } | undefined;
+			return typeof st?.teamLeadSessionId === "string" && st.teamLeadSessionId.length > 0;
+		}, {
 			timeoutMs: 15_000,
 			intervalMs: 25,
-			message: `auto-started team for child ${childId}`,
+			message: `auto-started team lead for child ${childId}`,
 		});
 	} catch {
 		return; // team never came up — nothing to tear down
@@ -85,19 +88,37 @@ async function quiesceAutoStartedChildTeam(gateway: any, childId: string, projec
 	// child's goalId so its per-goal cost is exactly zero again. Use both the
 	// captured session ids (public removeSession) and a goalId sweep over the
 	// tracker's entries (belt-and-suspenders against a member spawned in the
-	// brief window before capture).
+	// brief window before capture). The extra stability poll catches the race
+	// where a final mock-agent usage event lands just after teardown returns.
 	const ct = projectId ? gateway?.sessionManager?.getCostTracker?.(projectId) as {
 		removeSession?: (sid: string) => void;
+		getGoalCost?: (goalId: string) => { totalCost?: number };
+		getGeneration?: () => number;
 		costs?: Map<string, { goalId?: string }>;
 	} | undefined : undefined;
 	if (ct?.removeSession) {
-		for (const sid of teamSessionIds) ct.removeSession(sid);
-		const entries = ct.costs;
-		if (entries instanceof Map) {
-			for (const [sid, entry] of [...entries]) {
-				if (entry?.goalId === childId) ct.removeSession(sid);
+		const scrubGoalCost = (): void => {
+			for (const sid of teamSessionIds) ct.removeSession?.(sid);
+			const entries = ct.costs;
+			if (entries instanceof Map) {
+				for (const [sid, entry] of [...entries]) {
+					if (entry?.goalId === childId) ct.removeSession?.(sid);
+				}
 			}
-		}
+		};
+		let stableZeroPolls = 0;
+		await waitForCondition(() => {
+			const before = ct.getGeneration?.() ?? 0;
+			scrubGoalCost();
+			const after = ct.getGeneration?.() ?? 0;
+			const total = ct.getGoalCost?.(childId)?.totalCost ?? 0;
+			stableZeroPolls = total === 0 && before === after ? stableZeroPolls + 1 : 0;
+			return stableZeroPolls >= 3;
+		}, {
+			timeoutMs: 5_000,
+			intervalMs: 25,
+			message: `cost scrub for auto-started team ${childId}`,
+		});
 	}
 }
 
