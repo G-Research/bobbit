@@ -8,6 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
+const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 const STATE_DIR = bobbitStateDir();
 const CONFIG_PATH = path.join(STATE_DIR, "desec.json");
 
@@ -37,9 +39,9 @@ export function saveDesecConfig(config: DesecConfig): void {
  * Called on server startup to keep dynDNS fresh.
  * Fails silently — cert/DNS issues shouldn't prevent server from starting.
  */
-export async function updateDesecIp(config: DesecConfig, ip: string): Promise<void> {
+export async function updateDesecIp(config: DesecConfig, ip: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
 	try {
-		const res = await fetch(`https://update.dedyn.io/?myipv4=${ip}`, {
+		const res = await fetchImpl(`https://update.dedyn.io/?myipv4=${ip}`, {
 			headers: {
 				"Authorization": `Basic ${Buffer.from(`${config.domain}:${config.token}`).toString("base64")}`,
 			},

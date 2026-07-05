@@ -20,7 +20,6 @@
  * See docs/design/multi-repo-components.md §7.2.
  */
 
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +32,7 @@ import { scopePaths } from "./pack-types.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -122,7 +122,7 @@ export interface DockerRunConfig {
 
 // ── Builder ────────────────────────────────────────────────────────────────
 
-export function buildDockerRunArgs(config: DockerRunConfig): string[] {
+export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: CommandRunner = realCommandRunner): string[] {
 	const {
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath,
@@ -344,7 +344,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// ── Git identity ───────────────────────────────────────────────────
 	// Inherit the host user's git identity so agents can commit without
 	// manual `git config` setup. Uses env vars (highest priority in git).
-	const gitIdentity = getHostGitIdentity();
+	const gitIdentity = getHostGitIdentity(commandRunner);
 	if (gitIdentity.name) {
 		args.push("-e", `GIT_AUTHOR_NAME=${gitIdentity.name}`);
 		args.push("-e", `GIT_COMMITTER_NAME=${gitIdentity.name}`);
@@ -375,13 +375,14 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 /** Cache the host git identity so we only shell out once per process. */
 let _gitIdentityCache: { name: string; email: string } | undefined;
 
-function getHostGitIdentity(): { name: string; email: string } {
+function getHostGitIdentity(commandRunner: CommandRunner = realCommandRunner): { name: string; email: string } {
 	if (_gitIdentityCache) return _gitIdentityCache;
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for git identity detection");
 	const read = (key: string): string => {
 		try {
-			return execFileSync("git", ["config", "--global", key], {
+			return commandRunner.execFileSync!("git", ["config", "--global", key], {
 				encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"],
-			}).trim();
+			}).toString().trim();
 		} catch { return ""; }
 	};
 	_gitIdentityCache = { name: read("user.name"), email: read("user.email") };

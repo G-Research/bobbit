@@ -25,11 +25,11 @@
  *   origin to fall back to the mounted project repo.
  */
 
-import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { stripTokenFromGitUrl } from "../skills/git.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 /** Fixed container-internal mount point for the remote-less bind-mount source. */
 export const MOUNTED_SRC_PATH = "/workspace-src";
@@ -52,8 +52,9 @@ function slugForPathPart(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "repo";
 }
 
-function runGit(repoPath: string, args: string[], options: { encoding: "utf8" } | { encoding: "buffer" }): string | Buffer {
-	return execFileSync("git", args, {
+function runGit(repoPath: string, args: string[], options: { encoding: "utf8" } | { encoding: "buffer" }, commandRunner: CommandRunner = realCommandRunner): string | Buffer {
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for sandbox clone source git operations");
+	return commandRunner.execFileSync("git", args, {
 		cwd: repoPath,
 		encoding: options.encoding,
 		maxBuffer: 256 * 1024 * 1024,
@@ -61,18 +62,19 @@ function runGit(repoPath: string, args: string[], options: { encoding: "utf8" } 
 	});
 }
 
-function tryGit(repoPath: string, args: string[]): string | null {
+function tryGit(repoPath: string, args: string[], commandRunner: CommandRunner = realCommandRunner): string | null {
 	try {
-		return String(runGit(repoPath, args, { encoding: "utf8" })).trim() || null;
+		return String(runGit(repoPath, args, { encoding: "utf8" }, commandRunner)).trim() || null;
 	} catch {
 		return null;
 	}
 }
 
-function validateBranchName(branch: string | null): string {
+function validateBranchName(branch: string | null, commandRunner: CommandRunner = realCommandRunner): string {
 	const candidate = branch || "master";
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for git branch validation");
 	try {
-		execFileSync("git", ["check-ref-format", "--branch", candidate], { stdio: "ignore" });
+		commandRunner.execFileSync("git", ["check-ref-format", "--branch", candidate], { stdio: "ignore" });
 		return candidate;
 	} catch {
 		return "master";
@@ -103,10 +105,13 @@ export function prepareSanitizedSandboxCloneSource(opts: {
 	repoPath: string;
 	stateDir: string;
 	key?: string;
+	commandRunner?: CommandRunner;
 }): string {
+	const commandRunner = opts.commandRunner ?? realCommandRunner;
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for sandbox clone source preparation");
 	const repoPath = path.resolve(opts.repoPath);
 	const stateDir = path.resolve(opts.stateDir);
-	const head = tryGit(repoPath, ["rev-parse", "--verify", "HEAD"]);
+	const head = tryGit(repoPath, ["rev-parse", "--verify", "HEAD"], commandRunner);
 	const sourceId = `${SANITIZED_CLONE_SOURCE_VERSION}\0${repoPath}\0${opts.key ?? ""}\0${head ?? "empty"}`;
 	const hash = crypto.createHash("sha256").update(sourceId).digest("hex").slice(0, 16);
 	const dest = path.join(stateDir, "sandbox-clone-sources", `${slugForPathPart(opts.key ?? path.basename(repoPath))}-${hash}`);
@@ -118,7 +123,7 @@ export function prepareSanitizedSandboxCloneSource(opts: {
 	fs.mkdirSync(staging, { recursive: true });
 	try {
 		if (head) {
-			const tree = runGit(repoPath, ["ls-tree", "-r", "-z", "--full-tree", head], { encoding: "buffer" }) as Buffer;
+			const tree = runGit(repoPath, ["ls-tree", "-r", "-z", "--full-tree", head], { encoding: "buffer" }, commandRunner) as Buffer;
 			for (const rawEntry of tree.toString("utf8").split("\0")) {
 				if (!rawEntry) continue;
 				const tab = rawEntry.indexOf("\t");
@@ -130,7 +135,7 @@ export function prepareSanitizedSandboxCloneSource(opts: {
 
 				const target = safeWritePath(staging, gitPath);
 				fs.mkdirSync(path.dirname(target), { recursive: true });
-				const content = runGit(repoPath, ["cat-file", "blob", object], { encoding: "buffer" }) as Buffer;
+				const content = runGit(repoPath, ["cat-file", "blob", object], { encoding: "buffer" }, commandRunner) as Buffer;
 				if (mode === "120000" && process.platform !== "win32") {
 					fs.symlinkSync(content.toString("utf8"), target);
 				} else {
@@ -140,11 +145,11 @@ export function prepareSanitizedSandboxCloneSource(opts: {
 			}
 		}
 
-		execFileSync("git", ["init"], { cwd: staging, stdio: "ignore" });
-		const branch = validateBranchName(tryGit(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]));
-		execFileSync("git", ["checkout", "-B", branch], { cwd: staging, stdio: "ignore" });
-		execFileSync("git", ["add", "-A"], { cwd: staging, stdio: "ignore" });
-		execFileSync("git", [
+		commandRunner.execFileSync("git", ["init"], { cwd: staging, stdio: "ignore" });
+		const branch = validateBranchName(tryGit(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"], commandRunner), commandRunner);
+		commandRunner.execFileSync("git", ["checkout", "-B", branch], { cwd: staging, stdio: "ignore" });
+		commandRunner.execFileSync("git", ["add", "-A"], { cwd: staging, stdio: "ignore" });
+		commandRunner.execFileSync("git", [
 			"-c", "user.name=Bobbit",
 			"-c", "user.email=bobbit@bobbit.ai",
 			"commit", "--allow-empty", "-m", "Sanitized sandbox clone source",

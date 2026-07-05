@@ -10,6 +10,8 @@ import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { invalidateRoleNameCache } from "./team-names.js";
 
+const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NAMES_DIR = join(__dirname, "..", "..", "..", "data", "team-names");
 const MODEL = "claude-haiku-4-5-20251001";
@@ -41,7 +43,7 @@ function loadAuth(): AuthCredentials | null {
  * Generate 50 funny, role-themed names and write them to data/team-names/<role>.json.
  * Fire-and-forget — failures are logged but don't block role creation.
  */
-export async function generateRoleNames(roleName: string, roleLabel: string): Promise<void> {
+export async function generateRoleNames(roleName: string, roleLabel: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
 	const outPath = join(NAMES_DIR, `${roleName}.json`);
 
 	// Don't overwrite existing curated files
@@ -112,7 +114,7 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 	console.log(`[name-gen] Generating names for role "${roleName}" via ${MODEL}…`);
 
 	try {
-		let response = await fetch(API_URL, {
+		let response = await fetchImpl(API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -124,7 +126,7 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 			const newToken = await refreshOAuthToken();
 			if (newToken) {
 				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetch(API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+				response = await fetchImpl(API_URL, { method: "POST", headers, body: JSON.stringify(body) });
 			}
 		}
 

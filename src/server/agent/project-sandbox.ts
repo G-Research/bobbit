@@ -13,9 +13,7 @@
  * - Init sequence (clone, npm ci, build) runs only on first create
  */
 
-import { execFile as execFileCb } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,10 +25,10 @@ import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
+import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
-const execFileAsync = promisify(execFileCb);
 const DOCKER_BIN = "docker";
 
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
@@ -171,15 +169,15 @@ export function getStateDirMountStaleness(
 	return { stale: false };
 }
 
-async function execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+async function execDocker(args: readonly string[], options?: any, commandRunner: CommandRunner = realCommandRunner): Promise<{ stdout: string; stderr: string }> {
 	if (!cpuDiagnosticsEnabled()) {
-		return await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		return await commandRunner.execFile(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
 	}
 	const start = performance.now();
 	let success = 0;
 	let errorCode = "none";
 	try {
-		const result = await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		const result = await commandRunner.execFile(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
 		success = 1;
 		return result;
 	} catch (err) {
@@ -209,13 +207,14 @@ let _cachedDockerLimits: DockerResourceLimits | null | undefined; // undefined =
  * Cached for the process lifetime (Docker resource limits don't change mid-session).
  * Returns null if `docker info` fails (caller should fall back to host values).
  */
-export async function getDockerResourceLimits(): Promise<DockerResourceLimits | null> {
+export async function getDockerResourceLimits(commandRunner: CommandRunner = realCommandRunner): Promise<DockerResourceLimits | null> {
 	if (_cachedDockerLimits !== undefined) return _cachedDockerLimits;
 
 	try {
 		const { stdout } = await execDocker(
 			["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
 			{ timeout: 5_000, env: DOCKER_ENV },
+			commandRunner,
 		);
 		const parts = stdout.trim().split(/\s+/);
 		const cpus = parseInt(parts[0], 10);
@@ -332,12 +331,19 @@ export class ProjectSandbox {
 	private _healthInterval: ReturnType<typeof setInterval> | null = null;
 	private _healthListeners: Array<(event: SandboxHealthEvent) => void> = [];
 	private _recovering = false;
+	private readonly commandRunner: CommandRunner;
+	private readonly clock: Clock;
 
-
-	constructor(private options: ProjectSandboxOptions) {
+	constructor(private options: ProjectSandboxOptions, deps: { commandRunner?: CommandRunner; clock?: Clock } = {}) {
 		if (!options || typeof options !== "object" || typeof options.projectId !== "string" || !options.projectId) {
 			throw new Error("[project-sandbox] ProjectSandbox constructor requires ProjectSandboxOptions with a non-empty projectId");
 		}
+		this.commandRunner = deps.commandRunner ?? realCommandRunner;
+		this.clock = deps.clock ?? realClock;
+	}
+
+	private execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+		return execDocker(args, options, this.commandRunner);
 	}
 
 	// ── Public API ─────────────────────────────────────────────────────
@@ -393,7 +399,7 @@ export class ProjectSandbox {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
 			// Permission denied — create as root and chown to node
-			await execDocker([
+			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -498,7 +504,7 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", container]);
 		} catch {
-			await execDocker([
+			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				`mkdir -p ${container} && chown node:node ${container}`,
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -620,7 +626,7 @@ export class ProjectSandbox {
 		if (cpuDiagnosticsEnabled()) {
 			getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { starts: 1, intervalMs });
 		}
-		this._healthInterval = setInterval(() => {
+		this._healthInterval = this.clock.setInterval(() => {
 			this._healthCheck().catch(err => {
 				console.warn(`[project-sandbox] Health check error for project ${this.options.projectId}:`, err?.message || err);
 			});
@@ -630,7 +636,7 @@ export class ProjectSandbox {
 	/** Stop periodic health checks. */
 	stopHealthMonitor(): void {
 		if (this._healthInterval) {
-			clearInterval(this._healthInterval);
+			this.clock.clearInterval(this._healthInterval);
 			this._healthInterval = null;
 			if (cpuDiagnosticsEnabled()) {
 				getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { stops: 1 });
@@ -719,7 +725,7 @@ export class ProjectSandbox {
 				const wtList = await this._dockerExec(this.containerId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
 				console.log(`[project-sandbox] Pre-shutdown worktrees in ${this.containerId.substring(0, 12)}: ${wtList.trim()}`);
 			} catch { /* best-effort audit */ }
-			await execDocker(["stop", this.containerId], {
+			await this.execDocker(["stop", this.containerId], {
 				timeout: 30_000,
 				env: DOCKER_ENV,
 			});
@@ -735,14 +741,14 @@ export class ProjectSandbox {
 		const volumeName = this._volumeName();
 		if (this.containerId) {
 			try {
-				await execDocker(["rm", "-f", this.containerId], {
+				await this.execDocker(["rm", "-f", this.containerId], {
 					timeout: 15_000,
 					env: DOCKER_ENV,
 				});
 			} catch { /* already gone */ }
 		}
 		try {
-			await execDocker(["volume", "rm", "-f", volumeName], {
+			await this.execDocker(["volume", "rm", "-f", volumeName], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -830,7 +836,7 @@ export class ProjectSandbox {
 			} else {
 				// Stopped — try to start it
 				try {
-					await execDocker(["start", existingId], {
+					await this.execDocker(["start", existingId], {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
@@ -871,7 +877,7 @@ export class ProjectSandbox {
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
 		// Query Docker daemon to avoid requesting more resources than the VM has
-		const dockerLimits = await getDockerResourceLimits();
+		const dockerLimits = await getDockerResourceLimits(this.commandRunner);
 		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(
 			os.cpus().length,
 			os.totalmem(),
@@ -914,7 +920,7 @@ export class ProjectSandbox {
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
 			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
-		});
+		}, this.commandRunner);
 
 		// Inject GITHUB_TOKEN for git push/PR inside container
 		if (githubToken) {
@@ -922,7 +928,7 @@ export class ProjectSandbox {
 			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		}
 
-		const { stdout } = await execDocker(dockerArgs, {
+		const { stdout } = await this.execDocker(dockerArgs, {
 			timeout: 60_000,
 			env: DOCKER_ENV,
 		});
@@ -936,7 +942,7 @@ export class ProjectSandbox {
 
 		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
 		try {
-			await execDocker([
+			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -946,7 +952,7 @@ export class ProjectSandbox {
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
-			await execDocker([
+			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -1111,7 +1117,7 @@ export class ProjectSandbox {
 		}
 
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await this.execDocker([
 				"inspect", "--format", "{{json .Mounts}}", containerId,
 			], {
 				timeout: 5_000,
@@ -1134,7 +1140,7 @@ export class ProjectSandbox {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
 		};
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await this.execDocker([
 				"inspect", "--format", "{{json .Mounts}}", containerId,
 			], {
 				timeout: 5_000,
@@ -1154,7 +1160,7 @@ export class ProjectSandbox {
 
 	private async _findContainerByLabel(label: string): Promise<string | null> {
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await this.execDocker([
 				"ps", "-a",
 				"--filter", `label=${label}`,
 				"--format", "{{.ID}}",
@@ -1181,8 +1187,8 @@ export class ProjectSandbox {
 	private async _isContainerImageStale(containerId: string, imageTag: string): Promise<boolean> {
 		try {
 			const [containerImg, currentImg] = await Promise.all([
-				execDocker(["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
-				execDocker(["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
+				this.execDocker(["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
+				this.execDocker(["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
 			]);
 			const a = containerImg.stdout.trim();
 			const b = currentImg.stdout.trim();
@@ -1195,7 +1201,7 @@ export class ProjectSandbox {
 
 	private async _isContainerRunning(containerId: string): Promise<boolean> {
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await this.execDocker([
 				"inspect", "--format", "{{.State.Running}}", containerId,
 			], {
 				timeout: 5_000,
@@ -1209,7 +1215,7 @@ export class ProjectSandbox {
 
 	private async _removeContainer(containerId: string): Promise<void> {
 		try {
-			await execDocker(["rm", "-f", containerId], {
+			await this.execDocker(["rm", "-f", containerId], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -1232,7 +1238,7 @@ export class ProjectSandbox {
 		}
 		execArgs.push(containerId, ...args);
 
-		const { stdout } = await execDocker(execArgs, {
+		const { stdout } = await this.execDocker(execArgs, {
 			timeout: opts?.timeout ?? 60_000,
 			env: DOCKER_ENV,
 			maxBuffer: 10 * 1024 * 1024,

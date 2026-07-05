@@ -13,6 +13,8 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
 import { redactSensitive } from "./redact.js";
 
+const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 // Anthropic OAuth constants (same as in @earendil-works/pi-ai)
 const CLIENT_ID = Buffer.from("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", "base64").toString();
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -202,13 +204,13 @@ function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCred
 /**
  * Start an OAuth flow. Returns the authorization URL and a flow ID.
  */
-export async function oauthStart(providerInput?: string): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
+export async function oauthStart(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
 	cleanupExpiredFlows();
 	ensureFlowCleanupTimer();
 
 	const provider = normalizeProvider(providerInput);
 	if (provider === "google-gemini-cli") {
-		return oauthStartGoogle();
+		return oauthStartGoogle(fetchImpl);
 	}
 	if (provider !== "anthropic") {
 		return oauthStartExternal(provider);
@@ -392,8 +394,8 @@ function storeGoogleCredentials(creds: { access: string; refresh?: string; expir
  * Shared code→token exchange for the Google account (Gemini Code Assist) flow.
  * Used by both the loopback callback handler and the manual-paste path.
  */
-async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string): Promise<void> {
-	const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
+	const tokenResponse = await fetchImpl(GOOGLE_TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
@@ -421,7 +423,7 @@ async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string): Promi
 
 	let email: string | undefined;
 	try {
-		const userinfoResponse = await fetch(GOOGLE_USERINFO_URL, {
+		const userinfoResponse = await fetchImpl(GOOGLE_USERINFO_URL, {
 			headers: { Authorization: `Bearer ${tokenData.access_token}` },
 		});
 		if (userinfoResponse.ok) {
@@ -446,7 +448,7 @@ async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string): Promi
  * The manual-paste path (`oauthComplete`) is preserved for remote-gateway
  * setups where the user's browser cannot reach the gateway loopback.
  */
-async function oauthStartGoogle(): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
+async function oauthStartGoogle(fetchImpl: typeof fetch = defaultFetch): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
 	const { randomBytes } = await import("node:crypto");
 	const http = await import("node:http");
 
@@ -484,7 +486,7 @@ async function oauthStartGoogle(): Promise<{ flowId: string; url: string; provid
 					flow.error = "State mismatch";
 				} else {
 					try {
-						await exchangeGoogleCode(flow, code);
+						await exchangeGoogleCode(flow, code, fetchImpl);
 						flow.completed = true;
 					} catch (e) {
 						flow.error = redactSensitive(e instanceof Error ? e.message : String(e));
@@ -538,7 +540,7 @@ async function oauthStartGoogle(): Promise<{ flowId: string; url: string; provid
  * Complete a manual-paste Google flow: accepts a bare authorization code or a
  * full redirect URL (from which `code` + `state` are parsed).
  */
-async function completeGoogleFlow(flow: PendingGoogleOAuth, flowId: string, authCode: string): Promise<{ success: boolean; error?: string }> {
+async function completeGoogleFlow(flow: PendingGoogleOAuth, flowId: string, authCode: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; error?: string }> {
 	let code = authCode.trim();
 	// Allow pasting the full redirect URL (or just the query string).
 	if (code.includes("code=") || code.startsWith("http")) {
@@ -557,7 +559,7 @@ async function completeGoogleFlow(flow: PendingGoogleOAuth, flowId: string, auth
 	if (!code) return { success: false, error: "code required" };
 
 	try {
-		await exchangeGoogleCode(flow, code);
+		await exchangeGoogleCode(flow, code, fetchImpl);
 		flow.completed = true;
 		closeGoogleFlowServer(flow);
 		pendingFlows.delete(flowId);
@@ -576,6 +578,7 @@ async function completeGoogleFlow(flow: PendingGoogleOAuth, flowId: string, auth
 export async function oauthComplete(
 	flowId: string,
 	authCode: string,
+	fetchImpl: typeof fetch = defaultFetch,
 ): Promise<{ success: boolean; error?: string }> {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) {
@@ -601,7 +604,7 @@ export async function oauthComplete(
 		if (!authCode || !authCode.trim()) {
 			return { success: false, error: "code required" };
 		}
-		return completeGoogleFlow(flow, flowId, authCode);
+		return completeGoogleFlow(flow, flowId, authCode, fetchImpl);
 	}
 
 	if (flow.provider !== "anthropic") {
@@ -631,7 +634,7 @@ export async function oauthComplete(
 	const state = parts[1];
 
 	try {
-		const tokenResponse = await fetch(TOKEN_URL, {
+		const tokenResponse = await fetchImpl(TOKEN_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -745,7 +748,7 @@ export function oauthFlowStatus(
  * Updates ~/.bobbit/agent/auth.json with the new credentials.
  * Returns the new access token, or null if refresh fails.
  */
-export async function refreshOAuthToken(): Promise<string | null> {
+export async function refreshOAuthToken(fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const authPath = getAuthJsonPath();
 	if (!existsSync(authPath)) return null;
 
@@ -765,7 +768,7 @@ export async function refreshOAuthToken(): Promise<string | null> {
 	console.log("[oauth] Access token expired, refreshing...");
 
 	try {
-		const tokenResponse = await fetch(TOKEN_URL, {
+		const tokenResponse = await fetchImpl(TOKEN_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -823,7 +826,7 @@ export async function refreshOAuthToken(): Promise<string | null> {
  * This is a separate, provider-aware helper so the no-arg `refreshOAuthToken()`
  * Anthropic contract and its existing callers stay unchanged.
  */
-export async function refreshGoogleOAuthToken(): Promise<string | null> {
+export async function refreshGoogleOAuthToken(fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const authPath = getAuthJsonPath();
 	if (!existsSync(authPath)) return null;
 
@@ -845,7 +848,7 @@ export async function refreshGoogleOAuthToken(): Promise<string | null> {
 	console.log("[oauth] Google access token expired, refreshing...");
 
 	try {
-		const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+		const tokenResponse = await fetchImpl(GOOGLE_TOKEN_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 			body: new URLSearchParams({
@@ -900,9 +903,9 @@ export async function refreshGoogleOAuthToken(): Promise<string | null> {
  * Best-effort revocation of a Google OAuth token at Google's revoke endpoint.
  * Never throws — logout must succeed even if revoke is transiently unavailable.
  */
-async function revokeGoogleToken(token: string): Promise<void> {
+async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
 	try {
-		await fetch(GOOGLE_REVOKE_URL, {
+		await fetchImpl(GOOGLE_REVOKE_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 			body: new URLSearchParams({ token }).toString(),
@@ -920,7 +923,7 @@ async function revokeGoogleToken(token: string): Promise<void> {
  * other providers' OAuth entries are never touched. For Google, the upstream
  * token is best-effort revoked first. No token material is ever returned.
  */
-export async function oauthLogout(providerInput?: string): Promise<{ success: boolean; provider: OAuthProviderId }> {
+export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; provider: OAuthProviderId }> {
 	const provider = normalizeProvider(providerInput);
 	const authPath = getAuthJsonPath();
 	if (!existsSync(authPath)) return { success: true, provider };
@@ -935,7 +938,7 @@ export async function oauthLogout(providerInput?: string): Promise<{ success: bo
 	const cred = authData[provider];
 	if (provider === "google-gemini-cli" && cred && cred.type === "oauth") {
 		const token = cred.refresh || cred.access;
-		if (typeof token === "string" && token) await revokeGoogleToken(token);
+		if (typeof token === "string" && token) await revokeGoogleToken(token, fetchImpl);
 	}
 
 	if (cred !== undefined) {

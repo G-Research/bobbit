@@ -197,6 +197,7 @@ export default function(pi) {
   }
   const gwUrl = readState("gateway-url", "BOBBIT_GATEWAY_URL");
   const token = readState("token", "BOBBIT_TOKEN");
+  const fetchImpl = globalThis.fetch.bind(globalThis);
 
   // TLS for the local gateway is handled entirely by the spawner's inherited
   // env (the CA cert is pinned via NODE_EXTRA_CA_CERTS when present, with the
@@ -209,7 +210,7 @@ export default function(pi) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(gwUrl + "/api/sessions/" + sessionId + route, {
+      const res = await fetchImpl(gwUrl + "/api/sessions/" + sessionId + route, {
         method: "POST",
         headers: {
           "Authorization": "Bearer " + token,
