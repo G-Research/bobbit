@@ -388,16 +388,27 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 	}, { auto: true }],
 });
 
+function needsHeadquartersConfigProjectId(path: string, method: string): boolean {
+	const bare = path.split("?")[0];
+	if (method === "GET" && /^\/api\/(tools|roles)(\?|$)/.test(path)) return true;
+	if ((method === "GET" || method === "PUT") && /^\/api\/tools\/[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/tools\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "POST" && /^\/api\/roles$/.test(bare)) return true;
+	if ((method === "GET" || method === "PUT" || method === "DELETE") && /^\/api\/roles\/(?!assistant\/prompts(?:\/|$))[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/roles\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/tool-group-policies") return true;
+	if (method === "PUT" && /^\/api\/tool-group-policies\/[^/]+$/.test(bare)) return true;
+	return false;
+}
+
 function injectHeadquartersDiscoveryProjectId(path: string, method: string): string {
-	if (method !== "GET") return path;
-	if (!/^\/api\/(tools|roles)(\?|$)/.test(path)) return path;
+	if (!needsHeadquartersConfigProjectId(path, method)) return path;
 	if (/[?&]projectId=/.test(path)) return path;
 	return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
 }
 
 function injectHeadquartersDiscoveryUrl(input: RequestInfo | URL, init?: RequestInit): RequestInfo | URL {
 	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
-	if (method !== "GET") return input;
 	// rawApiFetch deliberately exercises missing-projectId guard paths.
 	if ((new Error().stack || "").includes("rawApiFetch")) return input;
 	const value = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

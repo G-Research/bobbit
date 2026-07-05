@@ -390,13 +390,26 @@ function maybeInjectAcceptCanonical(path: string, opts: RequestInit): RequestIni
  * the URL (workflow customize/override/PUT/DELETE on /:id). Returns the path
  * unchanged if it already carries projectId or no default project is registered.
  */
+function needsHeadquartersConfigProjectId(path: string, method: string): boolean {
+	const bare = path.split("?")[0];
+	if (method === "GET" && /^\/api\/(tools|roles|sandbox-status)(\?|$)/.test(path)) return true;
+	if (method === "POST" && /^\/api\/sandbox-image\/build(\?|$)/.test(path)) return true;
+	if ((method === "GET" || method === "PUT") && /^\/api\/tools\/[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/tools\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "POST" && bare === "/api/roles") return true;
+	if ((method === "GET" || method === "PUT" || method === "DELETE") && /^\/api\/roles\/(?!assistant\/prompts(?:\/|$))[^/]+$/.test(bare)) return true;
+	if ((method === "POST" || method === "DELETE") && /^\/api\/roles\/[^/]+\/(customize|override)$/.test(bare)) return true;
+	if (method === "GET" && bare === "/api/tool-group-policies") return true;
+	if (method === "PUT" && /^\/api\/tool-group-policies\/[^/]+$/.test(bare)) return true;
+	return false;
+}
+
 async function maybeInjectProjectIdQuery(path: string, method: string): Promise<string> {
 	// /api/workflows root GET also needs projectId now (returns [] without one).
 	// /api/workflows/:id and /:id/customize|/override require projectId on every method.
 	const rootGet = method === "GET" && WORKFLOWS_BODY_INJECT.test(path);
 	const idRoute = WORKFLOWS_QUERY_INJECT.test(path) && (method === "GET" || method === "POST" || method === "PUT" || method === "DELETE");
-	const hqDiscoveryRoute = (method === "GET" && /^\/api\/(tools|roles|sandbox-status)(\?|$)/.test(path))
-		|| (method === "POST" && /^\/api\/sandbox-image\/build(\?|$)/.test(path));
+	const hqDiscoveryRoute = needsHeadquartersConfigProjectId(path, method);
 	if (!rootGet && !idRoute && !hqDiscoveryRoute) return path;
 	if (/[?&]projectId=/.test(path)) return path;
 	if (hqDiscoveryRoute) return path + (path.includes("?") ? "&" : "?") + "projectId=headquarters";
