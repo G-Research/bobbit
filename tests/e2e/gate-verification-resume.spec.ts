@@ -144,11 +144,12 @@ test.describe("gate verification resume after restart", () => {
 				return origEnqueue(sid, msg, opts);
 			};
 
-			// Shrink the worker-idle nudge debounce to a negligible value so the
-			// nudge fires almost immediately and we can assert via fast polling
-			// instead of waiting out the real 5s window. (The 5s timing itself is
-			// covered deterministically by the unit tests using a logical clock.)
-			(teamManager as any).workerIdleNudgeDebounceMs = 20;
+				// Shrink debounce/coalescing windows to negligible values so the
+				// nudge fires almost immediately and we can assert via fast polling
+				// instead of waiting out the real production windows. The timing
+				// itself is covered deterministically by unit tests using a logical clock.
+				(teamManager as any).workerIdleNudgeDebounceMs = 20;
+				(teamManager as any).teamLeadNotifyCoalesceMs = 20;
 
 			try {
 				// Fire agent_end on the reviewer's RPC bridge. With the fix,

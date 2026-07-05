@@ -192,21 +192,22 @@ after(() => {
 			clearTimeout(t);
 		}
 		(tm as any).noWorkersNudgeTimers?.clear?.();
-		// The fix introduces a per-worker `pendingIdleNotify` timer map. Clear it
-		// defensively when present so the process can exit cleanly post-fix.
+		// Clear notification timers defensively so the process exits cleanly.
 		for (const [, t] of (tm as any).pendingIdleNotify ?? []) clearTimeout(t);
 		(tm as any).pendingIdleNotify?.clear?.();
+		for (const [, batch] of (tm as any).pendingLeadNotify ?? []) clearTimeout(batch.timer);
+		(tm as any).pendingLeadNotify?.clear?.();
 	}
 	try { fs.rmSync(TEST_BOBBIT_DIR, { recursive: true }); } catch { /* ignore */ }
 });
 
 // ---------------------------------------------------------------------------
-// Helper: set up a TeamManager with an idle team lead and ONE worker agent
-// whose RPC event callbacks we can drive manually. The worker subscription is
+// Helper: set up a TeamManager with an idle team lead and worker agents whose
+// RPC event callbacks we can drive manually. The worker subscription is
 // wired through the REAL production code path (`resubscribeTeamEvents`).
 // ---------------------------------------------------------------------------
 
-async function setupTeamWithWorker() {
+async function setupTeamWithWorkers(workerCount = 1) {
 	const goals = new Map<string, MockGoal>();
 	const goal = createMockGoal();
 	goals.set(goal.id, goal);
@@ -227,64 +228,82 @@ async function setupTeamWithWorker() {
 
 	const team = createTeamManager(sm);
 	await team.startTeam("goal-1");
+	// These tests focus on the per-worker idle debounce unless explicitly
+	// overriding the lead-level coalescing window in a coalescing test.
+	(team as any).teamLeadNotifyCoalesceMs = 1;
 
 	const entry = (team as any).teams.get("goal-1")!;
 	const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
 	tlSession.status = "idle";
 
-	// Register a worker session whose onEvent callbacks we capture so we can
+	// Register worker sessions whose onEvent callbacks we capture so we can
 	// fire `agent_end` / `agent_start` at the real subscription.
-	const workerSessionId = "worker-1";
-	const workerCallbacks: Array<(event: any) => void> = [];
-	const workerSession = {
-		id: workerSessionId,
-		status: "idle",
-		cwd: "/tmp/worker",
-		rpcClient: {
-			prompt: mock.fn(async () => {}),
-			onEvent: mock.fn((cb: any) => {
-				workerCallbacks.push(cb);
-				return () => {};
-			}),
-		},
-		clients: new Set(),
-	};
-	sm._sessions.set(workerSessionId, workerSession);
-	entry.agents.push({
-		sessionId: workerSessionId,
-		role: "coder",
-		task: "work on feature",
-		createdAt: Date.now(),
-	});
-	// dismissRole() resolves the goal via sessionToGoal — populate it so the
-	// real removal path works (resubscribeTeamEvents does not set this).
-	(team as any).sessionToGoal.set(workerSessionId, "goal-1");
+	const workerSessionIds: string[] = [];
+	const workerCallbacksById = new Map<string, Array<(event: any) => void>>();
+	for (let i = 0; i < workerCount; i++) {
+		const workerSessionId = `worker-${i + 1}`;
+		workerSessionIds.push(workerSessionId);
+		const workerCallbacks: Array<(event: any) => void> = [];
+		workerCallbacksById.set(workerSessionId, workerCallbacks);
+		const workerSession = {
+			id: workerSessionId,
+			status: "idle",
+			cwd: `/tmp/${workerSessionId}`,
+			rpcClient: {
+				prompt: mock.fn(async () => {}),
+				onEvent: mock.fn((cb: any) => {
+					workerCallbacks.push(cb);
+					return () => {};
+				}),
+			},
+			clients: new Set(),
+		};
+		sm._sessions.set(workerSessionId, workerSession);
+		entry.agents.push({
+			sessionId: workerSessionId,
+			role: "coder",
+			kind: "worker",
+			task: `work on feature ${i + 1}`,
+			createdAt: Date.now(),
+		});
+		// dismissRole() resolves the goal via sessionToGoal — populate it so the
+		// real removal path works (resubscribeTeamEvents does not set this).
+		(team as any).sessionToGoal.set(workerSessionId, "goal-1");
+	}
 
 	// Wire the worker subscription through the REAL production code path.
 	team.resubscribeTeamEvents();
 
-	assert.ok(
-		workerCallbacks.length > 0,
-		"harness error: worker rpcClient.onEvent was never invoked — resubscribeTeamEvents did not wire the worker subscription",
-	);
+	for (const workerSessionId of workerSessionIds) {
+		assert.ok(
+			(workerCallbacksById.get(workerSessionId)?.length ?? 0) > 0,
+			`harness error: worker rpcClient.onEvent was never invoked for ${workerSessionId} — resubscribeTeamEvents did not wire the worker subscription`,
+		);
+	}
 
-	function fireWorker(type: "agent_end" | "agent_start") {
-		for (const cb of workerCallbacks) cb({ type });
+	function fireWorker(type: "agent_end" | "agent_start", workerSessionId = workerSessionIds[0]) {
+		for (const cb of workerCallbacksById.get(workerSessionId) ?? []) cb({ type });
+	}
+
+	function dispatchedMessages(): string[] {
+		return [
+			...enqueuePrompt.mock.calls.map((c: any) => String(c.arguments?.[1] ?? "")),
+			...deliverLiveSteer.mock.calls.map((c: any) => String(c.arguments?.[1] ?? "")),
+		];
 	}
 
 	// Count of team-lead worker-completion nudges.
 	function workerIdleNudgeCount(): number {
-		return enqueuePrompt.mock.calls.filter((c: any) => {
-			const msg = String(c.arguments?.[1] ?? "");
+		return dispatchedMessages().filter((msg) => {
 			return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
-		}).length
-			+ deliverLiveSteer.mock.calls.filter((c: any) => {
-				const msg = String(c.arguments?.[1] ?? "");
-				return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
-			}).length;
+		}).length;
 	}
 
-	return { team, sm, entry, tlSession, workerSessionId, enqueuePrompt, fireWorker, workerIdleNudgeCount };
+	return { team, sm, entry, tlSession, workerSessionId: workerSessionIds[0], workerSessionIds, enqueuePrompt, fireWorker, dispatchedMessages, workerIdleNudgeCount };
+}
+
+async function setupTeamWithWorker() {
+	return setupTeamWithWorkers(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +343,7 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 		// Worker finishes and stays idle — no resume.
 		fireWorker("agent_end");
 		t.mock.timers.tick(6_000); // past the 5s debounce window
+		t.mock.timers.tick(1); // past the test-shrunk lead coalescing window
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -355,6 +375,98 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 			"a worker removed before the 5s debounce window elapses must not produce a " +
 				"worker-completion nudge — the pending idle-notify timer must be cleared on removal",
 		);
+
+		t.mock.timers.reset();
+	});
+});
+
+describe("TeamManager — team-lead worker notification coalescing", () => {
+	it("coalesces three workers finishing within the lead quiet window into one combined dispatch", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, workerSessionIds, fireWorker, dispatchedMessages, workerIdleNudgeCount } = await setupTeamWithWorkers(3);
+		(team as any).workerIdleNudgeDebounceMs = 1;
+		(team as any).teamLeadNotifyCoalesceMs = 100;
+
+		for (const workerSessionId of workerSessionIds) fireWorker("agent_end", workerSessionId);
+		t.mock.timers.tick(1);
+		assert.equal(workerIdleNudgeCount(), 0, "first accepted notification should wait for the lead-level quiet window");
+
+		t.mock.timers.tick(100);
+
+		assert.equal(workerIdleNudgeCount(), 1, "three near-simultaneous worker finishes should dispatch one combined lead prompt");
+		const [message] = dispatchedMessages().filter((msg) => msg.includes("**Team agents finished**"));
+		assert.ok(message, "combined worker notification should use the team-agents heading");
+		for (const workerSessionId of workerSessionIds) {
+			assert.ok(
+				message.includes(`\`coder-${workerSessionId.slice(0, 8)}\` (\`coder\`)`),
+				`combined notification should include ${workerSessionId}`,
+			);
+		}
+		assert.ok(
+			message.indexOf("`coder-worker-1`") < message.indexOf("`coder-worker-2`")
+				&& message.indexOf("`coder-worker-2`") < message.indexOf("`coder-worker-3`"),
+			"combined notification should preserve worker arrival order",
+		);
+
+		t.mock.timers.reset();
+	});
+
+	it("sends a separate dispatch for a worker notification that arrives after the quiet window", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, workerSessionIds, fireWorker, workerIdleNudgeCount } = await setupTeamWithWorkers(2);
+		(team as any).workerIdleNudgeDebounceMs = 1;
+		(team as any).teamLeadNotifyCoalesceMs = 50;
+
+		fireWorker("agent_end", workerSessionIds[0]);
+		t.mock.timers.tick(1);
+		t.mock.timers.tick(50);
+		assert.equal(workerIdleNudgeCount(), 1, "first worker should flush after the quiet window");
+
+		fireWorker("agent_end", workerSessionIds[1]);
+		t.mock.timers.tick(1);
+		t.mock.timers.tick(50);
+		assert.equal(workerIdleNudgeCount(), 2, "worker finishing after the quiet window should produce a separate dispatch");
+
+		t.mock.timers.reset();
+	});
+
+	it("keeps the existing per-worker 30s dedupe on top of lead coalescing", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
+		(team as any).workerIdleNudgeDebounceMs = 1;
+		(team as any).teamLeadNotifyCoalesceMs = 1;
+
+		fireWorker("agent_end");
+		t.mock.timers.tick(1);
+		t.mock.timers.tick(1);
+		assert.equal(workerIdleNudgeCount(), 1, "first worker finish should dispatch");
+
+		fireWorker("agent_end");
+		t.mock.timers.tick(1);
+		t.mock.timers.tick(1);
+		assert.equal(workerIdleNudgeCount(), 1, "repeat finish from same worker inside 30s should be deduped");
+
+		t.mock.timers.reset();
+	});
+
+	it("flushes a pending lead notification batch during team teardown", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
+		(team as any).workerIdleNudgeDebounceMs = 1;
+		(team as any).teamLeadNotifyCoalesceMs = 100;
+
+		fireWorker("agent_end");
+		t.mock.timers.tick(1);
+		assert.equal(workerIdleNudgeCount(), 0, "batch should still be pending before teardown");
+
+		await team.teardownTeam("goal-1");
+
+		assert.equal(workerIdleNudgeCount(), 1, "teardown should flush the pending worker notification before terminating the lead");
+		assert.equal((team as any).pendingLeadNotify.size, 0, "teardown flush should clear the pending batch");
 
 		t.mock.timers.reset();
 	});
