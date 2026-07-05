@@ -61,7 +61,14 @@ export interface ApiModel {
 export interface CustomProviderConfig {
 	id: string;
 	name: string;
-	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-images" | "gemini-images" | "google-imagen";
+	// NOTE: "openai-completions" is the Settings UI's type value (CustomProviderType
+	// in src/ui/storage/stores/custom-providers-store.ts) for a manually-specified
+	// OpenAI-completions-compatible remote API (e.g. NVIDIA NIM, OpenRouter, Together).
+	// The UI has never had a "manual" type — it calls this class of provider
+	// "openai-completions" — so both must be accepted here or every provider saved
+	// via the actual Settings dialog silently discovers zero models (see
+	// discoverFromSingleConfig below; bug fixed in fable/d6-glm-in-bobbit).
+	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-completions" | "openai-images" | "gemini-images" | "google-imagen";
 	baseUrl: string;
 	apiKey?: string;
 	models?: Array<{ id: string; name: string }>;
@@ -644,6 +651,7 @@ async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<A
 		case "vllm":
 			return discoverOpenAICompatModelsServer(config);
 		case "manual":
+		case "openai-completions":
 			return (config.models || []).map(m => ({
 				id: m.id,
 				name: m.name || m.id,
