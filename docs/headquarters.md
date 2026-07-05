@@ -180,4 +180,4 @@ Diagnostics are written to `<headquarters-state-dir>/headquarters-migration-diag
 
 - [internals.md — Headquarters project](internals.md#headquarters-project) and [projectId-required API contract](internals.md#projectid-required-api-contract).
 - [rest-api.md](rest-api.md) for the project and goal endpoints.
-- [security.md](security.md) for the server-secrets relocation rationale.
+- [security.md](security.md) for the admin token storage location and access controls (the token is stored in `serverSecretsDir()` outside any project root).
