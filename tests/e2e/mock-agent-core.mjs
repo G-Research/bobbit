@@ -855,9 +855,39 @@ export class MockAgentCore {
 		// is sufficient.
 		await this.tick(5);
 
-		// Emit agent lifecycle events
-		this.emit({ type: "agent_start" });
-		this.emit({ type: "session_status", status: "streaming" });
+		// Abort check (W2.W — tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts):
+		// every other abortable `tick()` below is paired with a guard that
+		// stops the turn from emitting further lifecycle events once aborted.
+		// This was the one gap: a turn aborted during this very tick (Steer
+		// racing an immediate Stop — the Stop's "abort" RPC lands and already
+		// emits its own terminal agent_end/idle pair while THIS call is still
+		// suspended here) would fall through and emit a fresh agent_start +
+		// session_status:"streaming" AFTER that terminal pair had already
+		// settled the session back to idle — re-flipping status to
+		// "streaming" with no subsequent agent_end ever following (every
+		// later checkpoint in this same call correctly detects the abort and
+		// returns without emitting one), wedging the session in "streaming"
+		// forever.
+		//
+		// Only the emission is suppressed here — deliberately NOT an early
+		// `return` — so the rest of this turn's control flow and timing
+		// (including the existing abort checks further down) is unchanged for
+		// every other caller. In particular tests/e2e/steer-reconnect.spec.ts
+		// depends on an aborted-but-still-referenced controller (steer does
+		// not null it out, see the "steer" RPC handler below) causing the
+		// later `tick(busyMs)` to run out its full duration instead of
+		// resolving early, since an abort-listener added to an
+		// already-aborted AbortSignal never fires — an early return here
+		// would skip straight to that same fate anyway for THIS turn, but for
+		// a turn that legitimately reaches its own busy branch (as in that
+		// spec) the existing downstream guards already handle it correctly
+		// without help from this one.
+		const abortedBeforeStart = !this.currentAbortController || this.currentAbortController.signal.aborted;
+		if (!abortedBeforeStart) {
+			// Emit agent lifecycle events
+			this.emit({ type: "agent_start" });
+			this.emit({ type: "session_status", status: "streaming" });
+		}
 
 		await this.tick(5);
 
