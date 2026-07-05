@@ -18,7 +18,7 @@
  * Per-test isolation is the caller's responsibility via `createScope()`
  * (see scope.ts) + `assertNoLeaks()` (see leak-detector.ts).
  */
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,7 +43,18 @@ const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
 // defaults only exist after a build). Production/legacy dist-boot leave these
 // undefined and keep their dist-relative defaults.
 const BUILTINS_DIR = resolve(REPO_ROOT, "defaults");
-const BUILTIN_PACKS_DIR = resolve(REPO_ROOT, "market-packs");
+// Source-of-truth for the shipped first-party pack SET is
+// scripts/copy-builtin-packs.mjs (FIRST_PARTY_PACKS). The repo-root
+// `market-packs/` SOURCE tree additionally carries test-only packs that dist
+// never ships (e.g. the `artifacts` litmus pack, whose provider-less
+// `artifact_demo` tool would otherwise surface with origin "mcp" in
+// /api/tools and diverge from the legacy/production dist cascade). We therefore
+// stage a CURATED builtin-packs dir per fork that mirrors the dist allowlist
+// exactly, so the v2 tools/roles cascade matches legacy. Keep this list in
+// sync with scripts/copy-builtin-packs.mjs::FIRST_PARTY_PACKS.
+const BUILTIN_PACKS_SRC = resolve(REPO_ROOT, "market-packs");
+const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "terminal"] as const;
+const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
 const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
@@ -82,6 +93,13 @@ export interface GatewayFixture {
 	countEntities(): EntityCounts;
 	/** Re-create/reseed the default project after a test deletes or mutates it. */
 	restoreDefaultProject(): Promise<void>;
+	/**
+	 * Reset the default project's seeded workflows + component config back to the
+	 * baseline when a fork-mate mutated them in place (the default project still
+	 * exists, so `restoreDefaultProject` — which only heals a MISSING default —
+	 * would not fix it). No-op when the baseline is already intact.
+	 */
+	resetDefaultProjectBaseline(): Promise<void>;
 }
 
 interface BootedGateway extends GatewayFixture {
@@ -153,6 +171,29 @@ async function registerDefaultProject(baseURL: string, token: string, rootPath: 
 	return project.id;
 }
 
+/**
+ * Stage a curated builtin-packs dir under `<bobbitDir>/builtin-packs/market-packs`
+ * containing ONLY the dist-shipped first-party packs (FIRST_PARTY_PACKS), copied
+ * from the repo-root source tree the same way scripts/copy-builtin-packs.mjs does
+ * (skipping `src/` and `node_modules/`). The literal `market-packs` path segment
+ * is preserved so pack-identity derivation (derivePackId/packIdFromRoot/
+ * isMarketPackBaseDir) resolves stable packIds unchanged. Returns the path to the
+ * curated `market-packs` dir to pass as `builtinPacksDir`.
+ */
+function prepareBuiltinPacksDir(bobbitDir: string): string {
+	const curated = join(bobbitDir, "builtin-packs", "market-packs");
+	mkdirSync(curated, { recursive: true });
+	for (const name of FIRST_PARTY_PACKS) {
+		const src = join(BUILTIN_PACKS_SRC, name);
+		if (!existsSync(src)) throw new Error(`[tests2/gateway] first-party pack not found: ${src}`);
+		cpSync(src, join(curated, name), {
+			recursive: true,
+			filter: (source) => !BUILTIN_PACK_SKIP_DIRS.has(source.split(/[\\/]/).pop() ?? ""),
+		});
+	}
+	return curated;
+}
+
 async function boot(): Promise<BootedGateway> {
 	mkdirSync(TMP_ROOT, { recursive: true });
 	let bobbitDir = mkdtempSync(join(TMP_ROOT, `fork-${process.pid}-`));
@@ -222,7 +263,7 @@ async function boot(): Promise<BootedGateway> {
 		skipRemotePush: true,
 		skipNonLocalRemoteGit: true,
 		builtinsDir: BUILTINS_DIR,
-		builtinPacksDir: BUILTIN_PACKS_DIR,
+		builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
 	}, deps);
 
 	// Suppress the startup internet probe / aigw auto-discovery without env flags.
@@ -303,6 +344,37 @@ async function boot(): Promise<BootedGateway> {
 				}
 			} catch { /* ignore */ }
 			return { sessions, goals, projects };
+		},
+		async resetDefaultProjectBaseline() {
+			const id = currentDefaultProjectId;
+			if (!id) return;
+			// Reset in-process through the SAME stores the server resolves from
+			// (project.yaml-backed). GET /api/projects/:id/config deliberately omits the
+			// workflows block, and PUT config REPLACES it — so a read-merge-write over the
+			// API would clobber workflows a test registered via POST /api/workflows (also
+			// project.yaml-backed, via ctx.workflowStore). Instead we surgically restore
+			// ONLY the seeded ids, leaving every extra workflow untouched.
+			let cfg: any;
+			try { cfg = gw.projectContextManager.getOrCreate(id)?.projectConfigStore; } catch { return; }
+			if (!cfg) return;
+			try { cfg.reload(); } catch { /* pick up any out-of-band project.yaml writes */ }
+			const seeded = testWorkflows();
+			const block = (cfg.getWorkflows?.() ?? {}) as Record<string, unknown>;
+			const components = (cfg.getComponents?.() ?? []) as Array<{ name?: string; commands?: Record<string, unknown> }>;
+			const testComp = components.find(c => c?.name === TEST_DEFAULT_COMPONENT.name);
+			const cmds = (testComp?.commands ?? {}) as Record<string, unknown>;
+			const expectedCmds = TEST_DEFAULT_COMPONENT.commands ?? {};
+			const componentOk = !!testComp && Object.entries(expectedCmds).every(([k, v]) => cmds[k] === v);
+			const workflowsOk = Object.keys(seeded).every(k => k in block);
+			// Fast path: baseline intact → no write (common case, every uncorrupted test).
+			if (componentOk && workflowsOk) return;
+			// Restore seeded workflows (baseline wins on seeded keys); preserve any EXTRA
+			// workflow a fork-mate/test added (e.g. gate-resign-cancel's `test-slow`).
+			if (!workflowsOk) { try { cfg.setWorkflows({ ...block, ...(seeded as Record<string, unknown>) }); } catch { /* best-effort */ } }
+			// Restore the seeded component set so a fork-mate's stray/renamed component
+			// (e.g. inline-workflow-goal-flow's `default`) can't linger and break the
+			// component-linked verification steps of seeded workflows.
+			if (!componentOk) { try { cfg.setComponents([TEST_DEFAULT_COMPONENT]); } catch { /* best-effort */ } }
 		},
 		async restoreDefaultProject() {
 			// If the default still exists (test only mutated it), keep its id — do NOT

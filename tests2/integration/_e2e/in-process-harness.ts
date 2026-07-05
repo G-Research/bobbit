@@ -200,12 +200,18 @@ async function sweepTo(gw: GatewayFixture, baseline: IdSnapshot): Promise<void> 
 	for (const id of now.projects) if (!baseline.projects.has(id) && id !== gw.defaultProjectId) {
 		await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 	}
-	// Only HEAL the default project when a test actually removed it. Calling
-	// restoreDefaultProject() unconditionally re-seeds the default workflows and
-	// would clobber workflows a test registered mid-file (e.g. a custom
-	// per-goal workflow via POST /api/workflows, which lives in a separate store
-	// from the project config), breaking later tests in the same describe.
+	// Heal the default project on cleanup:
+	//   - MISSING (a test deleted it) → re-register + reseed via restoreDefaultProject().
+	//   - PRESENT but its seeded workflows/component config were mutated in place by a
+	//     fork-mate (e.g. inline-workflow-goal-flow.test.ts REPLACES the default
+	//     project.yaml workflows) → resetDefaultProjectBaseline() restores the seeded
+	//     baseline (no-op when intact). Without the reset branch, a corrupted-but-
+	//     present default leaks across the shared fork and flakes later tests that
+	//     read the seeded workflows/components (e.g. the QA tooltip metadata test).
+	// Neither path touches ctx.workflowStore, so workflows a test registered via
+	// POST /api/workflows (a separate store) are preserved.
 	if (!hasVisibleDefaultProject(gw)) await gw.restoreDefaultProject();
+	else await gw.resetDefaultProjectBaseline();
 }
 
 function wrapDescribe(name: string, body: DescribeBody): void {
