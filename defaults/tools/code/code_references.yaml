@@ -1,6 +1,6 @@
 name: code_references
 description: "Find all references to a TypeScript symbol at a file position"
-summary: "Find all call sites of a TS symbol (TS-only)"
+summary: "Find TS symbol references"
 params: [file, line, col]
 provider:
   type: bobbit-extension

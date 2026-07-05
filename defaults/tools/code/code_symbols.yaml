@@ -1,6 +1,6 @@
 name: code_symbols
 description: "List symbols in a TypeScript file, or search project-wide with query"
-summary: "List a file's symbols, or project-wide symbol search (TS-only)"
+summary: "List or search TS symbols"
 params: [file, query?]
 provider:
   type: bobbit-extension

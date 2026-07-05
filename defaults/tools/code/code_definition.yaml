@@ -1,6 +1,6 @@
 name: code_definition
 description: "Find where a TypeScript symbol at a file position is defined"
-summary: "Jump to a TS symbol's definition (TS-only)"
+summary: "Jump to a TS definition"
 params: [file, line, col]
 provider:
   type: bobbit-extension
