@@ -13,6 +13,19 @@ import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.
 // imports keep working unchanged.
 import type { LifecycleHook } from "./lifecycle-hooks.js";
 export type { LifecycleHook } from "./lifecycle-hooks.js";
+// `Decision`/`DecisionPoint` are defined in decision-types.js (Wave 0(b) of the
+// Classifier Framework lane, EXT-05 core — see that file's header) and
+// re-exported here so callers only need `from "./lifecycle-hub.js"`.
+import {
+	decisionKey,
+	isDecision,
+	type Decision,
+	type DecisionClassifier,
+	type DecisionDispatchCtx,
+	type DecisionOutcome,
+	type DecisionPoint,
+} from "./decision-types.js";
+export type { Decision, DecisionClassifier, DecisionDispatchCtx, DecisionOutcome, DecisionPoint } from "./decision-types.js";
 
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
@@ -152,6 +165,22 @@ export class LifecycleHub {
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly runtimeResolver?: RuntimeContextResolver;
+
+	// --- Wave 0(b) decision seam (EXT-05 core, select-only) ---------------
+	// Independent of `registry`/`moduleHost` above: Wave 0(b) classifiers are
+	// registered directly (see `registerDecisionClassifier`), not loaded from
+	// pack YAML — that wiring is Wave 1(b). Empty in production today (no
+	// caller registers anything), which is what makes `dispatchDecision`
+	// byte-identical-dark: see the pinning tests in
+	// tests/lifecycle-hub-dispatch-decision.test.ts.
+	private readonly decisionAllowList = new Set<string>();
+	private readonly decisionClassifiers = new Map<string, DecisionClassifier[]>();
+	// TODO(CLF-W1a): fold into ContextTraceStore's `TraceEntry.decisions[]` +
+	// Transparency Panel rows instead of this bounded in-memory ring (design
+	// doc Wave 1(a)). Kept separate from `dispatch()`'s persisted trace for
+	// now so Wave 0(b) doesn't touch the on-disk TraceEntry schema/readers.
+	private readonly decisionTrace: DecisionOutcome[] = [];
+	private static readonly MAX_DECISION_TRACE = 500;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -419,6 +448,117 @@ export class LifecycleHub {
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
 
 		return { blocks: budgeted.kept, diagnostics };
+	}
+
+	// --- Wave 0(b) decision seam (EXT-05 core, select-only) ----------------
+
+	/**
+	 * Allow-lists a (point, kind) pair for `dispatchDecision` WITHOUT attaching
+	 * a classifier. Exists so tests can pin the "allow-listed but zero
+	 * classifiers registered" behaviour (abstain, byte-identical) distinctly
+	 * from the "pair never allow-listed at all" rejection. No production
+	 * caller exists yet — see `dispatchDecision`.
+	 */
+	allowDecisionPoint(point: DecisionPoint, kind: string): void {
+		this.decisionAllowList.add(decisionKey(point, kind));
+	}
+
+	/**
+	 * Registers a classifier at (point, kind), implicitly allow-listing the
+	 * pair. Returns an unregister function. No production caller registers a
+	 * classifier today (Wave 1(b) wires pack-declared classifiers through
+	 * here or a moduleHost-backed adapter) — this is exercised only by tests
+	 * (a "fake classifier") until then.
+	 */
+	registerDecisionClassifier<TChoice = unknown>(
+		point: DecisionPoint,
+		kind: string,
+		classifier: DecisionClassifier<TChoice>,
+	): () => void {
+		const key = decisionKey(point, kind);
+		this.decisionAllowList.add(key);
+		const list = this.decisionClassifiers.get(key) ?? [];
+		list.push(classifier as DecisionClassifier);
+		this.decisionClassifiers.set(key, list);
+		return () => {
+			const cur = this.decisionClassifiers.get(key);
+			if (!cur) return;
+			const idx = cur.indexOf(classifier as DecisionClassifier);
+			if (idx >= 0) cur.splice(idx, 1);
+		};
+	}
+
+	/**
+	 * EXT-05 core (CLF-W0b): consult registered classifiers for a DECISION at
+	 * (point, kind). SELECT-ONLY — returns the first `select` a registered
+	 * classifier produces (first-registered-wins; arbitrating ties/confidence
+	 * across multiple selecting classifiers is deferred to a later wave, see
+	 * design doc §6), or `abstain` when nothing selects (including when zero
+	 * classifiers are registered — this is the byte-identical-today case).
+	 *
+	 * Throws for an unregistered (point, kind) pair (the allow-list rejection)
+	 * rather than silently no-op-ing, so a caller typo can never silently go
+	 * dark — this is safe ONLY because there is no production call site yet;
+	 * a real call site would need to decide fail-open vs fail-closed per the
+	 * design doc's safety model (§6) before this wave's blanket "throw" ships
+	 * on a live path.
+	 *
+	 * NO PRODUCTION CALL SITE consults this yet — the seam ships dark. Nothing
+	 * in the shipped server calls `allowDecisionPoint`/`registerDecisionClassifier`,
+	 * so every real invocation of this method today would throw, and none
+	 * occurs — production behaviour is provably byte-identical. See
+	 * tests/lifecycle-hub-dispatch-decision.test.ts.
+	 */
+	async dispatchDecision<TChoice = unknown>(
+		point: DecisionPoint,
+		kind: string,
+		ctx: DecisionDispatchCtx,
+		arg?: unknown,
+	): Promise<Decision<TChoice>> {
+		const key = decisionKey(point, kind);
+		if (!this.decisionAllowList.has(key)) {
+			throw new Error(`dispatchDecision: (${point}, ${JSON.stringify(kind)}) is not a registered decision point/kind pair`);
+		}
+		const t0 = performance.now();
+		const classifiers = this.decisionClassifiers.get(key) ?? [];
+		const consulted: string[] = [];
+		let decision: Decision<TChoice> = { kind: "abstain" };
+		for (const classifier of classifiers) {
+			consulted.push(classifier.id);
+			let result: unknown;
+			try {
+				result = await classifier.evaluate(ctx, arg);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				console.warn(`[lifecycle-hub] decision classifier ${classifier.id} threw at (${point}, ${kind}) (non-fatal, treated as abstain): ${message}`);
+				continue;
+			}
+			if (!isDecision(result)) {
+				console.warn(`[lifecycle-hub] decision classifier ${classifier.id} returned a malformed Decision at (${point}, ${kind}); treated as abstain`);
+				continue;
+			}
+			if (result.kind === "select") {
+				decision = result as Decision<TChoice>;
+				break;
+			}
+			// abstain → keep polling remaining classifiers
+		}
+		const ms = Math.round(performance.now() - t0);
+		this.recordDecisionOutcome({ ts: Date.now(), point, decisionKind: kind, consulted, decision, ms });
+		return decision;
+	}
+
+	private recordDecisionOutcome(entry: DecisionOutcome): void {
+		this.decisionTrace.push(entry);
+		if (this.decisionTrace.length > LifecycleHub.MAX_DECISION_TRACE) {
+			this.decisionTrace.shift();
+		}
+	}
+
+	/** Test/inspection accessor for the internal decision-outcome trace buffer
+	 *  (see `recordDecisionOutcome`'s TODO for the planned Wave 1(a) migration). */
+	getDecisionTrace(): readonly DecisionOutcome[] {
+		return this.decisionTrace;
 	}
 }
 
