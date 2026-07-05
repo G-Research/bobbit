@@ -211,10 +211,16 @@ export function synthesizeAttachmentText(
 
 let _factory: RpcBridgeFactory | null = null;
 
+export function getRegisteredRpcBridgeFactory(): RpcBridgeFactory | null {
+	return _factory;
+}
+
 /**
- * Register an alternative bridge factory. Called by test harnesses to
+ * Register an alternative bridge factory. Called by legacy test harnesses to
  * route mock sessions to an in-process implementation. Return `null` from
  * the factory to fall through to the default child-process RpcBridge.
+ *
+ * @deprecated Pass `GatewayDeps.agentBridgeFactory` to `createGateway` instead.
  */
 export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void {
 	_factory = factory;
