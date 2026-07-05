@@ -81,7 +81,7 @@ function writeMeta(packDir: string, packName: string): void {
 /** A schema-v2 pack declaring a managed runtime (startPolicy: on-enable) and a
  *  memory provider carrying the deployment `mode` (drives the start plan). */
 function writeRuntimePack(root: string, packName: string, mode: "external" | "managed" | "managed-external-postgres", opts: { extraProviderConfig?: string[]; dataDir?: string } = {}): string {
-	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+	const packDir = path.join(root, "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtime"), { recursive: true });
@@ -133,7 +133,7 @@ function writeRuntimePack(root: string, packName: string, mode: "external" | "ma
  *  defaults to external/no-start, so without the no-surface fallback the
  *  `on-enable` runtime would never start. */
 function writeProviderlessRuntimePack(root: string, packName: string): string {
-	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+	const packDir = path.join(root, "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtime"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
@@ -168,7 +168,7 @@ function writeProviderlessRuntimePack(root: string, packName: string): string {
  *  pack: `hasDeploymentSurface` is false (a provider alone is not a deployment
  *  surface), so the `on-enable` runtime starts in the manifest DEFAULT mode. */
 function writeNoModeProviderRuntimePack(root: string, packName: string): string {
-	const packDir = path.join(root, ".bobbit", "config", "market-packs", packName);
+	const packDir = path.join(root, "config", "market-packs", packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtimes"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "runtime"), { recursive: true });
