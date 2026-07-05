@@ -4,6 +4,13 @@
  * Pure REST coverage for the additive pack-activation shape: provider refs and
  * the new schema-v2 catalogue arrays persist through GET/PUT without any
  * provider runtime dispatch.
+ *
+ * Also pins finding EXT-03 (contents.hooks/contents.workflows had no loader and
+ * were phantom activation toggles): a pack MAY still declare `contents.hooks`
+ * and `contents.workflows` (non-fatal, the manifest still loads with a warning),
+ * but NEITHER key is ever surfaced in the pack-activation catalogue or
+ * accepted/echoed as a disabled-refs kind — see
+ * src/server/agent/pack-manifest.ts / docs/marketplace.md.
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch } from "./e2e-setup.js";
@@ -107,10 +114,12 @@ test.describe("marketplace pack activation — providers", () => {
 					packName,
 					disabled: {
 						providers: ["memory", "not-declared"],
-						hooks: ["turn-hook"],
 						mcp: ["local-mcp"],
 						piExtensions: ["pi-card"],
 						runtimes: ["node"],
+						// hooks/workflows are sent anyway (finding EXT-03) to prove a PUT body
+						// carrying them is silently ignored, never persisted/echoed.
+						hooks: ["turn-hook"],
 						workflows: ["review-flow"],
 					},
 				}),
@@ -118,12 +127,16 @@ test.describe("marketplace pack activation — providers", () => {
 			expect(put.status).toBe(200);
 			const putBody = await put.json();
 			expect(putBody.catalogue.providers).toEqual(["memory"]);
-			expect(putBody.catalogue.hooks).toEqual(["turn-hook"]);
 			expect(putBody.catalogue.mcp).toEqual(["local-mcp"]);
 			expect(piExtensionRefs(putBody.catalogue.piExtensions)).toEqual(["pi-card"]);
 			expect(putBody.catalogue.runtimes).toEqual(["node"]);
-			expect(putBody.catalogue.workflows).toEqual(["review-flow"]);
 			expect(putBody.disabled.providers).toEqual(["memory"]);
+			// EXT-03: neither key is activation-toggleable — never echoed, even though
+			// the pack declares them and the PUT body tried to set them.
+			expect("hooks" in putBody.catalogue).toBe(false);
+			expect("workflows" in putBody.catalogue).toBe(false);
+			expect("hooks" in putBody.disabled).toBe(false);
+			expect("workflows" in putBody.disabled).toBe(false);
 
 			const get = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(packName)}`);
 			expect(get.status).toBe(200);
@@ -131,12 +144,12 @@ test.describe("marketplace pack activation — providers", () => {
 			expect(getBody.disabled.providers).toEqual(["memory"]);
 			expect(getBody.catalogue).toMatchObject({
 				providers: ["memory"],
-				hooks: ["turn-hook"],
 				mcp: ["local-mcp"],
 				runtimes: ["node"],
-				workflows: ["review-flow"],
 			});
 			expect(piExtensionRefs(getBody.catalogue.piExtensions)).toEqual(["pi-card"]);
+			expect("hooks" in getBody.catalogue).toBe(false);
+			expect("workflows" in getBody.catalogue).toBe(false);
 		} finally {
 			await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",

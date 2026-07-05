@@ -303,9 +303,7 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 					skills: [],
 					entrypoints: [],
 					providers: ["memory"],
-					hooks: ["retain"],
 					runtimes: ["hindsight"],
-					workflows: ["wf"],
 				},
 				disabled: {},
 			};
@@ -318,13 +316,15 @@ test.describe("managed-runtime consent enable-card (P3 design §8)", () => {
 		// kinds) — otherwise the pack reads "Disabled" while Docker keeps running.
 		expect(payloads.off.runtimes).toEqual(["hindsight"]);
 		expect(payloads.off.providers).toEqual(["memory"]);
-		expect(payloads.off.hooks).toEqual(["retain"]);
-		expect(payloads.off.workflows).toEqual(["wf"]);
 		expect(payloads.off.tools).toEqual(["recall"]);
+		// hooks/workflows are never in the payload (finding EXT-03): neither is
+		// activation-toggleable, so the master toggle must not resurrect them.
+		expect(payloads.off.hooks).toBeUndefined();
+		expect(payloads.off.workflows).toBeUndefined();
 		// Master ON clears every kind back to default-enabled.
 		expect(payloads.on.runtimes).toEqual([]);
 		expect(payloads.on.providers).toEqual([]);
-		expect(payloads.on.hooks).toEqual([]);
-		expect(payloads.on.workflows).toEqual([]);
+		expect(payloads.on.hooks).toBeUndefined();
+		expect(payloads.on.workflows).toBeUndefined();
 	});
 });

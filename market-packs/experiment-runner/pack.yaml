@@ -14,11 +14,10 @@ contents:
     - experiment-runner-palette
     - experiment-runner-route
   providers: []
-  hooks: []
   mcp: []
   pi-extensions: []
   runtimes: []
-  workflows: []
+  workflows: [] # reserved, not yet loadable (finding EXT-03) — see docs/marketplace.md
 provides: []
 requires: []
 # Pack-level routes — the orchestration brain. Reached via host.callRoute(<name>);

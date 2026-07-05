@@ -223,18 +223,21 @@ export interface DisabledRefs {
 	skills?: string[];
 	entrypoints?: string[];
 	providers?: string[];
-	hooks?: string[];
 	mcp?: string[];
 	mcpOperations?: Record<string, string[]>;
 	piExtensions?: string[];
 	runtimes?: string[];
-	workflows?: string[];
 }
 
 /** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
-const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows"] as const;
+// `hooks` and `workflows` are deliberately EXCLUDED (finding EXT-03): `hooks` was
+// removed as a contribution kind entirely (see pack-manifest.ts); `workflows` is
+// reserved-but-not-loadable, so it stays parseable on the manifest
+// (pack-types.ts) but is NOT activation-toggleable — toggling a kind with zero
+// runtime effect is exactly the phantom-capability bug this excludes.
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "mcp", "piExtensions", "runtimes"] as const;
 
 function normalizeMcpOperations(raw: unknown): Record<string, string[]> | undefined {
 	if (!isPlainObject(raw)) return undefined;

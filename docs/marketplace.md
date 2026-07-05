@@ -159,10 +159,15 @@ routes, stores, renderers, actions, `lib/` — are **not** independently togglea
 shown read-only as "support surfaces").
 
 > **Extension Platform (`schema: 2`).** The activation system also covers the pack-scoped
-> kinds — `providers`, `mcp`, `piExtensions`, plus the reserved siblings `hooks` / `runtimes`
-> / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
-> `pack-activation` catalogue includes their arrays only for schema-2 packs, so toggles round-trip through the same
-> REST without changing schema-1 catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads through `McpManager` discovery; **pi extensions** resolve to standalone pi `--extension` entries. The remaining reserved kinds toggle purely as catalogue metadata until their loaders land. See
+> kinds — `providers`, `mcp`, `piExtensions`, `runtimes` — all first-class in `DisabledRefs`
+> and `ACTIVATION_KINDS`. The `pack-activation` catalogue includes their arrays only for
+> schema-2 packs, so toggles round-trip through the same REST without changing schema-1
+> catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads
+> through `McpManager` discovery; **pi extensions** resolve to standalone pi `--extension`
+> entries; **runtimes** load through `PackContributionRegistry` + `PackRuntimeSupervisor`
+> (managed Docker runtimes, design §8). `hooks` and `workflows` are deliberately **NOT**
+> in this list (finding EXT-03): neither has a runtime loader, and toggling a kind with zero
+> runtime effect is exactly the phantom-capability bug that finding fixed — see
 > [pack.yaml schema 2](#packyaml-schema-2-extension-platform).
 
 What disabling does:
@@ -669,7 +674,10 @@ dispatch PRs landed and have them load, validate, and toggle in the meantime.
   keeps verbatim v1 validation, including the `contents.mcp` rejection below. Other stray
   schema-2 `contents` keys and top-level `provides`/`requires` are ignored, so v1 packs cannot
   load providers and their `pack-activation` catalogue remains the old shape.
-- **`schema: 2`** unlocks the six new `contents` keys and the `provides`/`requires` arrays.
+- **`schema: 2`** unlocks the new `contents` keys (`providers`, `mcp`, `piExtensions`,
+  `runtimes`, `workflows`) and the `provides`/`requires` arrays. `hooks` is not among them —
+  see [the `contents` keys table](#contents-keys-schema-2--and-the-hooks--workflows-decision-finding-ext-03)
+  (finding EXT-03).
 - **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
   forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
   This keeps a newer pack installable on an older Bobbit rather than vanishing — the publisher
@@ -686,22 +694,36 @@ They are **metadata only** today (recorded on the parsed manifest, surfaced nowh
 behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
 goal. They are validated now so packs can declare them ahead of that work.
 
-#### Six new `contents` keys
+#### `contents` keys (schema 2) — and the `hooks` / `workflows` decision (finding EXT-03)
 
-Schema 2 adds six optional `contents` keys. Each is a `string[]` of **safe basenames** (same
-guard as `contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), and
-each defaults to `[]` when absent:
+Schema 2 adds optional `contents` keys, each a `string[]` of **safe basenames** (same guard as
+`contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), defaulting to
+`[]` when absent:
 
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
-| `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
-| `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
+| `runtimes` | `runtimes` | **Yes** | `runtimes/<name>.yaml` managed-runtime descriptors (Docker-backed, consent-gated — design §8). |
+| `workflows` | `workflows` | No — **reserved, not activation-toggleable** | Workflow contribution basenames. Parsed onto the manifest for forward-compat (the classifier framework's future role/workflow router may want this kind), but there is no loader and it is excluded from `ACTIVATION_KINDS` — a pack declaring entries gets a non-fatal "reserved for a future loader" warning, never a phantom Market UI toggle. |
 
-**`providers`, `mcp`, and `pi-extensions` have loaders.** `providers` load through the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). The other reserved keys are accepted, normalised onto `contents`, and surfaced in the activation catalogue, but no runtime loader reads their files yet.
+**`providers`, `mcp`, `pi-extensions`, and `runtimes` have loaders.** `providers` load through
+the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path
+described above; `pi-extensions` resolve to standalone pi `--extension` entries described in
+[Marketplace pi extensions](#marketplace-pi-extensions); `runtimes` load through the same
+registry and are supervised by `PackRuntimeSupervisor` (Docker start/stop/status, design §8).
+`workflows` is accepted and parsed (reserved, see above) but is not activation-toggleable and
+has no runtime effect.
+
+**`hooks` is NOT a supported `contents` key** (finding EXT-03, resolved). An earlier revision of
+this schema accepted `contents.hooks` (basenames of a hypothetical `hooks/<name>.yaml` file), but
+no `loadHooks` ever existed and no design ever needed a *second*, file-based hook mechanism —
+providers already declare their own hook subscriptions inline via `providers/<id>.yaml`'s
+`hooks:` field (below). A pack declaring a non-empty `contents.hooks` gets a non-fatal
+"not a supported contribution kind" warning at load and the key is dropped (never round-trips
+onto the manifest, the activation catalogue, or `DisabledRefs`); an absent or empty array is a
+silent no-op for back-compat with existing packs.
 
 #### Minimal schema-2 example
 
@@ -720,8 +742,10 @@ contents:
   providers: [memory]         # loads providers/memory.yaml (see below)
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
-  # hooks / runtimes / workflows are accepted here at schema 2 but remain
-  # reserved for later goals.
+  runtimes: []                # loads runtimes/<name>.yaml managed-runtime descriptors
+  # workflows is accepted here (reserved for a future loader) but is NOT
+  # activation-toggleable; `hooks` is not a supported contents key at all — see
+  # above.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
@@ -796,13 +820,18 @@ rule: load via the pack-contribution registry, never the name-merging resolver.
 
 #### Per-provider activation
 
-Providers, MCP, and the reserved sibling kinds are **first-class in the activation system**,
+Providers, MCP, pi extensions, and runtimes are **first-class in the activation system**,
 so they round-trip through the same `GET/PUT /api/marketplace/pack-activation` REST as roles,
 tools, skills, and entrypoints — see [Activation controls](#activation-controls):
 
-- **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
-  `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
-  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename for authored packs and a source-qualified contribution id for gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
+- **`DisabledRefs`** includes `providers`, `mcp`, `piExtensions`, and `runtimes` arrays, plus
+  `mcpOperations` for gateway operation opt-outs. `hooks` and `workflows` are deliberately
+  **excluded** (finding EXT-03): neither is activation-toggleable. The array kinds are in
+  `ACTIVATION_KINDS` so normalisation, hydration, and `getPackActivation` cover them
+  automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local
+  `contents.mcp` basename for authored packs and a source-qualified contribution id for
+  gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions`
+  basename.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same
@@ -1022,5 +1051,5 @@ See [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md) fo
 - **No signing; isolation is stability-only, not a security sandbox.** Installing any pack copies its contents as-is — tool packs copy executable code, MCP packs can run host stdio commands or call trusted remote endpoints, pi-extension packs load host/runtime code into agent processes, and role/skill packs copy instructions for an LLM with shell access. Pack source is **trusted** (the trust decision is the source-level warning when adding a source). Phase 2 runs pack server modules in a `worker_threads` worker, but that is **RESOURCE + CRASH isolation only** (terminate-on-timeout, memory/CPU caps, spawned-child kill) — explicitly **not** a security sandbox against a pack's own trusted code. Trusted pack server code runs with full ambient parity (normal `node:` built-ins, network globals, full `process` env), exactly like a tool, MCP server, or pi extension; there is no capability concept. Pi-extension discovery is more confined than runtime loading, but it is still executable probing of trusted source after the source-level trust warning is accepted. Module-import resolution is contained to the pack root, but that is cheap loader/stability hygiene, not a security boundary (see the "Why?" disclosure and `extension-host.md §3.4`). The remaining gap is **per-pack realm isolation for UI** — pack UI shares the main thread's realm, so a deliberately malicious pack could monkey-patch globals; the surface-binding token and session-write permit close the accidental/non-pack-reachable paths but not a same-realm adversary. Per-pack signing and UI realm isolation are documented future hardenings.
 - **Git sync is synchronous.** Add-source, re-sync, and install run git inline and block until done.
 - **No hosted pack registry yet.** Generic pack sources are still git repos or local dirs. MCP Gateway sources discover providers from MCP `tools/list`, not from a searchable hosted pack marketplace.
-- **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; staff templates are noted as a gap. (UI panels are now shipped as auto-discovered `panels/<panel>.yaml` pack contributions — see the [Extension Host](#extension-contributions-tool-renderers--server-actions) section.)
+- **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; `pack.yaml`'s `contents.workflows` key exists only as a **reserved, not-yet-loadable** schema field for a possible future loader (finding EXT-03) — it is parsed but never activation-toggleable and has no runtime effect today. Staff templates are noted as a gap. (UI panels are now shipped as auto-discovered `panels/<panel>.yaml` pack contributions — see the [Extension Host](#extension-contributions-tool-renderers--server-actions) section.)
 - **Child-agent launch is pack-expressible (sandbox-inherited) via `host.agents`; goal-team `team_spawn` is not; typed inference is out of scope for v1.** A pack can launch + orchestrate child agents through `host.agents.*`, but only within the calling session's sandbox/credential scope (no escalation, no foreign-session reach) — see [What is (and isn't) pack-expressible](#what-is-and-isnt-pack-expressible-in-v1). Goal-team `team_spawn` (worktree-on-sub-branch role agents) stays agent-tool-side. There is no *typed* `host.model.*` inference method — not because the worker lacks credentials (a trusted pack has full ambient env + network, like any tool), but because a gateway-mediated inference contract is deferred. A parent-side `host.model.*` is the highest-value future additive capability — see [What is (and isn't) pack-expressible in v1](#what-is-and-isnt-pack-expressible-in-v1).

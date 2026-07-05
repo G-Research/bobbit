@@ -77,18 +77,18 @@ export function resolveDefaultActivationOverlay(
 }
 
 /** Activation-ref kinds in their canonical order. Mirrors ACTIVATION_KINDS in
- *  project-config-store.ts (kept local to avoid a value import cycle). */
+ *  project-config-store.ts (kept local to avoid a value import cycle). `hooks`
+ *  and `workflows` are deliberately excluded — see ACTIVATION_KINDS (finding
+ *  EXT-03: neither is activation-toggleable). */
 const DISABLED_REF_KINDS = [
 	"roles",
 	"tools",
 	"skills",
 	"entrypoints",
 	"providers",
-	"hooks",
 	"mcp",
 	"piExtensions",
 	"runtimes",
-	"workflows",
 ] as const;
 
 /**
@@ -114,11 +114,9 @@ export function buildAllDisabledRefs(
 		skills: c.skills,
 		entrypoints: c.entrypoints,
 		providers: c.providers,
-		hooks: c.hooks,
 		mcp: c.mcp,
 		piExtensions: c.piExtensions,
 		runtimes: c.runtimes,
-		workflows: c.workflows,
 	};
 	const out: DisabledRefs = {};
 	for (const kind of DISABLED_REF_KINDS) {

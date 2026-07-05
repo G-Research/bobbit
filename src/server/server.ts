@@ -8953,17 +8953,19 @@ async function handleApiRoute(
 				descriptions,
 			};
 			if ((entry.manifest.schema ?? 1) < 2) return baseCatalogue;
+			// `hooks` and `workflows` are deliberately OMITTED (finding EXT-03): neither
+			// is activation-toggleable — `hooks` was removed as a contribution kind
+			// entirely, and `workflows` is reserved-but-not-loadable. Echoing them here
+			// would resurrect the phantom Market UI toggle the finding fixed.
 			return {
 				roles: baseCatalogue.roles,
 				tools: baseCatalogue.tools,
 				skills: baseCatalogue.skills,
 				entrypoints: baseCatalogue.entrypoints,
 				providers: [...(c.providers ?? [])],
-				hooks: [...(c.hooks ?? [])],
 				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
-				workflows: [...(c.workflows ?? [])],
 				descriptions,
 			};
 		};
@@ -9023,7 +9025,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "mcp" | "piExtensions" | "runtimes", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -9046,18 +9048,20 @@ async function handleApiRoute(
 				}
 				return Object.keys(out).length > 0 ? out : undefined;
 			};
+			// `hooks`/`workflows` are deliberately excluded (finding EXT-03): neither is
+			// activation-toggleable, so a PUT body carrying either is silently dropped
+			// (never persisted, never echoed back) rather than resurrecting the phantom
+			// toggle.
 			const normalized = {
 				roles: normaliseKind("roles", new Set(catalogue.roles)),
 				tools: normaliseKind("tools", new Set(catalogue.tools)),
 				skills: normaliseKind("skills", new Set(catalogue.skills)),
 				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
 				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
-				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
 				mcp: normalizeMcpRefs(),
 				mcpOperations: normalizeMcpOperationsForCatalogue(),
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
-				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			// P3 — managed-runtime activation side effects. Enabling a
 			// `startPolicy: on-enable` runtime (disabled → enabled) IS the explicit

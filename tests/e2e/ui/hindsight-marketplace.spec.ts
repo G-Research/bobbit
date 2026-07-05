@@ -104,10 +104,12 @@ async function resetHindsightActivation(): Promise<void> {
 			Array.isArray(cat[k])
 				? (cat[k] as Array<{ listName?: string } | string>).map((e) => (typeof e === "string" ? e : e.listName ?? "")).filter(Boolean)
 				: [];
+		// hooks/workflows are excluded (finding EXT-03): neither is
+		// activation-toggleable, so the server catalogue never returns them.
 		const disabled = {
 			roles: arr("roles"), tools: arr("tools"), skills: arr("skills"), entrypoints: arr("entrypoints"),
-			providers: arr("providers"), hooks: arr("hooks"), mcp: arr("mcp"), piExtensions: arr("piExtensions"),
-			runtimes: arr("runtimes"), workflows: arr("workflows"),
+			providers: arr("providers"), mcp: arr("mcp"), piExtensions: arr("piExtensions"),
+			runtimes: arr("runtimes"),
 		};
 		await apiFetch("/api/marketplace/pack-activation", {
 			method: "PUT",
