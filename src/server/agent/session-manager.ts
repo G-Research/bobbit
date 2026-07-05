@@ -59,6 +59,8 @@ export {
 	type ArchivedSessionWorktreeCleanupResult,
 } from "./archived-worktree-manager.js";
 import { McpWiring, type McpWiringDeps } from "./mcp-wiring.js";
+import { SessionLifecycleFence, type RestoreCoordinator, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
+export { type RestoreCoordinator, type LifecycleFenceSession, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -907,11 +909,6 @@ export interface SessionManagerOptions {
 	extensionChannels?: ExtensionChannelServices;
 }
 
-type RestoreCoordinator = {
-	generation: number;
-	promise: Promise<SessionInfo | undefined>;
-};
-
 function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
 	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
 	let timestamp: number | undefined;
@@ -1093,10 +1090,16 @@ export class SessionManager {
 	 *  See docs/design/unify-session-status.md §3.4. */
 	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
-	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
-	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
-	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
-	private _sessionRespawnGenerations = new Map<string, number>();
+	/**
+	 * Lifecycle restore/respawn fencing (SessionManager decomposition cohort 3,
+	 * docs/design/session-manager-decomposition.md). Same accessor-wrapper
+	 * discipline as `mcpWiring`: tests poke `_sessionRespawnGenerations`
+	 * directly, so the same-named SessionManager surface must remain backed by
+	 * the extracted module's real map.
+	 */
+	private lifecycleFence!: SessionLifecycleFence<SessionInfo>;
+	private get _restoreCoordinators(): Map<string, RestoreCoordinator<SessionInfo>> { return this.lifecycleFence.restoreCoordinators; }
+	get _sessionRespawnGenerations(): Map<string, number> { return this.lifecycleFence.sessionRespawnGenerations; }
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -1115,48 +1118,24 @@ export class SessionManager {
 		return this._bootRepromptedSessions.has(sessionId);
 	}
 
-	private _currentRespawnGeneration(sessionId: string): number {
-		return this._sessionRespawnGenerations.get(sessionId) ?? 0;
+	private _currentRespawnGeneration(...args: Parameters<SessionLifecycleFence<SessionInfo>["currentRespawnGeneration"]>): ReturnType<SessionLifecycleFence<SessionInfo>["currentRespawnGeneration"]> {
+		return this.lifecycleFence.currentRespawnGeneration(...args);
 	}
 
-	private _nextRespawnGeneration(sessionId: string): number {
-		const next = this._currentRespawnGeneration(sessionId) + 1;
-		this._sessionRespawnGenerations.set(sessionId, next);
-		return next;
+	_nextRespawnGeneration(...args: Parameters<SessionLifecycleFence<SessionInfo>["nextRespawnGeneration"]>): ReturnType<SessionLifecycleFence<SessionInfo>["nextRespawnGeneration"]> {
+		return this.lifecycleFence.nextRespawnGeneration(...args);
 	}
 
-	private _sessionWriterIsCurrent(session: SessionInfo): boolean {
-		if (session.lifecycleFenced) return false;
-		const canonical = this.sessions.get(session.id);
-		if (canonical && canonical !== session) return false;
-		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
+	private _sessionWriterIsCurrent(...args: Parameters<SessionLifecycleFence<SessionInfo>["sessionWriterIsCurrent"]>): ReturnType<SessionLifecycleFence<SessionInfo>["sessionWriterIsCurrent"]> {
+		return this.lifecycleFence.sessionWriterIsCurrent(...args);
 	}
 
-	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
-		session.lifecycleFenced = true;
-		session.lifecycleGeneration = replacingGeneration - 1;
-		session.dormant = true;
-		session.status = "terminated";
-		session.clients.clear();
-		this.cancelPendingAutoRetry(session, "terminated");
-		this._untrackConnectedSession(session);
+	private _fenceReplacedSession(...args: Parameters<SessionLifecycleFence<SessionInfo>["fenceReplacedSession"]>): ReturnType<SessionLifecycleFence<SessionInfo>["fenceReplacedSession"]> {
+		return this.lifecycleFence.fenceReplacedSession(...args);
 	}
 
-	private _coalesceRestore(
-		sessionId: string,
-		restore: (generation: number) => Promise<SessionInfo | undefined>,
-	): Promise<SessionInfo | undefined> {
-		const inFlight = this._restoreCoordinators.get(sessionId);
-		if (inFlight) return inFlight.promise;
-
-		const generation = this._nextRespawnGeneration(sessionId);
-		const promise = (async () => restore(generation))()
-			.finally(() => {
-				const current = this._restoreCoordinators.get(sessionId);
-				if (current?.generation === generation) this._restoreCoordinators.delete(sessionId);
-			});
-		this._restoreCoordinators.set(sessionId, { generation, promise });
-		return promise;
+	private _coalesceRestore(...args: Parameters<SessionLifecycleFence<SessionInfo>["coalesceRestore"]>): ReturnType<SessionLifecycleFence<SessionInfo>["coalesceRestore"]> {
+		return this.lifecycleFence.coalesceRestore(...args);
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
@@ -1444,6 +1423,12 @@ export class SessionManager {
 			// may still hit re-attempt code paths.
 			if (!this.prStatusStore) this.prStatusStore = new PrStatusStore(stateDir);
 		}
+
+		this.lifecycleFence = new SessionLifecycleFence({
+			getCanonicalSession: (sessionId) => this.sessions.get(sessionId),
+			cancelPendingAutoRetry: (session, reason) => this.cancelPendingAutoRetry(session, reason),
+			untrackConnectedSession: (session) => this._untrackConnectedSession(session),
+		} satisfies SessionLifecycleFenceDeps<SessionInfo>);
 
 		// Constructed here (not lazily) so every field it captures by value
 		// (projectContextManager, testStore, testSearchIndex, colorStore) is
