@@ -91,6 +91,8 @@ import { registerStaffMcpOperatorRoutes } from "./routes/staff-mcp-operator-rout
 import { registerOauthAccountRoutes } from "./routes/oauth-account-routes.js";
 // STR-01 cohort 12: preferences routes.
 import { registerPreferencesRoutes } from "./routes/preferences-routes.js";
+// STR-01 cohort 13: config-directories routes.
+import { registerConfigDirectoriesRoutes } from "./routes/config-directories-routes.js";
 // STR-05: roles route-handler hoist.
 import { registerRolesRoutes } from "./routes/roles-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -588,7 +590,6 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, type PackOrderScope, type DisabledRefs } from "./agent/project-config-store.js";
 import { resolveDefaultActivationOverlay, buildAllDisabledRefs, isProviderConfigConfigured } from "./agent/pack-default-activation.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
-import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
@@ -3373,6 +3374,7 @@ registerServerSystemRoutes(coreRouteTable);
 registerStaffMcpOperatorRoutes(coreRouteTable);
 registerOauthAccountRoutes(coreRouteTable);
 registerPreferencesRoutes(coreRouteTable);
+registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
 
 async function handleApiRoute(
@@ -3613,6 +3615,8 @@ async function handleApiRoute(
 	// server/system routes (src/server/routes/server-system-routes.ts); cohort
 	// 11, OAuth account routes (src/server/routes/oauth-account-routes.ts);
 	// cohort 12, preferences routes (src/server/routes/preferences-routes.ts);
+	// cohort 13, config-directories routes
+	// (src/server/routes/config-directories-routes.ts);
 	// STR-05, roles routes (src/server/routes/roles-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
@@ -7248,41 +7252,9 @@ async function handleApiRoute(
 	// cohort 4) — see src/server/routes/project-config-server-routes.ts and
 	// docs/design/route-registry.md.
 
-	// GET /api/config-directories — return all scanned config directories
-	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		json(getAllConfigDirectories(resolved.project.rootPath, resolvedStore));
-		return;
-	}
-
-	// DELETE /api/config-directories — remove a built-in directory from scanning
-	if (url.pathname === "/api/config-directories" && req.method === "DELETE") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || typeof (body as any).path !== "string") {
-			json({ error: "Missing 'path' in body" }, 400);
-			return;
-		}
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId: (body as any).projectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		removeBuiltinDirectory(resolvedStore, (body as any).path);
-		json({ ok: true });
-		return;
-	}
-
-	// POST /api/config-directories/reset — reset all config dirs to defaults
-	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
-		const body = await readBody(req);
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId: body && typeof body === "object" ? (body as any).projectId : undefined });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const resolvedStore = resolveProjectConfigStore(resolved.projectId);
-		resetConfigDirectories(resolvedStore);
-		json({ ok: true });
-		return;
-	}
+	// /api/config-directories* moved to the core route registry (STR-01
+	// cohort 13) — see src/server/routes/config-directories-routes.ts and
+	// docs/design/route-registry.md.
 
 	// ── Pack-Based Marketplace (design §9 / §9.1 / §9.2) ──────────────
 	// GET/POST/PUT/DELETE/PATCH /api/marketplace/* (sources, browse, install/
