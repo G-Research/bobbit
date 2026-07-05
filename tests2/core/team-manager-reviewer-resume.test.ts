@@ -18,7 +18,9 @@
  * guard that early-returns for reviewer agents (covers old persisted records
  * that pre-date the `kind` field).
  */
-import { describe, it, afterAll, vi } from "vitest";
+import { describe, it, afterAll, vi, afterEach } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -124,7 +126,7 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 		// The worker idle nudge is debounced 5s (agent_end schedules a one-shot
 		// timer cancelled by agent_start). Use fake timers to advance past that
 		// window deterministically instead of waiting in real time.
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 		clearTeamStore();
 		const goals = new Map<string, any>();
 		goals.set("goal-1", createMockGoal());
@@ -176,27 +178,27 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 		reviewer.fire({ type: "agent_end" });
 		// Advance past the 5s worker idle-nudge debounce window. Reviewers attach
 		// no listener, so nothing should fire for them.
-		t.mock.timers.tick(6_000);
+		vi.advanceTimersByTime(6_000);
 
 		assert.equal(
-			sm.enqueuePrompt.mock.callCount(), 0,
+			sm.enqueuePrompt.mock.calls.length, 0,
 			"reviewer agent_end after restart must NOT enqueue a team-lead nudge",
 		);
 		assert.equal(
-			sm.deliverLiveSteer.mock.callCount(), 0,
+			sm.deliverLiveSteer.mock.calls.length, 0,
 			"reviewer agent_end after restart must NOT deliver a steer to the team lead",
 		);
 
 		// Now fire agent_end on the worker — this MUST trigger a nudge once the
 		// 5s idle-nudge debounce window elapses.
 		worker.fire({ type: "agent_end" });
-		t.mock.timers.tick(6_000);
+		vi.advanceTimersByTime(6_000);
 
 		const totalNudges =
-			sm.enqueuePrompt.mock.callCount() + sm.deliverLiveSteer.mock.callCount();
+			sm.enqueuePrompt.mock.calls.length + sm.deliverLiveSteer.mock.calls.length;
 		assert.equal(totalNudges, 1, "worker agent_end must trigger exactly one team-lead nudge");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("notifyTeamLead defensive guard skips reviewer agents (back-compat for entries missing kind)", async () => {
@@ -237,7 +239,7 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 		// defensive guard catches it.
 		await (tm as any).notifyTeamLead("goal-2", "reviewer-2", "reviewer", "reviewer-rev2-sho");
 
-		assert.equal(sm.enqueuePrompt.mock.callCount(), 0, "defensive guard must block notify for reviewer role");
-		assert.equal(sm.deliverLiveSteer.mock.callCount(), 0, "defensive guard must block steer for reviewer role");
+		assert.equal(sm.enqueuePrompt.mock.calls.length, 0, "defensive guard must block notify for reviewer role");
+		assert.equal(sm.deliverLiveSteer.mock.calls.length, 0, "defensive guard must block steer for reviewer role");
 	});
 });

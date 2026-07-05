@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { describe, it } from "vitest";
+import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -106,7 +106,7 @@ describe("agent directory resolver", () => {
 		const projectRoot = tempProjectRoot("startup-pinned");
 		const oldBobbit = process.env.BOBBIT_AGENT_DIR;
 		const oldPi = process.env.PI_CODING_AGENT_DIR;
-		t.after(() => {
+		onTestFinished(() => {
 			if (oldBobbit === undefined) delete process.env.BOBBIT_AGENT_DIR; else process.env.BOBBIT_AGENT_DIR = oldBobbit;
 			if (oldPi === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldPi;
 		});
@@ -152,7 +152,7 @@ describe("agent directory resolver", () => {
 
 		const envKeys = ["BOBBIT_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"] as const;
 		const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
-		t.after(() => {
+		onTestFinished(() => {
 			for (const key of envKeys) {
 				const value = oldEnv.get(key);
 				if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -208,7 +208,7 @@ describe("agent directory resolver", () => {
 
 		const envKeys = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR"] as const;
 		const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
-		t.after(() => {
+		onTestFinished(() => {
 			for (const key of envKeys) {
 				const value = oldEnv.get(key);
 				if (value === undefined) delete process.env[key]; else process.env[key] = value;

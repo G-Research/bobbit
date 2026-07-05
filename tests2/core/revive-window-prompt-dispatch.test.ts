@@ -146,7 +146,7 @@ describe("revive-window prompt dispatch (CS-R2 follow-up)", () => {
 		await flushMicrotasks();
 
 		// Exactly one restore started (the enqueue triggered it through the coordinator).
-		assert.equal(manager.restoreSession.mock.callCount(), 1, "enqueue must trigger exactly one restore");
+		assert.equal(manager.restoreSession.mock.calls.length, 1, "enqueue must trigger exactly one restore");
 
 		restoreGate.resolve();
 		const result = await enqueuePromise;
@@ -166,12 +166,12 @@ describe("revive-window prompt dispatch (CS-R2 follow-up)", () => {
 		// revive in flight), then enqueue while it is gated open.
 		const inFlight = manager._restoreSessionCoalesced(manager._testStore.get(sessionId));
 		await flushMicrotasks();
-		assert.equal(manager.restoreSession.mock.callCount(), 1, "one restore in flight");
+		assert.equal(manager.restoreSession.mock.calls.length, 1, "one restore in flight");
 
 		const enqueuePromise = manager.enqueuePrompt(sessionId, "queued during revive");
 		await flushMicrotasks();
 		// enqueue must NOT have started a second restore — it joins the in-flight one.
-		assert.equal(manager.restoreSession.mock.callCount(), 1, "enqueue must join the in-flight restore, not start a second");
+		assert.equal(manager.restoreSession.mock.calls.length, 1, "enqueue must join the in-flight restore, not start a second");
 
 		restoreGate.resolve();
 		await inFlight;

@@ -156,7 +156,7 @@ describe("missing live messages after dormant revive", () => {
 		assert.equal(manager.addClient(sessionId, firstAttachedClient as any), true);
 		assert.equal(manager.addClient(sessionId, secondAttachedClient as any), true);
 		assert.equal(restoreGates.length, 1, "concurrent dormant addClient calls must join exactly one restore");
-		assert.equal(manager.restoreSession.mock.callCount(), 1, "coordinator must invoke restoreSession exactly once");
+		assert.equal(manager.restoreSession.mock.calls.length, 1, "coordinator must invoke restoreSession exactly once");
 
 		restoreGates[0].resolve();
 		await flushMicrotasks();

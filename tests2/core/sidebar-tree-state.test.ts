@@ -35,7 +35,7 @@ function installStorage(initial?: Record<string, string>): FakeStorage {
 }
 
 async function importFresh(tag: string): Promise<typeof import("../../src/app/sidebar-tree-state.ts")> {
-	return await import(`../src/app/sidebar-tree-state.ts?${tag}-${Date.now()}-${Math.random()}`);
+	return await import(/* @vite-ignore */ `../../src/app/sidebar-tree-state.ts?${tag}-${Date.now()}-${Math.random()}`);
 }
 
 function storedExpansion(store: Map<string, string>): Record<string, string> {

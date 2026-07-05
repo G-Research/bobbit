@@ -25,7 +25,9 @@
 // blip case (#1) FAILS because the nudge fires synchronously on `agent_end`
 // before the cancelling `agent_start` can take effect.
 
-import { describe, it, afterAll, vi } from "vitest";
+import { describe, it, afterAll, vi, afterEach } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -298,17 +300,17 @@ async function setupTeamWithWorker() {
 
 describe("TeamManager — transient worker idle blip debounce (regression)", () => {
 	it("does NOT nudge the lead when a worker blips agent_end → agent_start within 5s", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
 
 		// Transient blip: worker momentarily finishes, then resumes immediately.
 		fireWorker("agent_end");
-		t.mock.timers.tick(1_000); // < 5s window
+		vi.advanceTimersByTime(1_000); // < 5s window
 		fireWorker("agent_start");
 
 		// Advance well past the intended 5s debounce window.
-		t.mock.timers.tick(6_000);
+		vi.advanceTimersByTime(6_000);
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -318,17 +320,17 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 				"but notifyTeamLead fired anyway — the worker-idle notification is not debounced/cancelled",
 		);
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("delivers exactly one nudge when a worker genuinely goes idle for >=5s", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
 
 		// Worker finishes and stays idle — no resume.
 		fireWorker("agent_end");
-		t.mock.timers.tick(6_000); // past the 5s debounce window
+		vi.advanceTimersByTime(6_000); // past the 5s debounce window
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -337,22 +339,22 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 				"(subject to the existing 30s repeat-debounce)",
 		);
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("does NOT nudge against a worker removed before the 5s window elapses", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, workerSessionId, fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
 
 		// Worker finishes, then is dismissed before the debounce window elapses.
 		fireWorker("agent_end");
-		t.mock.timers.tick(1_000);
+		vi.advanceTimersByTime(1_000);
 		await team.dismissRole(workerSessionId);
 
 		// Advance past the 5s window: a pending timer (post-fix) must have been
 		// cleared on removal, so no nudge fires against the torn-down session.
-		t.mock.timers.tick(6_000);
+		vi.advanceTimersByTime(6_000);
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -361,6 +363,6 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 				"worker-completion nudge — the pending idle-notify timer must be cleared on removal",
 		);
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 });

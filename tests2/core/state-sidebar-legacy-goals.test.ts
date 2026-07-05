@@ -62,7 +62,7 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	const { store } = installBrowserGlobals({
 		[LEGACY_EXPANDED_GOALS_KEY]: JSON.stringify(["goal-live", "goal-archived"]),
 	});
-	const stateModule = await import(`../src/app/state.ts?legacy-goals-${Date.now()}-${Math.random()}`);
+	const stateModule = await import(/* @vite-ignore */ `../../src/app/state.ts?legacy-goals-${Date.now()}-${Math.random()}`);
 	const sidebarTreeState = await import("../../src/app/sidebar-tree-state.js");
 
 	assert.equal(sidebarTreeState.isGoalExpanded("goal-live"), true, "legacy expanded goal should migrate initially");
@@ -81,7 +81,7 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	);
 	assert.equal(storedUnifiedExpansion(store)[sidebarTreeKey({ kind: "goal", goalId: "goal-live" })], "collapsed");
 
-	const reloadedSidebarTreeState = await import(`../src/app/sidebar-tree-state.ts?legacy-goals-reload-${Date.now()}-${Math.random()}`);
+	const reloadedSidebarTreeState = await import(/* @vite-ignore */ `../../src/app/sidebar-tree-state.ts?legacy-goals-reload-${Date.now()}-${Math.random()}`);
 	assert.equal(reloadedSidebarTreeState.isGoalExpanded("goal-live"), false, "stale legacy expansion must not override stored unified collapse on reload");
 	assert.equal(reloadedSidebarTreeState.getSidebarTreePreference({ kind: "goal", goalId: "goal-live" }), "collapsed");
 

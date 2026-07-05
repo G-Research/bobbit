@@ -72,8 +72,8 @@ describe("persistSessionMetadata must not pre-create the agent session file", ()
 		assert.equal(fs.existsSync(sessionFile), false, "session file must not be pre-created");
 
 		// The path is still recorded for restore.
-		assert.equal(manager._testStore.update.mock.callCount(), 1);
-		assert.deepEqual(manager._testStore.update.mock.calls[0].arguments, [
+		assert.equal(manager._testStore.update.mock.calls.length, 1);
+		assert.deepEqual(manager._testStore.update.mock.calls[0], [
 			session.id,
 			{ agentSessionFile: sessionFile },
 		]);
@@ -124,8 +124,8 @@ describe("restore tolerates a recorded-but-unflushed session file (no graceful a
 
 		await manager.restoreOneSession(ps);
 
-		assert.equal((manager.restoreSession as any).mock.callCount(), 1, "must attempt a live restore");
-		assert.equal(store.archive.mock.callCount(), 0, "must NOT gracefully archive a pre-flush session");
+		assert.equal((manager.restoreSession as any).mock.calls.length, 1, "must attempt a live restore");
+		assert.equal(store.archive.mock.calls.length, 0, "must NOT gracefully archive a pre-flush session");
 	});
 
 	it("falls back to a dormant (not archived) session when the live restore fails", async () => {
@@ -137,8 +137,8 @@ describe("restore tolerates a recorded-but-unflushed session file (no graceful a
 		const ps = persistedSession({ id: "ps-preflush-dormant" });
 		await manager.restoreOneSession(ps);
 
-		assert.equal((manager.restoreSession as any).mock.callCount(), 1);
-		assert.equal(store.archive.mock.callCount(), 0, "a failed restore must not archive — it goes dormant");
+		assert.equal((manager.restoreSession as any).mock.calls.length, 1);
+		assert.equal(store.archive.mock.calls.length, 0, "a failed restore must not archive — it goes dormant");
 		assert.ok(manager.sessions.has(ps.id), "session must be kept in memory as dormant");
 		assert.equal(manager.sessions.get(ps.id).status, "terminated");
 	});

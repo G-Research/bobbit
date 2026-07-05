@@ -4,6 +4,8 @@
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
 import { describe, it, beforeAll, beforeEach, afterEach, afterAll, vi } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -516,7 +518,7 @@ describe("TeamManager", () => {
 			releaseTerminate();
 
 			const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
-			assert.equal(sm.terminateSession.mock.callCount(), 1, "duplicate dismiss should not terminate twice");
+			assert.equal(sm.terminateSession.mock.calls.length, 1, "duplicate dismiss should not terminate twice");
 			assert.deepEqual(
 				{ ok: firstResult.ok, status: firstResult.status, sessionId: firstResult.sessionId, retryable: firstResult.retryable },
 				{ ok: true, status: "dismissed", sessionId: "agent-a", retryable: false },
@@ -753,7 +755,7 @@ describe("TeamManager", () => {
 
 	describe("idle nudge sleep guard", () => {
 		it("should only enqueue one nudge after sleep wake (pending guard)", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval"] });
+			vi.useFakeTimers({ toFake: ["setInterval"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -815,20 +817,20 @@ describe("TeamManager", () => {
 			}
 
 			// Advance time by 5 hours — simulates a sleep/wake where all overdue intervals fire
-			t.mock.timers.tick(5 * 60 * 60 * 1000);
+			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
 
 			// CORRECT behavior: only ONE nudge should be enqueued, not ~30
-			const callCount = enqueuePrompt.mock.callCount();
+			const callCount = enqueuePrompt.mock.calls.length;
 			assert.ok(
 				callCount <= 1,
 				`Expected enqueuePrompt to be called at most once (pending guard), but got ${callCount}`,
 			);
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should resume nudging after agent processes the pending nudge", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -864,8 +866,8 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance 5 hours — should get exactly 1 nudge (pending guard blocks the rest)
-			t.mock.timers.tick(5 * 60 * 60 * 1000);
-			assert.equal(enqueuePrompt.mock.callCount(), 1, "First batch: exactly 1 nudge");
+			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+			assert.equal(enqueuePrompt.mock.calls.length, 1, "First batch: exactly 1 nudge");
 
 			// Simulate agent processing the nudge: agent_start then agent_end
 			for (const cb of eventCallbacks) cb({ type: "agent_start" });
@@ -873,14 +875,14 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance another 15 minutes — should get a second nudge
-			t.mock.timers.tick(15 * 60 * 1000);
-			assert.ok(enqueuePrompt.mock.callCount() >= 2, "Second nudge should fire after agent processes first");
+			vi.advanceTimersByTime(15 * 60 * 1000);
+			assert.ok(enqueuePrompt.mock.calls.length >= 2, "Second nudge should fire after agent processes first");
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should not nudge a team lead whose goal is already complete", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval"] });
+			vi.useFakeTimers({ toFake: ["setInterval"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -916,15 +918,15 @@ describe("TeamManager", () => {
 			goal.state = "complete";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			t.mock.timers.tick(5 * 60 * 60 * 1000);
+			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
 
-			assert.equal(enqueuePrompt.mock.callCount(), 0, "Completed goal team lead must not be nudged");
+			assert.equal(enqueuePrompt.mock.calls.length, 0, "Completed goal team lead must not be nudged");
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should not nudge a team lead whose goal is archived", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval"] });
+			vi.useFakeTimers({ toFake: ["setInterval"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -950,15 +952,15 @@ describe("TeamManager", () => {
 			(goal as any).archived = true;
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			t.mock.timers.tick(5 * 60 * 60 * 1000);
+			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
 
-			assert.equal(enqueuePrompt.mock.callCount(), 0, "Archived goal team lead must not be nudged");
+			assert.equal(enqueuePrompt.mock.calls.length, 0, "Archived goal team lead must not be nudged");
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should skip workers-nudge when all streaming workers are under 30 min", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -996,18 +998,18 @@ describe("TeamManager", () => {
 
 			// Advance past the 10-minute base workers-nudge delay
 			// (and keep worker streamingStartedAt under threshold by tick < 30m from its start)
-			t.mock.timers.tick(15 * 60 * 1000);
+			vi.advanceTimersByTime(15 * 60 * 1000);
 
 			assert.equal(
-				enqueuePrompt.mock.callCount(), 0,
+				enqueuePrompt.mock.calls.length, 0,
 				"Should not nudge when all streaming workers are under the 30m threshold",
 			);
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should nudge when any streaming worker exceeds 30 min", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -1044,18 +1046,18 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance past the 10-minute base workers-nudge delay
-			t.mock.timers.tick(15 * 60 * 1000);
+			vi.advanceTimersByTime(15 * 60 * 1000);
 
 			assert.equal(
-				enqueuePrompt.mock.callCount(), 1,
+				enqueuePrompt.mock.calls.length, 1,
 				"Should nudge when a streaming worker has exceeded the 30m threshold",
 			);
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 
 		it("should still nudge when a worker is idle (not streaming)", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -1088,14 +1090,14 @@ describe("TeamManager", () => {
 			tlSession.status = "idle";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			t.mock.timers.tick(15 * 60 * 1000);
+			vi.advanceTimersByTime(15 * 60 * 1000);
 
 			assert.equal(
-				enqueuePrompt.mock.callCount(), 1,
+				enqueuePrompt.mock.calls.length, 1,
 				"Idle workers should not block the workers-nudge",
 			);
 
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		});
 	});
 
@@ -1134,10 +1136,10 @@ describe("TeamManager", () => {
 
 			await (team as any).notifyTeamLead("goal-1", "worker-1", "coder", "coder-xyz");
 
-			assert.equal(retryLastPrompt.mock.callCount(), 1);
-			assert.deepEqual(retryLastPrompt.mock.calls[0].arguments, [teamLead.id, { auto: true }]);
-			assert.equal(enqueuePrompt.mock.callCount(), 0, "errored idle team lead should not receive an auto-nudge prompt");
-			assert.equal(deliverLiveSteer.mock.callCount(), 0, "errored idle team lead should not receive a live auto-nudge steer");
+			assert.equal(retryLastPrompt.mock.calls.length, 1);
+			assert.deepEqual(retryLastPrompt.mock.calls[0], [teamLead.id, { auto: true }]);
+			assert.equal(enqueuePrompt.mock.calls.length, 0, "errored idle team lead should not receive an auto-nudge prompt");
+			assert.equal(deliverLiveSteer.mock.calls.length, 0, "errored idle team lead should not receive a live auto-nudge steer");
 		});
 
 		it("formats worker completion nudges as compact markdown with task_list next step", async () => {
@@ -1178,7 +1180,7 @@ describe("TeamManager", () => {
 
 			await (team as any).notifyTeamLead("goal-1", "worker-1", "test-engineer", "test-engineer-5dac");
 
-			const [, message, opts] = enqueuePrompt.mock.calls[0].arguments as any[];
+			const [, message, opts] = enqueuePrompt.mock.calls[0] as any[];
 			assert.equal(opts?.source, "auto-nudge");
 			assert.equal(
 				message,
@@ -1522,7 +1524,7 @@ describe("TeamManager", () => {
 			// The prompt should have been called with the task
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "session should exist");
-			assert.equal(session.rpcClient.prompt.mock.callCount(), 1);
+			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
 		});
 
 		it("team recovery scans configured and historical sessions roots instead of the legacy home default", () => {

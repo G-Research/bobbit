@@ -15,6 +15,8 @@
  *      clear stale streaming timestamps, and surface a credential fix/retry action.
  */
 import { afterEach, describe, it, vi } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -222,7 +224,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 	});
 
 	it("provider-auth prompt failures clear wasStreaming/streamingStartedAt and surface a credential fix or retry action", async (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const updates: any[] = [];
 		const client = makeClient();
 		const prompt = vi.fn(async () => ({ success: false, error: AUTH_ERROR }));

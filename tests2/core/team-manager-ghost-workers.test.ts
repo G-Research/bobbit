@@ -211,7 +211,7 @@ describe("TeamManager ghost worker reaping", () => {
 			[result.sessionId],
 			"team-state.json must not keep stale workers after spawn-time reaping",
 		);
-		assert.equal(forgetChild.mock.callCount(), 4, "stale worker sessions should be forgotten by orchestration core best-effort cleanup");
+		assert.equal(forgetChild.mock.calls.length, 4, "stale worker sessions should be forgotten by orchestration core best-effort cleanup");
 	});
 
 	it("restart resubscribe reaps missing and terminated workers and persists a clean team state", () => {
@@ -281,8 +281,8 @@ describe("TeamManager ghost worker reaping", () => {
 		assert.equal(team.lastNotifyTime.has("terminated-reviewer-worker"), false, "terminated reviewer-role worker notify debounce must be cleared");
 		assert.equal(team.pendingIdleNotify.has("missing-worker"), false, "missing worker pending nudge must be cancelled");
 		assert.equal(team.pendingIdleNotify.has("terminated-worker"), false, "terminated worker pending nudge must be cancelled");
-		assert.equal(missingUnsubscribe.mock.callCount(), 1, "missing worker event subscription must be unsubscribed");
-		assert.equal(terminatedUnsubscribe.mock.callCount(), 1, "terminated worker event subscription must be unsubscribed");
+		assert.equal(missingUnsubscribe.mock.calls.length, 1, "missing worker event subscription must be unsubscribed");
+		assert.equal(terminatedUnsubscribe.mock.calls.length, 1, "terminated worker event subscription must be unsubscribed");
 		assert.deepEqual(
 			forgetChild.mock.calls.map((call: any) => call.arguments[0]).sort(),
 			["missing-reviewer-worker", "missing-worker", "terminated-reviewer-worker", "terminated-worker"],
@@ -293,7 +293,7 @@ describe("TeamManager ghost worker reaping", () => {
 			false,
 			"reaping dead workers must not broadcast a synthetic worker-finished event",
 		);
-		assert.equal(sm._sessions.get("live-worker").rpcClient.onEvent.mock.callCount(), 1, "live workers must still be resubscribed");
+		assert.equal(sm._sessions.get("live-worker").rpcClient.onEvent.mock.calls.length, 1, "live workers must still be resubscribed");
 	});
 
 	it("verification reviewer entries are excluded from worker spawn capacity", async () => {

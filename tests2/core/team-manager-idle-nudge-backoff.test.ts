@@ -18,7 +18,9 @@
 // first cycle fires within these short windows; subsequent cycles will not
 // re-fire at the base delay because the preserved counter doubles the wait.
 
-import { describe, it, afterAll, vi } from "vitest";
+import { describe, it, afterAll, vi, afterEach } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -274,7 +276,7 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 
 describe("TeamManager — errored idle team lead auto-retry (regression)", () => {
 	it("retries an errored idle team lead instead of enqueueing no-workers [AUTO-NUDGE] cards", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
@@ -287,17 +289,17 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 
 			// Base no-workers delay is 5 minutes. The timer path should recover via
 			// retryLastPrompt({ auto: true }) rather than append a fresh auto-nudge.
-			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 			await Promise.resolve();
 
 			assert.equal(
-				retryLastPrompt.mock.callCount(),
+				retryLastPrompt.mock.calls.length,
 				1,
 				"errored idle team lead should be recovered through retryLastPrompt, not a new prompt card",
 			);
 			assert.deepEqual(
-				retryLastPrompt.mock.calls[0].arguments,
+				retryLastPrompt.mock.calls[0],
 				[tlSession.id, { auto: true }],
 				"team-manager retry should use the existing automatic retry path",
 			);
@@ -318,12 +320,12 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 				"errored idle recovery must not steer duplicate [AUTO-NUDGE] transcript cards",
 			);
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 
 	it("suppresses unknown errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
@@ -333,11 +335,11 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			tlSession.lastPromptText = "continue coordinating the team";
 
 			fire("agent_end");
-			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 			await Promise.resolve();
 
-			assert.equal(retryLastPrompt.mock.callCount(), 0,
+			assert.equal(retryLastPrompt.mock.calls.length, 0,
 				"unknown/unclassified errors must not be auto-retried by the team-manager nudge path");
 			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
 				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
@@ -348,12 +350,12 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			).length, 0,
 				"unknown errored idle sessions must suppress auto-nudge steer cards");
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 
 	it("suppresses non-retryable errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { tlSession, enqueuePrompt, retryLastPrompt, fire } = await setupTeamWithCapturedEvents();
@@ -363,22 +365,22 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			tlSession.lastPromptText = "continue coordinating the team";
 
 			fire("agent_end");
-			t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 
-			assert.equal(retryLastPrompt.mock.callCount(), 0,
+			assert.equal(retryLastPrompt.mock.calls.length, 0,
 				"non-retryable errors must leave manual Retry instead of using retryLastPrompt(auto)");
 			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
 				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
 			).length, 0,
 				"non-retryable errored idle sessions must suppress auto-nudge transcript cards");
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 
 	it("does not emit duplicate [AUTO-NUDGE] cards while session auto-retry is pending", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 		let pendingAutoRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 		try {
@@ -392,11 +394,11 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 
 			for (let i = 0; i < 3; i++) {
 				fire("agent_end");
-				t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+				vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
 				await Promise.resolve();
 			}
 
-			assert.equal(retryLastPrompt.mock.callCount(), 0,
+			assert.equal(retryLastPrompt.mock.calls.length, 0,
 				"team-manager must not start another retry while SessionManager auto-retry is pending");
 			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
 				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
@@ -408,14 +410,14 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 				"repeated timer ticks while auto-retry is pending must not steer duplicate auto-nudge cards");
 		} finally {
 			if (pendingAutoRetryTimer) clearTimeout(pendingAutoRetryTimer);
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 });
 
 describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 	it("should back off the no-workers nudge exponentially across nudge-reply cycles", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
 
@@ -427,9 +429,9 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 
 		// Cycle 1 — the legitimate first nudge.
 		fire("agent_end");
-		t.mock.timers.tick(BASE + SLACK);
+		vi.advanceTimersByTime(BASE + SLACK);
 		assert.equal(
-			enqueuePrompt.mock.callCount(),
+			enqueuePrompt.mock.calls.length,
 			1,
 			"First nudge of the first idle cycle should fire at the base delay (5m).",
 		);
@@ -442,10 +444,10 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			// Lead "finishes" its one-line reply — stays idle for the next round.
 			tlSession.status = "idle";
 			fire("agent_end");
-			t.mock.timers.tick(BASE + SLACK);
+			vi.advanceTimersByTime(BASE + SLACK);
 		}
 
-		const totalCalls = enqueuePrompt.mock.callCount();
+		const totalCalls = enqueuePrompt.mock.calls.length;
 		assert.ok(
 			totalCalls <= 1,
 			`exponential backoff regression: expected <=1 no-workers nudge across ` +
@@ -464,11 +466,11 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			);
 		}
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("should back off the workers nudge exponentially across nudge-reply cycles", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
@@ -480,9 +482,9 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 		const SLACK = 1_000;
 
 		fire("agent_end");
-		t.mock.timers.tick(BASE + SLACK);
+		vi.advanceTimersByTime(BASE + SLACK);
 		assert.equal(
-			enqueuePrompt.mock.callCount(),
+			enqueuePrompt.mock.calls.length,
 			1,
 			"First workers-nudge should fire at the base delay (10m).",
 		);
@@ -491,10 +493,10 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			fire("agent_start");
 			tlSession.status = "idle";
 			fire("agent_end");
-			t.mock.timers.tick(BASE + SLACK);
+			vi.advanceTimersByTime(BASE + SLACK);
 		}
 
-		const totalCalls = enqueuePrompt.mock.callCount();
+		const totalCalls = enqueuePrompt.mock.calls.length;
 		assert.ok(
 			totalCalls <= 1,
 			`exponential backoff regression: expected <=1 workers-nudge across ` +
@@ -503,7 +505,7 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 				`reset by agent_start on the lead's reply to its own auto-nudge`,
 		);
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 });
 
@@ -513,14 +515,14 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 
 describe("TeamManager — nudgePending clears when delivery does not start a turn (regression)", () => {
 	it("does not count or log an async rejected no-workers nudge as sent before agent_start", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
 			const log = vi.method(console, "log", () => {});
 			vi.method(console, "error", () => {});
 			let rejectDelivery: ((err: Error) => void) | undefined;
-			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
 				if (s) {
 					// Mirror SessionManager: provenance is recorded when delivery is attempted,
@@ -535,9 +537,9 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			t.mock.timers.tick(BASE + SLACK);
+			vi.advanceTimersByTime(BASE + SLACK);
 
-			assert.equal(enqueuePrompt.mock.callCount(), 1,
+			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first no-workers nudge delivery should be attempted at the base delay");
 
 			rejectDelivery?.(new Error("fetch failed"));
@@ -554,17 +556,17 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 			assert.equal(sentLogs.length, 0,
 				"nudge should not be logged as sent before agent_start");
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 
 	it("does not count or log a queued parked no-workers nudge as sent before agent_start", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
 			const log = vi.method(console, "log", () => {});
-			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
 				if (s) {
 					// Mirror SessionManager's cap path: provenance is recorded but the
@@ -579,12 +581,12 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			t.mock.timers.tick(BASE + SLACK);
+			vi.advanceTimersByTime(BASE + SLACK);
 			await Promise.resolve();
-			t.mock.timers.tick(0);
+			vi.advanceTimersByTime(0);
 			await Promise.resolve();
 
-			assert.equal(enqueuePrompt.mock.callCount(), 1,
+			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first parked no-workers nudge delivery should be attempted at the base delay");
 			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
 				"nudgePending should clear after queued/parked delivery before agent_start");
@@ -596,16 +598,16 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 			assert.equal(sentLogs.length, 0,
 				"nudge should not be logged as sent before agent_start");
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 
 	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		try {
 			const { sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
-			enqueuePrompt.mock.mockImplementation((sid: string, _msg: string, opts?: any) => {
+			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
 				if (s) {
 					// Mirror SessionManager's cap path: provenance is recorded but the
@@ -623,24 +625,24 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			// First no-workers nudge reaches SessionManager but is parked behind the
 			// errored/capped team-lead state. No agent_start follows.
-			t.mock.timers.tick(BASE + SLACK);
-			assert.equal(enqueuePrompt.mock.callCount(), 1,
+			vi.advanceTimersByTime(BASE + SLACK);
+			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first parked no-workers nudge should be enqueued at the base delay");
-			assert.equal((enqueuePrompt.mock.calls[0].arguments[2] as any)?.source, "auto-nudge",
+			assert.equal((enqueuePrompt.mock.calls[0][2] as any)?.source, "auto-nudge",
 				"the parked delivery must still be tagged as an auto-nudge");
 
 			// The next eligible no-workers nudge should still fire after the normal
 			// backoff delay. A sticky nudgePending flag suppresses this forever today.
 			tlSession.status = "idle";
-			t.mock.timers.tick(BASE * 2 + SLACK);
+			vi.advanceTimersByTime(BASE * 2 + SLACK);
 			assert.equal(
-				enqueuePrompt.mock.callCount(),
+				enqueuePrompt.mock.calls.length,
 				2,
 				"nudgePending sticky regression: expected a second no-workers auto-nudge " +
 					"after the parked delivery did not start a lead turn",
 			);
 		} finally {
-			t.mock.timers.reset();
+			vi.useRealTimers();
 		}
 	});
 });
@@ -651,7 +653,7 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 describe("TeamManager — PromptSource semantics", () => {
 	it("resets both counters on agent_start when lastPromptSource = 'user'", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
@@ -674,15 +676,15 @@ describe("TeamManager — PromptSource semantics", () => {
 		// proving the counter really was reset (not just the timer cancelled).
 		tlSession.status = "idle";
 		fire("agent_end");
-		t.mock.timers.tick(10 * 60 * 1000 + 1_000);
-		assert.equal(enqueuePrompt.mock.callCount(), 1,
+		vi.advanceTimersByTime(10 * 60 * 1000 + 1_000);
+		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"workers-nudge must fire at base 10m delay after counter reset");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("resets both counters on agent_start when lastPromptSource = 'system'", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
 
@@ -697,11 +699,11 @@ describe("TeamManager — PromptSource semantics", () => {
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
 			"system-source prompt must reset no-workers counter");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("preserves both counters on agent_start when source is auto-nudge / task-notification / verification / agent", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		for (const source of ["auto-nudge", "task-notification", "verification", "agent"] as const) {
 			const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
@@ -717,11 +719,11 @@ describe("TeamManager — PromptSource semantics", () => {
 				`source="${source}" must preserve no-workers counter`);
 		}
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("defaults lastPromptSource to 'user' when callers don't supply source (backward compat)", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, tlSession, sm, fire } = await setupTeamWithCapturedEvents();
 
@@ -739,7 +741,7 @@ describe("TeamManager — PromptSource semantics", () => {
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
 			"default 'user' source must reset no-workers counter");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 });
 
@@ -749,7 +751,7 @@ describe("TeamManager — PromptSource semantics", () => {
 
 describe("TeamManager — 12h backoff cap", () => {
 	it("no-workers schedule caps at MAX_NO_WORKERS_NUDGE_DELAY_MS", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
 
@@ -761,20 +763,20 @@ describe("TeamManager — 12h backoff cap", () => {
 
 		// Just under 12h — must NOT fire (capped delay is 12h).
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		t.mock.timers.tick(TWELVE_H - 10_000);
-		assert.equal(enqueuePrompt.mock.callCount(), 0,
+		vi.advanceTimersByTime(TWELVE_H - 10_000);
+		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped nudge must not fire before 12h");
 
 		// Crossing 12h — must fire exactly once.
-		t.mock.timers.tick(20_000);
-		assert.equal(enqueuePrompt.mock.callCount(), 1,
+		vi.advanceTimersByTime(20_000);
+		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped nudge must fire at the 12h boundary, not at 2^12 * 5m");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 
 	it("workers schedule caps at MAX_IDLE_NUDGE_DELAY_MS", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
@@ -786,15 +788,15 @@ describe("TeamManager — 12h backoff cap", () => {
 		fire("agent_end");
 
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		t.mock.timers.tick(TWELVE_H - 10_000);
-		assert.equal(enqueuePrompt.mock.callCount(), 0,
+		vi.advanceTimersByTime(TWELVE_H - 10_000);
+		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped workers-nudge must not fire before 12h");
 
-		t.mock.timers.tick(20_000);
-		assert.equal(enqueuePrompt.mock.callCount(), 1,
+		vi.advanceTimersByTime(20_000);
+		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped workers-nudge must fire at the 12h boundary");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 });
 
@@ -804,7 +806,7 @@ describe("TeamManager — 12h backoff cap", () => {
 
 describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 	it("adding a worker before the no-workers timer fires aborts cleanly", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
 
 		const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
 
@@ -814,7 +816,7 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		fire("agent_end");
 
 		// Tick partway through the 5m delay — add an idle worker before deadline.
-		t.mock.timers.tick(60_000);
+		vi.advanceTimersByTime(60_000);
 		const entry = (team as any).teams.get("goal-1")!;
 		const workerSession = {
 			id: "worker-late", status: "idle", cwd: "/tmp/worker",
@@ -827,7 +829,7 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		});
 
 		// Cross the original 5m deadline.
-		t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+		vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
 
 		// No no-workers nudge was sent, and the counter was NOT incremented.
 		const noWorkersFires = enqueuePrompt.mock.calls.filter((c: any) => {
@@ -839,6 +841,6 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, countBefore,
 			"aborted no-workers cycle must not increment the counter");
 
-		t.mock.timers.reset();
+		vi.useRealTimers();
 	});
 });

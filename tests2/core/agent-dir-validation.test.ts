@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { describe, it } from "vitest";
+import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -66,7 +66,7 @@ describe("validateAgentDirTarget", () => {
 		await withDefaultHeadquartersDirEnv(async () => {
 			const validate = await loadValidationFn();
 			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-");
-			t.after(() => cleanup(projectRoot));
+			onTestFinished(() => cleanup(projectRoot));
 
 			const defaultDir = path.join(projectRoot, ".bobbit", "headquarters", "agent");
 			const result = await validate(defaultDir, projectRoot);
@@ -81,7 +81,7 @@ describe("validateAgentDirTarget", () => {
 		await withDefaultHeadquartersDirEnv(async () => {
 			const validate = await loadValidationFn();
 			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-nested-");
-			t.after(() => cleanup(projectRoot));
+			onTestFinished(() => cleanup(projectRoot));
 
 			const nested = path.join(projectRoot, ".bobbit", "headquarters", "agent", "nested");
 			const result = await validate(nested, projectRoot);
@@ -95,7 +95,7 @@ describe("validateAgentDirTarget", () => {
 	it("rejects non-default paths inside the git worktree", async (t) => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-inside-");
-		t.after(() => cleanup(projectRoot));
+		onTestFinished(() => cleanup(projectRoot));
 
 		const result = await validate(path.join(projectRoot, "credentials", "agent"), projectRoot);
 
@@ -106,7 +106,7 @@ describe("validateAgentDirTarget", () => {
 	it("resolves relative inputs against project root before applying worktree checks", async (t) => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-relative-");
-		t.after(() => cleanup(projectRoot));
+		onTestFinished(() => cleanup(projectRoot));
 
 		const result = await validate("relative-agent-dir", projectRoot);
 
@@ -120,7 +120,7 @@ describe("validateAgentDirTarget", () => {
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-symlink-inside-");
 		const insideTarget = path.join(projectRoot, "credentials", "agent");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-symlink-outside-"));
-		t.after(() => {
+		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
 		});
@@ -145,7 +145,7 @@ describe("validateAgentDirTarget", () => {
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-symlink-mkdir-project-");
 		const insideParent = path.join(projectRoot, "credentials");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-symlink-mkdir-outside-"));
-		t.after(() => {
+		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
 		});
@@ -171,7 +171,7 @@ describe("validateAgentDirTarget", () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-project-");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-outside-"));
-		t.after(() => {
+		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
 		});
@@ -190,7 +190,7 @@ describe("validateAgentDirTarget", () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-errors-");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-file-"));
-		t.after(() => {
+		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
 		});

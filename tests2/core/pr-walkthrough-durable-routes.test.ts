@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import { test, onTestFinished } from "vitest";
 import { pathToFileURL } from "node:url";
 
 import { routes } from "../../market-packs/pr-walkthrough/lib/routes.mjs";
@@ -216,7 +216,7 @@ function routeHunks(cwd: string, base: string, head: string): Array<{ file: stri
 
 function seedGitRepo(t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): { cwd: string; baseSha: string; headSha: string; hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> } {
 	const cwd = fs.mkdtempSync(join(os.tmpdir(), "prw-route-git-"));
-	t.after(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } });
+	onTestFinished(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } });
 	git(cwd, ["init"]);
 	git(cwd, ["config", "user.name", "Test User"]);
 	git(cwd, ["config", "user.email", "test@example.invalid"]);
@@ -551,7 +551,7 @@ positive_notes: []`);
 
 test("PR walkthrough quota regression: finalize persists binding metadata after scoped review payloads exceed legacy quota", async (t) => {
 	const quotaRoot = fs.mkdtempSync(join(os.tmpdir(), "prw-route-quota-"));
-	t.after(() => { try { fs.rmSync(quotaRoot, { recursive: true, force: true }); } catch { /* best effort */ } });
+	onTestFinished(() => { try { fs.rmSync(quotaRoot, { recursive: true, force: true }); } catch { /* best effort */ } });
 	const { ctx, store, packStore, packId } = await seedQuotaCtx(quotaRoot);
 	await saveMinimumChunks(ctx);
 	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });

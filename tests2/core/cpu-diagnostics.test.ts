@@ -23,7 +23,7 @@ function restoreEnv(): void {
 }
 
 async function importFresh(tag: string): Promise<typeof import("../../src/server/agent/cpu-diagnostics.ts")> {
-	return await import(`../src/server/agent/cpu-diagnostics.ts?${tag}-${Date.now()}-${Math.random()}`);
+	return await import(/* @vite-ignore */ `../../src/server/agent/cpu-diagnostics.ts?${tag}-${Date.now()}-${Math.random()}`);
 }
 
 function tempFile(name: string): { dir: string; file: string } {

@@ -114,7 +114,7 @@ describe("TeamManager boot respawn", () => {
 		await Promise.resolve();
 
 		assert.equal(
-			startTeam.mock.callCount(),
+			startTeam.mock.calls.length,
 			0,
 			"BOOT_RESPAWN_SESSIONLESS_GOAL_STARTED_TEAM: resubscribeTeamEvents must not call startTeam for a sessionless in-progress ready team goal on boot",
 		);

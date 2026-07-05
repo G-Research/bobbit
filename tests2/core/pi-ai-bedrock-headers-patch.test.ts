@@ -7,13 +7,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 import { ensurePiAiBedrockHeadersPatch } from "../../src/server/agent/pi-ai-bedrock-headers-patch.ts";
 
 const PATCH_MARKER = "bobbit-pi-ai-bedrock-headers-patch-v1";
 
 function packageRootFromResolved(specifier: string): string {
-	const resolved = fileURLToPath(import.meta.resolve(specifier));
+	const resolved = createRequire(import.meta.url).resolve(specifier);
 	let dir = path.dirname(resolved);
 	while (true) {
 		if (fs.existsSync(path.join(dir, "package.json"))) return dir;

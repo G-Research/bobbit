@@ -28,6 +28,8 @@
  * Runs via `npm run test:unit` (Node test runner).
  */
 import { afterEach, describe, it, vi } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -312,7 +314,7 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 	});
 
 	it("uses the pending timer to call the existing auto retry path after the first 1s generic retry", async (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const { session, prompt } = putRetryStateSession(manager, {
 			lastPromptText: "please retry this user request",
@@ -321,15 +323,15 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 		manager.maybeAutoRetryTransient(session);
 
 		assert.ok(session.pendingAutoRetryTimer, "expected a pending auto-retry timer for generic unexpected errors");
-		t.mock.timers.tick(999);
-		assert.equal(prompt.mock.callCount(), 0, "auto retry should not fire before its 1s delay");
+		vi.advanceTimersByTime(999);
+		assert.equal(prompt.mock.calls.length, 0, "auto retry should not fire before its 1s delay");
 
-		t.mock.timers.tick(1);
+		vi.advanceTimersByTime(1);
 		await Promise.resolve();
 		await Promise.resolve();
 
-		assert.equal(prompt.mock.callCount(), 1, "generic auto retry should dispatch through retryLastPrompt(..., { auto: true })");
-		assert.equal(prompt.mock.calls[0].arguments[0], "please retry this user request");
+		assert.equal(prompt.mock.calls.length, 1, "generic auto retry should dispatch through retryLastPrompt(..., { auto: true })");
+		assert.equal(prompt.mock.calls[0][0], "please retry this user request");
 		assert.equal(session.lastTurnErrored, false, "retryLastPrompt should clear error state once the auto retry starts");
 		assert.equal(session.status, "streaming");
 	});

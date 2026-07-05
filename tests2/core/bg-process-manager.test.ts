@@ -13,7 +13,9 @@
  * file (as a wrapper would write it); the child `exit` event is only a hint to
  * check that file promptly, so tests write the status file then emit `exit`.
  */
-import { describe, it, vi } from "vitest";
+import { describe, it, vi, afterEach } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -148,7 +150,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 	});
 
 	it("timeout fires deterministically under fake timers", (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 
 		const h = makeManager();
 		const SESSION = freshSession();
@@ -158,7 +160,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		h.mgr.registerWait(SESSION, controller);
 
 		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 50, controller.signal);
-		t.mock.timers.tick(50);
+		vi.advanceTimersByTime(50);
 
 		return waitPromise.then((result) => {
 			assert.ok(result);
@@ -171,7 +173,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 	});
 
 	it("does not leak abort listeners across many cycles", async (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const h = makeManager();
 		const SESSION = freshSession();
 		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
@@ -194,7 +196,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		for (let i = 0; i < 200; i++) {
 			const p = h.mgr.waitForExit(SESSION, info.id, 1, signal);
 			await Promise.resolve();
-			t.mock.timers.tick(1);
+			vi.advanceTimersByTime(1);
 			await p;
 		}
 
@@ -260,7 +262,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 	});
 
 	it("pre-aborted signal returns immediately without arming the timer", (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 
 		const h = makeManager();
 		const SESSION = freshSession();
@@ -273,7 +275,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 			assert.ok(result);
 			assert.equal(result!.aborted, true);
 			assert.equal(result!.timedOut, false);
-			t.mock.timers.runAll();
+			vi.runAllTimers();
 			h.mgr.cleanup(SESSION);
 		});
 	});

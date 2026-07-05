@@ -11,7 +11,9 @@
  * log/status/spool/pid files are real files in an isolated temp state dir —
  * never the real `.bobbit/`.
  */
-import { describe, it } from "vitest";
+import { describe, it, vi, afterEach } from "vitest";
+// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -281,7 +283,7 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 	}
 
 	it("ALIVE (nonce match) → re-attach reads spool tail then captures eventual real exit code", async (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
 		const rec = seedRunningHostRecord(h, S);
@@ -297,7 +299,7 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 
 		// Later the status file gains the real exit code → status watcher captures it.
 		fs.writeFileSync(rec.statusSnapshot, "0\n");
-		t.mock.timers.tick(200);
+		vi.advanceTimersByTime(200);
 		const exited = h.sent.find(m => m.type === "bg_process_exited" && m.processId === rec.id);
 		assert.ok(exited, "bg_process_exited broadcast");
 		assert.equal(exited.exitCode, 0);
@@ -545,7 +547,7 @@ describe("BgProcessManager — kill terminal states", () => {
 	});
 
 	it("Fix (HIGH): hard kill with NO status within the grace window → killed/null only AFTER the grace window", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const killCalls: any[] = [];
 		const h = makeHarness({ env: { isHostPidAlive: () => false, killHostTree: (pid, sig) => killCalls.push([pid, sig]) } });
 		const S = freshSession();
@@ -556,7 +558,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		assert.equal(h.mgr.list(S).find(x => x.id === info.id)!.status, "running", "not finalized before grace window");
 		// No status ever appears → once the grace window elapses the watcher marks it
 		// killed/null (a KNOWN outcome — the user asked to kill it — not a fabrication).
-		t.mock.timers.tick(2000);
+		vi.advanceTimersByTime(2000);
 		const p = h.mgr.list(S).find(x => x.id === info.id)!;
 		assert.equal(p.status, "exited");
 		assert.equal(p.exitCode, null);
@@ -565,7 +567,7 @@ describe("BgProcessManager — kill terminal states", () => {
 	});
 
 	it("Fix (HIGH): killed process whose status lands AFTER liveness goes false → REAL exit code captured (not killed/null)", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => false } }); // dead the instant we check
 		const S = freshSession();
 		const info = h.mgr.create(S, "loop.sh", h.stateDir);
@@ -577,7 +579,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		// The wrapper writes the REAL (signal-derived) exit code milliseconds later,
 		// still inside the grace window. The status file is always preferred.
 		fs.writeFileSync(rec.statusSnapshot, "143\n"); // 128 + SIGTERM(15) — a REAL exit code
-		t.mock.timers.tick(200); // status watcher polls and reads it
+		vi.advanceTimersByTime(200); // status watcher polls and reads it
 		const p = h.mgr.list(S).find(x => x.id === info.id)!;
 		assert.equal(p.status, "exited");
 		assert.equal(p.exitCode, 143, "real exit code captured, NOT killed/null");
@@ -777,32 +779,32 @@ describe("BgProcessManager — disk caps", () => {
 
 describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 	it("rebases offset to 0 when spool shrinks below it (no stall)", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "short\n"); // 6 bytes
 		const chunks: string[] = [];
 		const tailer = new PollTailer(file, "stdout", (_s, text) => chunks.push(text));
 		tailer.start(9999); // stale offset > size
-		t.mock.timers.tick(200);
+		vi.advanceTimersByTime(200);
 		assert.ok(chunks.join("").includes("short"), "rebased to 0 and read the retained content");
 		tailer.stop();
 	});
 
 	it("copytruncates the spool once consumed and over cap", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "z".repeat(MAX_LOG_BYTES + 1000));
 		const tailer = new PollTailer(file, "stdout", () => {});
 		tailer.start(0);
-		t.mock.timers.tick(200);
+		vi.advanceTimersByTime(200);
 		assert.equal(fs.statSync(file).size, 0, "spool truncated to 0 after consume + over cap");
 		tailer.stop();
 	});
 
 	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
 		const head = Buffer.alloc(1000, 0x41); // 'A' — older bytes beyond the window
@@ -813,7 +815,7 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		let lastOffset = -1;
 		const tailer = new PollTailer(file, "stdout", (_s, text, off) => { received += text; lastOffset = off; });
 		tailer.start(0);
-		t.mock.timers.tick(200);
+		vi.advanceTimersByTime(200);
 		assert.equal(received.length, MAX_LOG_BYTES, "read exactly the last cap bytes, not the whole delta");
 		assert.ok(!received.includes("A"), "older bytes beyond the retained window were skipped");
 		assert.equal(lastOffset, size, "offset advanced to size");
@@ -830,7 +832,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 	}
 
 	it("rebases the offset DOWN to the current size when the spool is copytruncated mid-tail", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		let size = 0;
 		const child = fakeChild();
 		const deps: DockerExec = { probeSize: () => size, follow: () => child };
@@ -842,7 +844,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		child.stdout.emit("data", Buffer.alloc(100, 0x61));
 		// The in-container trimmer copytruncated the spool to 20 bytes.
 		size = 20;
-		t.mock.timers.tick(1000);
+		vi.advanceTimersByTime(1000);
 		// Offset rebased to the current size + persisted, so a later finalFlush/restore
 		// (which rebases-to-0 only when size < offset) won't re-read & DUPLICATE bytes.
 		assert.deepEqual(resets, [20], "offset rebased to the current size on copytruncate");
@@ -850,7 +852,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 	});
 
 	it("does NOT rebase while the spool only grows", (t) => {
-		t.mock.timers.enable({ apis: ["setInterval"] });
+		vi.useFakeTimers({ toFake: ["setInterval"] });
 		let size = 0;
 		const child = fakeChild();
 		const deps: DockerExec = { probeSize: () => size, follow: () => child };
@@ -860,7 +862,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		tailer.start(0);
 		child.stdout.emit("data", Buffer.alloc(50, 0x61)); // offset 50
 		size = 200; // spool grew
-		t.mock.timers.tick(1000);
+		vi.advanceTimersByTime(1000);
 		assert.deepEqual(resets, [], "no rebase while the spool grows");
 		tailer.stop();
 	});

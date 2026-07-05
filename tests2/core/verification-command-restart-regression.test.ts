@@ -15,7 +15,7 @@
  * reproducing-test gate can match the intended failure.
  */
 
-import { test, type TestContext } from "vitest";
+import { test, type TestContext, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,7 +35,7 @@ function makeHarness(t: TestContext) {
 	const root = makeTmpDir("verif-command-restart-repro-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 
 	const gateStoreCalls: GateStoreCall[] = [];
 	const notifications: Array<{ goalId: string; message: string }> = [];

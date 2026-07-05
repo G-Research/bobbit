@@ -78,8 +78,8 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		await manager.forceAbort(session.id, GRACE);
 		const elapsed = Date.now() - t0;
 
-		assert.equal(abortStarted.mock.callCount(), 1, "graceful abort() was attempted");
-		assert.equal(stop.mock.callCount(), 1, "force-kill stop() was called (didn't hang on abort)");
+		assert.equal(abortStarted.mock.calls.length, 1, "graceful abort() was attempted");
+		assert.equal(stop.mock.calls.length, 1, "force-kill stop() was called (didn't hang on abort)");
 		assert.ok(elapsed < 5000, `forceAbort resolved promptly (${elapsed}ms), not at the ~30s ack timeout`);
 		assert.ok(elapsed >= GRACE - 20, `did not force-kill before the grace period (${elapsed}ms)`);
 	});
@@ -189,7 +189,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 
 		await manager.forceAbort(session.id, 50);
 
-		assert.equal(cancel.mock.callCount(), 1, "forceAbort cancels the pending auto-retry timer");
+		assert.equal(cancel.mock.calls.length, 1, "forceAbort cancels the pending auto-retry timer");
 		assert.equal(session.pendingAutoRetryTimer, undefined, "timer was cleared");
 	});
 });

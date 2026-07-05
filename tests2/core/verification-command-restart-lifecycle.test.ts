@@ -4,7 +4,7 @@
 // Review: unparsed import name in `node:test` import list | test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { test, type TestContext } from "vitest";
+import { test, type TestContext, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,7 +26,7 @@ function makeHarness(t: TestContext) {
 	const root = makeTmpDir("verif-command-lifecycle-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 	return makeHarnessForStateDir(stateDir);
 }
 
@@ -458,7 +458,7 @@ test("timeout after restart kills a process only when matching identity is verif
 
 test("cancel cleanup without restart-safe identity remains durable and unverifiable", async (t) => {
 	const { stateDir, harness } = makeHarness(t);
-	t.after(() => clearKillRetryTimers(harness));
+	onTestFinished(() => clearKillRetryTimers(harness));
 	const child = spawnNode("setTimeout(() => {}, 30000)");
 	try {
 		const startedAt = Date.now();
@@ -503,7 +503,7 @@ test("cancel cleanup without restart-safe identity remains durable and unverifia
 
 test("timeout resume keeps cleanup pending when the kill cannot be verified", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
-	t.after(() => clearKillRetryTimers(harness));
+	onTestFinished(() => clearKillRetryTimers(harness));
 	const child = spawnNode("setTimeout(() => {}, 30000)");
 	try {
 		const startedAt = Date.now() - 2_000;
@@ -653,7 +653,7 @@ test("cancelled persisted command kill intent is processed on resume before acti
 	const root = makeTmpDir("verif-command-cancel-resume-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 	const child = spawnNode("setTimeout(() => {}, 30000)");
 	try {
 		const startedAt = Date.now();

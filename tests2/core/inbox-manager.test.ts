@@ -84,8 +84,8 @@ describe("InboxManager.enqueue", () => {
 		assert.equal(added[0].entry.id, entry.id);
 
 		// Nudger poked exactly once
-		assert.equal(nudger.poke.mock.callCount(), 1);
-		assert.equal(nudger.poke.mock.calls[0].arguments[0], "staff-a");
+		assert.equal(nudger.poke.mock.calls.length, 1);
+		assert.equal(nudger.poke.mock.calls[0][0], "staff-a");
 	});
 
 	it("throws when staff is unknown to all projects", () => {
@@ -100,7 +100,7 @@ describe("InboxManager.enqueue", () => {
 		mgr.enqueue("s", { title: "a", prompt: "p", source: { type: "trigger", triggerId: "t" } });
 		mgr.enqueue("s", { title: "a", prompt: "p", source: { type: "trigger", triggerId: "t" } });
 		assert.equal(inboxStore.listPending("s").length, 2);
-		assert.equal(nudger.poke.mock.callCount(), 2);
+		assert.equal(nudger.poke.mock.calls.length, 2);
 	});
 });
 

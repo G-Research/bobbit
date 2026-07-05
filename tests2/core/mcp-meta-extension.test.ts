@@ -12,7 +12,7 @@
  * We assert content-stable substrings rather than exact-equal to keep the
  * test resilient to whitespace tweaks in the template.
  */
-import { describe, it } from "vitest";
+import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 
 const { generateMcpMetaExtension, writeMcpProxyExtensions } = await import("../../src/server/agent/tool-activation.ts");
@@ -187,7 +187,7 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		const dir = tmpBobbitDir();
 		const orig = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = dir;
-		t.after(() => {
+		onTestFinished(() => {
 			if (orig === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = orig;
 		});

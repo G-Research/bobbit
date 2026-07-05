@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
-import { describe, it } from "vitest";
+import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -97,7 +97,7 @@ describe("agent directory copy migration", () => {
 	it("copies only allowlisted files/directories and preserves the source", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 
 		const report = await migrate({ sourcePath: source, destinationPath: dest, overwrite: false });
 		assert.equal(fs.existsSync(source), true, "source directory must be preserved");
@@ -117,7 +117,7 @@ describe("agent directory copy migration", () => {
 	it("skips existing destination files by default", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		fs.mkdirSync(path.join(dest, "sessions", "session-a"), { recursive: true });
 		fs.mkdirSync(path.join(dest, "bin"), { recursive: true });
 		fs.writeFileSync(path.join(dest, "auth.json"), "auth-existing");
@@ -135,7 +135,7 @@ describe("agent directory copy migration", () => {
 	it("overwrites existing destination files only when overwrite is explicit", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		fs.mkdirSync(path.join(dest, "sessions", "session-a"), { recursive: true });
 		fs.mkdirSync(path.join(dest, "bin"), { recursive: true });
 		fs.writeFileSync(path.join(dest, "auth.json"), "auth-existing");
@@ -155,7 +155,7 @@ describe("agent directory copy migration", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-migration-missing-"));
 		const source = path.join(root, "source-agent");
 		const dest = path.join(root, "dest-agent");
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		fs.mkdirSync(path.join(source, "sessions"), { recursive: true });
 		fs.writeFileSync(path.join(source, "sessions", "only.jsonl"), "only");
 
@@ -169,7 +169,7 @@ describe("agent directory copy migration", () => {
 	it("rejects same source and destination before copying", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 
 		const report = await migrate({ sourcePath: source, destinationPath: source, overwrite: true });
 
@@ -180,7 +180,7 @@ describe("agent directory copy migration", () => {
 	it("rejects destination nested inside source before creating it", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		const nestedDest = path.join(source, "nested-destination");
 
 		const report = await migrate({ sourcePath: source, destinationPath: nestedDest, overwrite: true });
@@ -192,7 +192,7 @@ describe("agent directory copy migration", () => {
 	it("rejects destination symlinked to a source child before copying", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		if (!symlinkDirectory(path.join(source, "sessions"), dest)) {
 			t.skip("directory symlinks are unavailable on this platform");
 			return;
@@ -208,7 +208,7 @@ describe("agent directory copy migration", () => {
 	it("refuses to copy through top-level destination allowlist directory symlinks", async (t) => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		const outside = path.join(root, "outside-target");
 		fs.mkdirSync(dest, { recursive: true });
 		fs.mkdirSync(outside, { recursive: true });
@@ -227,7 +227,7 @@ describe("agent directory copy migration", () => {
 	it("rejects source nested inside destination before copying", async (t) => {
 		const migrate = await loadMigrationFn();
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-migration-nested-source-"));
-		t.after(() => cleanup(root));
+		onTestFinished(() => cleanup(root));
 		const dest = path.join(root, "dest-agent");
 		const source = path.join(dest, "nested-source");
 		fs.mkdirSync(path.join(source, "sessions"), { recursive: true });
