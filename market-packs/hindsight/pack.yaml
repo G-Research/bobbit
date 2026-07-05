@@ -17,11 +17,10 @@ contents:
   skills: []
   entrypoints: [hindsight-session-menu, hindsight-route] # session-menu launcher + deep-link route for the embedded dashboard (use/view/query) panel
   providers: [memory] # → providers/memory.yaml
-  hooks: []
   mcp: []
   pi-extensions: []
   runtimes: [hindsight] # P1 managed runtime descriptor → runtimes/hindsight.yaml
-  workflows: []
+  workflows: [] # reserved, not yet loadable (finding EXT-03) — see docs/marketplace.md
 provides: []
 requires: []
 # Pack routes re-express the memory surface for diagnostics + config persistence.

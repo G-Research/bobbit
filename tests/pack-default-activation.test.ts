@@ -85,11 +85,10 @@ describe("buildAllDisabledRefs", () => {
 			skills: [],
 			entrypoints: ["hindsight-session-menu", "hindsight-route"],
 			providers: ["memory"],
-			hooks: [],
 			mcp: [],
 			piExtensions: [],
 			runtimes: ["hindsight"],
-			workflows: [],
+			workflows: [], // reserved (finding EXT-03) — never activation-toggleable regardless
 		},
 	};
 
@@ -102,7 +101,18 @@ describe("buildAllDisabledRefs", () => {
 		// empty kinds dropped entirely
 		assert.equal("roles" in refs, false);
 		assert.equal("skills" in refs, false);
+		// hooks/workflows are never activation-toggleable (finding EXT-03) — see the
+		// dedicated test below for a non-empty contents.workflows.
 		assert.equal("hooks" in refs, false);
+		assert.equal("workflows" in refs, false);
+	});
+
+	it("a non-empty contents.workflows (finding EXT-03: reserved, not toggleable) is NEVER included in disabled refs", () => {
+		const withWorkflows: PackManifest = {
+			...manifest,
+			contents: { ...manifest.contents, workflows: ["my-wf"] },
+		};
+		const refs = buildAllDisabledRefs(withWorkflows, ["hindsight_recall"]);
 		assert.equal("workflows" in refs, false);
 	});
 

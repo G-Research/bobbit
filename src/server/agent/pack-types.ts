@@ -66,9 +66,15 @@ export interface PackManifest {
 	defaultDisabled?: boolean;
 	/**
 	 * Authoritative advertised contents. v1 keys are REQUIRED but each MAY be
-	 * empty. Schema 2 adds optional pack-scoped catalogues; only `providers` has
-	 * a loader in G1.1, the other keys are activation/catalogue metadata for later
-	 * extension-platform goals.
+	 * empty. Schema 2 adds optional pack-scoped catalogues; `providers`, `mcp`,
+	 * `piExtensions`, and `runtimes` have loaders (see pack-contributions.ts).
+	 * `workflows` is RESERVED (finding EXT-03): parsed and validated, but has no
+	 * runtime loader and is NOT activation-toggleable — see
+	 * docs/marketplace.md#packyaml-schema-2-extension-platform. `hooks` was
+	 * removed as a distinct contribution kind (finding EXT-03): providers already
+	 * declare their own hook subscriptions via `providers/<id>.yaml`'s `hooks:`
+	 * field, and no design ever called for a second, file-based hook mechanism —
+	 * see pack-manifest.ts's `validateManifest` for the rejection warning.
 	 *
 	 * `entrypoints` lists the basenames (no extension) of `entrypoints/<name>.yaml`
 	 * files — the user-facing activation catalogue the Market UI toggles and the
@@ -82,11 +88,12 @@ export interface PackManifest {
 		entrypoints: string[]; // entrypoints/<name>.yaml basenames; toggleable
 		providers?: string[]; // providers/<name>.yaml basenames; toggleable
 		channels?: string[]; // channels/<name>.yaml basenames; support surfaces, not routes
-		hooks?: string[]; // hook contribution basenames (accepted, loader later)
-		mcp?: string[]; // MCP contribution basenames (schema 2+, loader later)
-		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
-		runtimes?: string[]; // runtimes/<name>.yaml basenames; managed-runtime descriptors
-		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
+		mcp?: string[]; // MCP contribution basenames (schema 2+); toggleable
+		piExtensions?: string[]; // YAML key `pi-extensions`; toggleable
+		runtimes?: string[]; // runtimes/<name>.yaml basenames; managed-runtime descriptors; toggleable
+		/** RESERVED (finding EXT-03): parsed for forward-compat, no runtime loader,
+		 *  not activation-toggleable. See docs/marketplace.md. */
+		workflows?: string[];
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */

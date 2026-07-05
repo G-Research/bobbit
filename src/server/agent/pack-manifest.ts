@@ -153,7 +153,6 @@ export function validateManifest(
 	if (entrypoints === null) return null;
 	let providers: string[] = [];
 	let channels: string[] = [];
-	let hooks: string[] = [];
 	let mcp: string[] = [];
 	let piExtensions: string[] = [];
 	let runtimes: string[] = [];
@@ -165,9 +164,19 @@ export function validateManifest(
 		const parsedChannels = parseContentsBasenames("channels", c.channels);
 		if (parsedChannels === null) return null;
 		channels = parsedChannels;
-		const parsedHooks = parseContentsBasenames("hooks", c.hooks);
-		if (parsedHooks === null) return null;
-		hooks = parsedHooks;
+		// `hooks` is NOT a supported contribution kind (finding EXT-03): providers
+		// already declare their own hook subscriptions via `providers/<id>.yaml`'s
+		// `hooks:` field, and no standalone `hooks/<name>.yaml` loader has ever
+		// existed. Warn (non-fatal — the manifest still loads) instead of silently
+		// accepting a toggle that does nothing; an empty/absent array is a
+		// harmless no-op and does not warn.
+		if (Array.isArray(c.hooks) && c.hooks.length > 0) {
+			problems?.push(
+				"pack.yaml: contents.hooks is not a supported contribution kind — there is no hooks/<name>.yaml " +
+					"loader (providers declare their own hook subscriptions via providers/<id>.yaml's `hooks:` " +
+					"field instead); remove contents.hooks from the manifest.",
+			);
+		}
 		const parsedMcp = parseContentsBasenames("mcp", c.mcp);
 		if (parsedMcp === null) return null;
 		mcp = parsedMcp;
@@ -180,13 +189,24 @@ export function validateManifest(
 		const parsedWorkflows = parseContentsBasenames("workflows", c.workflows);
 		if (parsedWorkflows === null) return null;
 		workflows = parsedWorkflows;
+		// `workflows` is RESERVED, not yet loadable (finding EXT-03): the classifier
+		// framework's F15 role/workflow router may want this kind later, so the
+		// schema field stays parseable — but a pack declaring entries today gets a
+		// clear signal, not a silent phantom toggle (it is also excluded from
+		// ACTIVATION_KINDS, so it is not activation-toggleable in the Market UI).
+		if (workflows.length > 0) {
+			problems?.push(
+				"pack.yaml: contents.workflows is reserved for a future loader and has no runtime effect yet " +
+					"(workflows are project-scoped inline in project.yaml today — see docs/marketplace.md).",
+			);
+		}
 	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows },
+		contents: { roles, tools, skills, entrypoints, providers, channels, mcp, piExtensions, runtimes, workflows },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
 	if (provides !== undefined) manifest.provides = provides;

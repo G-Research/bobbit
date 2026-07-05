@@ -3404,8 +3404,10 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 // ============================================================================
 
 /** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`.
- *  The schema-v2 arrays (`providers`/`hooks`/`runtimes`/`workflows`) are present
- *  only for schema≥2 packs; absent = all enabled. */
+ *  The schema-v2 arrays (`providers`/`runtimes`) are present only for schema≥2
+ *  packs; absent = all enabled. `hooks` and `workflows` are deliberately absent
+ *  (finding EXT-03): neither is activation-toggleable — see
+ *  docs/marketplace.md#packyaml-schema-2-extension-platform. */
 export interface DisabledRefs {
 	roles?: string[];
 	tools?: string[];
@@ -3417,10 +3419,8 @@ export interface DisabledRefs {
 	mcpOperations?: Record<string, string[]>;
 	/** Schema-v2 contribution basenames. */
 	providers?: string[];
-	hooks?: string[];
 	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
 	runtimes?: string[];
-	workflows?: string[];
 }
 
 /** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
@@ -3443,10 +3443,8 @@ export interface PackActivationCatalogue {
 	piExtensions?: Array<string | PackActivationPiExtensionEntry>;
 	/** Schema-v2 contribution basenames (loader-resolved listNames). */
 	providers?: string[];
-	hooks?: string[];
 	/** Managed-runtime descriptor basenames (Docker-backed; consent-gated). */
 	runtimes?: string[];
-	workflows?: string[];
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }

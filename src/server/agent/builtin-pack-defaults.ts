@@ -69,7 +69,7 @@ function writeMarker(stateDir: string, marker: SeedMarker): void {
  * via {@link loadPackContributions}, exactly as the activation-catalogue
  * endpoint does).
  */
-export function buildFullyDisabledRefs(entry: { path: string; manifest?: { contents: { roles: string[]; tools: string[]; skills: string[]; entrypoints?: string[]; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[] } } }): DisabledRefs {
+export function buildFullyDisabledRefs(entry: { path: string; manifest?: { contents: { roles: string[]; tools: string[]; skills: string[]; entrypoints?: string[]; providers?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[] } } }): DisabledRefs {
 	const manifest = entry.manifest;
 	if (!manifest) return {};
 	const c = manifest.contents;
@@ -82,17 +82,17 @@ export function buildFullyDisabledRefs(entry: { path: string; manifest?: { conte
 	} catch {
 		/* fall back to declared listNames */
 	}
+	// `hooks`/`workflows` are excluded (finding EXT-03): neither is
+	// activation-toggleable (see ACTIVATION_KINDS in project-config-store.ts).
 	return {
 		roles: [...c.roles],
 		tools: [...c.tools],
 		skills: [...c.skills],
 		entrypoints,
 		providers: [...(c.providers ?? [])],
-		hooks: [...(c.hooks ?? [])],
 		mcp: [...(c.mcp ?? [])],
 		piExtensions: [...(c.piExtensions ?? [])],
 		runtimes: [...(c.runtimes ?? [])],
-		workflows: [...(c.workflows ?? [])],
 	};
 }
 

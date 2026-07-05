@@ -130,7 +130,7 @@ describe("validateManifest (§1.2)", () => {
 		assert.equal(m.requires, undefined);
 		assert.deepEqual(m.contents.providers, []);
 		assert.deepEqual(m.contents.channels, []);
-		assert.deepEqual(m.contents.hooks, []);
+		assert.equal("hooks" in m.contents, false);
 		assert.deepEqual(m.contents.mcp, []);
 		assert.deepEqual(m.contents.piExtensions, []);
 		assert.deepEqual(m.contents.runtimes, []);
@@ -147,11 +147,9 @@ describe("validateManifest (§1.2)", () => {
 				...ok.contents,
 				providers: ["memory"],
 				channels: ["terminal"],
-				hooks: ["turn"],
 				mcp: ["local"],
 				"pi-extensions": ["pi"],
 				runtimes: ["node"],
-				workflows: ["review"],
 			},
 		});
 		assert.ok(m);
@@ -160,11 +158,45 @@ describe("validateManifest (§1.2)", () => {
 		assert.deepEqual(m.requires, ["host-api"]);
 		assert.deepEqual(m.contents.providers, ["memory"]);
 		assert.deepEqual(m.contents.channels, ["terminal"]);
-		assert.deepEqual(m.contents.hooks, ["turn"]);
 		assert.deepEqual(m.contents.mcp, ["local"]);
 		assert.deepEqual(m.contents.piExtensions, ["pi"]);
 		assert.deepEqual(m.contents.runtimes, ["node"]);
-		assert.deepEqual(m.contents.workflows, ["review"]);
+	});
+
+	// ── EXT-03: hooks removed, workflows reserved ──────────────────────
+
+	it("contents.hooks is NOT a supported contribution kind (finding EXT-03): non-fatal warning, dropped from manifest", () => {
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, hooks: ["my-hook"] } }, problems);
+		assert.ok(m); // non-fatal: manifest still loads
+		assert.equal("hooks" in m.contents, false); // never round-trips onto the manifest
+		assert.match(problems.join("; "), /contents\.hooks is not a supported contribution kind/);
+	});
+
+	it("an empty/absent contents.hooks is a silent no-op (no warning) — back-compat with existing packs", () => {
+		const problemsAbsent: string[] = [];
+		assert.ok(validateManifest({ ...ok, schema: 2 }, problemsAbsent));
+		assert.deepEqual(problemsAbsent, []);
+		const problemsEmpty: string[] = [];
+		assert.ok(validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, hooks: [] } }, problemsEmpty));
+		assert.deepEqual(problemsEmpty, []);
+	});
+
+	it("contents.workflows is RESERVED, not yet loadable (finding EXT-03): non-fatal warning, still parses onto the manifest", () => {
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, workflows: ["my-wf"] } }, problems);
+		assert.ok(m); // non-fatal
+		assert.deepEqual(m.contents.workflows, ["my-wf"]); // schema field stays reserved/parseable
+		assert.match(problems.join("; "), /contents\.workflows is reserved for a future loader/);
+	});
+
+	it("an empty/absent contents.workflows is a silent no-op (no warning)", () => {
+		const problemsAbsent: string[] = [];
+		assert.ok(validateManifest({ ...ok, schema: 2 }, problemsAbsent));
+		assert.deepEqual(problemsAbsent, []);
+		const problemsEmpty: string[] = [];
+		assert.ok(validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, workflows: [] } }, problemsEmpty));
+		assert.deepEqual(problemsEmpty, []);
 	});
 
 	it("schema 2 rejects unsafe contents.channels basenames", () => {
@@ -206,7 +238,6 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			entrypoints: opts.entrypoints ?? [],
 			providers: opts.providers ?? [],
 			channels: opts.channels ?? [],
-			hooks: opts.hooks ?? [],
 			mcp: opts.mcp ?? [],
 			piExtensions: opts.piExtensions ?? [],
 			runtimes: opts.runtimes ?? [],

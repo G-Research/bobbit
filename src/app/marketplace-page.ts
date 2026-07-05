@@ -321,12 +321,14 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 	renderApp();
 }
 
-type ActivationArrayKey = "roles" | "tools" | "skills" | "entrypoints" | "mcp" | "piExtensions" | "providers" | "hooks" | "runtimes" | "workflows";
+// `hooks`/`workflows` are deliberately EXCLUDED (finding EXT-03): neither is
+// activation-toggleable — see docs/marketplace.md#packyaml-schema-2-extension-platform.
+type ActivationArrayKey = "roles" | "tools" | "skills" | "entrypoints" | "mcp" | "piExtensions" | "providers" | "runtimes";
 
 /** Toggleable entity kinds (singular testid form). The schema-v2 kinds
- *  (`provider`/`hook`/`runtime`/`workflow`) appear only for schema≥2 packs;
- *  `runtime` is the consent-gated managed Docker runtime (design §8). */
-type ActivationKind = "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension" | "provider" | "hook" | "runtime" | "workflow";
+ *  (`provider`/`runtime`) appear only for schema≥2 packs; `runtime` is the
+ *  consent-gated managed Docker runtime (design §8). */
+type ActivationKind = "role" | "tool" | "skill" | "entrypoint" | "mcp" | "pi-extension" | "provider" | "runtime";
 
 /** Maps the singular testid kind → the `DisabledRefs` array key. */
 const ACTIVATION_KIND_KEY: Record<ActivationKind, ActivationArrayKey> = {
@@ -337,9 +339,7 @@ const ACTIVATION_KIND_KEY: Record<ActivationKind, ActivationArrayKey> = {
 	mcp: "mcp",
 	"pi-extension": "piExtensions",
 	provider: "providers",
-	hook: "hooks",
 	runtime: "runtimes",
-	workflow: "workflows",
 };
 
 /** Toggle a user-facing pack entity's activation. Computes the new `disabled`
@@ -364,26 +364,25 @@ async function handleToggleActivation(
 
 /** Compute the master enable/disable-all `disabled` payload from the current
  *  activation state. Disabling-all MUST cover the schema-v2 arrays too
- *  (providers/hooks/runtimes/workflows) — otherwise the master OFF toggle would
- *  leave a managed runtime enabled (and Docker running). Enabling-all clears
- *  every kind back to the default-enabled state. Pure (no module state / no
- *  network) — exported for the runtime-consent fixture test. */
+ *  (providers/runtimes) — otherwise the master OFF toggle would leave a managed
+ *  runtime enabled (and Docker running). `hooks`/`workflows` are deliberately
+ *  excluded (finding EXT-03): neither is activation-toggleable. Enabling-all
+ *  clears every kind back to the default-enabled state. Pure (no module state /
+ *  no network) — exported for the runtime-consent fixture test. */
 export function masterToggleDisabledRefs(current: PackActivationResponse, enable: boolean): DisabledRefs {
 	const cat = current.catalogue;
 	return enable
-		? { roles: [], tools: [], skills: [], entrypoints: [], providers: [], hooks: [], mcp: [], mcpOperations: current.disabled?.mcpOperations ?? {}, piExtensions: [], runtimes: [], workflows: [] }
+		? { roles: [], tools: [], skills: [], entrypoints: [], providers: [], mcp: [], mcpOperations: current.disabled?.mcpOperations ?? {}, piExtensions: [], runtimes: [] }
 		: {
 			roles: [...cat.roles],
 			tools: [...cat.tools],
 			skills: [...cat.skills],
 			entrypoints: cat.entrypoints.map((e) => e.listName),
 			providers: [...(cat.providers ?? [])],
-			hooks: [...(cat.hooks ?? [])],
 			mcp: normalizedActivationMcp(cat.mcp).map((e) => mcpContributionKey(e)),
 			mcpOperations: current.disabled?.mcpOperations ?? {},
 			piExtensions: normalizedActivationPiExtensions(cat.piExtensions).map((e) => e.ref),
 			runtimes: [...(cat.runtimes ?? [])],
-			workflows: [...(cat.workflows ?? [])],
 		};
 }
 
@@ -1855,13 +1854,14 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 }
 
 /** The schema-v2 activation arrays that count as plain-string toggleable
- *  entities (providers/hooks/runtimes/workflows). Present only for schema≥2 packs;
- *  folded into the master-toggle total/enabled counts so a managed runtime is part
- *  of "Enabled"/"Disabled". `mcp`/`piExtensions` are counted separately because
- *  their catalogue entries may be rich objects (normalized above). Exported for the
- *  managed-runtime consent render test. */
+ *  entities (providers/runtimes). Present only for schema≥2 packs; folded into
+ *  the master-toggle total/enabled counts so a managed runtime is part of
+ *  "Enabled"/"Disabled". `mcp`/`piExtensions` are counted separately because
+ *  their catalogue entries may be rich objects (normalized above). `hooks` and
+ *  `workflows` are deliberately excluded (finding EXT-03): neither is
+ *  activation-toggleable. Exported for the managed-runtime consent render test. */
 const ACTIVATION_SCHEMA_V2_KINDS: Array<keyof DisabledRefs & keyof PackActivationResponse["catalogue"]> = [
-	"providers", "hooks", "runtimes", "workflows",
+	"providers", "runtimes",
 ];
 
 export function activationEntityTotal(activation: PackActivationResponse): number {
@@ -2104,9 +2104,10 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 	if (cat.entrypoints.length) {
 		groups.push(group("Entry points", cat.entrypoints.map((e) => toggle("entrypoint", e.listName, entrypointDisplayLabel(e), entrypointKindLabel(e.kind)))));
 	}
-	// Schema-v2 toggleable arrays (present only for schema≥2 packs).
+	// Schema-v2 toggleable arrays (present only for schema≥2 packs). `hooks` and
+	// `workflows` are deliberately NOT rendered here (finding EXT-03): neither is
+	// activation-toggleable — see docs/marketplace.md.
 	if (cat.providers?.length) groups.push(group("Providers", cat.providers.map((n) => toggle("provider", n, n))));
-	if (cat.hooks?.length) groups.push(group("Hooks", cat.hooks.map((n) => toggle("hook", n, n))));
 	const mcpEntries = normalizedActivationMcp(cat.mcp);
 	if (mcpEntries.length) {
 		groups.push(group(
@@ -2144,7 +2145,6 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 			html`<div class="market-activation-help">Pi extensions are host-code/runtime extensions loaded into every matching agent session when enabled. Discovered tools appear on the Tools page for allow/ask/never policy.</div>`,
 		));
 	}
-	if (cat.workflows?.length) groups.push(group("Workflows", cat.workflows.map((n) => toggle("workflow", n, n))));
 	// Managed runtimes get an explicit consent enable-card per runtime (design §8):
 	// the toggle is the explicit on-enable start action, so the disclosure (images/
 	// services, ports, volume path, memory/trust copy) renders inline with it.
