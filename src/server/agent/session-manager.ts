@@ -87,7 +87,7 @@ import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.j
 import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
-import type { SandboxManager } from "./sandbox-manager.js";
+import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
@@ -1838,6 +1838,43 @@ export class SessionManager {
 		return undefined;
 	}
 
+	private readGatewayUrlForAgent(): string | undefined {
+		try {
+			return fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private mintScopedGatewayToken(projectId: string | undefined, sessionId: string, goalId?: string): string | undefined {
+		if (!projectId || !this.sandboxTokenStore) return undefined;
+		const scopedToken = this.sandboxTokenStore.register(projectId);
+		this.sandboxTokenStore.addSession(projectId, sessionId);
+		if (goalId) this.sandboxTokenStore.addGoal(projectId, goalId);
+		return scopedToken;
+	}
+
+	private applyScopedGatewayCredentials(
+		bridgeOptions: RpcBridgeOptions,
+		sessionId: string,
+		projectId: string | undefined,
+		goalId?: string,
+	): void {
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (gwUrl) bridgeOptions.gatewayUrl = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
+		if (scopedToken) bridgeOptions.gatewayToken = scopedToken;
+	}
+
+	private scopedGatewayEnvForDirectAgent(sessionId: string, projectId: string | undefined, goalId?: string): Record<string, string> | undefined {
+		const env: Record<string, string> = {};
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId);
+		if (scopedToken) env.BOBBIT_TOKEN = scopedToken;
+		return Object.keys(env).length > 0 ? env : undefined;
+	}
+
 	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
@@ -1855,15 +1892,24 @@ export class SessionManager {
 		sessionId: string,
 		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
-		if (!this.projectConfigStore) return false;
-		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
-		if (sandboxConfig !== "docker") return false;
-
-		// Resolve project ID
+		// Resolve project ID before reading sandbox config. The selected project's
+		// config is authoritative; the server/HQ store is only a legacy fallback for
+		// genuinely unscoped callers.
 		const projectId = opts?.projectId;
 		if (!projectId) {
 			throw new Error("Sandbox mode requires a projectId");
 		}
+		if (isSandboxExemptProject(projectId)) {
+			bridgeOptions.sandboxed = false;
+			delete bridgeOptions.containerId;
+			return false;
+		}
+
+		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
+		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
+		if (!projectConfigStore) return false;
+		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+		if (sandboxConfig !== "docker") return false;
 
 		// Get the ProjectSandbox for this project
 		if (!this.sandboxManager) {
@@ -1880,37 +1926,25 @@ export class SessionManager {
 
 		const containerId = await sandbox.getContainerId();
 
-		// Read gateway URL and generate scoped token for the container
-		try {
-			const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-			bridgeOptions.gatewayUrl = gwUrl;
-
-			// Generate/reuse a scoped sandbox token for the project (not per-session)
-			if (this.sandboxTokenStore) {
-				const scopedToken = this.sandboxTokenStore.register(projectId);
-				this.sandboxTokenStore.addSession(projectId, sessionId);
-				if (opts?.goalId) {
-					this.sandboxTokenStore.addGoal(projectId, opts.goalId);
-				} else if (bridgeOptions.env?.BOBBIT_GOAL_ID) {
-					this.sandboxTokenStore.addGoal(projectId, bridgeOptions.env.BOBBIT_GOAL_ID);
-				}
-				bridgeOptions.gatewayToken = scopedToken;
-			} else {
-				// readToken() is relocation-aware (serverSecretsDir() + legacy fallback),
-				// so a fresh install with no legacy <hqDir>/state/token still resolves.
-				const adminToken = readToken();
-				if (adminToken === null) {
-					throw new Error("Cannot read gateway credentials for sandbox");
-				}
-				bridgeOptions.gatewayToken = adminToken;
+		// Read gateway URL and generate scoped token for the container.
+		const gwUrl = this.readGatewayUrlForAgent();
+		if (!gwUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url not found");
+		bridgeOptions.gatewayUrl = gwUrl;
+		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
+		if (scopedToken) {
+			bridgeOptions.gatewayToken = scopedToken;
+		} else {
+			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
+			// unchanged there. Direct agents never use this admin fallback.
+			const adminToken = readToken();
+			if (adminToken === null) {
+				throw new Error("Cannot read gateway credentials for sandbox");
 			}
-		} catch (err) {
-			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
+			bridgeOptions.gatewayToken = adminToken;
 		}
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
-		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
 		const projectRootPath = projectContext?.project.rootPath;
 		if (projectRootPath) {
 			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
@@ -1976,7 +2010,6 @@ export class SessionManager {
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
 		// Get project-scoped config/secrets when available.
-		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
@@ -5082,16 +5115,30 @@ export class SessionManager {
 		}
 
 		// ── Restore Docker sandbox wiring ──
-		if (ps.sandboxed) {
+		let restoredSandboxed = ps.sandboxed === true && !(ps.projectId && isSandboxExemptProject(ps.projectId));
+		if (restoredSandboxed) {
 			// On restore, the worktree already exists inside the container —
 			// pass the container-internal cwd directly (no branch = no worktree creation).
 			if (ps.cwd?.startsWith("/workspace")) {
 				bridgeOptions.cwd = ps.cwd;
 			}
-			await this.applySandboxWiring(bridgeOptions, ps.id, {
+			restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
 				projectId: ps.projectId,
 				goalId: ps.goalId,
 			});
+			if (!restoredSandboxed) {
+				ps.sandboxed = false;
+				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
+				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId);
+			}
+		} else {
+			if (ps.sandboxed) {
+				ps.sandboxed = false;
+				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
+			}
+			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId);
+		}
+		if (restoredSandboxed) {
 			// Verify the sandbox worktree still exists inside the container. Headquarters
 			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
 			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
@@ -5522,11 +5569,13 @@ export class SessionManager {
 		// the lifecycle boundary so downstream setup never claims a pool, creates a
 		// git worktree, or asks sandbox wiring for a branch worktree.
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
+		const sandboxExemptScope = projectId ? isSandboxExemptProject(projectId) : false;
 		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
+		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
 		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
 		const worktreePushPolicy = headquartersScope ? undefined : opts?.worktreePushPolicy;
-		const sandboxBranch = headquartersScope ? undefined : opts?.sandboxBranch;
-		const sandboxBaseBranch = headquartersScope ? undefined : opts?.sandboxBaseBranch;
+		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
+		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
 		await this.ensureMcpManagerForContext(projectId, cwd);
 		const ctx = this.buildPipelineContext(projectId, cwd);
 
@@ -5551,8 +5600,11 @@ export class SessionManager {
 				});
 			}
 		}
-		const sandboxCwdOffset = opts?.sandboxed
+		const sandboxCwdOffset = effectiveSandboxed
 			? await this.resolveSandboxCwdOffset(cwd, projectId, goalId, opts?.sandboxCwdOffset)
+			: undefined;
+		const directGatewayEnv = !effectiveSandboxed
+			? this.scopedGatewayEnvForDirectAgent(id, projectId, goalId ?? opts?.teamGoalId ?? opts?.env?.BOBBIT_GOAL_ID)
 			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -5569,7 +5621,7 @@ export class SessionManager {
 			// inside the container via ProjectSandbox.createWorktree, and the
 			// host-side worktree pool isn't reachable from the container.
 			const targetBranch = `session/${uuid8}`;
-			const poolForCreate = (!opts?.sandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
+			const poolForCreate = (!effectiveSandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
 			const claimed = poolForCreate ? await poolForCreate.claim(targetBranch).catch((err) => {
 				console.warn(`[session-manager] pool.claim failed for ${id}, falling back to createWorktree: ${err instanceof Error ? err.message : err}`);
 				return null;
@@ -5654,12 +5706,12 @@ export class SessionManager {
 				worktreePushPolicy,
 				repoPath,
 				branch,
-				sandboxed: opts?.sandboxed,
+				sandboxed: effectiveSandboxed,
 				role: opts?.role,
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				agentArgs,
-				env: opts?.env,
+				env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 				rolePrompt: resolvedRolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
@@ -5740,12 +5792,12 @@ export class SessionManager {
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
-			sandboxed: opts?.sandboxed,
+			sandboxed: effectiveSandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
 			nonInteractive: opts?.nonInteractive,
 			agentArgs,
-			env: opts?.env,
+			env: { ...(opts?.env ?? {}), ...(directGatewayEnv ?? {}) },
 			rolePrompt: resolvedRolePrompt,
 			roleName: opts?.roleName,
 			workflowContext: opts?.workflowContext,
@@ -5836,7 +5888,7 @@ export class SessionManager {
 		// ── Sandbox propagation from parent ──
 		const parentMeta = parentStore?.get(parentSessionId);
 		let delegateSandboxed = false;
-		if (parentMeta?.sandboxed) {
+		if (parentMeta?.sandboxed && !(parentProjectId && isSandboxExemptProject(parentProjectId))) {
 			// Always use the parent's validated host-side cwd — never trust the
 			// cwd from the container.  The agent sends process.cwd() which is a
 			// container-internal path (typically /workspace or a subdir).  Using
@@ -5882,6 +5934,9 @@ export class SessionManager {
 		const sessionScopedAllowedTools = sourceAllowedTools && sourceAllowedTools.length > 0
 			? [...sourceAllowedTools]
 			: undefined;
+		const directGatewayEnv = !delegateSandboxed
+			? this.scopedGatewayEnvForDirectAgent(id, parentProjectId, parentEffectiveGoalId)
+			: undefined;
 
 		const plan: SessionSetupPlan = {
 			id,
@@ -5910,10 +5965,10 @@ export class SessionManager {
 			// level so a delegate no longer silently drops to the system default.
 			initialModel: opts.initialModel,
 			initialThinkingLevel: opts.initialThinkingLevel,
-			// NON-SECRET tool-scoping env (orchestration-core toolEnv). resolveBridgeOptions
-			// spreads plan.env AFTER BOBBIT_SESSION_ID/SECRET, so it is purely additive and
-			// can never widen the inherited sandbox/project scope.
-			env: opts.env,
+			// Caller toolEnv is non-secret metadata. directGatewayEnv is minted by the
+			// gateway and spread last so user-supplied env cannot widen the inherited
+			// project/session scope.
+			env: { ...(opts.env ?? {}), ...(directGatewayEnv ?? {}) },
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
@@ -7212,6 +7267,7 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		if (!session.sandboxed) this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
@@ -9231,10 +9287,17 @@ export class SessionManager {
 
 			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
 			if (session.sandboxed) {
-				await this.applySandboxWiring(bridgeOptions, id, {
+				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 					projectId: session.projectId,
 					goalId: session.goalId,
 				});
+				if (!sandboxApplied) {
+					session.sandboxed = false;
+					this.resolveStoreForSession(id).update(id, { sandboxed: false });
+					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+				}
+			} else {
+				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 			}
 
 			// Restore goal extension
