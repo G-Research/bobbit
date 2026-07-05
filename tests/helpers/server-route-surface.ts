@@ -63,6 +63,8 @@ export const DELEGATE_ROUTE_MODULE_PATHS = [
 export const REGISTRY_ROUTE_MODULE_PATHS = [
 	// STR-01 cohort 1.
 	"src/server/routes/projects-routes.ts",
+	// STR-01 cohort 2 (marketplace).
+	"src/server/routes/marketplace-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

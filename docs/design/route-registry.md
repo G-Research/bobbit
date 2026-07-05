@@ -12,9 +12,11 @@ protocol future cohorts should follow, and what's left after cohort 1.
 
 ## Status
 
-- **Cohort 1 (this change): `/api/projects*`** — 14 routes migrated. See
+- **Cohort 1: `/api/projects*`** — 14 routes migrated. See
   [Cohort list](#cohort-1-projects) below.
-- Everything else in `handleApiRoute` (~410 remaining routes) is unchanged,
+- **Cohort 2: `/api/marketplace/*` + `GET /api/packs/conflicts`** — see
+  [Cohort 2: marketplace](#cohort-2-marketplace) below.
+- Everything else in `handleApiRoute` (~390 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -191,6 +193,64 @@ lexically adjacent to the family above in `server.ts`:
 - `GET /api/projects/:id/qa-testing-config` — unrelated feature, happens to
   share the `/api/projects/:id/...` path shape.
 
+## Cohort 2: marketplace
+
+`src/server/routes/marketplace-routes.ts`. Unlike cohort 1 (14 small,
+independent handlers), this family was already behind ONE wrapping
+`if (url.pathname.startsWith("/api/marketplace/") || url.pathname === "/api/packs/conflicts")`
+guard in the legacy chain, with ~15 route-local closures (`parseScope`,
+`resolveScopeTarget`, `buildActivationCatalogue`, `resolvePackRuntimeContext`,
+etc.) shared across its ~12 nested exact-match sub-routes, and a shared
+trailing `{ error: "not found" }` 404 for any `/api/marketplace/*` path
+matching none of them. Splitting that into ~12 independent `table.register()`
+handlers would mean threading the same ~15 closures through every one of
+them (or duplicating them) — worse than registering the whole guard as a
+`/*` prefix (this is the cohort the `/*` prefix kind was built for — see
+[Precedence is explicit](#precedence-is-explicit-not-source-order) above)
+with ONE handler that preserves every nested exact `if (url.pathname === ...)`
+check, and the shared 404 fallback, byte-for-byte the same as the block it
+replaces:
+
+```ts
+table.register("GET", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("POST", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("PUT", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("DELETE", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("PATCH", "/api/marketplace/*", handleMarketplaceRequest);
+table.register("GET", "/api/packs/conflicts", handleMarketplaceRequest);
+```
+
+(`/api/packs/conflicts` is a distinct literal path lexically interleaved with
+the marketplace family in the legacy code — same "marketplace not available"
+500 guard, same closure scope — so it shares the handler via its own exact
+registration.)
+
+Free variables that used to be `handleApiRoute`'s own params/closures (`json`,
+`sessionManager`, `marketplaceInstaller`, `configCascade`, `projectConfigStore`,
+...) are destructured from `ctx` under IDENTICAL names, so the ~990-line body
+needed ZERO further edits beyond that destructure and the import list.
+`CoreRouteCtx` grew by ~20 fields (append-only, after cohort 1's fields) —
+every one of them a function or singleton this family shares with
+not-yet-migrated legacy code elsewhere in `server.ts` (`/api/pack-runtimes/*`,
+`/api/slash-skills*`, the roles/tools cascade). `PackRuntimeSupervisorLike` is
+a structural copy of the same-named interface in `server.ts` (it lives there,
+not in a leaf module, so importing it would recreate the cycle this file
+exists to avoid) — a pure type, kept in sync by TS itself: any divergence is a
+compile error at the `coreCtx` construction site, not silent drift.
+
+Same auth (handled upstream of `handleApiRoute`, untouched), same validation,
+same status codes, same error shapes, including the shared 404. Parity
+evidence: all 57 API E2E specs across `market-pack-roles-api.spec.ts`,
+`marketplace-mcp.spec.ts`, `marketplace-pi-extension.spec.ts`,
+`marketplace-provider-activation.spec.ts`,
+`marketplace-runtime-activation.spec.ts`, `pack-default-disabled.spec.ts`,
+`pack-runtimes-start-config.spec.ts` pass unchanged; so do the browser E2E
+specs (`market-activation`, `marketplace-conflicts`, `marketplace-mcp`,
+`marketplace`, `hindsight-marketplace`, `hindsight-pack`, `hindsight-wizard`,
+`artifacts-pack`) except one pre-existing flake
+(`marketplace.spec.ts`'s "Sources menu filters..." package-count assertion,
+confirmed to fail identically on the unmigrated baseline).
+
 ## Pins
 
 - **`tests/route-table.test.ts`** (new) — unit coverage of the registry
@@ -205,8 +265,9 @@ lexically adjacent to the family above in `server.ts`:
   (PR #23) and `tests/orient-api-route-families.test.ts` now also
   understands the registry idiom: `extractRegistryRoutes()` scans
   `table.register("METHOD", "pattern", ...)` calls in every path listed in
-  the new `REGISTRY_ROUTE_MODULE_PATHS` (currently just
-  `projects-routes.ts`), compiling `:param` segments to a `[^/]+` regex and
+  the new `REGISTRY_ROUTE_MODULE_PATHS` (`projects-routes.ts` and, as of
+  cohort 2, `marketplace-routes.ts`), compiling `:param` segments to a
+  `[^/]+` regex and
   `/*` suffixes to a prefix match — mirroring `route-table.ts`'s own
   semantics exactly — and merges the result into `getServerRoutes()`. Add a
   future cohort's route module path to this list; no other change needed.
@@ -242,6 +303,13 @@ lexically adjacent to the family above in `server.ts`:
      through (do not duplicate, do not import back from `server.ts`).
    - Anything used ONLY by the routes being migrated → move it into the new
      route file outright.
+   - If the family is already behind ONE wrapping `startsWith(...)` guard
+     with many closures shared across its nested exact matches (cohort 2's
+     shape — see [Cohort 2: marketplace](#cohort-2-marketplace)), don't
+     force-split it into one `table.register()` per nested route: register
+     the whole guard as a `/*` prefix (one registration per HTTP method the
+     family actually uses) with a single handler that preserves the nested
+     `if`s and the shared trailing 404 verbatim.
 4. Delete the corresponding `if` blocks from the legacy chain in the SAME
    commit. Add `registerXxxRoutes(coreRouteTable)` next to the existing
    registration call(s) in `server.ts`.
@@ -255,12 +323,16 @@ lexically adjacent to the family above in `server.ts`:
 
 ### What's NOT done yet (left for future cohorts)
 
-- The other ~410 routes, including the largest/highest-traffic families
-  (sessions, goals inline in `server.ts`, marketplace, tools/roles/skills
-  customization, MCP). Marketplace in particular needs the `/*` prefix kind
-  `RouteTable` already supports (built and unit-tested in cohort 1, but
-  unused until a cohort needs it) since its routes are behind one wrapping
-  `startsWith("/api/marketplace/")` guard with nested exact matches.
+- The other ~390 routes, including the largest/highest-traffic families
+  (sessions, goals inline in `server.ts`, tools/roles/skills customization,
+  MCP, `/api/pack-runtimes/*`). Cohort 2 migrated marketplace using the `/*`
+  prefix kind `RouteTable` already supports (built and unit-tested in cohort
+  1, unused until cohort 2 needed it for exactly this shape — see
+  [Cohort 2: marketplace](#cohort-2-marketplace) above); a future cohort
+  behind a similar single wrapping `startsWith(...)` guard with shared
+  closures across its nested exact matches should follow the same pattern
+  (one prefix registration + one handler preserving the nested `if`s)
+  rather than force-splitting into many small `table.register()` calls.
 - `GET`/`PUT` `/api/projects/:id/config(...)` — the large sibling deliberately
   left out of cohort 1 (see above).
 - Session/steer/WS hot paths — intentionally deferred to a later, more
