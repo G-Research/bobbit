@@ -5975,9 +5975,15 @@ export class VerificationHarness {
 	 * or `"capacity-blocked"` when the per-root cap is saturated (the caller
 	 * must stamp the child `state='blocked'`; the scheduler starts it later when
 	 * a permit frees). Thin delegator to `ChildTeamScheduler.requestStart`.
+	 *
+	 * `onStart`, if supplied, fires exactly when the child's team ACTUALLY
+	 * starts (immediately, or later once dequeued from capacity-blocked) —
+	 * see `ChildTeamScheduler.requestStart`'s doc. SWARM-W3: `swarm-best-of-n.ts`
+	 * uses this to defer governor registration until the team is really
+	 * running, instead of at this call's boundary.
 	 */
-	requestChildStart(childGoalId: string): "started" | "capacity-blocked" {
-		return this.childScheduler.requestStart(childGoalId);
+	requestChildStart(childGoalId: string, onStart?: () => void): "started" | "capacity-blocked" {
+		return this.childScheduler.requestStart(childGoalId, onStart);
 	}
 
 	/**

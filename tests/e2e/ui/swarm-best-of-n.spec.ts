@@ -1,6 +1,9 @@
 /**
  * SWARM-W1 — governor strip browser E2E (design/swarm-orchestration.md §8,
  * tracker: "browser E2E (run→render→reconcile→reload-persist)").
+ * SWARM-W3 extends this same flow with per-sibling transparency assertions
+ * (design/swarm-orchestration-w3.md): the strip must show which CANDIDATE is
+ * in which state and how it scored, not just an aggregate count.
  *
  * Flow: fan out a best-of-N swarm via REST (team-lead-authorized, mirrors
  * how a real orchestrating agent would trigger it — the UI itself never
@@ -8,11 +11,14 @@
  * spawn-child), drive both siblings to a real terminal state with one
  * planted "winner" file, then drive the REST verify/confirm (human-gated)
  * flow and assert the Agents-tab governor strip:
- *   1. renders once the barrier fires (RUN),
- *   2. reflects the verify pick + lets the operator confirm (RENDER),
- *   3. shows the integrated state after confirm (RECONCILE),
- *   4. still shows the integrated state after a full page reload
- *      (RELOAD-PERSIST).
+ *   1. renders once the barrier fires (RUN) — including a per-sibling row
+ *      for each candidate showing its terminal state.
+ *   2. reflects the verify pick + lets the operator confirm (RENDER) —
+ *      including each sibling's pass/fail verifier verdict.
+ *   3. shows the integrated state after confirm (RECONCILE) — including a
+ *      "winner" marker on the winning sibling's own row.
+ *   4. still shows the integrated state, per-sibling rows and all, after a
+ *      full page reload (RELOAD-PERSIST).
  * Also asserts a plain (non-swarm) goal's Agents tab renders NOTHING extra —
  * the governor strip must never leak into the normal Agents view.
  */
@@ -81,6 +87,19 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			const verifyBtn = strip.locator("button", { hasText: "Run verifier" });
 			await expect(verifyBtn).toBeVisible();
 
+			// SWARM-W3: a per-sibling row for EACH candidate, not just the
+			// aggregate count — both terminal ("done", captured via the manual
+			// merge/delete above, before the verifier has run).
+			const sib0Row = strip.locator(`.swarm-governor-sibling[data-sibling-goal-id="${sib0Id}"]`);
+			const sib1Row = strip.locator(`.swarm-governor-sibling[data-sibling-goal-id="${sib1Id}"]`);
+			await expect(sib0Row).toBeVisible({ timeout: 10_000 });
+			await expect(sib1Row).toBeVisible({ timeout: 10_000 });
+			await expect(sib0Row).toHaveAttribute("data-sibling-state", "done");
+			await expect(sib1Row).toHaveAttribute("data-sibling-state", "done");
+			// Verifier hasn't run yet — no per-sibling verdict, no winner marker.
+			await expect(sib0Row.locator(".swarm-governor-sibling-score")).toHaveCount(0);
+			await expect(sib0Row.locator(".swarm-governor-sibling-winner")).toHaveCount(0);
+
 			// ── RECONCILE (verify): click Run verifier — the human/UI browser
 			// session mints a confirmation token server-side; a Confirm button
 			// appears once the pick is in.
@@ -89,10 +108,20 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			await expect(confirmBtn).toBeVisible({ timeout: 10_000 });
 			await expect(strip.locator(".swarm-governor-scores")).toContainText("picked", { timeout: 5_000 });
 
+			// SWARM-W3: each sibling's OWN row now shows its verifier verdict —
+			// sib0 planted WINNER_MARKER (pass), sib1 did not (fail).
+			await expect(sib0Row.locator(".swarm-governor-sibling-score")).toContainText("pass", { timeout: 5_000 });
+			await expect(sib1Row.locator(".swarm-governor-sibling-score")).toContainText("fail", { timeout: 5_000 });
+
 			// ── RECONCILE (confirm): click Confirm — REAL git merge happens server-side ──
 			await confirmBtn.click();
 			await expect(strip.locator(".swarm-governor-integrated")).toBeVisible({ timeout: 15_000 });
 			await expect(strip.locator(".swarm-governor-integrated")).toContainText(sib0Id.slice(0, 8));
+
+			// SWARM-W3: the winning sibling's own row carries a "winner" marker;
+			// the losing sibling's does not.
+			await expect(sib0Row.locator(".swarm-governor-sibling-winner")).toBeVisible({ timeout: 10_000 });
+			await expect(sib1Row.locator(".swarm-governor-sibling-winner")).toHaveCount(0);
 
 			// ── RELOAD-PERSIST: a fresh page load still shows the integrated state ──
 			await page.reload();
@@ -102,6 +131,7 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			await expect(stripAfterReload).toBeVisible({ timeout: 15_000 });
 			await expect(stripAfterReload.locator(".swarm-governor-integrated")).toBeVisible({ timeout: 10_000 });
 			await expect(stripAfterReload.locator(".swarm-governor-integrated")).toContainText(sib0Id.slice(0, 8));
+			await expect(stripAfterReload.locator(`.swarm-governor-sibling[data-sibling-goal-id="${sib0Id}"] .swarm-governor-sibling-winner`)).toBeVisible({ timeout: 10_000 });
 		} finally {
 			await deleteGoal(sib0Id).catch(() => {});
 			await deleteGoal(sib1Id).catch(() => {});
@@ -118,6 +148,7 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			await page.locator('[data-testid="tab-agents"]').click();
 			await expect(page.locator(".tab-empty")).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(".swarm-governor-strip")).toHaveCount(0);
+			await expect(page.locator(".swarm-governor-sibling")).toHaveCount(0);
 		} finally {
 			await deleteGoal(parentId).catch(() => {});
 		}
