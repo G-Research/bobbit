@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
 
 /**
  * Tier-1 vitest configuration for Test Suite v2.
@@ -9,10 +10,37 @@ import { defineConfig } from "vitest/config";
  *   - retries:0 → budgets are met by architecture, never by masking flakes.
  *   - three projects: v2-core (node), v2-dom (happy-dom), v2-integration (node).
  *
- * `maxForks` here is a sane fixed default for a single uncontended run. The
- * concurrency ledger (scripts/testing-v2) overrides it per invocation.
+ * `maxForks` is derived from the concurrency ledger so the 5-way concurrency
+ * proof's `sum(workerSlots) <= cores` invariant holds. Resolution precedence:
+ *   1. VITEST_MAX_FORKS env override wins (dev/debug); skips the ledger entirely.
+ *   2. reserveWorkerSlots("vitest") — under run-v2.mjs this re-uses the parent
+ *      grant (BOBBIT_V2_SLOTS_VITEST) with a no-op release; standalone
+ *      `test:v2:core` performs its own cross-run reservation. release() is
+ *      registered on process exit so the slot isn't leaked.
+ *   3. Fallback to 6 only if the ledger call throws.
  */
-const MAX_FORKS = Number(process.env.VITEST_MAX_FORKS || 6);
+function resolveMaxForks(): number {
+	const override = process.env.VITEST_MAX_FORKS;
+	if (override != null && override !== "") {
+		const n = Number(override);
+		if (Number.isFinite(n) && n >= 1) return Math.floor(n);
+	}
+	try {
+		const { workerSlots, release } = reserveWorkerSlots("vitest");
+		process.once("exit", release);
+		return Math.max(1, workerSlots);
+	} catch (e) {
+		console.warn(`[vitest.config] ledger reserve failed, falling back to 6 forks: ${(e as Error)?.message ?? e}`);
+		return 6;
+	}
+}
+
+const MAX_FORKS = resolveMaxForks();
+console.log(
+	`[vitest.config] maxForks=${MAX_FORKS} (source: ${
+		process.env.VITEST_MAX_FORKS ? "VITEST_MAX_FORKS override" : process.env.BOBBIT_V2_SLOTS_VITEST ? "ledger parent grant" : "ledger standalone reserve"
+	})`,
+);
 
 // minForks === maxForks pins the pool size for the whole run. Under
 // pool:"forks" + isolate:false, letting tinypool spin DOWN an idle fork (a fast

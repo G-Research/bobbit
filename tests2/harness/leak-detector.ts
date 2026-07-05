@@ -29,7 +29,11 @@ export function diffEntities(before: EntityCounts, after: EntityCounts): LeakRep
 		goals: after.goals - before.goals,
 		projects: after.projects - before.projects,
 	};
-	const leaked = deltas.sessions > 0 || deltas.goals > 0 || deltas.projects > 0;
+	// Any unowned delta is a hard failure: a POSITIVE delta is a leak (a test
+	// created an entity it never cleaned up); a NEGATIVE delta means a test
+	// clobbered shared baseline state (net-removed a baseline entity). Both
+	// corrupt the shared fork for later files, so fire on either direction.
+	const leaked = deltas.sessions !== 0 || deltas.goals !== 0 || deltas.projects !== 0;
 	return { leaked, deltas, before, after };
 }
 
@@ -44,8 +48,15 @@ export function assertNoLeaks(before: EntityCounts, after: EntityCounts): void {
 		const parts = (Object.entries(report.deltas) as Array<[keyof EntityCounts, number]>)
 			.filter(([, d]) => d !== 0)
 			.map(([k, d]) => `${k}: ${d > 0 ? "+" : ""}${d}`);
+		const hasPositive = report.deltas.sessions > 0 || report.deltas.goals > 0 || report.deltas.projects > 0;
+		const hasNegative = report.deltas.sessions < 0 || report.deltas.goals < 0 || report.deltas.projects < 0;
+		const kind = hasPositive && hasNegative
+			? "entity leak + baseline clobber detected — a test both leaked new entities and net-removed baseline ones"
+			: hasNegative
+				? "baseline clobber detected — a test net-removed a baseline entity (destroyed shared state)"
+				: "entity leak detected — a test did not clean up after itself";
 		throw new Error(
-			`[tests2/leak-detector] entity leak detected — a test did not clean up after itself. ` +
+			`[tests2/leak-detector] ${kind}. ` +
 			`Deltas { ${parts.join(", ")} }. before=${JSON.stringify(before)} after=${JSON.stringify(after)}. ` +
 			`Wrap created sessions/goals/projects in createScope() and let afterEach delete them.`,
 		);
