@@ -178,18 +178,11 @@ describe("PR walkthrough GitHub export mapper", () => {
 	});
 
 	it("BOBBIT_TEST_NO_EXTERNAL blocks unmocked GitHub review submission", async () => {
-		const previousNoExternal = process.env.BOBBIT_TEST_NO_EXTERNAL;
-		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
-		try {
-			const preview = buildGithubReviewPreview(draft(), cards);
-			const result = await submitGithubReview(preview, { confirm: true, token: "token", event: "COMMENT" });
-			assert.equal(result.ok, false);
-			assert.equal(result.status, 403);
-			assert.match(result.message, /External GitHub API access is disabled in tests/);
-		} finally {
-			if (previousNoExternal === undefined) delete process.env.BOBBIT_TEST_NO_EXTERNAL;
-			else process.env.BOBBIT_TEST_NO_EXTERNAL = previousNoExternal;
-		}
+		const preview = buildGithubReviewPreview(draft(), cards);
+		const result = await submitGithubReview(preview, { confirm: true, token: "token", event: "COMMENT" }, { noExternal: true });
+		assert.equal(result.ok, false);
+		assert.equal(result.status, 403);
+		assert.match(result.message, /External GitHub API access is disabled in tests/);
 	});
 
 	it("route submit builds a preview before mocked GitHub submission", async () => {
@@ -247,17 +240,10 @@ describe("PR walkthrough GitHub adapter", () => {
 	});
 
 	it("BOBBIT_TEST_NO_EXTERNAL blocks unmocked GitHub PR resolution", async () => {
-		const previousNoExternal = process.env.BOBBIT_TEST_NO_EXTERNAL;
-		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
-		try {
-			await assert.rejects(
-				resolveGithubPr({ prUrl: "https://github.com/SuuBro/bobbit/pull/42", token: "token" }),
-				(error: unknown) => error instanceof GithubPrAdapterError && error.code === "github_external_network_disabled",
-			);
-		} finally {
-			if (previousNoExternal === undefined) delete process.env.BOBBIT_TEST_NO_EXTERNAL;
-			else process.env.BOBBIT_TEST_NO_EXTERNAL = previousNoExternal;
-		}
+		await assert.rejects(
+			resolveGithubPr({ prUrl: "https://github.com/SuuBro/bobbit/pull/42", token: "token", noExternal: true }),
+			(error: unknown) => error instanceof GithubPrAdapterError && error.code === "github_external_network_disabled",
+		);
 	});
 
 	it("parses GitHub PR URLs and origin remotes", () => {

@@ -232,7 +232,8 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		const before = readFileSync(path.join(tmp, "models.json"));
 
 		// Skip the no-internet probe path — it would otherwise try localhost candidates.
-		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+		configureAigwRuntimeFlags({ skipAigwDiscovery: true });
+		try {
 
 		const prefs = new PreferencesStore(stateDir);
 		// No aigw.url set.
@@ -242,5 +243,8 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 
 		const after = readFileSync(path.join(tmp, "models.json"));
 		assert.deepEqual(after, before, "models.json must be untouched when aigw is not configured");
+		} finally {
+			configureAigwRuntimeFlags({ skipAigwDiscovery: false });
+		}
 	});
 });
