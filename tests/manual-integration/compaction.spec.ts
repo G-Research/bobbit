@@ -65,6 +65,12 @@ async function startGW(dir: string, agentDir: string, port: number): Promise<GW>
 			...process.env,
 			BOBBIT_DIR: join(dir, ".bobbit"),
 			BOBBIT_AGENT_DIR: agentDir,
+			// Live server secrets (admin bearer token, TLS) live under
+			// serverSecretsDir() (see src/server/bobbit-dir.ts), which is
+			// OS-user-level by default so a project agent can't read the
+			// gateway's own admin token. BOBBIT_SECRETS_DIR is the explicit
+			// override the product provides for exactly this: test isolation.
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit-secrets"),
 			NODE_ENV: "test",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -75,7 +81,7 @@ async function startGW(dir: string, agentDir: string, port: number): Promise<GW>
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
 		try {
-			const tp = join(dir, ".bobbit", "state", "token");
+			const tp = join(dir, ".bobbit-secrets", "token");
 			if (existsSync(tp)) {
 				const t = readFileSync(tp, "utf-8").trim();
 				if ((await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } })).ok) break;
@@ -84,7 +90,7 @@ async function startGW(dir: string, agentDir: string, port: number): Promise<GW>
 		await new Promise(r => setTimeout(r, 200));
 	}
 	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Not healthy:\n${stderr}`); }
-	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
+	const token = readFileSync(join(dir, ".bobbit-secrets", "token"), "utf-8").trim();
 	return { proc, port, dir, agentDir, token, base: `http://127.0.0.1:${port}` };
 }
 
@@ -301,8 +307,19 @@ test("compaction — real LLM @real", async ({ page }) => {
 		// cap on most models, but generous enough that prompts are accepted.
 		writeContextWindowOverride(agentDir, modelId, providerId, 16_000);
 		await stopGW(gw);
+		// startGW returns a fresh GW object with no defaultProjectId, so capture
+		// the registered id before reassigning. Post-HQ-split GET /api/projects
+		// returns a bare array whose first entry is the Headquarters project, so
+		// re-derive by picking the first non-headquarters project and fall back
+		// to the id registered before the restart (POST /api/sessions without a
+		// projectId is a 400 PROJECT_ID_REQUIRED).
+		const registeredProjectId = gw.defaultProjectId;
 		gw = await startGW(dir, agentDir, port);
-		gw.defaultProjectId = (await (await api(gw, "/api/projects")).json() as any).projects?.[0]?.id || gw.defaultProjectId;
+		{
+			const projBody = await (await api(gw, "/api/projects")).json() as any;
+			const projList: any[] = Array.isArray(projBody) ? projBody : (projBody?.projects ?? []);
+			gw.defaultProjectId = projList.find(p => p?.kind !== "headquarters" && !p?.hidden)?.id || registeredProjectId;
+		}
 
 		const otherRes = await api(gw, "/api/sessions", { method: "POST", body: "{}" });
 		expect(otherRes.status).toBe(201);

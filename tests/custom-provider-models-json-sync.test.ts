@@ -114,6 +114,37 @@ describe("syncCustomProviderModelsJson — custom local provider models.json bri
 		}
 	});
 
+	it("configured 'openai-completions' custom provider (the Settings UI's type for a manually-specified remote OpenAI-compat API, e.g. NVIDIA NIM) → models.json gets a provider entry, no network call needed", async () => {
+		// Bug this pins: the Settings UI (CustomProviderDialog.ts) has never had a
+		// "manual" provider type — it labels this class of provider "OpenAI
+		// Completions Compatible" / type "openai-completions" and POSTs that string
+		// verbatim to /api/custom-providers. discoverFromSingleConfig's switch only
+		// matched "manual", so every provider saved via the real Settings dialog
+		// with a manually-typed model list (the only viable UX for a huge remote
+		// catalog like NVIDIA NIM's 100+ models) silently discovered zero models —
+		// accepted with `{ok: true}`, never shown in the model picker, never
+		// synced to models.json. Reproduced live against the real NIM endpoint.
+		const prefs = new PreferencesStore(stateDir);
+		prefs.set("customProviders", [
+			{
+				id: "nim-glm", name: "NIM GLM 5.2", type: "openai-completions",
+				baseUrl: "https://integrate.api.nvidia.com",
+				apiKey: "nvapi-test-key-not-real",
+				models: [{ id: "z-ai/glm-5.2", name: "GLM 5.2 (NIM)" }],
+			},
+		]);
+
+		await syncCustomProviderModelsJson(prefs as any);
+
+		const data = readModels();
+		assert.ok(data?.providers?.["NIM GLM 5.2"], "providers['NIM GLM 5.2'] must exist in models.json");
+		const entry = data.providers["NIM GLM 5.2"];
+		assert.equal(entry.baseUrl, "https://integrate.api.nvidia.com/v1", "baseUrl must be normalized to the /v1 surface");
+		assert.equal(entry.api, "openai-completions");
+		const ids = entry.models.map((m: any) => m.id);
+		assert.ok(ids.includes("z-ai/glm-5.2"), "manually-specified model id must be preserved verbatim (no network round-trip)");
+	});
+
 	it("provider config removed from preferences → next sync prunes its stale models.json entry", async () => {
 		const mock = await startMockOpenAICompatServer(["model-a"]);
 		try {
