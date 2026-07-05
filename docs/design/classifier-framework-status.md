@@ -36,6 +36,23 @@ construction (`registerThinkingRouterClassifier`, `server.ts`). Observe-mode
 only — `SessionManager.enqueuePrompt` records the decision but nothing applies
 it yet (no `setThinkingLevel` call on this path).
 
+**S7 (extension-seam audit) — pack-declared rule-table override.** The RULES
+table stays the built-in default, but a pack MAY now override/extend it via a
+`kind: "selector"` provider (`providers/<id>.yaml`, id
+`thinking-router-rules`) whose flat `config.rules` is a plain regex→level
+table (`config.mode: "extend" | "override"`, default `extend`).
+`registerThinkingRouterClassifier` resolves the effective table ONCE,
+synchronously, at gateway construction (`PackContributionRegistry.listProviders`
+— no `moduleHost.invoke`, no worker spawn); the registered classifier's
+per-prompt `evaluate()` is unchanged: a pure, zero-await regex loop. A real
+pack-dispatched classifier (invoked per-prompt through `moduleHost.invoke`)
+was rejected — `ModuleHost.invoke` spawns a new `worker_threads.Worker` per
+call, and `enqueuePrompt` is too hot a path to pay that per submitted prompt.
+Malformed pack config fails open to the built-in table; a single malformed
+rule entry is dropped without discarding the rest. See
+`thinking-router-classifier.ts`'s header and
+`tests/thinking-router-classifier-pack-override.test.ts`.
+
 ## Wave 2 — tool-approve decision seam (harness only)
 
 `tool-approve-classifier.ts`: the `(tool-call, tool-approve)` point/kind pair,
