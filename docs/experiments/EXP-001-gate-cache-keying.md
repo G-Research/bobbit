@@ -1,6 +1,6 @@
 # EXP-001: Gate Cache Keying A/B
 
-Status: pre-registered; measurement not yet collected.
+Status: measured; pre-registration was committed before data collection.
 Registered: 2026-07-06.
 Decision lane: evidence only; no product-default flips.
 
@@ -107,4 +107,45 @@ document only after this pre-registration has been committed.
 
 ## Results
 
-Not collected at pre-registration time.
+Collected by running `node scripts/exp-gate-cache-report.mjs` after the
+pre-registration commit (`85b6470a`). Machine-readable output:
+`docs/experiments/EXP-001-gate-cache-keying-results.json`; markdown summary:
+`docs/experiments/EXP-001-gate-cache-keying-summary.md`.
+
+Generated: 2026-07-05T23:12:10.878Z (UTC).
+
+| Metric | `sha` | `content` |
+|---|---:|---:|
+| Paired scenarios | 9 | 9 |
+| Cacheable step decisions | 27 | 27 |
+| Cache hits | 4 | 11 |
+| Cache hit rate | 14.8% | 40.7% |
+| SHA-key hits | 4 | 4 |
+| Content-key hits | 0 | 7 |
+| False-hit risk proxy | 0 | 0 |
+| Estimated wall-clock total | 1,845,000 ms | 1,410,000 ms |
+| Estimated wall-clock median | 315,000 ms | 180,000 ms |
+| Decision engine wall-clock | 0 ms | 347 ms |
+
+Effect summary:
+
+- Cache hit-rate delta: +25.9 percentage points for `content`.
+- Total estimated wall-clock savings: 435,000 ms.
+- Median estimated wall-clock reduction: 42.9%.
+- Median paired reduction: 0.0%, because more than half of the fixed scenarios
+  are deliberately conservative no-benefit cases.
+- Content decision overhead share of savings: 0.1%.
+
+## Recommendation
+
+Result: `recommend-content-for-next-lane`.
+
+The preregistered success thresholds passed: false-hit risk proxy was zero,
+`content` improved cache hit rate by more than 20 percentage points, median
+estimated wall-clock was more than 20% lower, and decision overhead was below
+5% of estimated savings.
+
+This does not flip a product default. It supports a follow-up lane that measures
+`BOBBIT_GATE_CACHE=content` on real gate traffic, or implements concurrent
+assignment logging from the A/B framework design before any default-change
+decision.
