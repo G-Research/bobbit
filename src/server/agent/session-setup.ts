@@ -11,11 +11,13 @@
  */
 
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
-import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
+import type { IRpcBridge, RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { createSessionBridge, assertRuntimeAllowedForSession, hydrateRuntimeOptions, modelAliasFromModelString, resolveSessionRuntime, runtimeFromModelString, type SessionBridgeOptions } from "./session-runtime.js";
 import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -374,6 +376,16 @@ export interface PipelineContext {
 	persistSessionMetadata?: (session: SessionInfo) => Promise<void>;
 	/** PR status store — source of truth for goal PR URLs (re-attempt context). */
 	prStatusStore: PrStatusStore;
+	/**
+	 * Warm pi-process pool (wave 1, docs/design/warm-pi-process-pool.md).
+	 * `undefined` when the feature is disabled (`BOBBIT_WARM_POOL` unset —
+	 * default) or the caller (tests) doesn't wire one — `spawnAgent()` must
+	 * treat that identically to "pool present but missed," i.e. fall through
+	 * to the cold `createSessionBridge` path with zero behavior change.
+	 */
+	piProcessPool?: import("./pi-process-pool.js").PiProcessPool;
+	/** See `SessionManager.registerWarmPoolIdentityAlias` doc comment. */
+	registerWarmPoolIdentityAlias?: (poolOwnedId: string, realSessionId: string) => void;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -1587,11 +1599,242 @@ function spawnSessionClass(plan: SessionSetupPlan): "sandboxed" | "readOnly" | "
 }
 
 /**
+ * Warm-pool eligibility gate (wave 1, docs/design/warm-pi-process-pool.md).
+ *
+ * Narrower than the doc's own literal "pool the exec class only" (§8 step
+ * 3), for reasons discovered during implementation that the doc did not
+ * anticipate: several pieces of `RpcBridgeOptions.env` are baked into the
+ * child process at spawn time — same as cwd/extensions/system-prompt — with
+ * no RPC to change them post-spawn, and are session-IDENTITY-bearing, not
+ * just session-content:
+ *
+ *   - `BOBBIT_GOAL_ID` (set whenever `plan.goalId` is present) is read
+ *     directly by the goal-tools extension; a warm entry pre-spawned before
+ *     any specific goal is known can never carry the right value.
+ *   - Genuinely caller-supplied `plan.env` (custom toolEnv) and raw
+ *     `plan.agentArgs` are, by construction, whatever an arbitrary caller
+ *     wants — nothing generic can be pre-spawned to match them. NOTE:
+ *     `plan.env` is NOT the same thing as "no env at all" — `SessionManager.
+ *     createSession()` unconditionally merges its own `directGatewayEnv`
+ *     (`BOBBIT_GATEWAY_URL`/`BOBBIT_TOKEN`) into `opts.env` for EVERY
+ *     non-sandboxed session before the plan is even built (session-
+ *     manager.ts's `scopedGatewayEnvForDirectAgent`), so `plan.env` is
+ *     non-empty for virtually the entire target population, not just
+ *     sessions with real custom env. Both keys are safe to bake generically
+ *     into a pool entry: `BOBBIT_GATEWAY_URL` is a gateway-wide constant, and
+ *     `BOBBIT_TOKEN` here is `SandboxTokenStore.register(projectId)` — an
+ *     idempotent PROJECT-scoped token, not a per-session secret (confirmed
+ *     in sandbox-token.ts: same string returned for every session in a
+ *     project) — so it's already identical for any two sessions keyed to the
+ *     same project, which the pool key already requires. Only OTHER keys
+ *     (a genuinely custom toolEnv) disqualify a plan.
+ *   - `assistantType`/`delegateOf`/`parentSessionId`/`childKind` sessions
+ *     (orchestration children, goal/role assistants) carry additional
+ *     context/recursion-guard plumbing not audited here for the same class
+ *     of spawn-time-baked-identity issue.
+ *   - `preExistingAgentSessionFile` sessions need a `switch_session` resume
+ *     onto a SPECIFIC transcript; wave 1 keeps pool entries brand-new only
+ *     (no resume path), matching the doc §3.1's "no switch_session issued
+ *     yet" description of what a pool entry is.
+ *   - Non-`pi` runtimes (Claude Code) aren't in scope.
+ *
+ * `BOBBIT_SESSION_ID`/`BOBBIT_SESSION_SECRET` are ALSO spawn-baked
+ * per-identity env, but these are handled (not excluded) — see
+ * `buildWarmPoolEntryOptions` and the claim-time aliasing in `spawnAgent()`.
+ *
+ * None of this is a hard architectural limit — it is wave 1 deliberately
+ * shipping a smaller, easier-to-reason-about-safely slice than the doc's
+ * text alone implies, disclosed here and in the PR body rather than
+ * silently narrowing the doc's claimed prize.
+ */
+/**
+ * `plan.env` keys `SessionManager` itself always injects for a non-sandboxed
+ * session (never a caller's genuine custom toolEnv) — see this function's
+ * doc comment for why both are safe to bake generically into a pool entry.
+ */
+const SESSION_MANAGER_INJECTED_ENV_KEYS = new Set(["BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN"]);
+
+export function isWarmPoolEligible(plan: SessionSetupPlan): boolean {
+	if (plan.sandboxed || plan.bridgeOptions.containerId) return false;
+	if (plan.readOnly) return false;
+	if (plan.goalId || plan.teamGoalId) return false;
+	if (plan.assistantType || plan.delegateOf || plan.parentSessionId || plan.childKind) return false;
+	if (plan.preExistingAgentSessionFile) return false;
+	if (plan.claudeCodeSessionId) return false;
+	const runtime = plan.bridgeOptions.runtime;
+	if (runtime && runtime !== "pi") return false;
+	if (plan.env && Object.keys(plan.env).some(k => !SESSION_MANAGER_INJECTED_ENV_KEYS.has(k))) return false;
+	if (plan.agentArgs && plan.agentArgs.length > 0) return false;
+	if (!plan.projectId) return false;
+	return true;
+}
+
+/**
+ * Pool key: `(projectId, cwd, fingerprint-of-resolved-args)`. Doc §2.3.
+ *
+ * Computed from the FULLY resolved `plan.bridgeOptions` (after
+ * `resolveToolActivation` etc. have run — i.e., inside `spawnAgent`, not
+ * earlier), so a config/role/tool-policy change that alters the resolved
+ * `--extension` list produces a different key automatically (doc §4 point
+ * 2: "a config change... produces a different pool key going forward — old-
+ * keyed entries simply age out via TTL", no explicit invalidation needed).
+ * `systemPromptPath` is included defensively per the doc's §2.4 open
+ * question (whether any role delivers its prompt via first-message instead
+ * of `--system-prompt`).
+ *
+ * CONTENT, not path, is what's hashed for each `--extension`/system-prompt
+ * file — discovered live (via an E2E trace) to be load-bearing, not just an
+ * optimization: several generated extensions
+ * (`tool-guard-extension.ts:78`'s `guard.ts`, `provider-bridge-
+ * extension.ts:199`'s `bridge.ts`, `google-code-assist-provider-
+ * extension.ts:102`'s `provider.ts`) embed the session's OWN id as a
+ * `JSON.stringify(sessionId)` literal so their generated code knows which
+ * `/api/sessions/<id>/...` URL to call back on — and are written under a
+ * `sha256(code)`-named directory, so the PATH differs for every session even
+ * when the role/tool-policy is byte-for-byte identical. Comparing those
+ * paths literally means the key can NEVER repeat across two different
+ * sessions (or a session and any pool placeholder, which has its own
+ * distinct id too) — not "reduced hit rate" as originally assumed here, but
+ * a silent, permanent 0% hit rate for any session using a guarded tool
+ * policy or these providers (i.e., most real traffic). Hashing each
+ * referenced file's CONTENT instead collapses two sessions with equivalent
+ * policy/role/project down to the same key, exactly as intended, while a
+ * genuine content difference (a real config/role change) still produces a
+ * different key. Static on-disk paths (e.g. `dist/server/defaults/tools/
+ * shell/extension.ts`, shared byte-for-byte by every session) hash
+ * identically to themselves, so this is strictly more correct than
+ * path-comparison, never less. `initialModel`/`initialThinkingLevel` remain
+ * excluded — both are covered by `set_model`/`set_thinking_level` post-claim
+ * (doc §2.2), so including them would only fragment the key for no
+ * correctness reason.
+ */
+export function computeWarmPoolKey(plan: SessionSetupPlan): string {
+	const args = plan.bridgeOptions.args ?? [];
+	const normalizedArgs: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--extension" && typeof args[i + 1] === "string") {
+			normalizedArgs.push(arg, fileContentFingerprint(args[i + 1], plan.id));
+			i++;
+		} else {
+			normalizedArgs.push(arg);
+		}
+	}
+	const systemPromptFingerprint = plan.bridgeOptions.systemPromptPath
+		? fileContentFingerprint(plan.bridgeOptions.systemPromptPath, plan.id)
+		: null;
+	const fingerprint = createHash("sha256").update(JSON.stringify({
+		args: normalizedArgs,
+		systemPromptFingerprint,
+	})).digest("hex").slice(0, 16);
+	return `${plan.projectId}::${plan.bridgeOptions.cwd}::${fingerprint}`;
+}
+
+/**
+ * Hash a referenced file's content for the pool key, with every occurrence
+ * of THIS session's own id redacted first.
+ *
+ * The redaction is load-bearing, not defensive: several generated
+ * extensions (`tool-guard-extension.ts:78`, `provider-bridge-
+ * extension.ts:199`, `google-code-assist-provider-extension.ts:102`) embed
+ * `JSON.stringify(sessionId)` as a literal in the generated CODE (needed so
+ * the extension knows which `/api/sessions/<id>/...` URL to call back on) —
+ * so their content genuinely differs, byte for byte, between any two
+ * sessions even with identical role/tool-policy. Hashing raw content
+ * without redaction would reproduce the exact same permanent-0%-hit-rate
+ * bug this function replaced path-comparison to fix (see this function's
+ * caller's doc comment) — it would just move the never-matches problem from
+ * the path string into the content bytes. Redacting `sessionId` first
+ * collapses two sessions with equivalent policy down to the same
+ * fingerprint while still catching a REAL content difference (e.g. a
+ * changed tool policy) — the pool-owned placeholder id baked into a
+ * candidate warm entry never appears in the CLAIMING plan's own generated
+ * files, so it's simply absent from `content` and the `.split/.join` is a
+ * no-op for those, which is exactly the desired behavior.
+ *
+ * Falls back to the raw path on any read failure (nonexistent file,
+ * permission error) — a degenerate but safe fallback: it behaves exactly
+ * like a pre-fix path-literal comparison for that one entry, which only
+ * risks under- not over-matching (never a wrong-context claim).
+ */
+function fileContentFingerprint(filePath: string, sessionId: string): string {
+	try {
+		const content = readFileSync(filePath, "utf-8");
+		const redacted = sessionId ? content.split(sessionId).join("<SESSION_ID>") : content;
+		return createHash("sha256").update(redacted).digest("hex").slice(0, 16);
+	} catch {
+		return filePath;
+	}
+}
+
+/**
+ * Build the `RpcBridgeOptions` for a warm-pool entry by RE-RUNNING the exact
+ * same plan-resolution pipeline `executePlan()` uses (steps 1-6), against a
+ * clone of the triggering plan whose `id` is the pool's own freshly-minted
+ * placeholder — not a byte-for-byte clone of the triggering plan's own
+ * already-resolved `bridgeOptions`.
+ *
+ * This is NOT simpler-than-necessary caution: a naive clone (this function's
+ * first cut, fixed after a live E2E trace caught it) only overrides the two
+ * env vars (`BOBBIT_SESSION_ID`/`BOBBIT_SESSION_SECRET`) and reuses
+ * `plan.bridgeOptions.args` verbatim — but session identity is baked in
+ * MORE than one place. `resolveToolActivation` (step 6) calls
+ * `generateToolGuardExtension`/`writeProviderBridgeExtension`/
+ * `writeGoogleCodeAssistProviderExtension` with `plan.id`, and EACH ONE
+ * interpolates that id as a string literal directly into the GENERATED
+ * EXTENSION FILE's source (e.g. tool-guard-extension.ts:
+ * `const sessionId = ${JSON.stringify(sessionId)}`, later POSTing tool-grant
+ * requests to `/api/sessions/<that id>/tool-grant-request`). A naive clone
+ * would leave a pool entry's tool-guard/provider-bridge/google-code-assist
+ * extensions permanently embedding the FIRST triggering session's id —
+ * every later claimant would misroute those callbacks to a stranger session
+ * (or a session that has since ended), not even to the pool's own
+ * placeholder id the env-var fix handles correctly. Re-running the real
+ * resolution steps with `poolOwnedId` as `plan.id` regenerates every one of
+ * these files fresh, scoped correctly, with no per-mechanism allowlist to
+ * keep in sync as new identity-embedding extensions are added later.
+ *
+ * `resolveGoalExtensions` is INCLUDED for parity with `executePlan()`'s step
+ * order even though it's a no-op here — `isWarmPoolEligible` already
+ * excludes `goalId`/`assistantType`, its only trigger conditions.
+ * Sandbox wiring (`executePlan()` step 6-equivalent, "if (plan.sandboxed)")
+ * is skipped — `isWarmPoolEligible` excludes sandboxed plans entirely.
+ */
+async function buildWarmPoolEntryOptions(plan: SessionSetupPlan, ctx: PipelineContext, poolOwnedId: string): Promise<RpcBridgeOptions> {
+	const poolPlan: SessionSetupPlan = {
+		...plan,
+		id: poolOwnedId,
+		bridgeOptions: {} as SessionBridgeOptions,
+		effectiveAllowedTools: undefined,
+		dynamicContextBlocks: undefined,
+		promptPath: undefined,
+	};
+	resolveBridgeOptions(poolPlan, ctx);
+	resolveGoalExtensions(poolPlan, ctx);
+	resolveTools(poolPlan, ctx);
+	await resolveDynamicContext(poolPlan, ctx);
+	resolvePrompt(poolPlan, ctx);
+	resolveToolActivation(poolPlan, ctx);
+	poolPlan.bridgeOptions.onPiExtensionDiagnostic = undefined;
+	return poolPlan.bridgeOptions;
+}
+
+/**
  * Create RpcBridge, subscribe events, start the agent process.
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
-	const rpcClient = createSessionBridge(plan.bridgeOptions);
+	let warmClaim: { id: string; rpcClient: IRpcBridge } | null = null;
+	if (ctx.piProcessPool && isWarmPoolEligible(plan)) {
+		const key = computeWarmPoolKey(plan);
+		try {
+			warmClaim = await ctx.piProcessPool.claim(key, (poolOwnedId) => buildWarmPoolEntryOptions(plan, ctx, poolOwnedId));
+		} catch (err) {
+			console.warn(`[session-setup] warm-pool claim failed for ${plan.id} (falling back to cold spawn):`, err instanceof Error ? err.message : err);
+			warmClaim = null;
+		}
+	}
+	const rpcClient = warmClaim ? warmClaim.rpcClient : createSessionBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 	const eventBuffer = new EventBuffer();
@@ -1662,18 +1905,29 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		}
 	}
 
+	// NOTE: for a warm-pool claim, this callback wiring is a no-op — the
+	// claimed `rpcClient` was constructed (by the pool, at fill time) from
+	// its OWN options object with `onPiExtensionDiagnostic: undefined` (see
+	// `buildWarmPoolEntryOptions`), not from `plan.bridgeOptions`, so
+	// mutating `plan.bridgeOptions` here doesn't reach it. Accepted wave-1
+	// gap: pi-extension load-failure diagnostics are not recorded for a
+	// warm-claimed session. Observability-only, not correctness-affecting.
 	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
 	// Subscribe to events
 	session.unsubscribe = subscribeToEvents(session, ctx);
 
-	// Start agent with retry
-	const __t = performance.now();
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
-	recordElapsed(`spawnAgent.rpcStart.${spawnSessionClass(plan)}`, performance.now() - __t);
+	if (warmClaim) {
+		console.log(`[session-setup] warm-pool claim wired for session ${session.id} (pool id ${warmClaim.id})`);
+	} else {
+		// Start agent with retry
+		const __t = performance.now();
+		await withRetry(
+			() => rpcClient.start(),
+			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		);
+		recordElapsed(`spawnAgent.rpcStart.${spawnSessionClass(plan)}`, performance.now() - __t);
+	}
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
@@ -1713,6 +1967,67 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);
 
+	if (warmClaim) {
+		// Identity rebind for a claimed warm-pool entry. The child process is
+		// ALREADY RUNNING with `BOBBIT_SESSION_ID`/`BOBBIT_SESSION_SECRET` baked
+		// to the pool's own placeholder id (`warmClaim.id`) — spawn-time env,
+		// no RPC to change it. Rather than trying to change the running
+		// process's identity, every place that resolves identity FROM that
+		// baked env is taught the alias instead:
+		//   - `SessionManager.getSession()` — the mcp-call/mcp-describe routes
+		//     resolve the session from the client-supplied X-Bobbit-Session-Id
+		//     header (itself just `process.env.BOBBIT_SESSION_ID` from inside
+		//     the agent), so they must find THIS session via `warmClaim.id`.
+		//   - `sessionSecretStore` — orchestration/children authz resolves the
+		//     AUTHENTIC caller session id from the `X-Bobbit-Session-Secret`
+		//     header; `rebind` makes that resolve to the real `session.id`.
+		// `BOBBIT_TOKEN`/`BOBBIT_GATEWAY_URL` need no rebind: they're
+		// project-scoped (`SandboxTokenStore.register()` is idempotent per
+		// project, not per session — confirmed in sandbox-token.ts), so the
+		// pool entry's already-baked token is already valid for this session;
+		// `addSession`/`removeSession` below are bookkeeping only (no auth
+		// check reads `sessionIds`), kept for accurate per-project tracking.
+		session.warmPoolAliasId = warmClaim.id;
+		ctx.registerWarmPoolIdentityAlias?.(warmClaim.id, session.id);
+		ctx.sessionSecretStore.rebind(ctx.sessionSecretStore.getOrCreateSecret(warmClaim.id), session.id);
+		if (plan.projectId) {
+			ctx.sandboxTokenStore?.addSession(plan.projectId, session.id);
+			ctx.sandboxTokenStore?.removeSession(plan.projectId, warmClaim.id);
+		}
+
+		// Correct the model/thinking level to THIS session's own pin. The pool
+		// entry may have booted with a different (or no) `--model`/`--thinking`
+		// CLI flag than what THIS plan resolved. This is NOT redundant with
+		// `postSpawn()`'s `tryAutoSelectModel`: that path explicitly SKIPS
+		// re-issuing `setModel` whenever `session.spawnPinnedModel` is set,
+		// assuming (correctly for a cold spawn, WRONGLY for a warm claim) that
+		// the CLI `--model` flag already achieved it at spawn time. Doc §2.2/
+		// §3.1 step 2 call this out explicitly: "set_model/set_thinking_level
+		// if the claiming session's model differs from whatever the pool entry
+		// was spawned with." Best-effort here — postSpawn's own read-back
+		// verification still runs afterward and is fatal on a real mismatch,
+		// so a failure here surfaces loudly rather than silently.
+		const initialModel = plan.bridgeOptions.initialModel;
+		if (initialModel) {
+			const slash = initialModel.indexOf("/");
+			if (slash > 0 && slash < initialModel.length - 1) {
+				try {
+					await rpcClient.setModel(initialModel.slice(0, slash), initialModel.slice(slash + 1));
+				} catch (err) {
+					console.warn(`[session-setup] warm-pool claim: setModel failed for ${session.id} (postSpawn's read-back verification will catch a real mismatch):`, err instanceof Error ? err.message : err);
+				}
+			}
+		}
+		const initialThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
+		if (initialThinkingLevel) {
+			try {
+				await rpcClient.setThinkingLevel(initialThinkingLevel);
+			} catch (err) {
+				console.warn(`[session-setup] warm-pool claim: setThinkingLevel failed for ${session.id}:`, err instanceof Error ? err.message : err);
+			}
+		}
+	}
+
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
 	// survives a hard kill in the setup window. Pre-existing cloned transcripts
 	// are already recorded; avoid get_state rewriting their runtime metadata. See
@@ -1723,7 +2038,19 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		const __t = performance.now();
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
-		recordElapsed(`persistSessionMetadata.${spawnSessionClass(plan)}`, performance.now() - __t);
+		const __elapsed = performance.now() - __t;
+		recordElapsed(`persistSessionMetadata.${spawnSessionClass(plan)}`, __elapsed);
+		// Warm-pool sizing (docs/design/warm-pi-process-pool.md): this
+		// specific getState() round trip is the ~0.6-1.5s "post-spawn tool/
+		// extension-graph load" cost PR #157 measured and this pool exists to
+		// amortize — a warm-claimed session's child already paid it during
+		// background fill, well before this request, so a HIT here should
+		// read back near-instantly. Only recorded for pool-eligible plans so
+		// the label's population is directly comparable (same session shape)
+		// across hit/miss/pool-disabled.
+		if (ctx.piProcessPool && isWarmPoolEligible(plan)) {
+			recordElapsed(`persistSessionMetadata.pool.${warmClaim ? "hit" : "miss"}`, __elapsed);
+		}
 	}
 
 	return session;

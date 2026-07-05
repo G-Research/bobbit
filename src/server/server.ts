@@ -3248,6 +3248,7 @@ export function createGateway(config: GatewayConfig) {
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
 			}
+			await sessionManager.getPiProcessPool().drain();
 			await sessionManager.shutdown();
 			await projectContextManager.closeAll();
 			if (sandboxManager) {
