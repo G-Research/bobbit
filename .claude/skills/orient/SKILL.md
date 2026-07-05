@@ -20,6 +20,6 @@ The graph is a SNAPSHOT — it does not auto-update as code changes. `src/graphi
 - **Manual refresh**: `npm run graph:refresh` (= `graphify update src --force`, no LLM needed; `--force` is required when files were deleted).
 - **Automatic refresh**: `.githooks/post-merge` and `.githooks/post-checkout` (branch switches) run the same refresh in the background after a merge/pull or branch switch. Opt in once per clone/worktree with `./scripts/setup-githooks.sh` (not on by default — no `postinstall`). No-ops silently if `graphify` isn't on PATH.
 - **In a fresh worktree/clone** the graph is absent until one of the above has run — either trigger the refresh once, or fall back to LSP + `rg` (steps 1/3/4 work without it).
-- The MCP wiring lives in `.mcp.json` (committed; the `command` path is machine-specific to AJ's uv install — adjust per machine).
+- The MCP wiring lives in `.mcp.json` (committed; `command` is the portable `scripts/graphify-mcp.sh` wrapper, which resolves the graphify interpreter via PATH/`$GRAPHIFY_PYTHON` and the graph via the local or primary checkout — see [docs/dev-workflow.md — MCP wiring](../../../docs/dev-workflow.md#mcp-wiring)).
 - If the CLI warns `skill is from graphify X, package is Y`, run `graphify install` to update the skill (writes to your home skill dir by default, not the repo).
 - See [docs/dev-workflow.md — Code graph (graphify)](../../../docs/dev-workflow.md#code-graph-graphify) for the full picture (why it's valuable, the merge-driver N/A verdict, etc.).
