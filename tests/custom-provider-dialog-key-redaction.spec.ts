@@ -13,11 +13,11 @@
  *   - send the typed value when the user enters a replacement key;
  *   - send `apiKey: null` when the user explicitly clears the stored key.
  *
- * NOTE: this surface (SettingsDialog → ProvidersModelsTab → this dialog) is
- * currently not wired into the app's settings navigation (legacy/orphan per
- * docs/design/claude-code-runtime-ux.md), so there is no URL/click path a
- * full-app browser E2E could take — the component is exercised directly via
- * a file:// fixture instead, driving the real element + real wire payloads.
+ * This dialog is now reachable at Settings → Models → Custom Providers (see
+ * tests/e2e/ui/custom-providers-settings.spec.ts for the full-app navigation
+ * + happy-path browser E2E). This fixture stays as a fast, no-gateway
+ * complement: it drives the real `<custom-provider-dialog>` element + real
+ * wire payloads via a file:// bundle, without booting a gateway.
  */
 import { test, expect } from "@playwright/test";
 import { execSync } from "node:child_process";

@@ -603,7 +603,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey, probeOpenAICompatModels } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -7555,10 +7555,20 @@ async function handleApiRoute(
 			...(testApiKey ? { apiKey: testApiKey } : {}),
 		};
 		try {
-			const models = await discoverModelsForConfig(config);
+			// manual/openai-completions have no discovery source — discoverModelsForConfig
+			// just echoes the (here, empty) static model list. Test Connection's whole
+			// point is validating reachability + auth against the REAL remote endpoint
+			// (e.g. NVIDIA NIM's /v1/models), so probe it directly. probeOpenAICompatModels
+			// throws on failure (unlike best-effort production discovery) so auth errors,
+			// timeouts, and unreachable hosts surface as distinct messages instead of a
+			// silent "0 models" that looks identical to "connected, nothing configured".
+			const isOpenAICompatManual = config.type === "manual" || config.type === "openai-completions";
+			const models = isOpenAICompatManual
+				? await probeOpenAICompatModels(config)
+				: await discoverModelsForConfig(config);
 			json({ models });
 		} catch (err: any) {
-			jsonError(500, err);
+			jsonError(502, err);
 		}
 		return;
 	}

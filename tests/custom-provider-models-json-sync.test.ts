@@ -145,6 +145,39 @@ describe("syncCustomProviderModelsJson — custom local provider models.json bri
 		assert.ok(ids.includes("z-ai/glm-5.2"), "manually-specified model id must be preserved verbatim (no network round-trip)");
 	});
 
+	it("optional per-model contextWindow/maxTokens override wins over the 8192/4096 default (NVIDIA NIM has no context_length in /v1/models)", async () => {
+		// Bug this pins: discoverFromSingleConfig hardcoded contextWindow:8192,
+		// maxTokens:4096 for every manual/openai-completions model with no way
+		// to override it. NIM's /v1/models never reports context_length, so a
+		// real 128k+-context model like z-ai/glm-5.2 got treated as an 8k
+		// model — Bobbit auto-compacted nearly every turn. The Settings UI
+		// (CustomProviderDialog.ts) now exposes optional per-model "Context
+		// window" / "Max output tokens" fields; this is the server-side half.
+		const prefs = new PreferencesStore(stateDir);
+		prefs.set("customProviders", [
+			{
+				id: "nim-glm", name: "NIM GLM 5.2", type: "openai-completions",
+				baseUrl: "https://integrate.api.nvidia.com",
+				apiKey: "nvapi-test-key-not-real",
+				models: [
+					{ id: "z-ai/glm-5.2", name: "GLM 5.2 (NIM)", contextWindow: 200_000, maxTokens: 32_000 },
+					{ id: "no-override-model", name: "No override" },
+				],
+			},
+		]);
+
+		await syncCustomProviderModelsJson(prefs as any);
+
+		const data = readModels();
+		const entry = data.providers["NIM GLM 5.2"];
+		const withOverride = entry.models.find((m: any) => m.id === "z-ai/glm-5.2");
+		const withoutOverride = entry.models.find((m: any) => m.id === "no-override-model");
+		assert.equal(withOverride.contextWindow, 200_000, "explicit override must win over the 8192 default");
+		assert.equal(withOverride.maxTokens, 32_000, "explicit override must win over the 4096 default");
+		assert.equal(withoutOverride.contextWindow, 8192, "no override configured → conservative default preserved");
+		assert.equal(withoutOverride.maxTokens, 4096, "no override configured → conservative default preserved");
+	});
+
 	it("provider config removed from preferences → next sync prunes its stale models.json entry", async () => {
 		const mock = await startMockOpenAICompatServer(["model-a"]);
 		try {

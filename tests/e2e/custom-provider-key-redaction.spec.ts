@@ -32,6 +32,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
@@ -91,11 +92,21 @@ async function startSeededGateway(opts: SeedOpts = {}): Promise<StartedGateway> 
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+	// Serialize the cold dist/server import across parallel Playwright worker
+	// processes. Concurrent cold imports intermittently fail with false ESM
+	// loader errors ("module X does not provide an export Y") — observed live
+	// in a gate run where two standalone custom-provider specs' workers raced.
+	// Same mitigation the harnesses use (see gateway-harness.ts /
+	// in-process-harness.ts and test-utils/dist-import-lock.ts).
+	const { setProjectRoot, resetAgentDirStateForTests, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory } =
+		await withDistServerImportLock(async () => {
+			const { setProjectRoot, resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
+			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+			const { createGateway } = await import("../../dist/server/server.js");
+			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+			return { setProjectRoot, resetAgentDirStateForTests, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
+		});
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((opts: any) => {
 		if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);

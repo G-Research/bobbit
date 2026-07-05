@@ -4,12 +4,22 @@ import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { Label } from "@mariozechner/mini-lit/dist/Label.js";
 import { Select } from "@mariozechner/mini-lit/dist/Select.js";
-import type { Model } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/api.js";
 import "../components/ErrorDetails.js";
-import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
+import type { CustomProvider, CustomProviderModelEntry, CustomProviderType } from "../storage/stores/custom-providers-store.js";
+
+/** Shape of an entry in the /api/custom-providers/test response `models` array (server ApiModel, trimmed to what this dialog renders). */
+interface DiscoveredModel {
+	id: string;
+	name: string;
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
+const NUMBER_INPUT_CLASS =
+	"px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring";
 
 export class CustomProviderDialog extends DialogBase {
 	private provider?: CustomProvider;
@@ -29,8 +39,14 @@ export class CustomProviderDialog extends DialogBase {
 	@state() private clearStoredKey = false;
 	@state() private testing = false;
 	@state() private testError = "";
-	@state() private discoveredModels: Model<any>[] = [];
-	@state() private manualModelsText = "";
+	@state() private discoveredModels: DiscoveredModel[] = [];
+	// Structured per-model rows for non-auto-discovery ("manual") provider
+	// types — replaces a free-text textarea so the optional contextWindow/
+	// maxTokens overrides can be plain numeric inputs per row.
+	@state() private manualModels: CustomProviderModelEntry[] = [];
+	// Not itself rendered — distinguishes "never tested" (nothing shown) from
+	// "tested, server reported 0 models" (shown as an explicit empty state).
+	@state() private testAttempted = false;
 
 	protected modalWidth = "min(800px, 90vw)";
 	protected modalHeight = "min(700px, 90vh)";
@@ -60,8 +76,7 @@ export class CustomProviderDialog extends DialogBase {
 			this.apiKey = "";
 			this.hasStoredKey = Boolean(this.provider.hasApiKey);
 			this.clearStoredKey = false;
-			this.discoveredModels = this.provider.models || [];
-			this.manualModelsText = (this.provider.models || []).map((m) => m.name && m.name !== m.id ? `${m.id} | ${m.name}` : m.id).join("\n");
+			this.manualModels = (this.provider.models || []).map((m) => ({ ...m }));
 		} else {
 			this.name = "";
 			this.type = this.initialType || "openai-completions";
@@ -70,11 +85,12 @@ export class CustomProviderDialog extends DialogBase {
 			this.apiKey = "";
 			this.hasStoredKey = false;
 			this.clearStoredKey = false;
-			this.discoveredModels = [];
-			this.manualModelsText = "";
+			this.manualModels = [];
 		}
+		this.discoveredModels = [];
 		this.testError = "";
 		this.testing = false;
+		this.testAttempted = false;
 	}
 
 	private updateDefaultBaseUrl() {
@@ -100,12 +116,40 @@ export class CustomProviderDialog extends DialogBase {
 		return this.type === "ollama" || this.type === "llama.cpp" || this.type === "vllm" || this.type === "lmstudio";
 	}
 
+	/**
+	 * Types for which "Test Connection" makes sense: auto-discovery servers
+	 * (unchanged) PLUS manual/openai-completions remote APIs (e.g. NVIDIA
+	 * NIM) — the server actually probes their /v1/models with the configured
+	 * key (see probeOpenAICompatModels in src/server/agent/model-registry.ts),
+	 * so the button validates reachability + auth honestly instead of just
+	 * echoing the locally-typed model list back.
+	 */
+	private supportsTestConnection(): boolean {
+		// Note: the Settings UI never emits the server-only "manual" type alias
+		// (see CustomProviderType) — only "openai-completions" — so it isn't
+		// checked here.
+		return this.isAutoDiscoveryType() || this.type === "openai-completions";
+	}
+
+	/** Turn a raw error message into a distinct auth/unreachable/other classification for the headline. */
+	private classifyTestError(message: string): string {
+		const m = message.toLowerCase();
+		if (/\b(401|403)\b/.test(m) || m.includes("unauthorized") || m.includes("forbidden")) {
+			return i18n("Authentication failed — check the API key.");
+		}
+		if (m.includes("econnrefused") || m.includes("timeout") || m.includes("enotfound") || m.includes("eai_again") || m.includes("enetunreach")) {
+			return i18n("Unreachable — check the base URL and that the server is running.");
+		}
+		return i18n("Test failed.");
+	}
+
 	private async testConnection() {
-		if (!this.isAutoDiscoveryType()) return;
+		if (!this.supportsTestConnection()) return;
 
 		this.testing = true;
 		this.testError = "";
 		this.discoveredModels = [];
+		this.testAttempted = true;
 
 		try {
 			// Test connection without persisting the provider
@@ -121,11 +165,12 @@ export class CustomProviderDialog extends DialogBase {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(testConfig),
 			});
-			if (!res.ok) throw new Error("Failed to test connection");
+			const data = await res.json().catch(() => null);
+			if (!res.ok) {
+				throw new Error(data?.error || `Test failed (HTTP ${res.status})`);
+			}
 
-			const data = await res.json();
-			this.discoveredModels = data.models || [];
-
+			this.discoveredModels = data?.models || [];
 			this.testError = "";
 		} catch (error) {
 			this.testError = error instanceof Error ? error.message : String(error);
@@ -136,6 +181,28 @@ export class CustomProviderDialog extends DialogBase {
 		}
 	}
 
+	/** Add a Test-Connection-discovered model into the manual models list (dedup by id). Manual types only — auto-discovery types never store `models`. */
+	private addDiscoveredModel(model: DiscoveredModel) {
+		if (this.manualModels.some((m) => m.id === model.id)) return;
+		this.manualModels = [...this.manualModels, { id: model.id, name: model.name || model.id }];
+		this.requestUpdate();
+	}
+
+	private addManualModelRow() {
+		this.manualModels = [...this.manualModels, { id: "", name: "" }];
+		this.requestUpdate();
+	}
+
+	private removeManualModelRow(index: number) {
+		this.manualModels = this.manualModels.filter((_, i) => i !== index);
+		this.requestUpdate();
+	}
+
+	private updateManualModelRow(index: number, patch: Partial<CustomProviderModelEntry>) {
+		this.manualModels = this.manualModels.map((row, i) => (i === index ? { ...row, ...patch } : row));
+		this.requestUpdate();
+	}
+
 	private async save() {
 		if (!this.name || !this.baseUrl) {
 			alert(i18n("Please fill in all required fields"));
@@ -143,7 +210,19 @@ export class CustomProviderDialog extends DialogBase {
 		}
 
 		try {
-			const manualModels = this.isAutoDiscoveryType() ? undefined : this.parseManualModels();
+			// Auto-discovery types never persist a model list (fetched on-demand);
+			// everything else sends the structured rows, filtering blank ones.
+			const manualModels = this.isAutoDiscoveryType()
+				? undefined
+				: this.manualModels
+						.map((m) => ({ ...m, id: m.id.trim() }))
+						.filter((m) => m.id.length > 0)
+						.map((m) => ({
+							id: m.id,
+							name: (m.name || "").trim() || m.id,
+							...(typeof m.contextWindow === "number" && m.contextWindow > 0 ? { contextWindow: m.contextWindow } : {}),
+							...(typeof m.maxTokens === "number" && m.maxTokens > 0 ? { maxTokens: m.maxTokens } : {}),
+						}));
 			// apiKey is write-only: send it only when the user typed a new key
 			// (replace) or explicitly asked to clear the stored one (null).
 			// Omitting the field preserves the stored key server-side — never
@@ -174,15 +253,152 @@ export class CustomProviderDialog extends DialogBase {
 		}
 	}
 
-	private parseManualModels(): Array<{ id: string; name: string }> {
-		return this.manualModelsText
-			.split(/\n+/)
-			.map((line) => line.trim())
-			.filter(Boolean)
-			.map((line) => {
-				const [idPart, namePart] = line.split("|").map((part) => part.trim());
-				return { id: idPart, name: namePart || idPart };
-			});
+	private renderTestConnectionSection(): TemplateResult {
+		return html`
+			<div class="flex flex-col gap-2" data-testid="test-connection-section">
+				${Button({
+					onClick: () => this.testConnection(),
+					variant: "outline",
+					disabled: this.testing || !this.baseUrl,
+					children: this.testing ? i18n("Testing...") : i18n("Test Connection"),
+				})}
+				${
+					// The server only falls back to the stored key when the
+					// baseUrl still matches the saved one (anti-exfiltration
+					// guard) — testing a CHANGED URL needs the key typed in.
+					this.hasStoredKey && !this.apiKey && this.provider && this.baseUrl !== this.provider.baseUrl
+						? html`<div class="text-sm text-muted-foreground" data-testid="changed-url-key-hint">
+								${i18n("Key required to test a changed URL")}
+							</div>`
+						: ""
+				}
+				${
+					this.testError
+						? html`<error-details
+								.message=${this.classifyTestError(this.testError)}
+								.code=${this.testError}
+							></error-details>`
+						: ""
+				}
+				${
+					!this.testing && !this.testError && this.discoveredModels.length === 0 && this.testAttempted
+						? html`<div class="text-sm text-muted-foreground" data-testid="test-connection-empty">
+								${i18n("Connected — the server reported 0 models.")}
+							</div>`
+						: ""
+				}
+				${
+					this.discoveredModels.length > 0
+						? html`
+							<div class="text-sm text-muted-foreground" data-testid="discovered-models">
+								${i18n("Discovered")} ${this.discoveredModels.length} ${i18n("models")}:
+								<ul class="list-disc list-inside mt-2 max-h-40 overflow-y-auto">
+									${this.discoveredModels.slice(0, 20).map(
+										(model) => html`
+											<li class="flex items-center justify-between gap-2">
+												<span>${model.name}</span>
+												${
+													!this.isAutoDiscoveryType() && !this.manualModels.some((m) => m.id === model.id)
+														? Button({
+																onClick: () => this.addDiscoveredModel(model),
+																variant: "ghost",
+																size: "sm",
+																children: i18n("+ Add"),
+															})
+														: ""
+												}
+											</li>
+										`,
+									)}
+									${
+										this.discoveredModels.length > 20
+											? html`<li>...${i18n("and")} ${this.discoveredModels.length - 20} ${i18n("more")}</li>`
+											: ""
+									}
+								</ul>
+							</div>
+						`
+						: ""
+				}
+			</div>
+		`;
+	}
+
+	private renderManualModelsSection(): TemplateResult {
+		return html`
+			<div class="flex flex-col gap-2">
+				${Label({ htmlFor: "provider-models", children: i18n("Models") })}
+				<div class="flex flex-col gap-2" data-testid="manual-models-rows">
+					${this.manualModels.map(
+						(row, index) => html`
+							<div class="flex flex-wrap items-end gap-2 rounded-md border border-border p-2" data-testid="manual-model-row">
+								<div class="flex flex-col gap-1 flex-1 min-w-[160px]">
+									<label class="text-xs text-muted-foreground">${i18n("Model ID")}</label>
+									${Input({
+										value: row.id,
+										placeholder: "e.g. z-ai/glm-5.2",
+										onInput: (e: Event) => this.updateManualModelRow(index, { id: (e.target as HTMLInputElement).value }),
+									})}
+								</div>
+								<div class="flex flex-col gap-1 flex-1 min-w-[160px]">
+									<label class="text-xs text-muted-foreground">${i18n("Display name (optional)")}</label>
+									${Input({
+										value: row.name,
+										placeholder: row.id || i18n("same as ID"),
+										onInput: (e: Event) => this.updateManualModelRow(index, { name: (e.target as HTMLInputElement).value }),
+									})}
+								</div>
+								<div class="flex flex-col gap-1 w-36" data-testid="manual-model-context-window">
+									<label class="text-xs text-muted-foreground">${i18n("Context window")}</label>
+									<input
+										type="number"
+										min="0"
+										class="${NUMBER_INPUT_CLASS}"
+										placeholder="auto (8192)"
+										.value=${row.contextWindow != null ? String(row.contextWindow) : ""}
+										@input=${(e: Event) => {
+											const v = (e.target as HTMLInputElement).value;
+											this.updateManualModelRow(index, { contextWindow: v ? Number(v) : undefined });
+										}}
+									/>
+								</div>
+								<div class="flex flex-col gap-1 w-36" data-testid="manual-model-max-tokens">
+									<label class="text-xs text-muted-foreground">${i18n("Max output tokens")}</label>
+									<input
+										type="number"
+										min="0"
+										class="${NUMBER_INPUT_CLASS}"
+										placeholder="auto (4096)"
+										.value=${row.maxTokens != null ? String(row.maxTokens) : ""}
+										@input=${(e: Event) => {
+											const v = (e.target as HTMLInputElement).value;
+											this.updateManualModelRow(index, { maxTokens: v ? Number(v) : undefined });
+										}}
+									/>
+								</div>
+								${Button({
+									onClick: () => this.removeManualModelRow(index),
+									variant: "ghost",
+									size: "sm",
+									children: i18n("Remove"),
+								})}
+							</div>
+						`,
+					)}
+				</div>
+				${Button({
+					onClick: () => this.addManualModelRow(),
+					variant: "outline",
+					size: "sm",
+					children: i18n("+ Add model"),
+				})}
+				<div class="text-sm text-muted-foreground">
+					${i18n(
+						"Context window / max output tokens are optional overrides — leave blank to use the provider's default (8192 / 4096). Set these when the provider doesn't report context length via its API (e.g. NVIDIA NIM), otherwise Bobbit under-estimates the model's context and compacts sessions too aggressively.",
+					)}
+				</div>
+			</div>
+		`;
 	}
 
 	protected override renderContent(): TemplateResult {
@@ -200,7 +416,7 @@ export class CustomProviderDialog extends DialogBase {
 		];
 
 		return html`
-			<div class="flex flex-col h-full overflow-hidden">
+			<div class="flex flex-col h-full overflow-hidden" data-testid="custom-provider-dialog-content">
 				<div class="p-6 flex-shrink-0 border-b border-border">
 					<h2 class="text-lg font-semibold text-foreground">
 						${this.provider ? i18n("Edit Provider") : i18n("Add Provider")}
@@ -233,6 +449,9 @@ export class CustomProviderDialog extends DialogBase {
 									this.type = value as CustomProviderType;
 									this.baseUrl = "";
 									this.updateDefaultBaseUrl();
+									this.discoveredModels = [];
+									this.testAttempted = false;
+									this.testError = "";
 									this.requestUpdate();
 								},
 								width: "100%",
@@ -298,66 +517,8 @@ export class CustomProviderDialog extends DialogBase {
 							}
 						</div>
 
-						${
-							this.isAutoDiscoveryType()
-								? html`
-									<div class="flex flex-col gap-2">
-										${Button({
-											onClick: () => this.testConnection(),
-											variant: "outline",
-											disabled: this.testing || !this.baseUrl,
-											children: this.testing ? i18n("Testing...") : i18n("Test Connection"),
-										})}
-										${
-											// The server only falls back to the stored key when the
-											// baseUrl still matches the saved one (anti-exfiltration
-											// guard) — testing a CHANGED URL needs the key typed in.
-											this.hasStoredKey && !this.apiKey && this.provider && this.baseUrl !== this.provider.baseUrl
-												? html`<div class="text-sm text-muted-foreground" data-testid="changed-url-key-hint">
-														${i18n("Key required to test a changed URL")}
-													</div>`
-												: ""
-										}
-										${this.testError ? html` <error-details .message=${this.testError}></error-details> ` : ""}
-										${
-											this.discoveredModels.length > 0
-												? html`
-													<div class="text-sm text-muted-foreground">
-														${i18n("Discovered")} ${this.discoveredModels.length} ${i18n("models")}:
-														<ul class="list-disc list-inside mt-2">
-															${this.discoveredModels.slice(0, 5).map((model) => html`<li>${model.name}</li>`)}
-															${
-																this.discoveredModels.length > 5
-																	? html`<li>...${i18n("and")} ${this.discoveredModels.length - 5} ${i18n("more")}</li>`
-																	: ""
-															}
-														</ul>
-													</div>
-												`
-												: ""
-										}
-									</div>
-								`
-								: html`
-									<div class="flex flex-col gap-2">
-										${Label({ htmlFor: "provider-models", children: i18n("Models") })}
-										<textarea
-											id="provider-models"
-											class="min-h-28 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-												focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-											placeholder="model-id&#10;model-id | Display name"
-											.value=${this.manualModelsText}
-											@input=${(e: Event) => {
-												this.manualModelsText = (e.target as HTMLTextAreaElement).value;
-												this.requestUpdate();
-											}}
-										></textarea>
-										<div class="text-sm text-muted-foreground">
-											Enter one model per line. Use <code>model-id | Display name</code> when the label should differ from the provider model ID.
-										</div>
-									</div>
-								`
-						}
+						${this.supportsTestConnection() ? this.renderTestConnectionSection() : ""}
+						${!this.isAutoDiscoveryType() ? this.renderManualModelsSection() : ""}
 					</div>
 				</div>
 

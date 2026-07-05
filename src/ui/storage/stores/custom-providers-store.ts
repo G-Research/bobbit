@@ -1,4 +1,3 @@
-import type { Model } from "@earendil-works/pi-ai";
 import { Store } from "../store.js";
 import type { StoreConfig } from "../types.js";
 
@@ -12,6 +11,21 @@ export type CustomProviderType =
 	| "openai-images" // Manual image-generation models - stored in provider.models
 	| "gemini-images" // Manual Gemini image-generation models - stored in provider.models
 	| "google-imagen"; // Manual Imagen model providers - stored in provider.models
+
+/**
+ * One manually-configured model entry for a non-auto-discovery custom
+ * provider. `contextWindow`/`maxTokens` are OPTIONAL per-model overrides —
+ * most manual-provider APIs (e.g. NVIDIA NIM) don't report context length via
+ * /v1/models, so the server falls back to a conservative 8192/4096 unless
+ * overridden here. See CustomProviderConfig in
+ * src/server/agent/model-registry.ts (the server-side twin of this shape).
+ */
+export interface CustomProviderModelEntry {
+	id: string;
+	name: string;
+	contextWindow?: number;
+	maxTokens?: number;
+}
 
 export interface CustomProvider {
 	id: string; // UUID
@@ -29,7 +43,7 @@ export interface CustomProvider {
 
 	// For manual types ONLY - models stored directly on provider
 	// Auto-discovery types: models fetched on-demand, never stored
-	models?: Model<any>[];
+	models?: CustomProviderModelEntry[];
 }
 
 /**

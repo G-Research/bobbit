@@ -117,8 +117,6 @@ export type { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
 // import directly from `./dialogs/ModelSelector.js`.
 export type { ModelSelector } from "./dialogs/ModelSelector.js";
 export type { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog.js";
-// Type-only — `ProvidersModelsTab` value-imports `getProviders` from pi-ai.
-export type { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab.js";
 export type { SessionListDialog } from "./dialogs/SessionListDialog.js";
 // Type-only — `SettingsDialog` value-imports `getProviders` from pi-ai.
 export type { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog.js";

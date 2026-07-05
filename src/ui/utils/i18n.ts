@@ -208,6 +208,18 @@ declare module "@mariozechner/mini-lit" {
 		and: string;
 		more: string;
 		"For manual provider types, add models after saving the provider.": string;
+		"Authentication failed — check the API key.": string;
+		"Unreachable — check the base URL and that the server is running.": string;
+		"Test failed.": string;
+		"Connected — the server reported 0 models.": string;
+		"+ Add": string;
+		"Model ID": string;
+		"Display name (optional)": string;
+		"same as ID": string;
+		"Context window": string;
+		"Max output tokens": string;
+		"+ Add model": string;
+		"Context window / max output tokens are optional overrides — leave blank to use the provider's default (8192 / 4096). Set these when the provider doesn't report context length via its API (e.g. NVIDIA NIM), otherwise Bobbit under-estimates the model's context and compacts sessions too aggressively.": string;
 		"Please fill in all required fields": string;
 		"Failed to save provider": string;
 		"OpenAI Completions Compatible": string;
@@ -460,6 +472,20 @@ export const translations = {
 		more: "more",
 		"For manual provider types, add models after saving the provider.":
 			"For manual provider types, add models after saving the provider.",
+		"Authentication failed — check the API key.": "Authentication failed — check the API key.",
+		"Unreachable — check the base URL and that the server is running.":
+			"Unreachable — check the base URL and that the server is running.",
+		"Test failed.": "Test failed.",
+		"Connected — the server reported 0 models.": "Connected — the server reported 0 models.",
+		"+ Add": "+ Add",
+		"Model ID": "Model ID",
+		"Display name (optional)": "Display name (optional)",
+		"same as ID": "same as ID",
+		"Context window": "Context window",
+		"Max output tokens": "Max output tokens",
+		"+ Add model": "+ Add model",
+		"Context window / max output tokens are optional overrides — leave blank to use the provider's default (8192 / 4096). Set these when the provider doesn't report context length via its API (e.g. NVIDIA NIM), otherwise Bobbit under-estimates the model's context and compacts sessions too aggressively.":
+			"Context window / max output tokens are optional overrides — leave blank to use the provider's default (8192 / 4096). Set these when the provider doesn't report context length via its API (e.g. NVIDIA NIM), otherwise Bobbit under-estimates the model's context and compacts sessions too aggressively.",
 		"Please fill in all required fields": "Please fill in all required fields",
 		"Failed to save provider": "Failed to save provider",
 		"OpenAI Completions Compatible": "OpenAI Completions Compatible",
