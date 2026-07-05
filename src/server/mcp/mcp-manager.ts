@@ -482,17 +482,16 @@ export class McpManager {
 
     this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
-    this._mergeConfigFile(merged, this._manualBobbitMcpConfigPath(), "mcpServers");
-
-    return merged;
-  }
-
-  private _manualBobbitMcpConfigPath(): string {
+    // Always load the server-level (Headquarters) Bobbit MCP config — it is the
+    // global base layer visible to all scopes. For normal projects, additionally
+    // load the project-scoped config so project-local servers layer on top.
+    this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
     const projectId = this.discoveryScope.projectId;
     if (projectId && !isHeadquartersProject(projectId) && projectId !== SYSTEM_PROJECT_ID) {
-      return path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json");
+      this._mergeConfigFile(merged, path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json"), "mcpServers");
     }
-    return path.join(bobbitConfigDir(), "mcp.json");
+
+    return merged;
   }
 
   /** Read a JSON config file and merge its servers into the target. */

@@ -669,7 +669,11 @@ describe("McpManager marketplace discovery primitives", () => {
       const projectMgr = new McpManager(projectRoot, undefined, stateDir, { projectId: "normal-project" });
       const projectDiscovered = projectMgr.discoverServers();
       assert.deepEqual(projectDiscovered[projectServerName], { command: "normal-project" });
-      assert.equal(projectDiscovered[headquartersServerName], undefined);
+      // Server-level (Headquarters) config is the global base layer — it is loaded
+      // for ALL scopes including normal projects, so project-level configs layer ON
+      // TOP of (not replace) the server config. The project manager therefore also
+      // discovers servers from bobbitConfigDir()/mcp.json.
+      assert.deepEqual(projectDiscovered[headquartersServerName], { command: "headquarters" });
 
       const headquartersMgr = new McpManager(headquartersDir, undefined, stateDir, { projectId: "headquarters" });
       const headquartersDiscovered = headquartersMgr.discoverServers();
