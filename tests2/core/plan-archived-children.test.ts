@@ -49,7 +49,9 @@ const _createElementStub = (): any => ({
 	appendChild: () => {},
 	setAttribute: () => {},
 });
-(globalThis as any).document ??= {
+// Force-set (not ??=): a partial `document` leaked by an earlier file in the
+// shared fork must not shadow this complete stub (would drop createTreeWalker).
+(globalThis as any).document = {
 	documentElement: { dataset: {}, style: { setProperty: () => {} } },
 	createTreeWalker: () => _treeWalkerStub,
 	createElement: _createElementStub,

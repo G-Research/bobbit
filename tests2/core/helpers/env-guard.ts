@@ -17,12 +17,18 @@
  * so nothing bleeds across the fork boundary.
  */
 import { afterAll } from "vitest";
+import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config.js";
 
 export function guardProcessEnv(): void {
 	const snapshot = new Map<string, string | undefined>();
 	for (const key of Object.keys(process.env)) snapshot.set(key, process.env[key]);
 
 	afterAll(() => {
+		// The agent-dir runtime is a module-memory singleton derived from
+		// BOBBIT_DIR/BOBBIT_AGENT_DIR. Restoring env alone leaves its cache pointing
+		// at this file's dir, so the NEXT file in the shared fork reads the wrong
+		// auth.json/models.json. Invalidate it alongside the env restore.
+		resetAgentDirStateForTests();
 		// Delete keys added during the file.
 		for (const key of Object.keys(process.env)) {
 			if (!snapshot.has(key)) delete process.env[key];

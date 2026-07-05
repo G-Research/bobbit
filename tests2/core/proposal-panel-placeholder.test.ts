@@ -18,7 +18,12 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { renderProposalPanelPlaceholder } from "../../src/app/proposal-panel-placeholder.ts";
+import { installLitDomStub } from "./helpers/dom-stub.js";
+
+// lit-html (imported transitively) touches document.* at module init; force a
+// complete DOM stub before the dynamic import so it resolves in the node env.
+installLitDomStub();
+const { renderProposalPanelPlaceholder } = await import("../../src/app/proposal-panel-placeholder.ts");
 
 test("error state renders the error card (not a spinner) with retry/reload", () => {
 	const tr = renderProposalPanelPlaceholder({
