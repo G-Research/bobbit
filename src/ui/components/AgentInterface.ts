@@ -185,6 +185,12 @@ export class AgentInterface extends LitElement {
 	 */
 	@state() private _archivedProposalTypes: string[] = [];
 	@state() private _claudeCodeNoticeExpanded = false;
+	/**
+	 * Set when a cross-runtime model switch (e.g. Pi → Claude Code) fails to
+	 * start the new top-level session; surfaced as an inline notice via
+	 * `data-testid="runtime-switch-notice"`. Cleared on a successful switch.
+	 */
+	@state() private _runtimeSwitchNotice = "";
 	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
 	private _archivedProposalsFetchedFor: string | null = null;
 
@@ -284,6 +290,72 @@ export class AgentInterface extends LitElement {
 		const stateRuntime = (this.session?.state as any)?.runtime;
 		if (stateRuntime === "claude-code" || stateRuntime === "pi") return stateRuntime;
 		return this._modelRuntime(this.session?.state?.model);
+	}
+
+	private _runtimeDisplay(runtime: "pi" | "claude-code"): string {
+		return runtime === "claude-code" ? "Claude Code" : "standard Bobbit";
+	}
+
+	private _applySelectedModel(model: any): void {
+		const session = this.session;
+		if (!session) return;
+		if (typeof (session as any).setModel === "function") (session as any).setModel(model);
+		else session.state.model = model;
+		// After model change, clamp the current thinking level to one
+		// supported by the new model. The server boundary re-clamps
+		// defensively, but doing it here keeps the UI in sync.
+		const current = session.state?.thinkingLevel as string | undefined;
+		if (current) {
+			const clamped = clampThinkingLevel(current, model as any);
+			if (clamped && clamped !== current) {
+				if (typeof (session as any).setThinkingLevel === "function") (session as any).setThinkingLevel(clamped);
+				else session.state.thinkingLevel = clamped as any;
+			}
+		}
+	}
+
+	/**
+	 * Central handler for every model-picker selection. Same-runtime picks
+	 * apply in place; cross-runtime picks (Pi ↔ Claude Code) can't just swap
+	 * `state.model` — the two runtimes are different session processes — so
+	 * this confirms with the user and starts a fresh top-level session on the
+	 * target runtime, leaving the current session untouched.
+	 */
+	private async _handleModelSelected(model: any): Promise<void> {
+		const currentRuntime = this._currentRuntime();
+		const nextRuntime = this._modelRuntime(model);
+		if (currentRuntime === nextRuntime) {
+			this._runtimeSwitchNotice = "";
+			this._applySelectedModel(model);
+			return;
+		}
+
+		const nextLabel = this._runtimeDisplay(nextRuntime);
+		const currentLabel = this._runtimeDisplay(currentRuntime);
+		const title = nextRuntime === "claude-code" ? "Start a Claude Code session?" : "Start a standard Bobbit session?";
+		const body = `This session is running on the ${currentLabel} runtime. ${nextLabel} uses a different runtime, so Bobbit will start a new top-level session from this working directory. The current session will stay unchanged.`;
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		const confirmed = await confirmAction(title, body, "Start new session");
+		if (!confirmed) return;
+
+		try {
+			const res = await gatewayFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({
+					cwd: this.cwd,
+					projectId: this.projectId,
+					runtime: nextRuntime,
+					model: `${model.provider}/${model.id}`,
+				}),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data?.id) throw new Error(data?.error || `Failed to start session (${res.status})`);
+			const { connectToSession } = await import("../../app/session-manager.js");
+			await connectToSession(data.id, false);
+		} catch (err) {
+			this._runtimeSwitchNotice = err instanceof Error ? err.message : String(err);
+			this.requestUpdate();
+		}
 	}
 
 	private _claudeCodeCapabilityNoticeKey(sessionId = this.session?.sessionId): string | null {
@@ -2119,30 +2191,18 @@ export class AgentInterface extends LitElement {
 			})}</span>`
 			: "";
 
+		const footerRuntime = this._currentRuntime();
 		const modelButton = this.enableModelSelector && state.model
 			? Button({
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					void openModelSelector(state.model, (m) => {
-						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
-						else session.state.model = m;
-						// After model change, clamp the current thinking level to one
-						// supported by the new model. The server boundary re-clamps
-						// defensively, but doing it here keeps the UI in sync.
-						const current = session.state?.thinkingLevel as string | undefined;
-						if (current) {
-							const clamped = clampThinkingLevel(current, m as any);
-							if (clamped && clamped !== current) {
-								if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
-								else session.state.thinkingLevel = clamped as any;
-							}
-						}
-					});
+					void openModelSelector(state.model, (m) => { void this._handleModelSelected(m); });
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
 					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id">${state.model.id}</span>
+					${footerRuntime === "claude-code" ? html`<span class="sr-only" data-testid="footer-runtime-label">Claude Code (local) · ${state.model.id}</span>` : ""}
 				`,
 				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
 				// icon sits closer to the model name. ! beats Button's defaults.
@@ -2409,6 +2469,10 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : ''}
+						${this._runtimeSwitchNotice ? html`
+						<div class="mx-2 mb-2 px-3 py-2 rounded-md border border-destructive/20 bg-destructive/10 text-destructive text-xs" data-testid="runtime-switch-notice">
+							${this._runtimeSwitchNotice}
+						</div>` : nothing}
 						${(this.session as any)?.isAborting ? html`
 						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm">
 							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2487,19 +2551,7 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								void openModelSelector(state.model, (model) => {
-								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
-								else session.state.model = model;
-								// Clamp thinking-level against the newly selected model.
-								const current = session.state?.thinkingLevel as string | undefined;
-								if (current) {
-									const clamped = clampThinkingLevel(current, model as any);
-									if (clamped && clamped !== current) {
-										if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
-										else session.state.thinkingLevel = clamped as any;
-									}
-								}
-							});
+								void openModelSelector(state.model, (model) => { void this._handleModelSelected(model); });
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector

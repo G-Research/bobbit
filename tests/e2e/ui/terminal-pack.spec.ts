@@ -128,10 +128,31 @@ test.describe("terminal pack panel", () => {
 		const run = `bobbit_scroll_${Date.now()}`;
 		const burstDone = `${run}_BURST_DONE`;
 		const followUp = `${run}_FOLLOWUP_VISIBLE`;
-		const burstCommand = [
-			...Array.from({ length: 90 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abc123xyz`),
-			`echo ${burstDone}`,
-		].join(" && ");
+		// Regression coverage needs ~90 lines of real PTY output, but the command
+		// LINE typed to produce it must stay short. An earlier version chained 90
+		// literal `echo ... && echo ...` clauses into one ~2.3KB input line; typing
+		// that (then pausing before Enter, exactly like typeCommand()/real keyboard
+		// input does) let the real interactive login shell's line editor spend the
+		// idle gap re-highlighting/redrawing that single long buffer. On a shell
+		// with a syntax-highlighting/fancy-prompt plugin active (e.g. zsh +
+		// zsh-syntax-highlighting, common in real dev environments and reproduced
+		// standalone against @homebridge/node-pty-prebuilt-multiarch outside
+		// Playwright entirely), that redraw pass never finished inside the poll's
+		// 20s budget — a real shell-side hang, not a Bobbit forwarding bug (the
+		// channel/PTY layer is a byte-faithful pass-through; a functionally
+		// equivalent loop with a short input line completes in ~1s under the same
+		// conditions). A short loop command sidesteps the long-single-line-redraw
+		// path entirely while still producing the same bulk output for the
+		// scrollback/layout assertions below. cmd.exe has no such shell-side
+		// highlighter and already gets its own syntax elsewhere in this file
+		// (see the `cursorHomeCommand` platform switch below), so keep the
+		// original chained form there.
+		const burstCommand = process.platform === "win32"
+			? [
+				...Array.from({ length: 90 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abc123xyz`),
+				`echo ${burstDone}`,
+			].join(" && ")
+			: `i=0; while [ $i -lt 90 ]; do echo ${run}_LINE_$(printf '%03d' "$i")_abc123xyz; i=$((i+1)); done; echo ${burstDone}`;
 		await typeCommand(page, burstCommand);
 		await expect.poll(
 			() => receivedTerminalTextIncludes(page, burstDone),
@@ -236,12 +257,45 @@ test.describe("terminal pack panel", () => {
 			`TERMINAL_TOUCH_SCROLL: output while touch-detached must not force-follow or become visible; diagnostics=${JSON.stringify(diagnostics)}`,
 		).toBe(true);
 
+		// The marker becoming visible only proves the WHILE_SCROLLED_UP row is
+		// somewhere within the (multi-row) viewport — it does not prove the
+		// viewport is at the true scroll bottom. The product's own follow-output
+		// reattachment (updateFollowOutputFromViewport in terminal-panel.ts) only
+		// re-engages once xterm's internal `viewportY` is within
+		// SCROLL_BOTTOM_EPSILON (1 row) of `baseY` — a much tighter, and
+		// different, bar than "marker visible somewhere in view". Verified by
+		// instrumentation: both DOM-derived scroll proxies this file has (the
+		// native `.xterm-viewport` scrollTop/scrollHeight via
+		// terminalViewportContent(), and xterm's decorative
+		// `.xterm-scrollable-element` overlay via terminalScrollMetrics()) can
+		// read as "at bottom" for a touch-drag-clamped position where
+		// `viewportY` is still measurably short of `baseY` (observed 289 vs
+		// 291) — a DOM/layout lag relative to xterm's own buffer bookkeeping.
+		// Poll the same ground truth the product's auto-follow logic reads,
+		// exposed via `window.__bobbitTerminalScrollState` (mirrors the
+		// `window.__bobbitState` test-introspection pattern from
+		// docs/testing-strategy.md), instead of reconstructing "at bottom" from
+		// DOM geometry.
 		let returnedToBottom = await terminalVisibleTouchLines(page, run);
-		for (let i = 0; i < 12 && !returnedToBottom.compactText.includes(whileScrolledUp); i += 1) {
+		let scrollState = await page.evaluate(() => (window as any).__bobbitTerminalScrollState?.());
+		for (let i = 0; i < 12 && !(returnedToBottom.compactText.includes(whileScrolledUp) && scrollState?.followOutput === true); i += 1) {
 			await dispatchTouchDragOverXtermScreen(page, client, "up");
 			returnedToBottom = await terminalVisibleTouchLines(page, run);
+			scrollState = await page.evaluate(() => (window as any).__bobbitTerminalScrollState?.());
 		}
 		expect(returnedToBottom.compactText, `TERMINAL_TOUCH_SCROLL: returning to bottom should show output that arrived while scrolled up; returned=${JSON.stringify(returnedToBottom)}`).toContain(whileScrolledUp);
+		// Gate on `followOutput` itself — the literal flag keepPromptVisible()
+		// checks before auto-scrolling new output into view — rather than
+		// re-deriving "at bottom" from viewportY/baseY. The two can diverge: a
+		// touch-drag's intermediate sub-steps can transiently overshoot past
+		// baseY (setting followDetachedByTouch, and with it followOutput=false)
+		// and then land back within epsilon of baseY on a later sub-step without
+		// that final step re-running the reattachment branch in every case, so
+		// the final position can read "at bottom" while `followOutput` is stuck
+		// false from the transient detach. Retrying the drag (rather than just
+		// asserting) lets a subsequent gesture settle into a state where the
+		// last recompute agrees with the final position.
+		expect(scrollState?.followOutput, `TERMINAL_TOUCH_SCROLL: must reach true scroll bottom AND reattach follow-output (not just marker-visible) before new output can auto-follow; scrollState=${JSON.stringify(scrollState)}`).toBe(true);
 		const afterReturn = `${run}_AFTER_RETURN_TO_BOTTOM`;
 		await injectTerminalTextFrame(page, `${afterReturn}\r\n`);
 		await expect(page.locator(terminalHost()), "touch scroll follow-output should resume after returning to bottom").toContainText(afterReturn, { timeout: 10_000 });

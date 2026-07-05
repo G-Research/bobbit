@@ -159,6 +159,28 @@ function createSessionState(sid: string): SessionState {
 
 function ensureTerminalMounted(state: SessionState): void {
 	if (state.term || !state.root.isConnected) return;
+	// Test-only introspection hook (mirrors the `window.__bobbitState` pattern
+	// documented in docs/testing-strategy.md): exposes the ground-truth xterm
+	// buffer position and follow-output bookkeeping this panel's own
+	// auto-scroll logic (updateFollowOutputFromViewport, keepPromptVisible)
+	// relies on. Browser E2E specs need this because DOM-derived scroll
+	// proxies (native `.xterm-viewport` scrollTop/scrollHeight, and xterm's
+	// decorative `.xterm-scrollable-element` overlay) can both read as
+	// "at bottom" a frame or two before `viewportY` actually reaches `baseY`
+	// after a touch-driven scroll, which is what actually gates whether new
+	// output auto-follows.
+	(window as any).__bobbitTerminalScrollState = () => {
+		const buffer = state.term?.buffer.active;
+		const viewportY = buffer?.viewportY;
+		const baseY = buffer?.baseY;
+		return {
+			followOutput: state.followOutput,
+			followDetachedByTouch: state.followDetachedByTouch,
+			viewportY,
+			baseY,
+			atBottom: viewportY !== undefined && baseY !== undefined ? viewportY >= baseY - SCROLL_BOTTOM_EPSILON : false,
+		};
+	};
 	const computed = getComputedStyle(document.documentElement);
 	const fg = cssVar(computed, "--foreground", "#d4d4d4");
 	const bg = cssVar(computed, "--background", "#111111");
@@ -326,9 +348,29 @@ function resetTerminalForAttach(state: SessionState): void {
 
 function handleFrame(state: SessionState, frame: HostChannelFrame): void {
 	if (frame.kind === "text") {
+		// Capture follow-intent BEFORE writing: xterm only auto-advances the
+		// viewport on write() when it was pinned at the EXACT bottom
+		// (viewportY === baseY, no tolerance), while this panel's own
+		// "at bottom" check (SCROLL_BOTTOM_EPSILON in
+		// updateFollowOutputFromViewport) is looser — a real-world resting
+		// position from a touch or wheel scroll can land within that epsilon
+		// without being exactly pinned. When that happens, growing `baseY`
+		// without xterm advancing `viewportY` fires xterm's own scroll event,
+		// which (via the plain `term.onScroll` listener, with no
+		// promptPinnedCountsAsBottom opt) recomputes the now-larger gap as
+		// "detached" and flips `followOutput` to false — synchronously, before
+		// this write's completion callback below runs. Restoring the
+		// pre-write intent here (unless a real touch-drag away from bottom is
+		// in progress) lets reconcileActivePrompt's keepPromptVisible() still
+		// catch the viewport up to the new bottom instead of being preempted
+		// by that spurious detach.
+		const wasFollowing = state.followOutput !== false;
 		state.term?.write(frame.data, () => {
 			if (state.replayHydrating) keepPromptVisible(state);
-			else reconcileActivePrompt(state);
+			else {
+				if (wasFollowing && !state.followDetachedByTouch) state.followOutput = true;
+				reconcileActivePrompt(state);
+			}
 		});
 		return;
 	}
