@@ -11,9 +11,14 @@
  * Bobbit's own live workflow config, `.bobbit/config/project.yaml` — the
  * project.yaml this repo uses to verify itself via the Ralph loop (see
  * `defaults/workflow-authoring-guide.md` §1: workflows are inlined per
- * project, not templated from `seed-default-workflows.ts`, which stays
- * glob-free by design since it's the legacy-migration fallback for
- * *arbitrary* managed projects with no shared layout assumption).
+ * project, not templated from `seed-default-workflows.ts`). That template
+ * still doesn't hardcode Bobbit-specific globs like `src/**`/`tsconfig*.json`
+ * — it's the legacy-migration fallback / new-project auto-seed for
+ * *arbitrary* managed projects with no shared layout assumption, so a
+ * language-specific glob would be unsound there — but it does now declare
+ * the generic, layout-agnostic `cacheInputGlobs: ["**"]` (component-root
+ * scoped) on its Build/Type check/Unit tests steps; see
+ * `tests/seed-default-workflows-cache-globs.test.ts` for that pin.
  *
  * Two levels of coverage:
  *
