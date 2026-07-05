@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
@@ -77,12 +78,14 @@ function compositeKey(goalId: string, gateId: string): string {
 export class GateStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
 	private gates: Map<string, GateState> = new Map();
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "gates.json");
 		this.load();
@@ -90,8 +93,8 @@ export class GateStore {
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const g of data) {
 						if (g.gateId && g.goalId) {
@@ -107,11 +110,11 @@ export class GateStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
+			if (!this.fs.existsSync(this.storeDir)) {
+				this.fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.gates.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[gate-store] Failed to save gates:", err);
 		}

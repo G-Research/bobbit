@@ -1,4 +1,6 @@
 import { execFile as execFileCb, execFileSync } from "node:child_process";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
@@ -62,6 +64,8 @@ import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
+
+let sessionManagerModuleClock: Clock = realClock;
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
@@ -819,7 +823,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 				console.warn(
 					`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
 				);
-				setTimeout(() => {
+				sessionManagerModuleClock.setTimeout(() => {
 					_pendingOverflowCheck.delete(client);
 					if (client.readyState !== 1) return;
 					const bufferedNow = (client as any).bufferedAmount ?? 0;
@@ -865,7 +869,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			console.warn(
 				`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
 			);
-			setTimeout(() => {
+			sessionManagerModuleClock.setTimeout(() => {
 				_pendingOverflowCheck.delete(client);
 				if (client.readyState !== 1) return;
 				const bufferedNow = (client as any).bufferedAmount ?? 0;
@@ -1047,6 +1051,8 @@ export interface SessionManagerOptions {
 	prStatusStore?: PrStatusStore;
 	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
 	extensionChannels?: ExtensionChannelServices;
+	/** Timer/clock implementation. Defaults to real timers. */
+	clock?: Clock;
 }
 
 type RestoreCoordinator = {
@@ -1066,6 +1072,7 @@ export class SessionManager {
 	private sessionsWithConnectedClients = new Set<SessionInfo>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
+	private readonly clock: Clock;
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
 	private _testBgProcessStore: BgProcessStore | null = null;
@@ -1461,6 +1468,8 @@ export class SessionManager {
 	}
 
 	constructor(options?: SessionManagerOptions) {
+		this.clock = options?.clock ?? realClock;
+		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
 		this.colorStore = options?.colorStore;
@@ -1478,8 +1487,8 @@ export class SessionManager {
 			// Non-PCM path: used by test harnesses that don't set up a full
 			// ProjectContextManager. Stores are created from the explicit stateDir.
 			const stateDir = bobbitStateDir();
-			this._testStore = new SessionStore(stateDir);
-			this._testBgProcessStore = new BgProcessStore(stateDir);
+			this._testStore = new SessionStore(stateDir, undefined, this.clock);
+			this._testBgProcessStore = new BgProcessStore(stateDir, this.clock);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
@@ -1492,7 +1501,7 @@ export class SessionManager {
 
 		// Start the status heartbeat. Runs for the lifetime of this manager;
 		// `unref()` so unit tests don't hang on process exit.
-		this._statusHeartbeatTimer = setInterval(
+		this._statusHeartbeatTimer = this.clock.setInterval(
 			() => this._emitStatusHeartbeat(),
 			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
 		);
@@ -3073,7 +3082,7 @@ export class SessionManager {
 		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
 		if (hasSkillExpansions || hasFileMentions) {
 			appendSkillSidecarEntry(session.id, {
-				ts: Date.now(),
+				ts: this.clock.now(),
 				modelText: dispatchText,
 				originalText: text,
 				skillExpansions: opts?.skillExpansions ?? [],
@@ -3390,7 +3399,7 @@ export class SessionManager {
 	}
 
 	private markPromptDispatchStreaming(session: SessionInfo): void {
-		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
+		session.streamingStartedAt = session.streamingStartedAt ?? this.clock.now();
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
@@ -3509,7 +3518,7 @@ export class SessionManager {
 		}
 		// Schedule a follow-up drain on the next tick so the rows we just
 		// re-enqueued get another chance once the bridge has finished its
-		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
+		// abort/finishRun bookkeeping. this.clock.setTimeout(0) lets pending microtasks
 		// (including the SDK's finally{finishRun()}) run first.
 		//
 		// Bound the immediate retries: when the agent is genuinely mid-turn the
@@ -3526,7 +3535,7 @@ export class SessionManager {
 		}
 		session.recoverDrainAttempts = attempts;
 		const generation = session.lifecycleGeneration ?? 0;
-		setTimeout(() => {
+		this.clock.setTimeout(() => {
 			if ((session.lifecycleGeneration ?? 0) !== generation) return;
 			this.drainQueue(session);
 		}, 0);
@@ -3773,7 +3782,7 @@ export class SessionManager {
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
-			session.streamingStartedAt = Date.now();
+			session.streamingStartedAt = this.clock.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 			// Clear the inbox nudger's per-staff guard so a fresh batch can be
@@ -3896,7 +3905,7 @@ export class SessionManager {
 				// the broadcast end-event, and the client's live `compact_active`
 				// card all share the same id. The live card uses it to mount the
 				// pre-compaction-history affordance in-session (no reload needed).
-				const startedAtMs = Date.now();
+				const startedAtMs = this.clock.now();
 				(session as any)._pendingCompactionStart = {
 					startedAtMs,
 					trigger: reason === "overflow" ? "overflow" as const : "auto" as const,
@@ -3912,7 +3921,7 @@ export class SessionManager {
 			// Manual path is handled in ws/handler.ts. Auto/overflow path writes
 			// the sidecar here from the upstream CompactionResult.
 			if (reason !== "manual" && pending) {
-				const endedAtMs = Date.now();
+				const endedAtMs = this.clock.now();
 				const result = (event as any).result as
 					| { tokensBefore?: number; firstKeptEntryId?: string }
 					| undefined;
@@ -3970,7 +3979,7 @@ export class SessionManager {
 				const manualSuccess = !!manualId && !manualAborted && !manualError && !!manualResult;
 				if (manualId && !manualAborted) (event as any).compactionId = manualId;
 				if (manualId && manualSuccess) {
-					const endedAtMs = Date.now();
+					const endedAtMs = this.clock.now();
 					const startedAtMs = parseCompactionStartMs(manualId) ?? endedAtMs;
 					try {
 						const wrote = appendCompactionSidecarEntry(session.id, {
@@ -4020,7 +4029,7 @@ export class SessionManager {
 					sessionId: session.id,
 					sessionTitle: session.title,
 					message: event.message,
-					timestamp: Date.now(),
+					timestamp: this.clock.now(),
 					projectId: session.projectId || undefined,
 					goalId: session.goalId,
 					goalTitle,
@@ -4134,7 +4143,7 @@ export class SessionManager {
 			reason: isBackoff ? "provider-overload" : "transient-error",
 			retryDelayMs: Math.round(delayMs),
 			attempt,
-			scheduledAt: Date.now(),
+			scheduledAt: this.clock.now(),
 			error: errMsg.slice(0, 200),
 		};
 		// WP4/RC3: route through emitSessionEvent so the frame gets a seq, enters
@@ -4142,9 +4151,9 @@ export class SessionManager {
 		// longer orphans a stale "Retrying…" banner (S5/S21).
 		emitSessionEvent(session, pendingEvent);
 
-		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+		if (session.pendingAutoRetryTimer) this.clock.clearTimeout(session.pendingAutoRetryTimer);
 		const generation = session.lifecycleGeneration ?? 0;
-		session.pendingAutoRetryTimer = setTimeout(() => {
+		session.pendingAutoRetryTimer = this.clock.setTimeout(() => {
 			session.pendingAutoRetryTimer = undefined;
 			// Session may have been terminated or replaced in the meantime.
 			if ((session.lifecycleGeneration ?? 0) !== generation) return;
@@ -4170,14 +4179,14 @@ export class SessionManager {
 		opts?: { emitWithoutTimer?: boolean },
 	): void {
 		const hadTimer = !!session.pendingAutoRetryTimer;
-		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+		if (session.pendingAutoRetryTimer) this.clock.clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = undefined;
 		if (!hadTimer && !opts?.emitWithoutTimer) return;
 		if (reason !== "shutdown") {
 			const cancelledEvent: AutoRetryCancelledEvent = {
 				type: "auto_retry_cancelled",
 				reason,
-				cancelledAt: Date.now(),
+				cancelledAt: this.clock.now(),
 			};
 			// WP4/RC3: seq + buffer + replay (see auto_retry_pending above).
 			emitSessionEvent(session, cancelledEvent);
@@ -4382,7 +4391,7 @@ export class SessionManager {
 				? requestedGroupMatches && approvedToolsCoverPending
 				: requestedToolMatches && approvedToolsCoverPending;
 			if (!grantCoversPending) {
-				clearTimeout(pending.timer);
+				this.clock.clearTimeout(pending.timer);
 				session.pendingGrantRequest = undefined;
 				pending.resolve({
 					granted: false,
@@ -4432,7 +4441,7 @@ export class SessionManager {
 			// the approved grant scope/delta and lets the original tool call continue.
 			// Returning the full effective surface here would let unrelated ask-gated
 			// tools bypass future prompts in the active process.
-			clearTimeout(session.pendingGrantRequest.timer);
+			this.clock.clearTimeout(session.pendingGrantRequest.timer);
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
 			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
@@ -4454,7 +4463,7 @@ export class SessionManager {
 
 		// If a previous grant request is still pending, resolve it as denied
 		if (session.pendingGrantRequest) {
-			clearTimeout(session.pendingGrantRequest.timer);
+			this.clock.clearTimeout(session.pendingGrantRequest.timer);
 			session.pendingGrantRequest.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
 		}
@@ -4470,7 +4479,7 @@ export class SessionManager {
 
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const timer = this.clock.setTimeout(() => {
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
 			}, 5 * 60 * 1000); // 5 minute timeout
@@ -4503,7 +4512,7 @@ export class SessionManager {
 	denyToolPermission(sessionId: string, _toolName: string): void {
 		const session = this.sessions.get(sessionId);
 		if (!session?.pendingGrantRequest) return;
-		clearTimeout(session.pendingGrantRequest.timer);
+		this.clock.clearTimeout(session.pendingGrantRequest.timer);
 		const pending = session.pendingGrantRequest;
 		session.pendingGrantRequest = undefined;
 		pending.resolve({ granted: false });
@@ -4657,7 +4666,7 @@ export class SessionManager {
 				`(no agentSessionFile, no role) — archiving instead of restarting.`,
 			);
 			try {
-				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: Date.now() });
+				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: this.clock.now() });
 			} catch (err) {
 				console.error(`[session-manager] Failed to archive zombie session ${sessionId}:`, err);
 			}
@@ -4893,7 +4902,7 @@ export class SessionManager {
 			}
 			// If the store is empty (fresh install), use a 24h floor so we don't
 			// flag every transcript from a previous install.
-			const floor = mostRecent > 0 ? mostRecent : (Date.now() - 24 * 60 * 60 * 1000);
+			const floor = mostRecent > 0 ? mostRecent : (this.clock.now() - 24 * 60 * 60 * 1000);
 			const result = scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
 			this.orphanedTranscriptsCount = result.count;
 			if (result.count > 0) {
@@ -5579,7 +5588,7 @@ export class SessionManager {
 			const branch = targetBranch;
 			const worktreePath = claimed ? claimed.worktreePath : path.join(wtRoot, safeName);
 
-			const now = Date.now();
+			const now = this.clock.now();
 			const session: SessionInfo = {
 				id,
 				title: "New session",
@@ -5975,13 +5984,13 @@ export class SessionManager {
 				resolve,
 				reject,
 				cleanup: () => {
-					clearTimeout(timer);
+					this.clock.clearTimeout(timer);
 					unsub();
 					waiters.delete(waiter);
 					if (waiters.size === 0) this._idleWaiters.delete(sessionId);
 				},
 			};
-			timer = setTimeout(() => {
+			timer = this.clock.setTimeout(() => {
 				waiter.cleanup();
 				reject(new Error(`Timeout waiting for session ${sessionId} to become idle`));
 			}, timeoutMs);
@@ -6021,19 +6030,19 @@ export class SessionManager {
 		if (session.status === "streaming") return Promise.resolve();
 
 		return new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const timer = this.clock.setTimeout(() => {
 				unsub();
 				reject(new Error(`Timeout waiting for session ${sessionId} to start streaming`));
 			}, timeoutMs);
 
 			const unsub = session.rpcClient.onEvent((event: any) => {
 				if (event.type === "agent_start") {
-					clearTimeout(timer);
+					this.clock.clearTimeout(timer);
 					unsub();
 					resolve();
 				}
 				if (event.type === "process_exit") {
-					clearTimeout(timer);
+					this.clock.clearTimeout(timer);
 					unsub();
 					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
 					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
@@ -6534,11 +6543,11 @@ export class SessionManager {
 		try {
 			// Use cached model list if fresh (avoids HTTP round-trip per session)
 			if (this._aigwModelCache && this._aigwModelCache.url === aigwUrl &&
-				Date.now() - this._aigwModelCache.ts < SessionManager.AIGW_CACHE_TTL_MS) {
+				this.clock.now() - this._aigwModelCache.ts < SessionManager.AIGW_CACHE_TTL_MS) {
 				aigwModels = this._aigwModelCache.models;
 			} else {
 				aigwModels = await discoverAigwModels(aigwUrl);
-				this._aigwModelCache = { url: aigwUrl, models: aigwModels, ts: Date.now() };
+				this._aigwModelCache = { url: aigwUrl, models: aigwModels, ts: this.clock.now() };
 			}
 		} catch (err) {
 			console.warn(`[session-manager] Failed to discover aigw models for auto-selection:`, err);
@@ -6624,7 +6633,7 @@ export class SessionManager {
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
-						await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+						await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
 						continue;
 					}
 					console.error(
@@ -6676,7 +6685,7 @@ export class SessionManager {
 			} catch (err) {
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
-					await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
 				} else {
 					console.error(
 						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
@@ -6725,7 +6734,7 @@ export class SessionManager {
 		projectId?: string;
 	}): () => void {
 		const eventBuffer = new EventBuffer();
-		const now = Date.now();
+		const now = this.clock.now();
 
 		const session: SessionInfo = {
 			id,
@@ -6748,7 +6757,7 @@ export class SessionManager {
 		};
 
 		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
+			session.lastActivity = this.clock.now();
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
 			emitSessionEvent(session, truncated);
@@ -6927,7 +6936,7 @@ export class SessionManager {
 	markSessionRead(id: string): boolean {
 		const store = this.resolveStoreForId(id);
 		if (!store?.get(id)) return false;
-		store.update(id, { lastReadAt: Date.now() });
+		store.update(id, { lastReadAt: this.clock.now() });
 		return true;
 	}
 
@@ -7012,7 +7021,7 @@ export class SessionManager {
 	 * `updateArchivedMeta` for an archived one.
 	 */
 	markChildTerminal(childSessionId: string): void {
-		const updates = { childTerminal: true, terminalAt: Date.now() };
+		const updates = { childTerminal: true, terminalAt: this.clock.now() };
 		if (this.sessions.has(childSessionId)) {
 			this.updateSessionMeta(childSessionId, updates);
 			return;
@@ -7201,7 +7210,7 @@ export class SessionManager {
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			if (isUserVisibleActivity(event)) {
-				session.lastActivity = Date.now();
+				session.lastActivity = this.clock.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
 			this.handleAgentLifecycle(session, event);
@@ -7557,7 +7566,7 @@ export class SessionManager {
 
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
-			clearTimeout(session.pendingGrantRequest.timer);
+			this.clock.clearTimeout(session.pendingGrantRequest.timer);
 			session.pendingGrantRequest.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
 		}
@@ -7638,7 +7647,7 @@ export class SessionManager {
 		// `reopen-archived-proposals.md`.
 
 		// Broadcast session_archived event before closing clients
-		const archivedAt = Date.now();
+		const archivedAt = this.clock.now();
 		broadcast(session.clients, { type: "session_archived", sessionId: id, archivedAt });
 
 		for (const client of session.clients) {
@@ -7860,7 +7869,7 @@ export class SessionManager {
 	/** Purge all archived sessions older than 7 days. */
 	async purgeExpiredArchives(): Promise<void> {
 		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-		const cutoff = Date.now() - SEVEN_DAYS_MS;
+		const cutoff = this.clock.now() - SEVEN_DAYS_MS;
 		const archived = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
 			: (this._testStore?.getArchived() ?? []);
@@ -7947,7 +7956,7 @@ export class SessionManager {
 			counts,
 			groups: this.buildArchivedWorktreeGroups(allItems),
 			selectionPresets: this.buildArchivedWorktreeSelectionPresets(responseItems),
-			generatedAt: Date.now(),
+			generatedAt: this.clock.now(),
 		};
 	}
 
@@ -7965,7 +7974,7 @@ export class SessionManager {
 			byStatus: {},
 			byReason: {},
 		});
-		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [], generatedAt: Date.now() };
+		const response: CleanupArchivedSessionWorktreesResponse = { counts: zeroCounts(), results: [], generatedAt: this.clock.now() };
 		const scan = await this.listArchivedSessionWorktrees(true);
 		const sessionById = new Map(scan.sessions.map(session => [session.id, session]));
 		const rows = scan.items.map(item => ({ session: sessionById.get(item.sessionId), item }));
@@ -9017,7 +9026,7 @@ export class SessionManager {
 	 */
 	async getExpiredArchiveStats(): Promise<{ count: number; totalSizeBytes: number }> {
 		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-		const cutoff = Date.now() - SEVEN_DAYS_MS;
+		const cutoff = this.clock.now() - SEVEN_DAYS_MS;
 		let count = 0;
 		let totalSizeBytes = 0;
 
@@ -9043,7 +9052,7 @@ export class SessionManager {
 	startPurgeSchedule(): void {
 		// No longer purge on startup — use Settings → Maintenance to purge manually.
 		// Purge every 24 hours
-		this.purgeInterval = setInterval(() => {
+		this.purgeInterval = this.clock.setInterval(() => {
 			this.purgeExpiredArchives().catch(err => {
 				console.error("[session-manager] Scheduled purge failed:", err);
 			});
@@ -9139,13 +9148,13 @@ export class SessionManager {
 		// is killed before it can produce an assistant response.
 		let resolveSettled!: (v: boolean) => void;
 		const settledPromise = new Promise<boolean>((resolve) => { resolveSettled = resolve; });
-		const settleTimer = setTimeout(() => {
+		const settleTimer = this.clock.setTimeout(() => {
 			unsubSettle();
 			resolveSettled(false);
 		}, gracePeriodMs);
 		const unsubSettle = session.rpcClient.onEvent((event: any) => {
 			if (event.type === "agent_end") {
-				clearTimeout(settleTimer);
+				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
 				resolveSettled(true);
 			}
@@ -9284,7 +9293,7 @@ export class SessionManager {
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				if (isUserVisibleActivity(event)) {
-					session.lastActivity = Date.now();
+					session.lastActivity = this.clock.now();
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
 
@@ -9358,11 +9367,11 @@ export class SessionManager {
 
 	async shutdown(): Promise<void> {
 		if (this.purgeInterval) {
-			clearInterval(this.purgeInterval);
+			this.clock.clearInterval(this.purgeInterval);
 			this.purgeInterval = null;
 		}
 		if (this._statusHeartbeatTimer) {
-			clearInterval(this._statusHeartbeatTimer);
+			this.clock.clearInterval(this._statusHeartbeatTimer);
 			this._statusHeartbeatTimer = null;
 		}
 
@@ -9385,7 +9394,7 @@ export class SessionManager {
 			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
 			this.resolveStoreForSession(id).update(id, {
 				wasStreaming: needsRestartRedrive,
-				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? Date.now()) : undefined,
+				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
 			});
 
 			// Cancel any pending transient/provider-backoff auto-retry so the

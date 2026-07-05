@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import path from "node:path";
 import { monitorEventLoopDelay, performance, type EventLoopUtilization } from "node:perf_hooks";
 
@@ -163,18 +165,18 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private lastWall = performance.now();
 	private lastElu: EventLoopUtilization = performance.eventLoopUtilization();
 	private delay: ReturnType<typeof monitorEventLoopDelay>;
-	private timer: ReturnType<typeof setInterval> | null = null;
+	private timer: ReturnType<Clock["setInterval"]> | null = null;
 	private shutdownCalled = false;
 	private readonly outFile?: string;
 	private readonly beforeExitHandler: () => void;
 	private readonly exitHandler: () => void;
 
-	constructor() {
+	constructor(private readonly clock: Clock = realClock) {
 		this.outFile = JSONL_PATH;
 		if (this.outFile) fs.mkdirSync(path.dirname(this.outFile), { recursive: true });
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
-		this.timer = setInterval(() => this.flush("tick"), FLUSH_MS);
+		this.timer = this.clock.setInterval(() => this.flush("tick"), FLUSH_MS);
 		if (typeof this.timer.unref === "function") this.timer.unref();
 		this.beforeExitHandler = () => { try { this.flush("beforeExit"); } catch { /* best-effort */ } };
 		this.exitHandler = () => { try { this.flush("exit"); } catch { /* best-effort */ } };
@@ -237,7 +239,7 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		if (this.shutdownCalled) return;
 		this.shutdownCalled = true;
 		if (this.timer) {
-			clearInterval(this.timer);
+			this.clock.clearInterval(this.timer);
 			this.timer = null;
 		}
 		try { this.flush("shutdown"); } catch { /* best-effort */ }
@@ -261,7 +263,7 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		const memory = process.memoryUsage();
 		const snapshot: CpuDiagnosticsSnapshot = {
 			kind: "cpu",
-			ts: Date.now(),
+			ts: this.clock.now(),
 			pid: process.pid,
 			wallMs: round(wallMs),
 			cpuUserMs: round(cpuUserMs),

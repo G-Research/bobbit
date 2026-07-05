@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 
 /**
@@ -8,16 +9,18 @@ import path from "node:path";
 export class PreferencesStore {
 	private data: Record<string, unknown> = {};
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.storeFile = path.join(stateDir, "preferences.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const raw = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const raw = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 					this.data = raw as Record<string, unknown>;
 				}
@@ -30,10 +33,10 @@ export class PreferencesStore {
 	private save(): void {
 		try {
 			const dir = path.dirname(this.storeFile);
-			if (!fs.existsSync(dir)) {
-				fs.mkdirSync(dir, { recursive: true });
+			if (!this.fs.existsSync(dir)) {
+				this.fs.mkdirSync(dir, { recursive: true });
 			}
-			fs.writeFileSync(this.storeFile, JSON.stringify(this.data, null, 2), "utf-8");
+			this.fs.writeFileSync(this.storeFile, JSON.stringify(this.data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[preferences-store] Failed to save preferences:", err);
 		}

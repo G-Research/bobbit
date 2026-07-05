@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 
 export interface PrStatusEntry {
@@ -19,8 +20,10 @@ export class PrStatusStore {
 	private cache: Map<string, PrStatusEntry> = new Map();
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "pr-status-cache.json");
 		this.load();
@@ -28,8 +31,8 @@ export class PrStatusStore {
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, entry] of Object.entries(data)) {
 						if (entry && typeof entry === "object") this.cache.set(id, entry as PrStatusEntry);
@@ -43,8 +46,8 @@ export class PrStatusStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
-			fs.writeFileSync(this.storeFile, JSON.stringify(Object.fromEntries(this.cache), null, 2), "utf-8");
+			if (!this.fs.existsSync(this.storeDir)) this.fs.mkdirSync(this.storeDir, { recursive: true });
+			this.fs.writeFileSync(this.storeFile, JSON.stringify(Object.fromEntries(this.cache), null, 2), "utf-8");
 		} catch (err) {
 			console.error("[pr-status-store] Failed to save:", err);
 		}

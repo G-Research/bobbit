@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 
 import { walkGoalSubtree } from "./goal-subtree.js";
@@ -141,11 +142,13 @@ export class CostTracker {
 	private costs: Map<string, RawSessionCost> = new Map();
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
 	/** Monotonically increasing tick — bumped on every cost mutation.
 	 *  Used by `computeTreeCost` for cache invalidation (tree-cost rollup). */
 	private generation = 0;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "session-costs.json");
 		this.load();
@@ -153,8 +156,8 @@ export class CostTracker {
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, cost] of Object.entries(data)) {
 						if (id && cost && typeof cost === "object") {
@@ -184,8 +187,8 @@ export class CostTracker {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
+			if (!this.fs.existsSync(this.storeDir)) {
+				this.fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			// Persist the raw counters plus the stamped `goalId` / `firstSeenAt`
 			// (needed for tree-cost rollups + legacy backfill to survive reload).
@@ -203,7 +206,7 @@ export class CostTracker {
 				if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
 				data[id] = entry;
 			}
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[cost-tracker] Failed to save costs:", err);
 		}

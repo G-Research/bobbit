@@ -1,4 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -344,7 +346,7 @@ export class TeamManager {
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
 
-	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string) {
+	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string, private readonly clock: Clock = realClock) {
 		this.sessionManager = sessionManager;
 		this.config = config;
 		this.taskManager = config.taskManager;
@@ -368,7 +370,7 @@ export class TeamManager {
 	/** Start the periodic stuck-team watchdog (idempotent). */
 	startStuckSweep(): void {
 		if (this.stuckSweepTimer) return;
-		const t = setInterval(() => {
+		const t = this.clock.setInterval(() => {
 			try {
 				this._stuckSweepTick();
 			} catch (err) {
@@ -381,7 +383,7 @@ export class TeamManager {
 
 	stopStuckSweep(): void {
 		if (this.stuckSweepTimer) {
-			clearInterval(this.stuckSweepTimer);
+			this.clock.clearInterval(this.stuckSweepTimer);
 			this.stuckSweepTimer = null;
 		}
 	}
@@ -392,7 +394,7 @@ export class TeamManager {
 	 * STUCK_QUIET_THRESHOLD_MS, and !shouldSkipNudge.
 	 * See docs/design/auto-nudge-stuck-team-leads.md.
 	 */
-	_stuckSweepTick(now: number = Date.now()): void {
+	_stuckSweepTick(now: number = this.clock.now()): void {
 		for (const [goalId, entry] of this.teams) {
 			if (!entry.teamLeadSessionId) continue;
 			if (this.shouldSkipNudge(goalId)) continue;
@@ -1056,7 +1058,7 @@ export class TeamManager {
 	 *    doesn't double-fire within STUCK_QUIET_THRESHOLD_MS.
 	 */
 	private _bootResumeIdleTeamLeads(): void {
-		const now = Date.now();
+		const now = this.clock.now();
 		let resumed = 0;
 		for (const [goalId, entry] of this.teams) {
 			if (!entry.teamLeadSessionId) continue;
@@ -1116,7 +1118,7 @@ export class TeamManager {
 		if (this.isThenable(delivery)) {
 			// A parked/capped enqueue returns a resolved promise while the lead stays idle.
 			// Clear on the next macrotask if no agent_start/status transition happened.
-			setTimeout(() => {
+			this.clock.setTimeout(() => {
 				if (this.isTeamLeadIdle(goalId)) this.clearPendingNudgeNoStart(goalId);
 			}, 0);
 			void delivery.then(
@@ -1241,13 +1243,13 @@ export class TeamManager {
 	private clearIdleNudgeTimer(goalId: string): void {
 		const timer = this.idleNudgeTimers.get(goalId);
 		if (timer) {
-			clearTimeout(timer);
+			this.clock.clearTimeout(timer);
 			this.idleNudgeTimers.delete(goalId);
 		}
 		this.idleNudgeCount.delete(goalId);
 		const nwTimer = this.noWorkersNudgeTimers.get(goalId);
 		if (nwTimer) {
-			clearTimeout(nwTimer);
+			this.clock.clearTimeout(nwTimer);
 			this.noWorkersNudgeTimers.delete(goalId);
 		}
 		this.noWorkersNudgeCount.delete(goalId);
@@ -1312,7 +1314,7 @@ export class TeamManager {
 		this.lastNotifyTime.delete(agent.sessionId);
 		const pending = this.pendingIdleNotify.get(agent.sessionId);
 		if (pending) {
-			clearTimeout(pending);
+			this.clock.clearTimeout(pending);
 			this.pendingIdleNotify.delete(agent.sessionId);
 		}
 		try { this.config.orchestrationCore?.forgetChild(agent.sessionId); } catch { /* best-effort */ }
@@ -1362,9 +1364,9 @@ export class TeamManager {
 		// (where we want continued backoff). Reset is the job of
 		// clearIdleNudgeTimer / the external-prompt branch of subscribeTeamLeadEvents.
 		const existingWorkers = this.idleNudgeTimers.get(goalId);
-		if (existingWorkers) { clearTimeout(existingWorkers); this.idleNudgeTimers.delete(goalId); }
+		if (existingWorkers) { this.clock.clearTimeout(existingWorkers); this.idleNudgeTimers.delete(goalId); }
 		const existingNoWorkers = this.noWorkersNudgeTimers.get(goalId);
-		if (existingNoWorkers) { clearTimeout(existingNoWorkers); this.noWorkersNudgeTimers.delete(goalId); }
+		if (existingNoWorkers) { this.clock.clearTimeout(existingNoWorkers); this.noWorkersNudgeTimers.delete(goalId); }
 		this.nudgePending.delete(goalId);
 
 		// --- No-workers timer (one-shot, reschedules with exponential backoff) ---
@@ -1396,7 +1398,7 @@ export class TeamManager {
 			TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
 		);
 
-		const timer = setTimeout(() => {
+		const timer = this.clock.setTimeout(() => {
 			this.noWorkersNudgeTimers.delete(goalId);
 
 			if (this.shouldSkipNudge(goalId)) return;
@@ -1452,7 +1454,7 @@ export class TeamManager {
 			TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
 		);
 
-		const timer = setTimeout(() => {
+		const timer = this.clock.setTimeout(() => {
 			this.idleNudgeTimers.delete(goalId);
 
 			if (this.shouldSkipNudge(goalId)) return;
@@ -1472,7 +1474,7 @@ export class TeamManager {
 				.map((a) => this.sessionManager.getSession(a.sessionId))
 				.filter((s): s is NonNullable<typeof s> => !!s && s.status === "streaming");
 			if (streamingWorkers.length > 0) {
-				const now = Date.now();
+				const now = this.clock.now();
 				const anyLongRunning = streamingWorkers.some((s) => {
 					const since = s.streamingStartedAt;
 					return typeof since === "number" && now - since > TeamManager.LONG_STREAMING_THRESHOLD_MS;
@@ -1558,8 +1560,8 @@ export class TeamManager {
 				}
 				// Clear-before-set so a worker never has two pending timers.
 				const existing = this.pendingIdleNotify.get(sessionId);
-				if (existing) clearTimeout(existing);
-				const timer = setTimeout(() => {
+				if (existing) this.clock.clearTimeout(existing);
+				const timer = this.clock.setTimeout(() => {
 					this.pendingIdleNotify.delete(sessionId);
 					this.notifyTeamLead(goalId, sessionId, role, agentId).catch((err) => {
 						console.error("[team-manager] Failed to notify team lead:", err);
@@ -1570,7 +1572,7 @@ export class TeamManager {
 				// Worker resumed — cancel any pending idle nudge.
 				const existing = this.pendingIdleNotify.get(sessionId);
 				if (existing) {
-					clearTimeout(existing);
+					this.clock.clearTimeout(existing);
 					this.pendingIdleNotify.delete(sessionId);
 				}
 			}
@@ -1595,12 +1597,12 @@ export class TeamManager {
 		// restart), seed leadIdleSinceByGoal so the stuck-team watchdog has a
 		// timestamp to compare against on its next tick.
 		if (session.status === "idle" && !this.leadIdleSinceByGoal.has(goalId)) {
-			this.leadIdleSinceByGoal.set(goalId, Date.now());
+			this.leadIdleSinceByGoal.set(goalId, this.clock.now());
 		}
 
 		const unsubscribe = session.rpcClient.onEvent((event: any) => {
 			if (event.type === "agent_end") {
-				this.leadIdleSinceByGoal.set(goalId, Date.now());
+				this.leadIdleSinceByGoal.set(goalId, this.clock.now());
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
 				this.leadIdleSinceByGoal.delete(goalId);
@@ -1616,9 +1618,9 @@ export class TeamManager {
 					// Cancel pending timers (shouldSkipNudge would block them while streaming anyway),
 					// but PRESERVE counters so backoff continues to grow across cycles.
 					const t1 = this.idleNudgeTimers.get(goalId);
-					if (t1) { clearTimeout(t1); this.idleNudgeTimers.delete(goalId); }
+					if (t1) { this.clock.clearTimeout(t1); this.idleNudgeTimers.delete(goalId); }
 					const t2 = this.noWorkersNudgeTimers.get(goalId);
-					if (t2) { clearTimeout(t2); this.noWorkersNudgeTimers.delete(goalId); }
+					if (t2) { this.clock.clearTimeout(t2); this.noWorkersNudgeTimers.delete(goalId); }
 					// idleNudgeCount and noWorkersNudgeCount intentionally preserved.
 				}
 			}
@@ -2093,7 +2095,7 @@ export class TeamManager {
 				branch: branchName,
 				baseSha,
 				task,
-				createdAt: Date.now(),
+				createdAt: this.clock.now(),
 			};
 			entry.agents.push(agent);
 			this.sessionToGoal.set(session.id, goalId);
@@ -2193,7 +2195,7 @@ export class TeamManager {
 		if (this.recoverErroredIdleSessionBeforeNudge(goalId, entry.teamLeadSessionId, "Worker-idle notification")) return;
 
 		// Debounce: skip if we notified about this worker in the last 30 seconds
-		const now = Date.now();
+		const now = this.clock.now();
 		const lastNotify = this.lastNotifyTime.get(workerSessionId);
 		if (lastNotify && now - lastNotify < 30_000) {
 			console.log(`[team-manager] notifyTeamLead deferred for ${role}/${agentId} — ${now - lastNotify}ms ago`);
@@ -2260,7 +2262,7 @@ export class TeamManager {
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 
-		const now = Date.now();
+		const now = this.clock.now();
 		const last = this.lastSpecNudgeTs.get(goalId) ?? 0;
 		if (now - last < TeamManager.SPEC_NUDGE_THROTTLE_MS) {
 			console.log(`[team-manager] Skipping spec-edit nudge for goal ${goalId} (throttled, last ${now - last}ms ago)`);
@@ -2424,7 +2426,7 @@ export class TeamManager {
 		// torn-down session.
 		const pending = this.pendingIdleNotify.get(sessionId);
 		if (pending) {
-			clearTimeout(pending);
+			this.clock.clearTimeout(pending);
 			this.pendingIdleNotify.delete(sessionId);
 		}
 		this.persistEntry(goalId);
@@ -2489,7 +2491,7 @@ export class TeamManager {
 			worktreePath: undefined,
 			branch: undefined,
 			task: `Verification review: ${stepName}`,
-			createdAt: Date.now(),
+			createdAt: this.clock.now(),
 		};
 		entry.agents.push(agent);
 		this.sessionToGoal.set(sessionId, goalId);

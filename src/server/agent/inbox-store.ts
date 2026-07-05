@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
@@ -39,12 +40,14 @@ export interface InboxEntry {
  */
 export class InboxStore {
 	private readonly inboxDir: string;
+	private readonly fs: FsLike;
 	/** staffId → entries (in-memory cache; populated on first access). */
 	private byStaff: Map<string, InboxEntry[]> = new Map();
 	/** Marks the per-staff files we have already attempted to load. */
 	private loaded: Set<string> = new Set();
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.inboxDir = path.join(stateDir, "inbox");
 	}
 
@@ -59,8 +62,8 @@ export class InboxStore {
 		this.loaded.add(staffId);
 		const file = this.fileFor(staffId);
 		try {
-			if (fs.existsSync(file)) {
-				const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as { staffId?: string; entries?: unknown };
+			if (this.fs.existsSync(file)) {
+				const raw = JSON.parse(this.fs.readFileSync(file, "utf-8")) as { staffId?: string; entries?: unknown };
 				if (raw && Array.isArray(raw.entries)) {
 					const entries = (raw.entries as InboxEntry[]).filter((e) => e && typeof e.id === "string");
 					this.byStaff.set(staffId, entries);
@@ -77,12 +80,12 @@ export class InboxStore {
 	private save(staffId: string): void {
 		const entries = this.byStaff.get(staffId) ?? [];
 		try {
-			if (!fs.existsSync(this.inboxDir)) {
-				fs.mkdirSync(this.inboxDir, { recursive: true });
+			if (!this.fs.existsSync(this.inboxDir)) {
+				this.fs.mkdirSync(this.inboxDir, { recursive: true });
 			}
 			const file = this.fileFor(staffId);
 			const payload = JSON.stringify({ staffId, entries }, null, 2);
-			fs.writeFileSync(file, payload, "utf-8");
+			this.fs.writeFileSync(file, payload, "utf-8");
 		} catch (err) {
 			console.error(`[inbox-store] Failed to save inbox for staff ${staffId}:`, err);
 		}
@@ -156,7 +159,7 @@ export class InboxStore {
 		this.loaded.add(staffId);
 		const file = this.fileFor(staffId);
 		try {
-			if (fs.existsSync(file)) fs.unlinkSync(file);
+			if (this.fs.existsSync(file)) this.fs.unlinkSync(file);
 		} catch (err) {
 			console.error(`[inbox-store] Failed to remove inbox for staff ${staffId}:`, err);
 		}
