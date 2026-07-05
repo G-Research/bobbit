@@ -12,10 +12,12 @@ import { render } from "lit";
 import {
 	renderRuntimeConsentCardView,
 	renderRuntimeConsentCard,
+	renderRuntimeRow,
 	ensureRuntimeCapabilities,
 	invalidateRuntimeCapabilities,
 	activationEntityTotal,
 	activationEntityEnabledCount,
+	masterToggleDisabledRefs,
 	runtimeRestPackId,
 	runtimeCapabilityCacheKey,
 } from "../../src/app/marketplace-page.js";
@@ -73,6 +75,19 @@ const CONSENT_PACK = { scope: "server", packName: "hindsight", packId: "hindsigh
 
 (window as any).__total = (activation: PackActivationResponse): number => activationEntityTotal(activation);
 (window as any).__enabled = (activation: PackActivationResponse): number => activationEntityEnabledCount(activation);
+
+// Runtime activation ROW (review blocker: the row is the consent card's only
+// production render path — the card alone rendering proves nothing about the
+// activation UI). Renders the toggle + consent card together.
+(window as any).__renderRuntimeRow = (runtimeId: string, checked: boolean): string => {
+	render(renderRuntimeRow(CONSENT_PACK, runtimeId, checked), container);
+	return container.innerHTML;
+};
+
+// Master enable/disable-all payload (review blocker: the payload must cover the
+// schema-v2 arrays — runtimes above all — or master-OFF leaves Docker running).
+(window as any).__masterToggle = (activation: PackActivationResponse, enable: boolean): unknown =>
+	masterToggleDisabledRefs(activation, enable);
 
 // Runtime REST identity + capability cache-key helpers (findings #2/#3): the
 // capability fetch must address the STRUCTURAL pack id (not the manifest name)
