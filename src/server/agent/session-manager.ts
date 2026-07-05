@@ -58,6 +58,7 @@ export {
 	type CleanupArchivedSessionWorktreesResponse,
 	type ArchivedSessionWorktreeCleanupResult,
 } from "./archived-worktree-manager.js";
+import { McpWiring, type McpWiringDeps } from "./mcp-wiring.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -1009,9 +1010,33 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private prStatusStore: PrStatusStore | null = null;
-	private mcpManager: McpManager | null = null;
-	private scopedMcpManagers: Map<string, McpManager> = new Map();
-	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
+	/**
+	 * MCP client wiring (SessionManager decomposition cohort 2,
+	 * docs/design/session-manager-decomposition.md). Constructed once at the
+	 * end of this constructor and held for the manager's lifetime — same
+	 * discipline as `archivedWorktrees` above (§4.2: not rebuilt per-call).
+	 */
+	private mcpWiring!: McpWiring;
+	/**
+	 * `mcpManager`/`scopedMcpManagers` are now owned by `McpWiring`; these
+	 * accessors keep them readable/writable exactly like plain fields
+	 * (`this.mcpManager`, `this.mcpManager = x`, `this.scopedMcpManagers.set(...)`)
+	 * for every existing internal call site AND for unit tests that poke
+	 * these members directly on a `new SessionManager()` instance (see
+	 * mcp-wiring.ts's TEST-SEAM HAZARD doc comment) — zero call-site changes
+	 * required anywhere else in this file or in tests.
+	 */
+	private get mcpManager(): McpManager | null { return this.mcpWiring.mcpManager; }
+	private set mcpManager(value: McpManager | null) { this.mcpWiring.mcpManager = value; }
+	// No `private` modifier: no production code in this file reads this
+	// accessor anymore (every cluster-D caller moved into mcp-wiring.ts and
+	// reads its own `scopedMcpManagers` field directly) — TS's unused-private-member
+	// check would otherwise flag it. Kept as an accessor (not removed) purely
+	// for unit tests that poke `sessionManager.scopedMcpManagers.set(...)` /
+	// `.clear()` / `.size` directly on a `new SessionManager()` instance; see
+	// mcp-wiring.ts's TEST-SEAM HAZARD comment. Same "effectively public"
+	// treatment this file already gives `sandboxManager`/`configCascade`.
+	get scopedMcpManagers(): Map<string, McpManager> { return this.mcpWiring.scopedMcpManagers; }
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
@@ -1457,6 +1482,37 @@ export class SessionManager {
 				}
 			},
 		} satisfies ArchivedWorktreeDeps);
+
+		// MCP client wiring (SessionManager decomposition cohort 2,
+		// docs/design/session-manager-decomposition.md). toolManager/
+		// projectConfigStore/projectContextManager are constructor-time-only
+		// (never reassigned after this point, confirmed live) so they are
+		// captured by value. `resolveSessionScope`/`isCwdInUseByLiveSession`
+		// are narrow snapshot callbacks over `sessions` (which mutates
+		// continuously), never a live Map reference — same rule as
+		// `archivedWorktrees`'s `listLiveSessionWorktreeRefs` above. The four
+		// `createMcpManager`/`ensureMcpManager`/`ensureMcpManagerForContext`/
+		// `refreshExternalMcpToolRegistrations` callbacks round-trip through
+		// THIS class's own delegating wrapper methods (defined further down,
+		// at their original cluster-D locations) rather than calling
+		// `this.mcpWiring.<name>` directly — see mcp-wiring.ts's TEST-SEAM
+		// HAZARD doc comment for why: several unit tests monkey-patch these
+		// exact method names directly on a `new SessionManager()` instance.
+		this.mcpWiring = new McpWiring({
+			toolManager: this.toolManager,
+			projectConfigStore: this.projectConfigStore,
+			projectContextManager: this.projectContextManager,
+			resolveSessionScope: (sessionId) => {
+				const live = this.sessions.get(sessionId);
+				const persisted = live ? null : this.getPersistedSession(sessionId);
+				return { projectId: live?.projectId ?? persisted?.projectId, cwd: live?.cwd ?? persisted?.cwd };
+			},
+			isCwdInUseByLiveSession: (cwd) => [...this.sessions.values()].some((s) => !!s.cwd && path.resolve(s.cwd) === cwd),
+			createMcpManager: (cwd, opts) => this.createMcpManager(cwd, opts),
+			ensureMcpManager: (scope) => this.ensureMcpManager(scope),
+			ensureMcpManagerForContext: (projectId, cwd) => this.ensureMcpManagerForContext(projectId, cwd),
+			refreshExternalMcpToolRegistrations: () => this.refreshExternalMcpToolRegistrations(),
+		} satisfies McpWiringDeps);
 
 		// Start the status heartbeat. Runs for the lifetime of this manager;
 		// `unref()` so unit tests don't hang on process exit.
@@ -2151,218 +2207,107 @@ export class SessionManager {
 		return tasks.length > 0 ? tasks[0].id : undefined;
 	}
 
-	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
-		if (scope?.scopeKey) return scope.scopeKey;
-		if (scope?.projectId) return `project:${scope.projectId}`;
-		if (scope?.cwd) return `cwd:${path.resolve(scope.cwd)}`;
-		return "default";
-	}
-
+	/** Delegates to McpWiring (SessionManager decomposition cohort 2, docs/design/session-manager-decomposition.md). */
 	getMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): McpManager | null {
-		const key = this.mcpScopeKey(scope);
-		if (key === "default") return this.mcpManager;
-		return this.scopedMcpManagers.get(key) ?? null;
+		return this.mcpWiring.getMcpManager(scope);
 	}
 
+	/** Delegates to McpWiring. */
 	getActiveMcpManagers(): McpManager[] {
-		return [
-			...(this.mcpManager ? [this.mcpManager] : []),
-			...this.scopedMcpManagers.values(),
-		];
+		return this.mcpWiring.getActiveMcpManagers();
 	}
 
+	/**
+	 * Delegates to McpWiring. Kept as a real prototype method (not inlined)
+	 * because tests/mcp-manager-marketplace-discovery.test.ts monkey-patches
+	 * this exact method on a `new SessionManager()` instance and expects
+	 * McpWiring's OWN internal callers (removeScopedMcpManagerByKey,
+	 * reloadMcpAfterMarketplaceMutation's pending-reload callback, initMcp)
+	 * to observe the patch — see mcp-wiring.ts's TEST-SEAM HAZARD comment and
+	 * this constructor's McpWiring wiring above.
+	 */
 	refreshExternalMcpToolRegistrations(): void {
-		if (!this.toolManager) return;
-		const removePrefixes = new Set<string>(["mcp__"]);
-		const toolInfos: ReturnType<McpManager["getToolInfos"]> = [];
-		for (const mgr of this.getActiveMcpManagers()) {
-			const refresh = mgr.getToolRegistrationRefresh();
-			for (const prefix of refresh.removePrefixes) removePrefixes.add(prefix);
-			toolInfos.push(...refresh.toolInfos);
-		}
-		for (const prefix of removePrefixes) this.toolManager.removeExternalTools(prefix);
-		this.toolManager.registerExternalTools(toolInfos.map(info => ({
-			name: info.name,
-			description: info.description,
-			summary: info.summary ?? info.description,
-			group: info.group,
-			docs: info.docs,
-			provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
-		})));
+		this.mcpWiring.refreshExternalMcpToolRegistrations();
 	}
 
-	private async removeScopedMcpManagerByKey(key: string): Promise<boolean> {
-		const mgr = this.scopedMcpManagers.get(key);
-		if (!mgr) return false;
-		this.scopedMcpManagers.delete(key);
-		try {
-			await mgr.disconnectAll();
-		} finally {
-			this.refreshExternalMcpToolRegistrations();
-		}
-		return true;
-	}
-
+	/** Delegates to McpWiring. */
 	async cleanupScopedMcpManagersForProject(projectId: string, rootPath?: string): Promise<void> {
-		const targetRoot = rootPath ? path.resolve(rootPath) : undefined;
-		const projectScopeKey = this.mcpScopeKey({ projectId });
-		const targetCwdScopeKey = targetRoot ? this.mcpScopeKey({ cwd: targetRoot }) : undefined;
-		const keys: string[] = [];
-		for (const [key, mgr] of this.scopedMcpManagers) {
-			const scope = mgr.getDiscoveryScope();
-			if (
-				key === projectScopeKey
-				|| key === targetCwdScopeKey
-				|| scope.projectId === projectId
-				|| (targetRoot && path.resolve(scope.cwd) === targetRoot)
-			) {
-				keys.push(key);
-			}
-		}
-		for (const key of keys) await this.removeScopedMcpManagerByKey(key);
+		return this.mcpWiring.cleanupScopedMcpManagersForProject(projectId, rootPath);
 	}
 
+	/** Delegates to McpWiring. Cluster G (ArchivedWorktreeManager) and cluster I (terminateSession) call this by name — see this constructor's ArchivedWorktreeDeps wiring above. */
 	private async cleanupScopedMcpManagersForSessionScope(scope: { projectId?: string; cwd?: string }): Promise<void> {
-		if (!scope.cwd) return;
-		const cwdKey = this.mcpScopeKey({ cwd: scope.cwd });
-		if (!this.scopedMcpManagers.has(cwdKey)) return;
-		const cwd = path.resolve(scope.cwd);
-		const stillInUse = [...this.sessions.values()].some((s) => !!s.cwd && path.resolve(s.cwd) === cwd);
-		if (!stillInUse) await this.removeScopedMcpManagerByKey(cwdKey);
+		return this.mcpWiring.cleanupScopedMcpManagersForSessionScope(scope);
 	}
 
+	/**
+	 * Delegates to McpWiring. Kept as a real prototype method — monkey-patched
+	 * directly by tests/mcp-manager-marketplace-discovery.test.ts and
+	 * tests/session-manager-ambient-mcp-isolation.test.ts to stub out real
+	 * `McpManager` construction; McpWiring's own `ensureMcpManager`/`initMcp`
+	 * round-trip through `deps.createMcpManager` (i.e. back through this
+	 * method) so the patch is honored — see mcp-wiring.ts's TEST-SEAM HAZARD
+	 * comment.
+	 */
 	private createMcpManager(cwd: string, opts?: { projectId?: string; scopeKey?: string; includeAdditionalProjects?: boolean }): McpManager {
-		const projectConfigStore = opts?.projectId && this.projectContextManager
-			? (this.projectContextManager.getOrCreate(opts.projectId)?.projectConfigStore ?? this.projectConfigStore)
-			: this.projectConfigStore;
-		const mgr = new McpManager(cwd, projectConfigStore, bobbitStateDir(), {
-			marketplaceResolver: this.marketplaceMcpResolver ?? undefined,
-			...(opts?.projectId ? { projectId: opts.projectId } : {}),
-			...(opts?.scopeKey ? { scopeKey: opts.scopeKey } : {}),
-		});
-		if (opts?.includeAdditionalProjects && this.projectContextManager) {
-			const additionalProjects = Array.from(this.projectContextManager.all())
-				.filter(ctx => ctx.project.rootPath !== cwd)
-				.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
-			if (additionalProjects.length > 0) mgr.setAdditionalProjects(additionalProjects);
-		}
-		return mgr;
+		return this.mcpWiring.createMcpManager(cwd, opts);
 	}
 
+	/**
+	 * Delegates to McpWiring. Kept as a real prototype method — monkey-patched
+	 * directly by tests/mcp-manager-marketplace-discovery.test.ts and
+	 * tests/headquarters-server-scope-guards.test.ts; McpWiring's own
+	 * `ensureMcpManagerForContext`/`reloadMcpAfterMarketplaceMutation`/
+	 * `resolveMcpManagerForSession` round-trip through `deps.ensureMcpManager`
+	 * (i.e. back through this method) so the patch is honored — see
+	 * mcp-wiring.ts's TEST-SEAM HAZARD comment.
+	 */
 	async ensureMcpManager(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): Promise<McpManager | null> {
-		const key = this.mcpScopeKey(scope);
-		if (key === "default") return this.mcpManager;
-		const existing = this.scopedMcpManagers.get(key);
-		if (existing) return existing;
-		let cwd = scope?.cwd;
-		let projectId = scope?.projectId;
-		if (projectId && this.projectContextManager) {
-			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (!ctx) return null;
-			cwd = ctx.project.rootPath;
-		}
-		if (!cwd) return null;
-		const mgr = this.createMcpManager(cwd, { projectId, scopeKey: key });
-		this.scopedMcpManagers.set(key, mgr);
-		await mgr.connectAll();
-		return mgr;
+		return this.mcpWiring.ensureMcpManager(scope);
 	}
 
+	/** Delegates to McpWiring. Cluster A (buildPipelineContext) and cluster F (buildToolActivationArgs) call this by name. */
 	private getMcpManagerForContext(projectId?: string, cwd?: string): McpManager | null {
-		if (projectId) return this.getMcpManager({ projectId, cwd });
-		return null;
+		return this.mcpWiring.getMcpManagerForContext(projectId, cwd);
 	}
 
+	/**
+	 * Delegates to McpWiring. Kept as a real prototype method — this is the
+	 * PR #105 test-seam (tests/helpers/mcp-stub.ts's `stubMcp()`) that
+	 * clusters A/B/I (restoreSession, createSession, createDelegateSession,
+	 * grantToolPermission, forceAbort) call by name to avoid reaching real
+	 * ambient MCP config in unit tests (design doc §2.3/hazard 3). McpWiring's
+	 * own `ensureMcpManagerForSession` round-trips through
+	 * `deps.ensureMcpManagerForContext` (i.e. back through this method) so
+	 * the stub is honored from every internal path too.
+	 */
 	private async ensureMcpManagerForContext(projectId?: string, cwd?: string): Promise<McpManager | null> {
-		if (projectId) return this.ensureMcpManager({ projectId, cwd });
-		return null;
+		return this.mcpWiring.ensureMcpManagerForContext(projectId, cwd);
 	}
 
-	private getMcpSessionScope(sessionId: string): { projectId?: string; cwd?: string } {
-		const live = this.sessions.get(sessionId);
-		const persisted = live ? null : this.getPersistedSession(sessionId);
-		return { projectId: live?.projectId ?? persisted?.projectId, cwd: live?.cwd ?? persisted?.cwd };
-	}
-
+	/** Delegates to McpWiring. */
 	getMcpManagerForSession(sessionId: string): McpManager | null {
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
-		return this.getMcpManagerForContext(projectId, cwd);
+		return this.mcpWiring.getMcpManagerForSession(sessionId);
 	}
 
+	/** Delegates to McpWiring. */
 	async ensureMcpManagerForSession(sessionId: string): Promise<McpManager | null> {
-		const { projectId, cwd } = this.getMcpSessionScope(sessionId);
-		return this.ensureMcpManagerForContext(projectId, cwd);
+		return this.mcpWiring.ensureMcpManagerForSession(sessionId);
 	}
 
+	/** Delegates to McpWiring. */
 	async resolveMcpManagerForSession(sessionId: string, scopeKey?: string): Promise<McpManager | null> {
-		if (!scopeKey) return this.ensureMcpManagerForSession(sessionId);
-		const { projectId } = this.getMcpSessionScope(sessionId);
-		const projectScopeKey = projectId ? this.mcpScopeKey({ projectId }) : undefined;
-		if (projectId && scopeKey === projectScopeKey) return this.getMcpManager({ scopeKey }) ?? await this.ensureMcpManager({ projectId });
-		return null;
+		return this.mcpWiring.resolveMcpManagerForSession(sessionId, scopeKey);
 	}
 
-	private aggregateMcpReloadResults(results: McpReloadResult[]): McpReloadResult | undefined {
-		if (results.length === 0) return undefined;
-		const connected = results.flatMap(r => r.connected);
-		const disconnected = results.flatMap(r => r.disconnected);
-		const unchanged = results.flatMap(r => r.unchanged);
-		const skippedErrored = results.flatMap(r => r.skippedErrored);
-		const failed = results.flatMap(r => r.failed);
-		const statuses = results.flatMap(r => r.statuses);
-		let status: McpReloadResult["status"] = "ok";
-		if (results.some(r => r.status === "pending")) {
-			status = "pending";
-		} else if (results.every(r => r.status === "error")) {
-			status = "error";
-		} else if (results.some(r => r.status === "error" || r.status === "partial")) {
-			status = "partial";
-		}
-		return { status, connected, disconnected, unchanged, skippedErrored, failed, statuses };
-	}
-
+	/** Delegates to McpWiring. */
 	async reloadMcpAfterMarketplaceMutation(scope?: "server" | "global-user" | "project", projectId?: string): Promise<McpReloadResult | undefined> {
-		const managers = new Set<McpManager>();
-		if (scope === "project") {
-			const mgr = await this.ensureMcpManager({ projectId });
-			if (mgr) managers.add(mgr);
-		} else {
-			if (this.mcpManager) managers.add(this.mcpManager);
-			for (const mgr of this.scopedMcpManagers.values()) managers.add(mgr);
-		}
-		const results: McpReloadResult[] = [];
-		const pendingRefreshes: Promise<unknown>[] = [];
-		for (const mgr of managers) {
-			try {
-				const result = await mgr.reloadDiscoveredServers({ timeoutMs: 30_000, queueIfInFlight: true });
-				results.push(result);
-				if (result.status === "pending") {
-					const pending = mgr.currentReload();
-					if (pending) pendingRefreshes.push(pending.catch(() => undefined));
-				}
-			} catch (err) {
-				const scopeKey = mgr.getScopeKey();
-				results.push({
-					status: "error",
-					connected: [],
-					disconnected: [],
-					unchanged: [],
-					skippedErrored: [],
-					failed: [{ name: scopeKey, error: err instanceof Error ? err.message : String(err) }],
-					statuses: [],
-				});
-			}
-		}
-		if (pendingRefreshes.length > 0) {
-			void Promise.allSettled(pendingRefreshes).then(() => this.refreshExternalMcpToolRegistrations());
-		}
-		return this.aggregateMcpReloadResults(results);
+		return this.mcpWiring.reloadMcpAfterMarketplaceMutation(scope, projectId);
 	}
 
+	/** Delegates to McpWiring. */
 	setMarketplaceMcpResolver(resolver: MarketplaceMcpResolver | null | undefined): void {
-		this.marketplaceMcpResolver = resolver ?? null;
-		this.mcpManager?.setMarketplaceResolver(this.marketplaceMcpResolver);
-		for (const mgr of this.scopedMcpManagers.values()) mgr.setMarketplaceResolver(this.marketplaceMcpResolver);
+		this.mcpWiring.setMarketplaceMcpResolver(resolver);
 	}
 
 	setMarketplacePiExtensionResolver(resolver: MarketplacePiExtensionResolver | null | undefined): void {
@@ -2481,29 +2426,9 @@ export class SessionManager {
 		}
 	}
 
+	/** Delegates to McpWiring. */
 	async initMcp(cwd: string): Promise<void> {
-		try {
-			const mgr = this.createMcpManager(cwd, { includeAdditionalProjects: true });
-
-			await mgr.connectAll();
-			this.mcpManager = mgr;
-
-			if (this.projectContextManager) {
-				for (const ctx of this.projectContextManager.all()) {
-					const key = this.mcpScopeKey({ projectId: ctx.project.id });
-					if (this.scopedMcpManagers.has(key)) continue;
-					const scoped = this.createMcpManager(ctx.project.rootPath, { projectId: ctx.project.id, scopeKey: key });
-					this.scopedMcpManagers.set(key, scoped);
-					await scoped.connectAll();
-				}
-			}
-
-			// Register MCP tools with ToolManager across default and scoped managers.
-			this.refreshExternalMcpToolRegistrations();
-			console.log(`[mcp] MCP initialization complete`);
-		} catch (err) {
-			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
-		}
+		return this.mcpWiring.initMcp(cwd);
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
@@ -8776,21 +8701,11 @@ export class SessionManager {
 		// forceAbort respawn and restore paths lazily create scoped managers per
 		// project/cwd via ensureMcpManagerForContext). Left connected, their real
 		// stdio child processes / HTTP sockets outlive the gateway process on a
-		// graceful shutdown. disconnectServer() swallows per-server errors, so
-		// this is best-effort and never blocks the rest of shutdown(). The
-		// typeof guard tolerates test doubles injected as `mcpManager` (e.g.
-		// tests/headquarters-server-scope-guards.test.ts stubs a plain object
-		// to observe scope-resolution calls) — a double without disconnectAll
-		// has no real child processes to reap.
-		const mcpManagers = [...this.scopedMcpManagers.values(), ...(this.mcpManager ? [this.mcpManager] : [])];
-		await Promise.all(mcpManagers.map(async (mgr) => {
-			if (typeof mgr?.disconnectAll !== "function") return;
-			await mgr.disconnectAll().catch((err: unknown) => {
-				console.error("[mcp] Failed to disconnect MCP manager during shutdown:", (err as Error).message);
-			});
-		}));
-		this.scopedMcpManagers.clear();
-		this.mcpManager = null;
+		// graceful shutdown. Delegates to McpWiring (SessionManager decomposition
+		// cohort 2, docs/design/session-manager-decomposition.md) — see
+		// mcp-wiring.ts's shutdownDisconnectAll for the best-effort/typeof-guard
+		// details preserved verbatim from this file's pre-extraction logic.
+		await this.mcpWiring.shutdownDisconnectAll();
 	}
 }
 
