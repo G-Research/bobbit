@@ -37,6 +37,33 @@ import { makeTmpDir } from "./helpers/tmp.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
 
+// A valid admin token must be >= 64 chars (see src/server/auth/token.ts
+// readToken()). The previous fixture wrote a short "admin-token" that
+// readToken() rejects for length, so on a box with no real admin token file
+// applySandboxWiring's mintScopedGatewayToken -> readToken() returned null and
+// threw "Cannot read gateway credentials for sandbox".
+const TEST_ADMIN_TOKEN = "a".repeat(64);
+
+/**
+ * Seed a valid admin token where readToken() looks for it: the primary
+ * serverSecretsDir() (pinned via BOBBIT_SECRETS_DIR to a temp dir) plus the
+ * legacy bobbitStateDir() fallback. Snapshots/restores BOBBIT_SECRETS_DIR so
+ * the ambient environment is untouched. Returns the restore fn (callers already
+ * snapshot/restore BOBBIT_DIR themselves).
+ */
+function seedAdminToken(stateRoot: string, stateDir: string): () => void {
+	const secretsDir = path.join(stateRoot, "secrets");
+	fs.mkdirSync(secretsDir, { recursive: true });
+	fs.writeFileSync(path.join(secretsDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
+	fs.writeFileSync(path.join(stateDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
+	const prevSecrets = process.env.BOBBIT_SECRETS_DIR;
+	process.env.BOBBIT_SECRETS_DIR = secretsDir;
+	return () => {
+		if (prevSecrets === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+		else process.env.BOBBIT_SECRETS_DIR = prevSecrets;
+	};
+}
+
 describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates", () => {
 	function setup(opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof mock.fn>; createSpy: ReturnType<typeof mock.fn> } {
 		const stateRoot = makeTmpDir("sandbox-wiring-");
@@ -45,7 +72,7 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		const stateDir = path.join(stateRoot, "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		fs.writeFileSync(path.join(stateDir, "token"), "admin-token\n");
+		const restoreSecrets = seedAdminToken(stateRoot, stateDir);
 
 		const sm: any = new SessionManager();
 		// Sandbox config = docker so applySandboxWiring proceeds.
@@ -74,6 +101,7 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		sm.dispatchGoalProvisionedForWorktree = dispatchSpy;
 
 		const restoreEnv = () => {
+			restoreSecrets();
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
 		};
@@ -181,7 +209,7 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 		const stateDir = path.join(stateRoot, "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
-		fs.writeFileSync(path.join(stateDir, "token"), "admin-token\n");
+		const restoreSecrets = seedAdminToken(stateRoot, stateDir);
 
 		// Real host worktree directory the agent's session was created with.
 		const hostWorktree = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-wt-")));
@@ -242,6 +270,7 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 			assert.ok(!fs.existsSync(path.join("/workspace-wt/goal-g1-coder-x", MARKER)), "no marker at the container path");
 		} finally {
 			moduleHost.dispose();
+			restoreSecrets();
 			if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 			else process.env.BOBBIT_DIR = prevBobbitDir;
 			fs.rmSync(hostWorktree, { recursive: true, force: true });
