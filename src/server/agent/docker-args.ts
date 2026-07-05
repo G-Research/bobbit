@@ -227,6 +227,11 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// (and any shared pack modules they import) resolve inside Docker sandboxes.
 	const addReadonlyDirectoryMount = (hostPath: string, containerPath: string): void => {
 		try {
+			// fs.statSync follows symlinks, so this guard is satisfied whether
+			// hostPath is a real directory (atomicReplaceDir fallback) or a
+			// symlink into a versioned dir (gapless symlink-swap; see
+			// scripts/lib/gapless-symlink-swap.mjs) — Docker's bind-mount source
+			// resolution follows the symlink on the host the same way.
 			if (fs.statSync(hostPath).isDirectory()) {
 				args.push("-v", `${toDockerPath(hostPath)}:${containerPath}:ro`);
 			}
@@ -236,11 +241,12 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	};
 	// Mount builtin tools directory for cascade-resolved builtin extensions. Guarded
 	// on existence like the mounts below: dist/server/defaults is rebuilt via an
-	// atomic rename (scripts/copy-defaults.mjs) so it's never observed missing or
-	// partial mid-rebuild, but a truly fresh checkout that hasn't been built yet
-	// (or a builtinToolsDir override pointing at a still-uncreated path) must not
-	// bind-mount a nonexistent host path — Docker silently auto-creates an empty
-	// directory for a missing `-v` source with no error, which then reads as
+	// atomic rename (scripts/copy-defaults.mjs, gapless where the platform
+	// supports it — scripts/lib/gapless-symlink-swap.mjs) so it's never observed
+	// missing or partial mid-rebuild, but a truly fresh checkout that hasn't been
+	// built yet (or a builtinToolsDir override pointing at a still-uncreated path)
+	// must not bind-mount a nonexistent host path — Docker silently auto-creates an
+	// empty directory for a missing `-v` source with no error, which then reads as
 	// "/tools-builtin/* not resolving" inside the sandbox for that container's
 	// entire lifetime.
 	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
