@@ -44,7 +44,13 @@ const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+// Route names are JavaScript export/member names, so first-party packs use
+// camelCase route ids (e.g. `defineExperiment`). Mirrors pack-manifest.ts's
+// ROUTE_NAME_RE (restores commit 0eacc2dc, "Allow camelCase pack route
+// names" — dropped from this copy by a later merge; pinned by
+// tests/pack-contributions.test.ts's "accepts camelCase route names in the
+// allowlist").
+const ROUTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
 // Acceptance list for `providers/<id>.yaml` `hooks:` entries — derived from the
 // single source of truth in lifecycle-hooks.ts (finding EXT-02) so this can

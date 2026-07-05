@@ -629,6 +629,7 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { seedBuiltinPackDefaults } from "./agent/builtin-pack-defaults.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
@@ -1297,6 +1298,16 @@ export function createGateway(config: GatewayConfig) {
 	);
 
 	const projectConfigStore = new ProjectConfigStore(configDir);
+
+	// One-time boot seed for first-party built-ins that ship present-but-disabled
+	// (opt-in) — e.g. experiment-runner. Idempotent (durable marker under
+	// stateDir) and a no-op when the pack is not actually shipped as a built-in;
+	// never throws (src/server/agent/builtin-pack-defaults.ts).
+	try {
+		seedBuiltinPackDefaults({ stateDir, store: projectConfigStore, builtinPacksDir: resolveBuiltinPacksDir() });
+	} catch (err) {
+		console.warn(`[startup] builtin-pack-defaults seed failed: ${err}`);
+	}
 
 	// Initialize per-project contexts. Headquarters shares the server-scope
 	// ProjectConfigStore so server/HQ writes cannot stale-read or clobber.
