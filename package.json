@@ -28,6 +28,7 @@
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "pretest:unit": "node -e \"require('fs').existsSync('dist/server')||require('child_process').execSync('npm run build:server',{stdio:'inherit'})\"",
     "test:unit": "node scripts/run-unit.mjs",
+    "test:unit:queued": "scripts/test-mutex.sh npm run test:unit",
     "test:bundle": "npm run build:ui && npx tsx --test tests/bundle-size.test.ts",
     "test:e2e": "npm run test:e2e:run --",
     "test:e2e:run": "node scripts/run-playwright-e2e.mjs",
