@@ -967,6 +967,16 @@ function stringifyPersistedToolResultContent(content: unknown): string {
  * `isNarrowDelegateAllowedTools` to decide whether a delegate's spawn-time
  * `allowedTools` PROVES the spawn is bounded to a single coding task, as
  * opposed to one that still needs team/goal awareness.
+ *
+ * NOT the same axis as `read-only-tool-policy.ts`'s `isReadOnlyToolPolicy`
+ * (eligibility-signal lane), even though both derive a session-class signal
+ * from the resolved `allowedTools` instead of an opt-in flag/name. This is an
+ * ALLOW-list that deliberately INCLUDES `write`/`edit`/`bash`/`bash_bg` — a
+ * narrow delegate is still allowed to mutate files, it's just proven to be
+ * scoped to one bounded coding task. `isReadOnlyToolPolicy` is the opposite:
+ * a DENY-list that excludes any of those same tools. Forcing them onto one
+ * shared constant would contort whichever one lost — kept deliberately
+ * separate, cross-referenced here so they don't silently diverge in intent.
  */
 const NARROW_WORKER_TOOLS: ReadonlySet<string> = new Set([
 	"read", "write", "edit", "grep", "find", "ls", "bash", "bash_bg", "read_session", "activate_skill",

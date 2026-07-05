@@ -100,6 +100,15 @@ export interface RpcBridgeOptions {
 	sandboxed?: boolean;
 	/** Whether this session should run in read-only mode where supported by the runtime. */
 	readOnly?: boolean;
+	/**
+	 * The session's RESOLVED tool allowlist (post role/group/project policy —
+	 * e.g. `plan.effectiveAllowedTools` names), threaded through purely as
+	 * classification metadata for `isInProcessBridgeEligible`
+	 * (`read-only-tool-policy.ts`'s `isReadOnlyToolPolicy`). Not consumed by
+	 * `RpcBridge`/`ClaudeCodeBridge` themselves — tool enforcement happens via
+	 * `args`/the guard extension, same as before this field existed.
+	 */
+	allowedTools?: string[];
 	/** Env vars to inject into the container (API keys, etc.) */
 	sandboxCredentials?: Record<string, string>;
 	/** Gateway URL for the agent to call back */

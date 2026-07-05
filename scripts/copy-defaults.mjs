@@ -8,26 +8,15 @@
  * The defaults/ directory is the source of truth for all shipped builtins that
  * participate in the config cascade. .bobbit/config/ is purely runtime state
  * for per-project overrides and is NOT copied into builtins.
+ *
+ * The replace is atomic (see scripts/lib/atomic-copy-dir.mjs) — dist/server/defaults
+ * is bind-mounted read-only into sandbox containers as /tools-builtin, and a naive
+ * rm -rf + copy leaves it missing/partial for any container created mid-rebuild.
  */
-import fs from "node:fs";
-import path from "node:path";
+import { atomicReplaceDir } from "./lib/atomic-copy-dir.mjs";
 
 const SRC = "defaults";
 const DEST = "dist/server/defaults";
 
-function copyDir(src, dest) {
-  if (!fs.existsSync(src)) return;
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDir(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-copyDir(SRC, DEST);
+atomicReplaceDir(SRC, DEST);
 console.log(`Built ${DEST}/ from ${SRC}/`);
