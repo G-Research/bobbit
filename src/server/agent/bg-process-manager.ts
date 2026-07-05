@@ -261,10 +261,29 @@ export interface TailerSpec {
 }
 export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
 
-/** Default host poll tailer (200ms) with §6.2 truncation/offset-rebase + gateway copytruncate. */
+/** Fast cadence used while a stream is actively producing output (5Hz). */
+const POLL_FAST_MS = 200;
+/**
+ * Backoff cap once a stream has gone quiet (0.5Hz) — PERF-07: an idle
+ * bash_bg stream no longer burns a constant 5 statSync/sec forever; the poll
+ * interval decays from {@link POLL_FAST_MS} to this cap after a few silent
+ * ticks and resets to {@link POLL_FAST_MS} the instant output resumes, so
+ * delivery latency after silence is bounded by this cap, never unbounded.
+ */
+const POLL_MAX_MS = 2000;
+/** Multiplier applied to the interval on each consecutive quiet tick, until the cap. */
+const POLL_BACKOFF_FACTOR = 2;
+
+/**
+ * Default host poll tailer with §6.2 truncation/offset-rebase + gateway
+ * copytruncate, and PERF-07 adaptive-backoff cadence: {@link POLL_FAST_MS}
+ * while output flows, decaying by {@link POLL_BACKOFF_FACTOR} per quiet tick
+ * up to {@link POLL_MAX_MS}, reset to fast on the next byte seen.
+ */
 export class PollTailer implements Tailer {
 	private offset = 0;
 	private timer: ReturnType<typeof setInterval> | null = null;
+	private intervalMs = POLL_FAST_MS;
 	constructor(
 		private readonly file: string,
 		private readonly stream: "stdout" | "stderr",
@@ -274,18 +293,31 @@ export class PollTailer implements Tailer {
 	start(startOffset: number): void {
 		this.offset = startOffset;
 		if (this.timer) return;
-		this.timer = setInterval(() => this.tick(), 200);
+		this.intervalMs = POLL_FAST_MS;
+		this.armTimer();
+	}
+	private armTimer(): void {
+		this.timer = setInterval(() => this.tick(), this.intervalMs);
 		if (typeof (this.timer as any).unref === "function") (this.timer as any).unref();
+	}
+	/** Recreate the interval at a new cadence (setInterval can't change its own delay in place). */
+	private rearm(nextIntervalMs: number): void {
+		if (nextIntervalMs === this.intervalMs) return;
+		this.intervalMs = nextIntervalMs;
+		if (this.timer) clearInterval(this.timer);
+		this.armTimer();
 	}
 	private tick(): void {
 		let size: number;
 		try { size = fs.statSync(this.file).size; } catch { return; /* ENOENT → not yet created */ }
+		let sawActivity = false;
 		if (size < this.offset) {
 			// §6.2 rebase after copytruncate (trimmer/gateway shrank the spool below the
 			// offset). Persist the reset synchronously so a restart resumes from the
 			// aligned offset and never re-reads already-projected bytes (Fix 3).
 			this.offset = 0;
 			this.onOffsetReset?.(this.stream, 0);
+			sawActivity = true; // the spool was just written to (that's what triggered the shrink)
 		}
 		if (size > this.offset) {
 			try {
@@ -302,7 +334,10 @@ export class PollTailer implements Tailer {
 					const buf = Buffer.alloc(len);
 					const read = fs.readSync(fd, buf, 0, len, from);
 					this.offset = from + read;
-					if (read > 0) this.onChunk(this.stream, buf.subarray(0, read).toString("utf-8"), this.offset);
+					if (read > 0) {
+						this.onChunk(this.stream, buf.subarray(0, read).toString("utf-8"), this.offset);
+						sawActivity = true;
+					}
 				} finally { fs.closeSync(fd); }
 			} catch { /* transient */ }
 		}
@@ -312,6 +347,12 @@ export class PollTailer implements Tailer {
 		if (size > MAX_LOG_BYTES && this.offset >= size) {
 			try { fs.truncateSync(this.file, 0); this.offset = 0; this.onOffsetReset?.(this.stream, 0); } catch { /* ignore */ }
 		}
+		// PERF-07: instant reset to fast cadence on any activity; otherwise decay
+		// geometrically toward the cap. A silent stream still gets to POLL_MAX_MS
+		// within a handful of ticks, so worst-case delivery latency after silence
+		// ends is bounded (next tick after resume sees the growth via statSync).
+		if (sawActivity) this.rearm(POLL_FAST_MS);
+		else this.rearm(Math.min(this.intervalMs * POLL_BACKOFF_FACTOR, POLL_MAX_MS));
 	}
 	stop(): void {
 		if (this.timer) { clearInterval(this.timer); this.timer = null; }
