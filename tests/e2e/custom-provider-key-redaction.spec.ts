@@ -353,9 +353,55 @@ test.describe("Custom provider API-key redaction (E2E)", () => {
 			expect(res.status).toBe(200);
 			expect(mock.authHeaders).toContain(`Bearer ${FAKE_KEY_2}`);
 			expect(mock.authHeaders).not.toContain(`Bearer ${FAKE_KEY}`);
+
+			// Trailing-slash difference is still the same destination — the
+			// normalization must not force users to retype the key over a "/".
+			mock.authHeaders.length = 0;
+			res = await api(gw, "/api/custom-providers/test", {
+				method: "POST",
+				body: JSON.stringify({ id: "p-vllm", name: "p-vllm", type: "vllm", baseUrl: `${mock.url}/` }),
+			});
+			expect(res.status).toBe(200);
+			expect(mock.authHeaders, "trailing slash must still match the stored baseUrl").toContain(`Bearer ${FAKE_KEY}`);
 		} finally {
 			await gw?.shutdown();
 			await mock.close();
+		}
+	});
+
+	test("SECURITY: /test with a stored id but a DIFFERENT baseUrl must NOT export the stored key (anti-exfiltration)", async () => {
+		// mockA is the saved destination; mockB plays the attacker-chosen URL.
+		const mockA = await startMockOpenAICompatServer(["model-a"]);
+		const mockB = await startMockOpenAICompatServer(["model-b"]);
+		let gw: StartedGateway | undefined;
+		try {
+			gw = await startSeededGateway({
+				preferences: {
+					customProviders: [
+						{ id: "p-vllm", name: "p-vllm", type: "vllm", baseUrl: mockA.url, apiKey: FAKE_KEY },
+					],
+				},
+			});
+
+			mockA.authHeaders.length = 0;
+			mockB.authHeaders.length = 0;
+			const res = await api(gw, "/api/custom-providers/test", {
+				method: "POST",
+				body: JSON.stringify({ id: "p-vllm", name: "p-vllm", type: "vllm", baseUrl: mockB.url }),
+			});
+			// The test still runs (new-destination test) — just without a key.
+			expect(res.status).toBe(200);
+			expect((await res.json()).models.map((m: any) => m.id)).toContain("model-b");
+			// The stored key must not have been sent ANYWHERE: the outbound
+			// request to the caller-chosen URL carries no Authorization at all.
+			expect(mockB.authHeaders.length).toBeGreaterThan(0);
+			for (const h of mockB.authHeaders) expect(h, "no Authorization header may reach a non-matching baseUrl").toBe("");
+			expect(mockB.authHeaders.join("|")).not.toContain(FAKE_KEY);
+			expect(mockA.authHeaders, "the saved destination must not be contacted either").toHaveLength(0);
+		} finally {
+			await gw?.shutdown();
+			await mockA.close();
+			await mockB.close();
 		}
 	});
 });

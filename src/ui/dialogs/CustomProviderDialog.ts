@@ -308,6 +308,16 @@ export class CustomProviderDialog extends DialogBase {
 											disabled: this.testing || !this.baseUrl,
 											children: this.testing ? i18n("Testing...") : i18n("Test Connection"),
 										})}
+										${
+											// The server only falls back to the stored key when the
+											// baseUrl still matches the saved one (anti-exfiltration
+											// guard) — testing a CHANGED URL needs the key typed in.
+											this.hasStoredKey && !this.apiKey && this.provider && this.baseUrl !== this.provider.baseUrl
+												? html`<div class="text-sm text-muted-foreground" data-testid="changed-url-key-hint">
+														${i18n("Key required to test a changed URL")}
+													</div>`
+												: ""
+										}
 										${this.testError ? html` <error-details .message=${this.testError}></error-details> ` : ""}
 										${
 											this.discoveredModels.length > 0

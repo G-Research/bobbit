@@ -173,4 +173,30 @@ test.describe("<custom-provider-dialog> key redaction contract", () => {
 		expect(payload.name).toBe("Fresh Provider");
 		expect(payload.apiKey).toBe(FAKE_KEY);
 	});
+
+	test("editing the base URL surfaces 'Key required to test a changed URL' until a key is typed", async ({ page }) => {
+		// Auto-discovery type so the Test Connection block (which hosts the
+		// hint) renders. The server's anti-exfiltration guard only applies the
+		// stored key to the SAVED baseUrl, so a changed URL needs a typed key.
+		const ollamaProvider = {
+			id: "prov-ollama",
+			name: "Local Ollama",
+			type: "ollama",
+			baseUrl: "http://localhost:11434",
+			hasApiKey: true,
+		};
+		await gotoAndWait(page);
+		await openDialog(page, ollamaProvider);
+
+		const hint = page.locator('custom-provider-dialog [data-testid="changed-url-key-hint"]');
+		await expect(hint).toHaveCount(0);
+
+		// Change the base URL: hint appears.
+		await page.locator("custom-provider-dialog input:not([type=password])").nth(1).fill("http://attacker.example.invalid:11434");
+		await expect(hint).toContainText("Key required to test a changed URL");
+
+		// Typing a key satisfies it: hint disappears.
+		await keyInput(page).fill(FAKE_KEY);
+		await expect(hint).toHaveCount(0);
+	});
 });

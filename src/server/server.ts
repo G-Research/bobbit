@@ -602,7 +602,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, syncCustomProviderModelsJson, removeCustomProviderModelsJsonEntry, redactCustomProviderConfig, baseUrlsMatchForStoredKey } from "./agent/model-registry.js";
 import { CLAUDE_CODE_OPERATOR_CONFIRMATION_PURPOSE, isClaudeCodePreferenceKey, normalizeClaudeCodePreferencePatch, sensitiveClaudeCodePreferenceMutation } from "./agent/claude-code-config.js";
 import { getClaudeCodeStatus, invalidateClaudeCodeStatusCache } from "./agent/claude-code-status.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -7519,6 +7519,12 @@ async function handleApiRoute(
 	// the client omits the key but references an existing provider id (edit
 	// flow — the dialog never receives the stored key back), fall back to the
 	// stored key server-side so "Test Connection" keeps working.
+	// SECURITY: the fallback ONLY applies when the requested baseUrl matches
+	// the stored provider's configured baseUrl (baseUrlsMatchForStoredKey) —
+	// otherwise a caller-chosen baseUrl would make the server export the
+	// stored key as a bearer token to an arbitrary destination. A changed URL
+	// is a new destination: the test runs with NO key unless the caller
+	// supplies one.
 	if (url.pathname === "/api/custom-providers/test" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body || !body.type || !body.baseUrl) {
@@ -7530,7 +7536,9 @@ async function handleApiRoute(
 			const stored = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined)?.find(
 				(c: CustomProviderConfig) => c.id === body.id,
 			);
-			testApiKey = stored?.apiKey;
+			if (stored?.apiKey && baseUrlsMatchForStoredKey(stored.baseUrl, body.baseUrl)) {
+				testApiKey = stored.apiKey;
+			}
 		}
 		const config: CustomProviderConfig = {
 			id: body.id || "test-" + Date.now(),

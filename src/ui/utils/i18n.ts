@@ -198,6 +198,7 @@ declare module "@mariozechner/mini-lit" {
 		"Stored key will be removed on save.": string;
 		"Clear stored key": string;
 		"Keep stored key": string;
+		"Key required to test a changed URL": string;
 		"Test Connection": string;
 		Discovered: string;
 		models: string;
@@ -444,6 +445,7 @@ export const translations = {
 		"Stored key will be removed on save.": "Stored key will be removed on save.",
 		"Clear stored key": "Clear stored key",
 		"Keep stored key": "Keep stored key",
+		"Key required to test a changed URL": "Key required to test a changed URL",
 		"Test Connection": "Test Connection",
 		Discovered: "Discovered",
 		Models: "Models",
