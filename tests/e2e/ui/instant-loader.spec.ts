@@ -21,6 +21,26 @@ async function showHeadquarters(): Promise<void> {
 	expect(resp.ok, "Headquarters should be visible for the splash Quick Session path").toBeTruthy();
 }
 
+// `Locator.isVisible({ timeout })` does NOT wait — Playwright's own type
+// declarations mark that `timeout` option `@deprecated ... ignored`, and
+// `isVisible()` always resolves immediately against whatever is in the DOM
+// *right now*. The splash click handler (`_onSplashSessionClick` in
+// src/app/render.ts) flips `state.splashProjectPickerOpen` synchronously, but
+// the actual render is deferred one frame via `renderApp()`'s
+// `requestAnimationFrame` scheduling (src/app/state.ts) — so an immediate,
+// non-waiting visibility check taken right after `.click()` resolves can
+// observe the picker DOM before that frame has painted, and silently treat
+// neither picker as present. `Locator.waitFor({ state: "visible" })` (unlike
+// `isVisible()`) actually polls up to `timeout`, which is the real fix here.
+async function isVisibleWithin(locator: import("@playwright/test").Locator, timeout: number): Promise<boolean> {
+	try {
+		await locator.waitFor({ state: "visible", timeout });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 test.describe("Instant loader on session create", () => {
 	test.beforeEach(async () => {
 		await showHeadquarters();
@@ -64,11 +84,11 @@ test.describe("Instant loader on session create", () => {
 		// points. Pick Headquarters to exercise the built-in first-run workspace;
 		// single-visible-project states still POST immediately.
 		const picker = page.locator("project-picker-popover").first();
-		if (await picker.isVisible({ timeout: 1_000 }).catch(() => false)) {
+		if (await isVisibleWithin(picker, 2_000)) {
 			await picker.locator('button[data-project-id="headquarters"]').click();
 		} else {
 			const inlineHeadquartersOption = page.getByRole("button", { name: /Headquarters\s+Server workspace/i }).first();
-			if (await inlineHeadquartersOption.isVisible({ timeout: 1_000 }).catch(() => false)) {
+			if (await isVisibleWithin(inlineHeadquartersOption, 2_000)) {
 				await inlineHeadquartersOption.click();
 			}
 		}
@@ -76,10 +96,25 @@ test.describe("Instant loader on session create", () => {
 
 		const loader = page.locator('[data-testid="bobbit-loader"]').first();
 		try {
+			// `renderApp()` (src/app/state.ts) schedules the actual DOM patch via
+			// `requestAnimationFrame`, not synchronously — `state.creatingSession`
+			// flips true before the fetch is even issued, but the loader only
+			// paints on the next animation frame. Under heavy full-suite load
+			// (many concurrent headless Chromium instances contending for the
+			// host's compositor/paint scheduling — not reproducible with plain
+			// CPU-spin load on this box), that next frame can be delayed well
+			// past a tight 1s margin, same class of issue as the VER-07 fixed
+			// flake in KNOWN-FLAKES.txt (tight wall-clock margin losing under
+			// contention). Widening this does not weaken the regression check:
+			// the POST is held open by the route handler above until we call
+			// releasePost() in this `finally`, so a real regression (loader
+			// gated behind POST completion) would still never satisfy this wait
+			// and the test would still fail — just after a more realistic
+			// budget for a browser-scheduled paint under load.
 			await expect(
 				loader,
 				"bobbit-loader should be visible before POST /api/sessions is allowed to complete",
-			).toBeVisible({ timeout: 1_000 });
+			).toBeVisible({ timeout: 5_000 });
 			expect(postReleased).toBe(false);
 		} finally {
 			releasePost();

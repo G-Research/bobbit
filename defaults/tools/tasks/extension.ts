@@ -246,6 +246,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")]),
 			summary: Type.String({ description: "Markdown findings: what was reviewed, issues with file:line, rationale." }),
+			findings: Type.Optional(Type.Array(Type.Object({
+				severity: Type.Union([Type.Literal("blocker"), Type.Literal("major"), Type.Literal("minor")]),
+				summary: Type.String({ maxLength: 300, description: "One-line finding summary." }),
+				file: Type.Optional(Type.String({ description: "Relative file path." })),
+				line: Type.Optional(Type.Number({ description: "1-indexed line number." })),
+			}), { description: "Structured issues found, esp. on fail." })),
 			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report. Mutually exclusive with report_html_file." })),
 			report_html_file: Type.Optional(Type.String({ description: "Absolute path to HTML report file. Use for large reports." })),
 		}),
@@ -255,6 +261,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			try {
 				const body: Record<string, unknown> = { sessionId, verdict: params.verdict, summary: params.summary };
+				if (params.findings) body.findings = params.findings;
 				if (params.report_html) body.report_html = params.report_html;
 				if (params.report_html_file) body.report_html_file = params.report_html_file;
 				return ok(await api("POST", "/api/internal/verification-result", body));

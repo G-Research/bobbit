@@ -98,6 +98,7 @@ promptTemplate: |-
   - `verdict: "pass"` if you found no critical or high severity actionable bugs.
   - `verdict: "fail"` if you found any critical or high severity actionable bug.
   - `summary`: detailed markdown containing what you reviewed, all findings with file:line references, reproduction conditions, consequences, and verdict rationale.
+  - `findings`: on fail, also list each issue as a structured finding (severity/summary/file/line).
 
   Do **not** emit XML verdict tags. Do **not** call `gate_signal`.
 

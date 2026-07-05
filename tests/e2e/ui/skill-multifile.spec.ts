@@ -15,7 +15,7 @@ import { test, expect } from "../gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
 
 const SKILL_NAME = "multi-file-skill";
 const BODY_MARKER = "MULTI_FILE_BODY_MARKER";
@@ -80,7 +80,7 @@ test.describe("multi-file skill activation", () => {
 
 		// (B) Open UI and send /<name>; chip should render.
 		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await navigateToHash(page, `#/session/${sessionId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 
 		await sendMessage(page, `/${SKILL_NAME}`);
@@ -108,8 +108,13 @@ test.describe("multi-file skill activation", () => {
 		// (D) Reload preserves chip.
 		await page.reload();
 		// Re-assert the session route after reload — some sidebar layouts can
-		// land on a different default view depending on init order.
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		// land on a different default view depending on init order. Use
+		// navigateToHash (not a raw `window.location.hash =` assignment): under
+		// heavy parallel load Chromium can drop or delay a single hash
+		// assignment right after a reload, and the subsequent waitForFunction
+		// would then poll a stale value for the full timeout. navigateToHash
+		// retries the assignment against the real post-navigation signal.
+		await navigateToHash(page, `#/session/${sessionId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await expect(userBubble(page)).toBeVisible({ timeout: 20_000 });
 		await expect(userBubble(page)).toContainText(`/${SKILL_NAME}`);

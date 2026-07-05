@@ -1872,6 +1872,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			serverProjectConfigStore: this.projectConfigStore ?? null,
 			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
@@ -2782,8 +2783,9 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		if (!parts.serverConfigStore) parts.serverConfigStore = this.projectConfigStore;
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		// Skills catalog — progressive disclosure (level 1) for autonomous activation.
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
@@ -2806,6 +2808,13 @@ export class SessionManager {
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts);
 		return assembleSystemPrompt(sessionId, parts);
+	}
+
+	private projectConfigStoreForPrompt(projectId?: string): import("./project-config-store.js").ProjectConfigStore | undefined {
+		if (projectId && this.projectContextManager) {
+			return this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore;
+		}
+		return this.projectConfigStore;
 	}
 
 	/**
@@ -2903,6 +2912,7 @@ export class SessionManager {
 			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
 			allowedTools: opts.allowedTools,
 			projectConfigStore: narrow ? undefined : this.projectConfigStore,
+			serverConfigStore: this.projectConfigStore,
 			sectionOrder: opts.sectionOrder,
 			promptProfile: narrow ? "narrow-worker" : undefined,
 		};
@@ -2919,6 +2929,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const ownerProjectId = session.projectId ?? persisted?.projectId;
+		const ownerProjectConfigStore = this.projectConfigStoreForPrompt(ownerProjectId);
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -2934,9 +2946,11 @@ export class SessionManager {
 				allowedTools: session.allowedTools ?? persisted.allowedTools,
 				sectionOrder,
 			});
+			parts.projectConfigStore = isNarrowDelegateAllowedTools(parts.allowedTools) ? undefined : ownerProjectConfigStore;
+			parts.serverConfigStore = this.projectConfigStore;
 			parts.dynamicContext = session.promptParts?.dynamicContext;
 			if (this.toolManager && !parts.toolDocs) {
-				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 			}
 			if (!parts.skillsCatalog) {
 				parts.skillsCatalog = this.computeSkillsCatalog(
@@ -2990,7 +3004,8 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 			};
 		} else {
@@ -3019,14 +3034,15 @@ export class SessionManager {
 				rolePrompt,
 				roleName,
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 				promptProfile: (session.nonInteractive ?? persisted?.nonInteractive) ? "reviewer" : undefined,
 			};
 		}
 
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(
@@ -6741,6 +6757,18 @@ export class SessionManager {
 		goalId?: string;
 		teamGoalId?: string;
 		projectId?: string;
+		/** Eligibility-signal census (in-process-bridge-eligibility.ts step 2):
+		 *  the derived read-only-ness of the RPC bridge already constructed by
+		 *  the caller (`isReadOnlyToolPolicy` over `allowedTools`, computed
+		 *  before this bridge existed — see verification-harness.ts's legacy
+		 *  `runLlmReviewDirect`). Recorded as session metadata for display/
+		 *  persistence parity with SessionManager-spawned reviewer sessions;
+		 *  this bridge was already constructed by the caller, so it cannot
+		 *  retroactively change which bridge class backs it. */
+		readOnly?: boolean;
+		/** The resolved tool allowlist behind `readOnly` above, for the same
+		 *  metadata-parity reason. */
+		allowedTools?: string[];
 	}): () => void {
 		const eventBuffer = new EventBuffer();
 		const now = Date.now();
@@ -6762,6 +6790,8 @@ export class SessionManager {
 			goalId: opts.goalId,
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			promptQueue: new PromptQueue(),
 		};
 
@@ -6801,6 +6831,8 @@ export class SessionManager {
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
 			nonInteractive: true,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			projectId: extProjectId,
 		});
 
@@ -7176,7 +7208,8 @@ export class SessionManager {
 			rolePrompt,
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
-			projectConfigStore: this.projectConfigStore,
+			projectConfigStore: this.projectConfigStoreForPrompt(session.projectId),
+			serverConfigStore: this.projectConfigStore,
 		});
 
 		// Respawn with new system prompt

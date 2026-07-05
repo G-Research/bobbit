@@ -32,7 +32,7 @@ import { availableParallelism, loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveUnitSelection } from "./test-unit-args.mjs";
-import { computeUnitSummary, formatUnitSummaryLine } from "./unit-summary.mjs";
+import { computeUnitSummary, detectMaskedFailureCount, formatUnitSummaryLine } from "./unit-summary.mjs";
 import { readHeartbeatDiagnostics } from "./lib/unit-heartbeat.mjs";
 import { computeAdaptiveConcurrency } from "./lib/adaptive-concurrency.mjs";
 
@@ -237,8 +237,25 @@ function run(label, args, opts = {}) {
 			if (runnerTimeoutTimer) clearTimeout(runnerTimeoutTimer);
 			if (runnerKillGraceTimer) clearTimeout(runnerKillGraceTimer);
 			const secs = ((Date.now() - start) / 1000).toFixed(1);
-			const resultCode = timedOut ? 1 : (code ?? (signal ? 1 : 0));
+			let resultCode = timedOut ? 1 : (code ?? (signal ? 1 : 0));
 			const exitLabel = timedOut ? `timeout/${code ?? signal ?? "?"}` : (code ?? signal ?? "?");
+			// Masked-failure cross-check: a runner reporting a successful (0) exit
+			// code is not trusted blindly — its own output is scanned for an
+			// unambiguous failure count (node's `# fail N`, Playwright's `N failed`)
+			// and a reported-0 result is promoted to failing if one is found. See
+			// detectMaskedFailureCount's doc comment (scripts/unit-summary.mjs) for
+			// why: this exact class of bug (13 real browser-fixture failures
+			// alongside a 0 exit code) was observed on a loaded shared machine.
+			// Never overrides an already-failing code.
+			if (resultCode === 0) {
+				const maskedFailures = detectMaskedFailureCount(label, tail.join("\n"));
+				if (maskedFailures > 0) {
+					resultCode = 1;
+					const warning = `[run-unit] ${label} reported exit 0 but its own output shows ${maskedFailures} failure(s) — overriding to a failing exit code (masked-failure guard).`;
+					console.error(`\n${warning}`);
+					appendTail(tail, warning);
+				}
+			}
 			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${exitLabel})`);
 			res({ label, code: resultCode, tail });
 		};

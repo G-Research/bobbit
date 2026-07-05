@@ -126,6 +126,50 @@ describe("buildVerificationFailureMessage", () => {
 		assert.match(message, /gate_inspect\(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120\)/);
 	});
 
+	it("renders compact findings lines under a failed step when present (F3)", () => {
+		const message = buildVerificationFailureMessage("review", [
+			{
+				name: "LLM review", type: "llm-review", passed: false, output: "Found issues",
+				findings: [
+					{ severity: "blocker", summary: "SQL injection in query builder", file: "src/db.ts", line: 42 },
+					{ severity: "minor", summary: "Missing trailing comma" },
+				],
+			},
+		]);
+
+		assert.match(message, /- \*\*blocker\*\*: SQL injection in query builder \(src\/db\.ts:42\)/);
+		assert.match(message, /- \*\*minor\*\*: Missing trailing comma/);
+		// Findings appear before the inspect block for that step.
+		const findingIndex = message.indexOf("**blocker**");
+		const inspectIndex = message.indexOf('gate_inspect(gate_id="review"');
+		assert.ok(findingIndex >= 0 && findingIndex < inspectIndex);
+	});
+
+	it("omits findings section entirely when a failed step has none (dark-compatible)", () => {
+		const message = buildVerificationFailureMessage("review", [
+			{ name: "LLM review", type: "llm-review", passed: false, output: "Found an issue" },
+		]);
+
+		assert.doesNotMatch(message, /\*\*blocker\*\*/);
+		assert.doesNotMatch(message, /\*\*major\*\*/);
+		assert.doesNotMatch(message, /\*\*minor\*\*/);
+	});
+
+	it("caps rendered findings and notes the overflow count", () => {
+		const findings = Array.from({ length: 7 }, (_, i) => ({
+			severity: "minor" as const,
+			summary: `issue ${i}`,
+		}));
+		const message = buildVerificationFailureMessage("review", [
+			{ name: "LLM review", type: "llm-review", passed: false, output: "many issues", findings },
+		]);
+
+		assert.match(message, /- \*\*minor\*\*: issue 0/);
+		assert.match(message, /- \*\*minor\*\*: issue 4/);
+		assert.doesNotMatch(message, /issue 5/);
+		assert.match(message, /- \.\.\.and 2 more findings/);
+	});
+
 	it("does not need longer fences when command output contains backticks", () => {
 		const message = buildVerificationFailureMessage("execution", [
 			{ name: "Unit tests", type: "command", passed: false, output: "before\n```\ninside\n```\nafter" },

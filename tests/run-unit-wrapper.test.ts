@@ -51,6 +51,17 @@ test("run-unit timeout diagnostics name the in-flight/hung test file", () => {
 	assert.match(src, /run\("node-logic", nodeArgs, \{ heartbeatFile: nodeHeartbeatFile \}\)/, "only the node-logic runner is given a heartbeat file");
 });
 
+test("run-unit never trusts a reported-0 exit code blindly — masked-failure guard is wired in", () => {
+	// A runner (browser-fixtures in particular) reporting a 0 exit code is
+	// cross-checked against its own output before being treated as a pass —
+	// see scripts/unit-summary.mjs::detectMaskedFailureCount's doc comment for
+	// the incident this guards against (13 real browser-fixture failures
+	// alongside a 0 exit code on a loaded shared machine).
+	assert.match(src, /import \{ computeUnitSummary, detectMaskedFailureCount, formatUnitSummaryLine \} from "\.\/unit-summary\.mjs"/, "the masked-failure detector is imported alongside the existing summary helpers");
+	assert.match(src, /if \(resultCode === 0\) \{\s*\n\s*const maskedFailures = detectMaskedFailureCount\(label, tail\.join\("\\n"\)\);/, "a reported-0 result is cross-checked against the runner's own output");
+	assert.match(src, /maskedFailures > 0\) \{\s*\n\s*resultCode = 1;/, "a detected failure signature overrides a reported-0 exit code to failing");
+});
+
 test("run-unit preserves concurrent runners, artifact snapshot/restore and heartbeat cleanup", () => {
 	// Both runners must launch inside the SAME Promise.all so they run
 	// concurrently. TEST-01 path filtering wraps each in a conditional spread

@@ -98,7 +98,8 @@ unmodified.
 Trim the schema-shaped duplication (params names) rather than the prose
 (the one-line summary earns its keep — it's the compact per-tool "what does
 this do" index, and the previous compaction pass already established that
-shape). `BOBBIT_TOOLS_MD=full|index` env var (`resolveToolsMdMode()` /
+shape). `tools_md: "full" | "index"` in `project.yaml`, with
+`BOBBIT_TOOLS_MD=full|index` as the process override (`resolveToolsMdMode()` /
 `getToolDocsForPrompt(..., modeOverride?)`).
 
 **Default unset = `"full"` = today's output, byte-identical** (pinned by the
@@ -151,7 +152,7 @@ F19's `BOBBIT_AGENTSMD_BUDGET`.
 
 ## A/B plan
 
-1. Ship default OFF (`"full"`). Operators opt in with `BOBBIT_TOOLS_MD=index`.
+1. Ship default OFF (`"full"`). Operators opt in with `tools_md: "index"` or `BOBBIT_TOOLS_MD=index`.
 2. Compare `<sessionId>-prompt.json` `totalTokens` and the "Tools" section's
    `tokens`/`toolsMdMode` fields across matched sessions with the flag off
    vs. on for the same project/role mix, alongside the `cacheWrite1h`

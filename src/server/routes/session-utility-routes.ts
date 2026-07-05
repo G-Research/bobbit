@@ -196,7 +196,7 @@ async function handleSessionAbort(ctx: CoreRouteCtx, params: Record<string, stri
 
 // GET /api/sessions/:id/prompt-sections — return system prompt broken into labeled sections
 async function handlePromptSections(ctx: CoreRouteCtx, params: Record<string, string>): Promise<void> {
-	const { json, sessionManager, toolManager } = ctx;
+	const { json, sessionManager, toolManager, serverProjectConfigStore } = ctx;
 	const id = params.id;
 
 	const persisted = loadPersistedPromptSections(id);
@@ -209,7 +209,8 @@ async function handlePromptSections(ctx: CoreRouteCtx, params: Record<string, st
 	if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
 
 	if (!parts.toolDocs && toolManager) {
-		parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		if (!parts.serverConfigStore) parts.serverConfigStore = serverProjectConfigStore;
+		parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 	}
 
 	const sections = getPromptSections(parts);
