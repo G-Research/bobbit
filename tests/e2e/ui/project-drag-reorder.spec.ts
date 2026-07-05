@@ -342,16 +342,70 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		await setHeadquartersVisible(true).catch(() => {});
 	});
 
-	test("Headquarters is anchored first and has no reorder handle", async ({ page }) => {
+	test("Headquarters is first by default but is a reorderable project like any other", async ({ page }) => {
 		await setHeadquartersVisible(true);
 		await openDesktop(page);
 		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
 			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
 		);
-		expect(headerIds[0], "Headquarters should be anchored first when visible").toBe(HEADQUARTERS_PROJECT_ID);
+		expect(headerIds[0], "Headquarters should be first by default when visible").toBe(HEADQUARTERS_PROJECT_ID);
 		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 20_000 });
-		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters should be excluded from reorder rows").toHaveCount(0);
-		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters should not render a reorder handle").toHaveCount(0);
+		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters participates in reorder rows").toHaveCount(1);
+		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters renders a reorder handle like any other project").toHaveCount(1);
+	});
+
+	test("Headquarters can be dragged to a new position and it persists across reload", async ({ page }) => {
+		test.setTimeout(120_000);
+		await setHeadquartersVisible(true);
+		const alpha = await createProjectFixture("hq-drag-alpha");
+		const beta = await createProjectFixture("hq-drag-beta");
+		const hq = { id: HEADQUARTERS_PROJECT_ID, name: "Headquarters", rootPath: "", sessionId: "", sessionTitle: "" } as ProjectFixture;
+
+		await openDesktop(page);
+		await waitForProjects(page, [alpha, beta]);
+		// Headquarters is first by default, then user-ordered normal projects.
+		await expectRenderedOrder(page, [hq, alpha, beta]);
+
+		// Drag Headquarters to the end — it is a first-class reorderable project.
+		await startProjectDrag(page, hq);
+		await dropProjectOn(page, beta, "after");
+
+		await expectRenderedOrder(page, [alpha, beta, hq]);
+		await expectPersistedOrder([alpha, beta, hq]);
+		await expectNoProjectOrderFailureDialog(page);
+
+		await page.reload();
+		await waitForProjects(page, [alpha, beta]);
+		await expectRenderedOrder(page, [alpha, beta, hq]);
+	});
+
+	test("releasing the drag outside the list commits the previewed order", async ({ page }) => {
+		test.setTimeout(120_000);
+		await setHeadquartersVisible(false);
+		const alpha = await createProjectFixture("outside-alpha");
+		const beta = await createProjectFixture("outside-beta");
+		const gamma = await createProjectFixture("outside-gamma");
+
+		await openDesktop(page);
+		await waitForProjects(page, [alpha, beta, gamma]);
+		await expectRenderedOrder(page, [alpha, beta, gamma]);
+
+		// Pick up gamma and drag it far above the list, then release completely
+		// outside the reorder list. The preview clamps gamma to the top slot.
+		await startProjectDrag(page, gamma);
+		await page.mouse.move(200, 4, { steps: 12 });
+		await expectRenderedOrder(page, [gamma, alpha, beta]);
+		await page.mouse.up();
+		await expect(reorderMode(page), "release should exit reorder mode").toHaveCount(0, { timeout: 10_000 });
+
+		// The previewed order must persist even though the release was outside the list.
+		await expectRenderedOrder(page, [gamma, alpha, beta]);
+		await expectPersistedOrder([gamma, alpha, beta]);
+		await expectNoProjectOrderFailureDialog(page);
+
+		await page.reload();
+		await waitForProjects(page, [alpha, beta, gamma]);
+		await expectRenderedOrder(page, [gamma, alpha, beta]);
 	});
 
 	test("desktop affordances, pointer reorder persistence, live sync, cancel, and collapsed sidebar order", async ({ page }) => {
@@ -434,7 +488,9 @@ test.describe("Project drag reorder (browser E2E)", () => {
 				timeout: 10_000,
 			}).toBeGreaterThan(0);
 			const savedOrderPayload = savedOrderPayloads[savedOrderPayloads.length - 1];
-			expect(savedOrderPayload).not.toContain(HEADQUARTERS_PROJECT_ID);
+			// Headquarters is now a first-class reorderable project, so it participates
+			// in the persisted order payload (first here, since only normals moved).
+			expect(savedOrderPayload[0], "Headquarters should be included in the reorder payload").toBe(HEADQUARTERS_PROJECT_ID);
 			expect(savedOrderPayload.filter(id => [gamma.id, alpha.id, beta.id].includes(id))).toEqual([
 				gamma.id,
 				alpha.id,

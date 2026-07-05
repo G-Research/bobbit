@@ -179,7 +179,7 @@ describe("Headquarters storage and config aliasing", () => {
 });
 
 describe("ProjectRegistry Headquarters ordering", () => {
-	it("ensureHeadquartersProject creates stable Headquarters and excludes it from user reorder", async () => {
+	it("ensureHeadquartersProject creates stable Headquarters as a reorderable project", async () => {
 		const { ProjectRegistry, SYSTEM_PROJECT_ID } = await import("../src/server/agent/project-registry.ts");
 		const stateDir = mkTemp("registry-state");
 		const configDir = mkTemp("registry-config");
@@ -200,25 +200,38 @@ describe("ProjectRegistry Headquarters ordering", () => {
 		assert.equal(path.resolve(hq.rootPath), path.resolve(hqRoot));
 		assert.notEqual(hq.hidden, true);
 		assert.notEqual(hq.provisional, true);
-		assert.equal(hq.position, undefined, "Headquarters is anchored, not user-positioned");
+		assert.equal(hq.position, 0, "Headquarters participates in user-controlled ordering (anchored first only by default)");
 
 		const sameRootNormal = registry.register("Server Root Normal", serverRoot, { acceptCanonical: true });
 		const b = registry.register("B", mkTemp("registry-b"), { acceptCanonical: true });
-		const reordered = registry.setVisibleOrder([b.id, sameRootNormal.id]);
-		assert.deepEqual(reordered.map(project => project.id), [HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id]);
+		// Headquarters is now a first-class reorderable project and MUST be included
+		// in the reorder payload alongside the normal projects.
+		const reordered = registry.setVisibleOrder([b.id, HEADQUARTERS_PROJECT_ID, sameRootNormal.id]);
+		assert.deepEqual(reordered.map(project => project.id), [b.id, HEADQUARTERS_PROJECT_ID, sameRootNormal.id]);
 		assert.deepEqual(
 			registry.list().filter(project => !project.hidden && project.id !== SYSTEM_PROJECT_ID).map(project => project.id),
-			[HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id],
+			[b.id, HEADQUARTERS_PROJECT_ID, sameRootNormal.id],
 		);
 		assert.throws(
-			() => registry.setVisibleOrder([HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id]),
-			/error|invalid_project_order/i,
-			"Headquarters must not be accepted in client-supplied reorder payloads",
+			() => registry.setVisibleOrder([b.id, sameRootNormal.id]),
+			/stale/i,
+			"reorder payloads must include Headquarters now that it participates in ordering",
 		);
 		assert.throws(
 			() => registry.register("HQ Dir", hqRoot, { acceptCanonical: true }),
 			/Headquarters|immutable/i,
 			"normal projects cannot be registered at the physical Headquarters directory",
+		);
+
+		// When Headquarters is hidden from project lists it is excluded from the
+		// reorder scope: the client omits it, so setVisibleOrder must accept a
+		// payload without it, preserve its slot, and reorder only the normals.
+		registry.setVisibleOrder([HEADQUARTERS_PROJECT_ID, sameRootNormal.id, b.id]);
+		const hiddenReordered = registry.setVisibleOrder([b.id, sameRootNormal.id], { excludeIds: [HEADQUARTERS_PROJECT_ID] });
+		assert.deepEqual(
+			hiddenReordered.map(project => project.id),
+			[HEADQUARTERS_PROJECT_ID, b.id, sameRootNormal.id],
+			"Headquarters keeps its slot while the excluded reorder repositions the normals",
 		);
 	});
 });
