@@ -66,7 +66,16 @@ The moving parts:
   interleaving. This is the **authoritative retained log** — every REST reader
   (`getLogs`/`grep`/`head`/`slice`) and restore read it, never the raw spools.
   Because it is rewritten from the already-capped buffer, it is bounded at every
-  instant (see [Bounded on-disk growth](#bounded-on-disk-growth)).
+  instant (see [Bounded on-disk growth](#bounded-on-disk-growth)). The file also
+  carries a leading `#OFF\t<outOffset>\t<errOffset>` header recording the EXACT
+  spool offsets its body covers, written atomically with the body on every
+  rewrite. Restore reads this header — not `BgProcessStore`'s independently
+  debounced (1s) copy of the same offsets — as the spool splice point, so the
+  projection and the splice point can never drift out of byte-alignment across
+  a hard kill even though the two files flush to disk on different debounces
+  (projection: 300ms). Without this, a hard kill in the seam between the two
+  debounces could duplicate (or, more rarely, drop) the re-attached output —
+  see finding CON-03 in the Fable refactor audit.
 - **Status snapshot** (`<bgId>.status`) — the real exit code. On host spawns the
   wrapper/helper writes it directly; for docker the gateway mirrors the
   container-internal status into this host file so the outcome survives the

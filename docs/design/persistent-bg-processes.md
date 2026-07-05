@@ -573,9 +573,25 @@ export class BgProcessStore {
 offset-advance. Offsets advance frequently, so `outOffset`/`errOffset` updates use the **debounced**
 path (like `lastActivity`), while `status`/`exitCode`/`terminalReason`/`endTime` **and the
 post-spawn `processPid`** (§4.0) are **recovery-critical** → flush synchronously (mirror
-`SessionStore.RECOVERY_CRITICAL_FIELDS`). Losing a few KB of replayed offset
-on a hard kill is harmless — the tailer re-reads from the persisted offset and the dedupe in the
-pill (`_fetchedUpTo`) and manager handle the small overlap.
+`SessionStore.RECOVERY_CRITICAL_FIELDS`).
+
+> **CON-03 correction (this store's debounce is NOT what keeps restore byte-aligned).** An earlier
+> draft of this section claimed a hard kill was harmless because "the dedupe in the pill
+> (`_fetchedUpTo`) and manager handle the small overlap." That is wrong on two counts: (1)
+> `_fetchedUpTo` is a **client-side**, timestamp-keyed guard against re-processing a
+> `bg_process_output` broadcast the pill already applied — it has no effect on what the gateway
+> writes into the durable projection or returns from a fresh `GET` after reconnect; (2) the
+> manager's own **content-based dedupe was removed** (Fix 3, §11 test "genuinely repeated output
+> ... is PRESERVED (not dropped)") because it wrongly dropped legitimately-repeated lines (e.g. a
+> second "ready"). So as of Fix 3 there is **no dedupe anywhere** protecting a hard kill from the
+> `writeProjection` (300ms) / `BgProcessStore` offset-save (1000ms) debounce skew — see finding
+> CON-03 in `bobbit-fable-refactor/FINDINGS.md`. The actual fix: `writeProjection()` embeds the
+> EXACT `outOffset`/`errOffset` the projection body covers in a leading header line
+> (`#OFF\t<out>\t<err>`), written atomically with the body on every rewrite; `loadProjection()`
+> reads that header and uses it — not the separately-debounced store offset — as the spool splice
+> point on restore. Header and body can never disagree with each other (same synchronous write),
+> only with the store's own debounced copy, which no longer matters for byte alignment. No new
+> store writes were added.
 
 ### 5.3 Wiring per project
 
