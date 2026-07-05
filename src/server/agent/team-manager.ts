@@ -1928,6 +1928,13 @@ export class TeamManager {
 				// and "...honours a goal-scoped inline role override...".
 				initialModel: inlineTeamLeadRole?.model || undefined,
 				initialThinkingLevel: inlineTeamLeadRole?.thinkingLevel || undefined,
+				// SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1 / staged-plan
+				// item 4.0/4.5): pass through a goal-stamped promptProfile override,
+				// when present — see `PersistedGoal.promptProfile`'s doc comment.
+				// `undefined` for every goal that doesn't set it (the overwhelming
+				// majority), so this is byte-identical to before this wave for every
+				// existing caller.
+				promptProfile: goal.promptProfile,
 			},
 		);
 

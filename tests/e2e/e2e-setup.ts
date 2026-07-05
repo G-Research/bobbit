@@ -582,8 +582,11 @@ const CHILDREN_MUTATION_PATH =
  * signal here ALSO controls whether the server mints a confirmation token
  * at all (see `swarm-routes.ts`'s `humanConfirmed` gate) — tests that want
  * to observe the agent-only (no-token) path use `rawApiFetch` instead.
+ *
+ * SWARM-W4.5 adds the plan-fan-in analogues (`plan-verify`/`plan-confirm`/
+ * `plan-reject`) — same OPERATOR-class authz, same human-gate discipline.
  */
-const SWARM_GROUP_ACTION_PATH = /^\/api\/goals\/[^/]+\/swarm-groups\/[^/]+\/(verify|confirm)$/;
+const SWARM_GROUP_ACTION_PATH = /^\/api\/goals\/[^/]+\/swarm-groups\/[^/]+\/(verify|confirm|plan-verify|plan-confirm|plan-reject)$/;
 
 /**
  * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan

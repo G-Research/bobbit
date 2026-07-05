@@ -482,6 +482,16 @@
 	color: var(--primary-foreground, #fff);
 	border-color: var(--primary);
 }
+/* SWARM-W4.5 — plan-fan-in's "Reject plan" action (orchestrator ruling #1). */
+.swarm-governor-btn-danger {
+	background: var(--background);
+	color: var(--destructive, #e5484d);
+	border-color: var(--destructive, #e5484d);
+}
+.swarm-governor-rejected {
+	color: var(--text-tertiary);
+	font-weight: 600;
+}
 
 /* ── SWARM GOVERNOR SIBLING ROWS (SWARM-W3 transparency) — per-candidate state/verdict, under the aggregate strip ── */
 .swarm-governor-siblings {
