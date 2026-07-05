@@ -43,36 +43,36 @@ export async function testPiAiProviderKey(provider: string, modelId: string, api
 export async function streamSimplePiAi(model: Model<any>, context: Context, options?: SimpleStreamOptions): Promise<any> {
 	switch (model.api) {
 		case "anthropic-messages": {
-			const { streamSimpleAnthropic } = await import("@earendil-works/pi-ai/anthropic");
-			return streamSimpleAnthropic(model as any, context, options as any);
+			const { anthropicMessagesApi } = await import("@earendil-works/pi-ai/api/anthropic-messages.lazy");
+			return anthropicMessagesApi().streamSimple(model as any, context, options as any);
 		}
 		case "azure-openai-responses": {
-			const { streamSimpleAzureOpenAIResponses } = await import("@earendil-works/pi-ai/azure-openai-responses");
-			return streamSimpleAzureOpenAIResponses(model as any, context, options as any);
+			const { azureOpenAIResponsesApi } = await import("@earendil-works/pi-ai/api/azure-openai-responses.lazy");
+			return azureOpenAIResponsesApi().streamSimple(model as any, context, options as any);
 		}
 		case "google-generative-ai": {
-			const { streamSimpleGoogle } = await import("@earendil-works/pi-ai/google");
-			return streamSimpleGoogle(model as any, context, options as any);
+			const { googleGenerativeAIApi } = await import("@earendil-works/pi-ai/api/google-generative-ai.lazy");
+			return googleGenerativeAIApi().streamSimple(model as any, context, options as any);
 		}
 		case "google-vertex": {
-			const { streamSimpleGoogleVertex } = await import("@earendil-works/pi-ai/google-vertex");
-			return streamSimpleGoogleVertex(model as any, context, options as any);
+			const { googleVertexApi } = await import("@earendil-works/pi-ai/api/google-vertex.lazy");
+			return googleVertexApi().streamSimple(model as any, context, options as any);
 		}
 		case "mistral-conversations": {
-			const { streamSimpleMistral } = await import("@earendil-works/pi-ai/mistral");
-			return streamSimpleMistral(model as any, context, options as any);
+			const { mistralConversationsApi } = await import("@earendil-works/pi-ai/api/mistral-conversations.lazy");
+			return mistralConversationsApi().streamSimple(model as any, context, options as any);
 		}
 		case "openai-codex-responses": {
-			const { streamSimpleOpenAICodexResponses } = await import("@earendil-works/pi-ai/openai-codex-responses");
-			return streamSimpleOpenAICodexResponses(model as any, context, options as any);
+			const { openAICodexResponsesApi } = await import("@earendil-works/pi-ai/api/openai-codex-responses.lazy");
+			return openAICodexResponsesApi().streamSimple(model as any, context, options as any);
 		}
 		case "openai-completions": {
-			const { streamSimpleOpenAICompletions } = await import("@earendil-works/pi-ai/openai-completions");
-			return streamSimpleOpenAICompletions(model as any, context, options as any);
+			const { openAICompletionsApi } = await import("@earendil-works/pi-ai/api/openai-completions.lazy");
+			return openAICompletionsApi().streamSimple(model as any, context, options as any);
 		}
 		case "openai-responses": {
-			const { streamSimpleOpenAIResponses } = await import("@earendil-works/pi-ai/openai-responses");
-			return streamSimpleOpenAIResponses(model as any, context, options as any);
+			const { openAIResponsesApi } = await import("@earendil-works/pi-ai/api/openai-responses.lazy");
+			return openAIResponsesApi().streamSimple(model as any, context, options as any);
 		}
 		case "bedrock-converse-stream":
 			throw new Error("Bedrock browser streaming is unavailable without the server-side agent path.");

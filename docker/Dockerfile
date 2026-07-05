@@ -90,18 +90,47 @@ function applyBobbitBedrockRequestHeaders(client, model, options) {
 }
 `;
 const npmRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
-const candidates = [
-  path.join(npmRoot, "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
-  path.join(npmRoot, "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
+// pi-ai 0.80 moved the Bedrock stream implementation from
+// dist/providers/amazon-bedrock.js to dist/api/bedrock-converse-stream.js
+// (the old path is now a thin provider-factory wrapper with neither anchor).
+// Mirrors src/server/agent/pi-ai-bedrock-headers-patch.ts's piAiBedrockCandidates():
+// per-copy target, new path first, old path kept as a fallback for an older
+// pinned pi-coding-agent version — a target only throws (failing the image
+// build loudly, on purpose) if EVERY one of its candidates exists but has
+// neither anchor, i.e. genuine upstream shape drift, not just the expected
+// pre-/post-0.80 path split.
+const targets = [
+  {
+    label: "top-level @earendil-works/pi-ai",
+    candidates: [
+      path.join(npmRoot, "@earendil-works", "pi-ai", "dist", "api", "bedrock-converse-stream.js"),
+      path.join(npmRoot, "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
+    ],
+  },
+  {
+    label: "pi-coding-agent's nested @earendil-works/pi-ai",
+    candidates: [
+      path.join(npmRoot, "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "api", "bedrock-converse-stream.js"),
+      path.join(npmRoot, "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
+    ],
+  },
 ];
-for (const file of candidates) {
-  if (!existsSync(file)) continue;
-  const source = readFileSync(file, "utf8");
-  if (source.includes(marker)) continue;
-  const importAnchor = `import { transformMessages } from "./transform-messages.js";\n`;
-  const clientAnchor = `            const client = new BedrockRuntimeClient(config);\n`;
-  if (!source.includes(importAnchor) || !source.includes(clientAnchor)) throw new Error(`Unsupported pi-ai Bedrock provider shape: ${file}`);
-  writeFileSync(file, source.replace(importAnchor, `${importAnchor}${helper}`).replace(clientAnchor, `${clientAnchor}            applyBobbitBedrockRequestHeaders(client, model, options);\n`));
+const importAnchor = `import { transformMessages } from "./transform-messages.js";\n`;
+const clientAnchor = `            const client = new BedrockRuntimeClient(config);\n`;
+for (const target of targets) {
+  let patched = false;
+  const existingCandidates = target.candidates.filter((file) => existsSync(file));
+  for (const file of existingCandidates) {
+    const source = readFileSync(file, "utf8");
+    if (source.includes(marker)) { patched = true; break; }
+    if (!source.includes(importAnchor) || !source.includes(clientAnchor)) continue;
+    writeFileSync(file, source.replace(importAnchor, `${importAnchor}${helper}`).replace(clientAnchor, `${clientAnchor}            applyBobbitBedrockRequestHeaders(client, model, options);\n`));
+    patched = true;
+    break;
+  }
+  if (!patched && existingCandidates.length > 0) {
+    throw new Error(`Unsupported pi-ai Bedrock provider shape for ${target.label}: ${existingCandidates.join(", ")}`);
+  }
 }
 NODE
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
