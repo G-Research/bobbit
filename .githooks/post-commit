@@ -2,10 +2,9 @@
 # graphify graph refresh — runs after a local `git commit`.
 #
 # Same guard/lock rationale as post-merge/post-checkout (see those for
-# details): no-ops unless this checkout already has src/graphify-out/graph.json,
-# and coalesces with any in-flight refresh via the shared lock. In practice
-# this mostly fires in the primary checkout — lane worktrees rarely carry
-# their own graph, so it's a no-op there too.
+# details): no-ops unless this is the PRIMARY checkout (lane worktrees share
+# the primary's graph via symlink and must never trigger a rebuild), and
+# coalesces with any in-flight refresh via the shared lock.
 # Opt in via `scripts/setup-githooks.sh` (sets core.hooksPath=.githooks).
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0

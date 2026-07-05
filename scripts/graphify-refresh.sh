@@ -5,20 +5,29 @@
 # .githooks/post-commit, and `npm run graph:refresh`
 # (see docs/dev-workflow.md#code-graph-graphify).
 #
+# OPERATING RULE (2026-07-05): `graphify update` must ONLY ever run from the
+# PRIMARY checkout. Lane worktrees share the primary's graph via a symlink
+# (src/graphify-out -> <primary>/src/graphify-out), so a refresh triggered
+# from a worktree would rebuild the SHARED graph from that worktree's file
+# state — wrong content, and with 10+ concurrent lane worktrees (plus heavy
+# e2e load) potentially many concurrent rebuilds. This script enforces that
+# rule for both hook-triggered and manual invocations.
+#
 # Guarded by design:
 #   - no-ops silently if `graphify` isn't on PATH (other machines/CI unaffected)
-#   - `--hook` (used by the git hooks) only refreshes a checkout that ALREADY
-#     has src/graphify-out/graph.json. A fresh `git worktree add` has none, so
-#     this is a fast, side-effect-free no-op there — it must NEVER trigger a
-#     full graph build per worktree (we routinely run 10+ concurrent lane
-#     worktrees; a full build per worktree would be a machine-wide hazard).
-#   - `--force` (used by `npm run graph:refresh`) always refreshes, building
-#     the graph from scratch if it doesn't exist yet.
+#   - PRIMARY-ONLY: exits unless this is the primary checkout, detected via
+#     `git rev-parse --git-dir` == `git rev-parse --git-common-dir` (equal in
+#     the primary; a linked worktree's git-dir is .git/worktrees/<name>).
+#     NOTE: a graph-file-presence check is NOT sufficient for this — the
+#     worktree symlinks make graph.json look "present" in every worktree.
+#   - `--hook` additionally requires src/graphify-out/graph.json to already
+#     exist, so a fresh clone that never built a graph doesn't start a full
+#     build as a git-hook side effect.
 #   - a mkdir-based lock under src/graphify-out/ means back-to-back git
 #     operations (e.g. a burst of merges) coalesce instead of stacking
-#     concurrent rebuilds. A lock older than $STALE_LOCK_SECONDS is treated as
-#     abandoned (the owning process crashed/was killed without cleanup) and
-#     reclaimed, rather than blocking refreshes forever.
+#     concurrent rebuilds. A lock older than $STALE_LOCK_SECONDS is treated
+#     as abandoned (the owning process crashed/was killed without cleanup)
+#     and reclaimed, rather than blocking refreshes forever.
 #   - runs detached in the background at low `nice` priority so the calling
 #     git command (or `npm run graph:refresh`) never blocks on the rebuild.
 #   - logs to src/graphify-out/graphify-update.log
@@ -43,10 +52,23 @@ esac
 
 command -v graphify >/dev/null 2>&1 || exit 0
 
+# PRIMARY-ONLY guard (see header). Hooks exit silently; a manual --force from
+# a worktree gets a loud refusal so nobody wonders why nothing happened.
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+if [ "$git_dir" != "$git_common_dir" ]; then
+  if [ "$mode" = "--force" ]; then
+    echo "graphify-refresh: refusing to run from a linked worktree ($repo_root)." >&2
+    echo "graphify-refresh: worktrees share the primary's graph via symlink; run 'npm run graph:refresh' from the primary checkout instead." >&2
+    exit 1
+  fi
+  exit 0
+fi
+
 # --hook (default when called from a git hook): only refresh a checkout that
-# already opted into a graph. A brand-new worktree/clone has no
-# src/graphify-out/ at all — leave it alone until someone runs
-# `npm run graph:refresh` there deliberately.
+# already has a graph. A clone that never built one shouldn't start a full
+# build as a git-hook side effect — run `npm run graph:refresh` there
+# deliberately first.
 if [ "$mode" != "--force" ] && [ ! -f "$graph_path" ]; then
   exit 0
 fi
@@ -101,7 +123,7 @@ fi
   else
     graphify update src --force >>"$log" 2>&1
   fi
-  printf '[%s] graphify refresh done: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$repo_root" >>"$log" 2>&1
+  printf '[%s] graphify refresh done: %s status=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$repo_root" "$?" >>"$log" 2>&1
 ) &
 disown >/dev/null 2>&1 || true
 
