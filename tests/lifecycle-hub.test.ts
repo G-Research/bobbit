@@ -226,4 +226,113 @@ describe("LifecycleHub", () => {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
+
+	// EXT-04 — shared-deadline fan-out. dispatch() used to await providers one at
+	// a time (see FINDINGS.md EXT-04), so N providers' timeouts/latencies stacked
+	// serially. These pins prove (a) providers now genuinely run concurrently and
+	// (b) merged block/trace ORDER still reflects registration order, never
+	// completion timing — the two properties the CLF coordination note calls out
+	// as the ones a future parallel-dispatch consumer must not break.
+	it("dispatches providers concurrently against a shared deadline, not serial timeout-stacking", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			// Each provider records its OWN start wall-clock (Date.now() — comparable
+			// across worker threads, unlike performance.now() which has a per-thread
+			// origin) before sleeping. Serial dispatch would show the SECOND
+			// provider's start offset from `dispatchT0` inflated by ~sleepMs (it would
+			// only begin after the first fully completed); concurrent dispatch shows
+			// both starting within ordinary worker-spinup jitter of `dispatchT0`.
+			const sleepMs = 1200;
+			const mk = (id: string) => fixtureProvider(
+				tmp,
+				id,
+				`export default { async sessionSetup() { const start = Date.now(); await new Promise((r) => setTimeout(r, ${sleepMs})); return { blocks: [{ id: "${id}", title: "${id}", authority: "memory", content: String(start), reason: "r", priority: 1 }] }; } };`,
+				{ timeoutMs: 10_000 },
+			);
+			const first = mk("first");
+			const second = mk("second");
+
+			const dispatchT0 = Date.now();
+			const result = await hub(tmp, [first, second], moduleHost).dispatch("sessionSetup", base(tmp));
+			const startsById = new Map(result.blocks.map((b) => [b.id, Number(b.content)]));
+
+			const firstOffset = startsById.get("first")! - dispatchT0;
+			const secondOffset = startsById.get("second")! - dispatchT0;
+			assert.ok(firstOffset < sleepMs, `first should start well before ${sleepMs}ms, got ${firstOffset}ms`);
+			assert.ok(secondOffset < sleepMs, `second should start well before ${sleepMs}ms under concurrent dispatch, got ${secondOffset}ms (serial dispatch would stack this by ~${sleepMs}ms)`);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps registration-order determinism when a later-registered provider finishes first", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const trace = new ContextTraceStore(path.join(tmp, "state"));
+			// `slow` is registered FIRST but finishes LAST; `fast` is registered
+			// SECOND but finishes immediately. Equal priority ⇒ the tie-break is
+			// original registration index, so both the returned blocks AND the
+			// persisted trace row order must reflect registration, never completion.
+			const slow = fixtureProvider(tmp, "slow", `export default { async sessionSetup() { await new Promise((r) => setTimeout(r, 400)); return { blocks: [{ id: "slow", title: "slow", authority: "memory", content: "s", reason: "r", priority: 5 }] }; } };`, { timeoutMs: 10_000 });
+			const fast = fixtureProvider(tmp, "fast", `export default { async sessionSetup() { return { blocks: [{ id: "fast", title: "fast", authority: "memory", content: "f", reason: "r", priority: 5 }] }; } };`, { timeoutMs: 10_000 });
+
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([slow, fast]),
+				moduleHost,
+				trace,
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "order-sess"));
+			assert.deepEqual(result.blocks.map((b) => b.id), ["slow", "fast"]);
+
+			const rows = trace.readTrace("order-sess");
+			assert.deepEqual(rows[0].providers.map((p) => p.id), ["slow", "fast"]);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	// EXT-06 — fair-share transparency. A provider that returned valid candidate
+	// blocks but ends up with ZERO kept blocks purely because the shared budget
+	// had no room left for it (no error, no timeout, nothing malformed) used to be
+	// silent — see FINDINGS.md EXT-06. This pins the new starvation marker landing
+	// in BOTH the returned diagnostics and the persisted context trace.
+	it("marks a fully-starved provider (all its blocks lost to the shared budget) in diagnostics and the trace", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const trace = new ContextTraceStore(path.join(tmp, "state"));
+			const big = fixtureProvider(tmp, "big", `export default { async sessionSetup() { return { blocks: [{ id: "big", title: "big", authority: "memory", content: "${"x".repeat(600)}", reason: "r", priority: 10 }] }; } };`);
+			const small = fixtureProvider(tmp, "small", `export default { async sessionSetup() { return { blocks: [{ id: "small", title: "small", authority: "memory", content: "${"y".repeat(600)}", reason: "r", priority: 1 }] }; } };`);
+
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([big, small]),
+				moduleHost,
+				trace,
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				globalMaxTokens: 50,
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "starve-sess"));
+
+			assert.deepEqual(result.blocks.map((b) => b.id), ["big"]);
+			const starvedDiag = result.diagnostics.find((d) => d.providerId === "small");
+			assert.ok(starvedDiag, "the fully-starved provider should get a diagnostics entry");
+			assert.match(starvedDiag!.error ?? "", /budget/i);
+
+			const rows = trace.readTrace("starve-sess");
+			const smallRow = rows[0].providers.find((p) => p.id === "small")!;
+			assert.equal(smallRow.blocks, 0);
+			assert.ok(smallRow.omitted > 0);
+			assert.match(smallRow.error ?? "", /budget/i);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
 });
