@@ -1201,7 +1201,9 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// awaited before the session is returned/live so explicit failures cannot
 	// continue on provider/runtime defaults.
 	try {
-		await profileAsync(`executePlan.postSpawn.${spawnClass}`, () => postSpawn(session, plan, ctx));
+		const __postSpawnT0 = performance.now();
+		await postSpawn(session, plan, ctx);
+		recordElapsed(`executePlan.postSpawn.${spawnClass}`, performance.now() - __postSpawnT0);
 	} catch (err) {
 		const setupError = err instanceof Error ? err : new Error(String(err));
 		handleSetupFailure(session, plan, setupError, ctx);
@@ -1583,7 +1585,9 @@ export async function executeWorktreeAsync(
 	// Enforce explicit model selection before marking the session idle/live. This
 	// prevents a failed selected model from silently continuing on provider or
 	// runtime defaults. Thinking-level application remains non-fatal below.
-	await profileAsync(`executeWorktreeAsync.postSpawn.${__worktreeSpawnClass}`, () => postSpawn(session, plan, ctx));
+	const __postSpawnT0 = performance.now();
+	await postSpawn(session, plan, ctx);
+	recordElapsed(`executeWorktreeAsync.postSpawn.${__worktreeSpawnClass}`, performance.now() - __postSpawnT0);
 
 	// Notify connected clients that the session is ready (single writer + version bump).
 	broadcastStatus(session, "idle");
