@@ -69,7 +69,7 @@ async function handlePackRuntimesList(ctx: CoreRouteCtx): Promise<void> {
 //   managed data/volume path, the start policy, and the memory/trust copy. Pure
 //   (no Docker), so the Market UI can render it BEFORE the user consents.
 async function handlePackRuntimeCapabilities(ctx: CoreRouteCtx, params: Record<string, string>): Promise<void> {
-	const { url, json, jsonError, packRuntimeSupervisor, packContributionRegistry, providerCarriesDeploymentMode } = ctx;
+	const { url, json, jsonError, packRuntimeSupervisor, packContributionRegistry, providerCarriesDeploymentMode, mapDeploymentModeToRuntimeMode } = ctx;
 	if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
 	let packId: string, runtimeId: string;
 	try { ({ packId, runtimeId } = decodePackRuntimeId(params.id)); }
@@ -88,6 +88,7 @@ async function handlePackRuntimeCapabilities(ctx: CoreRouteCtx, params: Record<s
 	// from what activation actually mounts.
 	const deploymentConfig: Record<string, unknown> = {};
 	let hasDeploymentSurface = false;
+	let runtimeManifest: Record<string, unknown> | undefined;
 	{
 		// Read RAW (activation-UNFILTERED) contributions, NOT `getPack` — the latter
 		// drops a provider whose activation gate is still unsatisfied (e.g. Hindsight's
@@ -95,6 +96,7 @@ async function handlePackRuntimeCapabilities(ctx: CoreRouteCtx, params: Record<s
 		// misclassify fresh/default Hindsight as provider-less and disclose the Docker
 		// default mode instead of the external (no-Docker) setup path.
 		const pack = packContributionRegistry.getRawPack(projectId, packId);
+		runtimeManifest = pack?.runtimes.find((r) => r.id === runtimeId)?.manifest;
 		for (const p of pack?.providers ?? []) {
 			const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
@@ -114,11 +116,10 @@ async function handlePackRuntimeCapabilities(ctx: CoreRouteCtx, params: Record<s
 		?? (typeof deploymentConfig.mode === "string" && deploymentConfig.mode.length > 0
 			? deploymentConfig.mode
 			: (hasDeploymentSurface ? "external" : undefined));
-	// Deployment mode → runtime manifest mode. `external` is the non-Docker setup path.
-	const RUNTIME_MODE_FOR_DEPLOYMENT: Record<string, string> = {
-		managed: "managed-postgres",
-		"managed-external-postgres": "external-postgres",
-	};
+	// Deployment mode → runtime manifest mode, read DECLARATIVELY from the
+	// runtime's own manifest (`deploymentModes` — see
+	// src/server/runtime/manifest.ts and resolveRuntimeStartPlan's doc comment
+	// in server.ts). `external` is the non-Docker setup path.
 	try {
 		if (deploymentMode === undefined) {
 			// No deployment surface: disclose the runtime's manifest DEFAULT (Docker)
@@ -137,7 +138,7 @@ async function handlePackRuntimeCapabilities(ctx: CoreRouteCtx, params: Record<s
 			json({ ...base, id: encodePackRuntimeId(base.packId, base.runtimeId), mode: "external", services: [], images: [], ports: [], volumePath: undefined, dockerRequired: false });
 			return;
 		}
-		const runtimeMode = RUNTIME_MODE_FOR_DEPLOYMENT[deploymentMode] ?? deploymentMode;
+		const runtimeMode = mapDeploymentModeToRuntimeMode(deploymentMode, runtimeManifest);
 		const summary = await packRuntimeSupervisor.capabilitySummary(packId, runtimeId, { projectId, mode: runtimeMode, config: deploymentConfig });
 		json({ ...summary, id: encodePackRuntimeId(summary.packId, summary.runtimeId), dockerRequired: true });
 	} catch (err) {
@@ -265,10 +266,12 @@ async function handlePackRuntimeAction(
 		// to resolve HINDSIGHT_API_LLM_API_KEY / HINDSIGHT_API_DATABASE_URL.
 		const deploymentConfig: Record<string, unknown> = {};
 		let hasDeploymentSurface = false;
+		let runtimeManifest: Record<string, unknown> | undefined;
 		{
 			// Read RAW (activation-UNFILTERED) contributions — see the /capabilities route
 			// above for why getRawPack (not getPack) is required here.
 			const pack = packContributionRegistry.getRawPack(projectId, packId);
+			runtimeManifest = pack?.runtimes.find((r) => r.id === runtimeId)?.manifest;
 			for (const p of pack?.providers ?? []) {
 				const merged: Record<string, unknown> = { ...(p.config ?? {}) };
 				const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(p.id));
@@ -280,7 +283,10 @@ async function handlePackRuntimeAction(
 				if (providerCarriesDeploymentMode(p, merged)) hasDeploymentSurface = true;
 			}
 		}
-		const plan = resolveRuntimeStartPlan(deploymentConfig);
+		// Declarative plan (S1): the target runtime's OWN manifest carries the
+		// `deploymentModes`/`configRemap` policy — see resolveRuntimeStartPlan's
+		// doc comment in server.ts and src/server/runtime/manifest.ts.
+		const plan = resolveRuntimeStartPlan(deploymentConfig, runtimeManifest);
 		startConfig = plan.config;
 		// Respect a saved EXTERNAL (or default/unset) deployment mode: that is the
 		// non-Docker setup path (plan.start === false), so there is NO managed

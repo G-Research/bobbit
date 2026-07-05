@@ -74,6 +74,20 @@ export interface RuntimeModeSpec {
 	requireEnv?: string[];
 }
 
+/** Declarative link from a PROVIDER-level "deployment mode" value (e.g. a
+ *  Hindsight-style `managed` / `managed-external-postgres` config `mode`)
+ *  onto this runtime manifest's OWN mode id (a key of {@link RuntimeManifest.modes}).
+ *  A deployment-mode value with NO entry in `deploymentModes` has no
+ *  Docker-backed runtime mode — it is the non-Docker / operator-supplied setup
+ *  path, so no runtime start is requested for it. Consumed by
+ *  `resolveRuntimeStartPlan` (src/server/server.ts) — see S1 in
+ *  docs/design (extension-seam audit): this replaces what used to be a
+ *  hard-coded mode-name switch in core. */
+export interface RuntimeDeploymentModeSpec {
+	/** This runtime manifest's mode id to start under. */
+	runtimeMode: string;
+}
+
 export interface RuntimeManifest {
 	id: string;
 	title?: string;
@@ -84,6 +98,15 @@ export interface RuntimeManifest {
 	secrets?: RuntimeSecretSpec[];
 	ports?: RuntimePortSpec[];
 	modes?: Record<string, RuntimeModeSpec>;
+	/** Provider deployment-config `mode` value → this manifest's own mode id.
+	 *  See {@link RuntimeDeploymentModeSpec}. */
+	deploymentModes?: Record<string, RuntimeDeploymentModeSpec>;
+	/** Provider deployment-config FIELD name → this manifest's ENV KEY (e.g. a
+	 *  provider's `externalDatabaseUrl` field onto `HINDSIGHT_API_DATABASE_URL`).
+	 *  A value already present under the target env key wins (never
+	 *  overwritten) — the precedence rule is enforced by the consumer
+	 *  (`resolveRuntimeStartPlan`), not by this schema. */
+	configRemap?: Record<string, string>;
 }
 
 function note(problems: string[] | undefined, msg: string): void {
@@ -313,6 +336,43 @@ function validateModes(raw: unknown, problems?: string[]): Record<string, Runtim
 	return out;
 }
 
+function validateDeploymentModes(raw: unknown, problems?: string[]): Record<string, RuntimeDeploymentModeSpec> | null {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		note(problems, "deploymentModes must be a mapping");
+		return null;
+	}
+	const out: Record<string, RuntimeDeploymentModeSpec> = {};
+	for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+		if (!v || typeof v !== "object" || Array.isArray(v)) {
+			note(problems, `deploymentModes.${name} must be a mapping`);
+			return null;
+		}
+		const obj = v as Record<string, unknown>;
+		if (typeof obj.runtimeMode !== "string" || obj.runtimeMode.length === 0) {
+			note(problems, `deploymentModes.${name}: runtimeMode must be a non-empty string`);
+			return null;
+		}
+		out[name] = { runtimeMode: obj.runtimeMode };
+	}
+	return out;
+}
+
+function validateConfigRemap(raw: unknown, problems?: string[]): Record<string, string> | null {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		note(problems, "configRemap must be a mapping");
+		return null;
+	}
+	const out: Record<string, string> = {};
+	for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof v !== "string" || !ENV_NAME_RE.test(v)) {
+			note(problems, `configRemap.${name}: value must be a valid env var name`);
+			return null;
+		}
+		out[name] = v;
+	}
+	return out;
+}
+
 /**
  * Validate an already-parsed runtime descriptor. Returns the typed manifest or
  * null; problems (when provided) accumulate human-readable reasons.
@@ -365,6 +425,16 @@ export function validateRuntimeManifest(
 		const modes = validateModes(obj.modes, problems);
 		if (modes === null) return null;
 		manifest.modes = modes;
+	}
+	if (obj.deploymentModes !== undefined) {
+		const deploymentModes = validateDeploymentModes(obj.deploymentModes, problems);
+		if (deploymentModes === null) return null;
+		manifest.deploymentModes = deploymentModes;
+	}
+	if (obj.configRemap !== undefined) {
+		const configRemap = validateConfigRemap(obj.configRemap, problems);
+		if (configRemap === null) return null;
+		manifest.configRemap = configRemap;
 	}
 
 	return manifest;

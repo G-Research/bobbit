@@ -848,16 +848,21 @@ async function handleMarketplaceRequest(ctx: CoreRouteCtx): Promise<void> {
 			const rtCtx = resolvePackRuntimeContext(targetScope, st.target.projectBase, st.target.store, packName);
 			if (rtCtx && rtCtx.runtimes.length > 0) {
 				const runtimeProjectId = targetScope === "project" ? targetProjectId : undefined;
-				const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig);
-				// A runtime-only pack with NO provider deployment-config surface has no
-				// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
-				// external (start:false) and would wrongly suppress its `on-enable` start.
-				// Mirror the REST start path's no-surface fallback: enabling such a runtime
-				// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
-				// the manifest default). When a deployment surface exists, honour plan.start.
-				const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
-				const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
 				for (const rc of rtCtx.runtimes) {
+					// Plan is resolved PER RUNTIME from that runtime's OWN manifest — its
+					// declarative `deploymentModes`/`configRemap` (see
+					// src/server/runtime/manifest.ts) turns the pack's deployment config
+					// into supervisor start args; same source of truth the REST
+					// start/restart/capabilities routes use.
+					const plan = resolveRuntimeStartPlan(rtCtx.deploymentConfig, rc.manifest);
+					// A runtime-only pack with NO provider deployment-config surface has no
+					// external/managed concept, so resolveRuntimeStartPlan({}) defaults to
+					// external (start:false) and would wrongly suppress its `on-enable` start.
+					// Mirror the REST start path's no-surface fallback: enabling such a runtime
+					// starts it in the runtime's DEFAULT mode (mode undefined ⇒ supervisor picks
+					// the manifest default). When a deployment surface exists, honour plan.start.
+					const startWhenEnabled = plan.start || !rtCtx.hasDeploymentSurface;
+					const startMode = rtCtx.hasDeploymentSurface ? plan.mode : undefined;
 					const ref = rc.listName;
 					const wasDisabled = prevDisabledRuntimes.has(ref);
 					const nowDisabled = nextDisabledRuntimes.has(ref);
