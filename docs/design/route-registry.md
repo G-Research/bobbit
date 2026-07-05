@@ -91,7 +91,13 @@ protocol future cohorts should follow, and what's left after cohort 1.
   (`src/server/routes/model-provider-routes.ts`) — see
   [Cohort 15: model/provider settings routes](#cohort-15-modelprovider-settings-routes)
   below.
-- Everything else in `handleApiRoute` (~261 remaining routes) is unchanged,
+- **Cohort 16a: cost routes** — session, goal, and task cost endpoints
+  (`src/server/routes/cost-routes.ts`) — see
+  [Cohort 16a: cost routes](#cohort-16a-cost-routes) below.
+- **Cohort 16b: preview routes** — preview mount, artifact restore, and
+  preview-changed SSE endpoints (`src/server/routes/preview-routes.ts`) — see
+  [Cohort 16b: preview routes](#cohort-16b-preview-routes) below.
+- Everything else in `handleApiRoute` (~252 remaining routes) is unchanged,
   still in the legacy if/else chain.
 
 ## The seam
@@ -941,8 +947,8 @@ Remaining closure inventory after this slice:
   legacy handlers.
 - Inline legacy families still in `server.ts` include session create/prompt/
   continue/output/git/PR helpers, goals/tasks/gates/team endpoints,
-  tools/skills/model/provider/agent-directory settings, extension-host
-  store/action/route/channel endpoints, preview routes, cost routes, and
+  tools/skills/agent-directory settings, extension-host
+  store/action/route/channel endpoints, and
   internal verification/user-question routes.
 - Gateway-lifetime mutable handles remain explicit deps: `routeRegistry`,
   `extensionChannelServices`, `packRuntimeSupervisor`, `sandboxManager`, and
@@ -1030,6 +1036,72 @@ and `tests/client-api-orphan-pinning.test.ts`. Behavior coverage includes
 `tests/e2e/claude-code-status-api.spec.ts`,
 `tests/e2e/custom-provider-key-redaction.spec.ts`,
 `tests/e2e/aigw-api.spec.ts`, and model/provider UI specs.
+
+## Cohort 16a: cost routes
+
+`src/server/routes/cost-routes.ts`.
+
+This cohort moved the compact cost-read surface used by session cards, goal
+dashboards, task rows, and cost popovers. These endpoints are read-only and
+share the same cost-tracker/session-manager dependencies.
+
+| Method | Path |
+|---|---|
+| GET | `/api/sessions/:id/cost/breakdown` |
+| GET | `/api/sessions/:id/cost` |
+| GET | `/api/goals/:goalId/cost/breakdown` |
+| GET | `/api/goals/:goalId/cost` |
+| GET | `/api/tasks/:id/cost` |
+
+`CoreRouteCtx` grew append-only by two existing handleApiRoute closures:
+`getGoalAcrossProjects` and `getTaskManagerForTask`. Both remain in
+`server.ts` because other inline goal/task routes still share them.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on route match and method together, so unhandled methods fell through to the
+terminal 404. The registry preserves this by registering only the legacy
+method/path pairs.
+
+Registry count reconciliation: cohort 15 left ~261 remaining legacy routes.
+Moving these 5 routes leaves ~256 routes in the legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/source-pin-merge-invariants.test.ts`,
+and `tests/client-api-orphan-pinning.test.ts`. Behavior coverage includes
+`tests/e2e/cost-update-cache-hit.spec.ts` and cost popover UI/browser specs.
+
+## Cohort 16b: preview routes
+
+`src/server/routes/preview-routes.ts`.
+
+This cohort moved the preview mount/artifact surface used by `preview_open`,
+the preview panel bootstrap probe, historical preview artifact restore, and
+the per-session preview-changed SSE stream.
+
+| Method | Path |
+|---|---|
+| POST | `/api/preview/mount` |
+| POST | `/api/preview/artifacts/:artifactId/restore` |
+| GET | `/api/preview/mount` |
+| GET | `/api/sessions/:sid/preview-events` |
+
+`CoreRouteCtx` grew append-only by one field: the existing optional
+`broadcastToSession` gateway dependency. The preview route uses it only when
+opening/updating the side-panel workspace tab after a successful mount.
+
+LEGACY FALL-THROUGH PARITY: no 405 shim was added. Each legacy block was gated
+on route match and method together, so unhandled methods fell through to the
+terminal 404. The registry preserves this by registering only the legacy
+method/path pairs.
+
+Registry count reconciliation: cohort 16a left ~256 remaining legacy routes.
+Moving these 4 routes leaves ~252 routes in the legacy chain.
+
+Pinning coverage: route surface extraction is covered by `tests/route-table*`,
+`tests/helpers/server-route-surface*`, `tests/source-pin-merge-invariants.test.ts`,
+and `tests/client-api-orphan-pinning.test.ts`. Behavior coverage includes
+`tests/e2e/preview-mount-route.spec.ts`, `tests/e2e/preview-token-cost.spec.ts`,
+`tests/e2e/search-preview-api.spec.ts`, and preview browser specs.
 
 ## Pins
 
