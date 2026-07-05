@@ -11062,7 +11062,7 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, goal.cwd);
+			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], goal.cwd);
 			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
 			json({ commits });
 		} catch (e: any) {
@@ -13455,7 +13455,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, cwd, 10000, cid);
+			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], cwd, 10000, cid);
 			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
 
 			json({ commits });
