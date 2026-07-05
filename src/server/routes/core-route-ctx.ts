@@ -258,4 +258,7 @@ export interface CoreRouteCtx {
 	// ── Cohort 16a (cost routes) additions — append-only.
 	getGoalAcrossProjects(goalId: string): PersistedGoal | undefined;
 	getTaskManagerForTask(taskId: string): TaskManager;
+
+	// ── Cohort 16b (preview routes) additions — append-only.
+	broadcastToSession?: (sessionId: string, event: any) => void;
 }
