@@ -72,7 +72,26 @@ export default defineConfig({
 					...shared,
 					name: "v2-core",
 					environment: "node",
+					// Exclude stragglers that require process isolation (singleFork project below)
 					include: ["tests2/core/**/*.test.ts"],
+					exclude: ["tests2/core/session-recovery-agent-dir.test.ts"],
+				},
+			},
+			// singleFork: files that genuinely cannot share a fork even with env-guard.
+			// Target: ≤10 files. Each must be documented in tests2/tests-map.json with reason.
+			{
+				test: {
+					...shared,
+					name: "v2-core-isolated",
+					environment: "node",
+					isolate: true,
+					pool: "forks" as const,
+					poolOptions: { forks: { singleFork: true } },
+					include: [
+						// HOME/USERPROFILE env is set at module-top AND re-asserted in beforeAll;
+						// under rare sibling fork orderings the re-assert fires too late.
+						"tests2/core/session-recovery-agent-dir.test.ts",
+					],
 				},
 			},
 			{
