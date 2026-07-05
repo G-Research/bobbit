@@ -253,6 +253,54 @@ describe("#4 three-scope resolution", () => {
 	});
 });
 
+// ── design-doc pin #1 (docs/design/pack-loader-unification.md §4 item 1) ──
+// PackResolver resolution-order pin: builtin-market + server-market +
+// global-user-market + project-market ALL defining a role of the SAME name,
+// asserting the winner + the exact shadows[] order low→high. #4 above covers
+// user-pack-vs-market-pack and market-vs-market-within-a-scope, but not all
+// four MARKET-pack scopes stacked on the same name with a shadows[] check.
+
+describe("design-doc pin #1 — four-scope MARKET-pack resolution-order + shadows[]", () => {
+	function marketRolePack(base: string, scope: string, packName: string, role: string, model: string) {
+		const dir = path.join(base, ".bobbit", "config", "market-packs", packName);
+		w(path.join(dir, "roles", role + ".yaml"), roleYaml(role, model));
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [role], tools: [], skills: [] } });
+		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: scope as any });
+	}
+	function builtinMarketRolePack(builtinPacksDir: string, packName: string, role: string, model: string) {
+		const dir = path.join(builtinPacksDir, packName);
+		w(path.join(dir, "roles", role + ".yaml"), roleYaml(role, model));
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [role], tools: [], skills: [] } });
+	}
+
+	it("builtin-market < server-market < global-user-market < project-market, same-named role: project wins; shadows[] is exactly [builtin-pack, server, global-user] oldest→newest", () => {
+		const r = path.join(TMP, "pin1-four-scope");
+		const builtinsDir = path.join(r, "builtin-defaults");
+		const builtinPacksDir = path.join(r, "builtin-packs");
+		const serverBase = path.join(r, "server");
+		const globalUserBase = path.join(r, "gu");
+		const projectBase = path.join(r, "proj");
+		fs.mkdirSync(builtinsDir, { recursive: true });
+
+		builtinMarketRolePack(builtinPacksDir, "shared-pack", "sentinel", "m-builtin-market");
+		marketRolePack(serverBase, "server", "shared-pack", "sentinel", "m-server-market");
+		marketRolePack(globalUserBase, "global-user", "shared-pack", "sentinel", "m-gu-market");
+		marketRolePack(projectBase, "project", "shared-pack", "sentinel", "m-project-market");
+
+		const list = buildPackList({ builtinsDir, builtinPacksDir, serverBase, globalUserBase, projectBase, cwd: projectBase });
+		const resolved = new PackResolver(list, [new RoleLoader()]).resolve<any>("roles");
+		const sentinel = resolved.find((e: AnyEntry) => e.item.name === "sentinel")!;
+		assert.ok(sentinel, "same-named role across all four market-pack scopes must resolve");
+		assert.equal(sentinel.item.promptTemplate, "m-project-market", "project market pack must win over server/global-user/builtin market packs");
+		assert.equal(sentinel.origin.id, "market:project:shared-pack");
+		assert.deepEqual(
+			sentinel.shadows.map((s: AnyEntry) => s.id),
+			["builtin-pack:shared-pack", "market:server:shared-pack", "market:global-user:shared-pack"],
+			"shadows[] must accumulate oldest→newest in scope order: builtin-market < server < global-user",
+		);
+	});
+});
+
 // ── #5 legacy → unified A/B equivalence ──────────────────────────
 
 describe("#5 legacy → unified A/B equivalence", () => {
