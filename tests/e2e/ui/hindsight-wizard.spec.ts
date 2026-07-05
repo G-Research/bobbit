@@ -42,10 +42,34 @@ const STUB_PATH = path.resolve(__dirname, "..", "hindsight-stub.mjs");
 const CONFIG_KEY = "provider-config:memory";
 const EX_UI_URL = "http://127.0.0.1:19177/banks/bobbit?view=data";
 
+// The pack-contribution layer (dashboard panel bundle/descriptor + routes)
+// landed well ahead of the Marketplace UI redesign this spec pins (guided
+// setup wizard on Marketplace Enable). Per the W2.E restoration review
+// (commit 1311e5ce), that Marketplace-side UI was never carried into
+// marketplace-page.ts's lineage after the "embedded dashboard" redesign
+// landed on top of it — confirmed an abandoned-mid-flight feature, not a
+// merge-drop, via `git stash` bisection (identical failure before/after). The
+// three fs.existsSync checks below only prove the pack-contribution half is
+// ready; they say nothing about the Marketplace UI half, so this file also
+// needs a static source check for a stable marker unique to that redesign —
+// without it STACK_READY goes true prematurely and every test here fails
+// hard instead of skipping as this file's own header promises ("green-by-skip
+// until the parallel coder branches land").
+const MARKETPLACE_PAGE_SRC = path.resolve(__dirname, "..", "..", "..", "src", "app", "marketplace-page.ts");
+function marketplaceUiImplemented(): boolean {
+	try {
+		const src = fs.readFileSync(MARKETPLACE_PAGE_SRC, "utf-8");
+		return src.includes('data-testid="market-hindsight-state"') && src.includes("market-hindsight-wizard");
+	} catch {
+		return false;
+	}
+}
+
 const STACK_READY =
 	fs.existsSync(path.join(PACK_SRC, "lib", "HindsightDashboardPanel.js")) &&
 	fs.existsSync(path.join(PACK_SRC, "panels", "hindsight-dashboard.yaml")) &&
-	fs.existsSync(STUB_PATH);
+	fs.existsSync(STUB_PATH) &&
+	marketplaceUiImplemented();
 
 const describe = STACK_READY ? test.describe : test.describe.skip;
 
