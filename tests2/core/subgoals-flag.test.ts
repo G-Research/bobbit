@@ -2,6 +2,9 @@
 // Source: tests/subgoals-flag.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for the client-side Subgoals (Experimental) flag helper.
  * See docs/nested-goals.md.

@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getModels } from "@earendil-works/pi-ai";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 
 let tmp: string;
 let previousAgentDir: string | undefined;
@@ -43,6 +44,10 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+	// Re-point + reset the agent-dir singleton so writes/reads target THIS file's
+	// tmp dir, not a stale dir cached by an earlier file in the shared fork.
+	process.env.BOBBIT_AGENT_DIR = tmp;
+	resetAgentDirStateForTests();
 	const f = path.join(tmp, "models.json");
 	if (existsSync(f)) rmSync(f);
 });

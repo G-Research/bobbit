@@ -2,6 +2,9 @@
 // Source: tests/sidebar-font-scale.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for src/app/sidebar-font-scale.ts — the pure helpers that drive
  * the user-adjustable sidebar font-size setting.

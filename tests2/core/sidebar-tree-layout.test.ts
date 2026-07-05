@@ -2,6 +2,9 @@
 // Source: tests/sidebar-tree-layout.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import {

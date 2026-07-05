@@ -2,6 +2,9 @@
 // Source: tests/plan-archived-children.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Plan tab — archived/completed children inclusion.
  *

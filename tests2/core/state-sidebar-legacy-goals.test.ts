@@ -2,6 +2,9 @@
 // Source: tests/state-sidebar-legacy-goals.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import { test, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { sidebarTreeKey } from "../../src/app/sidebar-tree-builder.ts";

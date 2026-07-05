@@ -2,6 +2,9 @@
 // Source: tests/session-path-routing.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { getRouteFromHash } from "../../src/app/routing.ts";

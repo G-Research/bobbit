@@ -2,6 +2,9 @@
 // Source: tests/theme-init.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for src/app/theme-init.ts — the boot-time theme normalization that
  * keeps the shared <theme-toggle> from ever showing the ambiguous "system"

@@ -2,6 +2,9 @@
 // Source: tests/safe-storage.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Regression test for the "Failed to execute 'setItem' on 'Storage'" error
  * that rendered in the sidebar right before the UI loaded.

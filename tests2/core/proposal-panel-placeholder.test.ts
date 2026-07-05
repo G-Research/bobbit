@@ -2,6 +2,9 @@
 // Source: tests/proposal-panel-placeholder.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Pins the proposal-panel lazy-load error contract: a failed chunk import must
  * surface an error card with Retry / Reload affordances, NEVER an indefinite

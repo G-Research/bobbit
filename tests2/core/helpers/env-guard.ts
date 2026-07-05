@@ -16,7 +16,7 @@
  * withEnv() scopes a single mutation; guardProcessEnv() backstops the whole file
  * so nothing bleeds across the fork boundary.
  */
-import { afterAll, beforeEach } from "vitest";
+import { afterAll } from "vitest";
 import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config.js";
 
 export function guardProcessEnv(): void {
@@ -25,19 +25,24 @@ export function guardProcessEnv(): void {
 	// Also snapshot globalThis.fetch: several tests override it with a mock; if not
 	// restored the mock bleeds into the next file's real loopback fetch (a rotating
 	// order-dependent flake in the http-server contract tests).
-	const g = globalThis as { fetch?: typeof fetch };
-	const hadFetch = Object.prototype.hasOwnProperty.call(globalThis, "fetch");
-	const priorFetch = g.fetch;
-
-	// Re-derive the agent-dir runtime singleton before each test so a stale cache
-	// left by an UNGUARDED leaker file cannot make this file read the wrong
-	// auth.json/models.json. Runs before the file's own beforeEach (registered
-	// later), and the singleton re-derives lazily from env at first use.
-	beforeEach(() => resetAgentDirStateForTests());
+	// Snapshot shared globalThis slots that tests commonly override (fetch) or
+	// stub for DOM (document/window/localStorage). Under isolate:false these bleed
+	// across files unless restored.
+	const g = globalThis as Record<string, unknown>;
+	const GLOBAL_KEYS = ["fetch", "document", "window", "localStorage"] as const;
+	const hadGlobal = new Map<string, boolean>();
+	const priorGlobal = new Map<string, unknown>();
+	for (const k of GLOBAL_KEYS) {
+		const present = Object.prototype.hasOwnProperty.call(globalThis, k);
+		hadGlobal.set(k, present);
+		priorGlobal.set(k, present ? g[k] : undefined);
+	}
 
 	afterAll(() => {
-		if (hadFetch) g.fetch = priorFetch;
-		else if (Object.prototype.hasOwnProperty.call(globalThis, "fetch")) delete (g as Record<string, unknown>).fetch;
+		for (const k of GLOBAL_KEYS) {
+			if (hadGlobal.get(k)) g[k] = priorGlobal.get(k);
+			else if (Object.prototype.hasOwnProperty.call(globalThis, k)) delete g[k];
+		}
 		// The agent-dir runtime is a module-memory singleton derived from
 		// BOBBIT_DIR/BOBBIT_AGENT_DIR. Restoring env alone leaves its cache pointing
 		// at this file's dir, so the NEXT file in the shared fork reads the wrong

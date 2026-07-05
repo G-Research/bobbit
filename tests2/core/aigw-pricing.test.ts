@@ -23,6 +23,7 @@ import path from "node:path";
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { discoverAigwModels, writeAigwModelsJson } = await import("../../src/server/agent/aigw-manager.ts");
+const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.js");
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const GPT_52_COST = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.5625 };
@@ -177,6 +178,9 @@ describe("AI Gateway pricing metadata", () => {
 		const tmpAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-pricing-models-"));
 		try {
 			process.env.BOBBIT_AGENT_DIR = tmpAgentDir;
+			// Reset the agent-dir singleton so writeAigwModelsJson targets tmpAgentDir,
+			// not a dir cached by an earlier file in the shared fork.
+			resetAgentDirStateForTests();
 			const mock = await startMockAigw([pricedOpenAiModel(), pricedClaudeModel()]);
 			try {
 				const discoveredModels = await discoverAigwModels(mock.url);
