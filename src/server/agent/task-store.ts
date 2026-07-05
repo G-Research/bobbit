@@ -52,10 +52,23 @@ export class TaskStore {
 	private tasks: Map<string, PersistedTask> = new Map();
 	/** Number of .bak generations to keep alongside tasks.json. */
 	private static readonly BACKUP_COUNT = 3;
+	/**
+	 * Monotonically increasing tick — bumped on every mutation (put/remove/
+	 * removeMany). Mirrors `SessionStore.getGeneration()` /
+	 * `GoalStore.getGeneration()`: lets callers cheaply detect "has anything
+	 * assignment-relevant changed since I last looked" without diffing task
+	 * contents (PERF-05 — session→taskId resolution cache invalidation).
+	 */
+	private generation = 0;
 
 	constructor(stateDir: string) {
 		this.storeFile = path.join(stateDir, "tasks.json");
 		this.load();
+	}
+
+	/** Current generation counter — bumped on every mutation. */
+	getGeneration(): number {
+		return this.generation;
 	}
 
 	private load(): void {
@@ -99,6 +112,7 @@ export class TaskStore {
 
 	put(task: PersistedTask): void {
 		this.tasks.set(task.id, task);
+		this.generation++;
 		this.save();
 	}
 
@@ -107,6 +121,7 @@ export class TaskStore {
 	}
 
 	remove(id: string): void {
+		this.generation++;
 		this.tasks.delete(id);
 		this.save();
 	}
@@ -115,7 +130,10 @@ export class TaskStore {
 		for (const id of ids) {
 			this.tasks.delete(id);
 		}
-		if (ids.length > 0) this.save();
+		if (ids.length > 0) {
+			this.generation++;
+			this.save();
+		}
 	}
 
 	getAll(): PersistedTask[] {

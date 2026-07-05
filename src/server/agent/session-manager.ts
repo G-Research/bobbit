@@ -1106,6 +1106,21 @@ export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
 	private sessionsWithConnectedClients = new Set<SessionInfo>();
+	/**
+	 * Cache for `resolveTaskIdForSession`'s cross-project fallback scan
+	 * (PERF-05). Only populated for sessions that have NO `taskId` recorded
+	 * on the session itself (the common fast path returns before touching
+	 * this) — those sessions would otherwise pay a `new TaskManager()` +
+	 * full `getTasksForSession` scan across every project on EVERY
+	 * `trackCostFromEvent` call (once per assistant message). Keyed by
+	 * sessionId; invalidated by comparing against
+	 * `ProjectContextManager.getTaskGeneration()` at read time — any task
+	 * put/remove in any project (including (re)assignment) bumps that sum,
+	 * so a stale entry is never served, only recomputed. Entries are pruned
+	 * alongside `this.sessions.delete(...)` so it stays bounded to live
+	 * sessions.
+	 */
+	private taskIdCache = new Map<string, { taskId: string | undefined; gen: number }>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
 	/** @internal Test-only session store (used when no PCM is available). */
@@ -2148,18 +2163,43 @@ export class SessionManager {
 		if (update) broadcast(session.clients, update);
 	}
 
+	/**
+	 * Resolve the taskId (if any) assigned to a session.
+	 *
+	 * Fast path: `session.taskId` / `persisted.taskId` are stamped once at
+	 * session creation (`createSession` opts.taskId) for the normal
+	 * task-driven spawn flow — cheap, no scan needed.
+	 *
+	 * Slow path (PERF-05): sessions with neither (ad hoc / legacy / not
+	 * spawned for a task) fall back to scanning every project's TaskStore
+	 * for a task whose `assignedSessionId` matches. That fallback is cached
+	 * per session, keyed by `ProjectContextManager.getTaskGeneration()` — a
+	 * cheap integer sum bumped by every task mutation across every project
+	 * (see TaskStore.getGeneration). A generation mismatch (any task
+	 * assigned/reassigned/removed anywhere) invalidates the entry and forces
+	 * a fresh scan; otherwise the cached result (including a cached "no
+	 * task" `undefined`) is reused. This is what keeps sessions with no task
+	 * from re-scanning on every single `message_end` (the PERF-05
+	 * reproduction case), while still observing a later (re)binding.
+	 */
 	private resolveTaskIdForSession(sessionId: string): string | undefined {
 		const live = this.sessions.get(sessionId);
 		if (live?.taskId) return live.taskId;
 		const persisted = this.getPersistedSession(sessionId);
 		if (persisted?.taskId) return persisted.taskId;
 		if (this.projectContextManager) {
+			const gen = this.projectContextManager.getTaskGeneration();
+			const cached = this.taskIdCache.get(sessionId);
+			if (cached && cached.gen === gen) return cached.taskId;
+
+			let taskId: string | undefined;
 			for (const ctx of this.projectContextManager.all()) {
 				const tm = new TaskManager(ctx.taskStore);
 				const tasks = tm.getTasksForSession(sessionId);
-				if (tasks.length > 0) return tasks[0].id;
+				if (tasks.length > 0) { taskId = tasks[0].id; break; }
 			}
-			return undefined;
+			this.taskIdCache.set(sessionId, { taskId, gen });
+			return taskId;
 		}
 		const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
 		return tasks.length > 0 ? tasks[0].id : undefined;
@@ -4711,6 +4751,11 @@ export class SessionManager {
 			try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
 			this.sessions.delete(session.id);
+			// PERF-05: session is about to be re-registered by restoreSession()
+			// below; drop any stale taskId-resolution cache entry so it's
+			// recomputed fresh rather than briefly missing from the map with a
+			// now-orphaned cache entry.
+			this.taskIdCache.delete(session.id);
 			(ps as any)._restartFrameOfReference = frameOfRef;
 			opts?.mutatePs?.(ps);
 			try {
@@ -4823,18 +4868,13 @@ export class SessionManager {
 			cost: costValue,
 		}, stampGoalId);
 
-		// Look up taskId from assigned tasks for this session
-		let taskId: string | undefined;
-		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) {
-				const tm = new TaskManager(ctx.taskStore);
-				const tasks = tm.getTasksForSession(session.id);
-				if (tasks.length > 0) { taskId = tasks[0].id; break; }
-			}
-		} else {
-			const tasks = this._testTaskManager?.getTasksForSession(session.id) ?? [];
-			taskId = tasks.length > 0 ? tasks[0].id : undefined;
-		}
+		// PERF-05: was a per-message, per-project TaskManager alloc + full
+		// scan inlined here. Now reuses the shared, cached resolver (also
+		// used by getSessionCostUpdate/broadcastSessionCost for reconnect
+		// hydration), so live and reconnect cost_update frames agree on
+		// taskId and the hot streaming path stops paying the scan whenever
+		// the session already carries its taskId or a cached resolution.
+		const taskId = this.resolveTaskIdForSession(session.id);
 
 		broadcast(session.clients, {
 			type: "cost_update",
@@ -6966,6 +7006,7 @@ export class SessionManager {
 			session.clients.clear();
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
+			this.taskIdCache.delete(id); // PERF-05: prune with the session, not indefinitely
 			extStore.remove(id);
 			cleanupSessionPrompt(id);
 			console.log(`[session-manager] Unregistered external session ${id}`);
@@ -7827,6 +7868,7 @@ export class SessionManager {
 		const terminateStore = this.resolveStoreForSession(id);
 		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
+		this.taskIdCache.delete(id); // PERF-05: prune with the session, not indefinitely
 		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
