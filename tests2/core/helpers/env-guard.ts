@@ -16,7 +16,7 @@
  * withEnv() scopes a single mutation; guardProcessEnv() backstops the whole file
  * so nothing bleeds across the fork boundary.
  */
-import { afterAll } from "vitest";
+import { afterAll, beforeEach } from "vitest";
 import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config.js";
 
 export function guardProcessEnv(): void {
@@ -28,6 +28,12 @@ export function guardProcessEnv(): void {
 	const g = globalThis as { fetch?: typeof fetch };
 	const hadFetch = Object.prototype.hasOwnProperty.call(globalThis, "fetch");
 	const priorFetch = g.fetch;
+
+	// Re-derive the agent-dir runtime singleton before each test so a stale cache
+	// left by an UNGUARDED leaker file cannot make this file read the wrong
+	// auth.json/models.json. Runs before the file's own beforeEach (registered
+	// later), and the singleton re-derives lazily from env at first use.
+	beforeEach(() => resetAgentDirStateForTests());
 
 	afterAll(() => {
 		if (hadFetch) g.fetch = priorFetch;
