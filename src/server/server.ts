@@ -538,7 +538,7 @@ import {
 	attachCommitFiles,
 	getGitDiff,
 } from "./skills/git-gh.js";
-import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer, sanitizeVerificationFindings } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -12766,6 +12766,7 @@ async function handleApiRoute(
 			verdict: body.verdict === "pass",
 			summary: body.summary,
 			reportHtml,
+			findings: sanitizeVerificationFindings(body.findings),
 		});
 		json({ ok: true });
 		return;
