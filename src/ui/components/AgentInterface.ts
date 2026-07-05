@@ -55,6 +55,7 @@ import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.j
 import { i18n } from "../utils/i18n.js";
 import { createStreamFn } from "../utils/proxy-utils.js";
 import type { UserMessageWithAttachments } from "./Messages.js";
+import type { TransparencyDecision } from "./TransparencyPanel.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 
 @customElement("agent-interface")
@@ -186,6 +187,57 @@ export class AgentInterface extends LitElement {
 	@state() private _claudeCodeNoticeExpanded = false;
 	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
 	private _archivedProposalsFetchedFor: string | null = null;
+
+	/**
+	 * CLF-W1a: classifier decision outcomes for this session's Transparency
+	 * Panel rows, one array per user turn (`MessageList.decisionsByTurn`).
+	 * Refetched from `GET /api/sessions/:id/context-trace` whenever the
+	 * message count changes, so a newly-recorded decision (or a page reload)
+	 * shows up without a manual refresh. See `_refreshContextTrace`.
+	 */
+	@state() private _decisionsByTurn: TransparencyDecision[][] = [];
+	/** `"${sessionId}:${messageCount}"` we last fetched the trace for — prevents re-fetching on every render. */
+	private _contextTraceFetchedFor: string | null = null;
+
+	private async _refreshContextTrace(sessionId: string): Promise<void> {
+		try {
+			const resp = await gatewayFetch(`/api/sessions/${sessionId}/context-trace`);
+			if (!resp.ok) {
+				this._decisionsByTurn = [];
+				return;
+			}
+			const data = await resp.json().catch(() => null);
+			const entries: Array<{ hook?: string; decisions?: TransparencyDecision[] }> = Array.isArray(data?.entries) ? data.entries : [];
+			// Order-based turn correlation (transparency-panel design doc's
+			// fallback, §4): the Nth `beforePrompt` trace entry ↔ the Nth user
+			// turn. `dispatchDecision` attaches onto the latest trace entry
+			// (see `ContextTraceStore.appendDecision`), which for the
+			// `user-prompt-submit`/`agent-prompt` points is that turn's
+			// `beforePrompt` entry.
+			const beforePromptEntries = entries.filter((e) => e.hook === "beforePrompt");
+			this._decisionsByTurn = beforePromptEntries.map((e) => (Array.isArray(e.decisions) ? e.decisions : []));
+		} catch {
+			this._decisionsByTurn = [];
+		}
+	}
+
+	private _maybeRefreshContextTrace(): void {
+		// Unit browser fixtures run from file:// with no gateway REST API and no
+		// mocked fetch layer for this endpoint (same guard as
+		// `useServerWorkspaceApi` in side-panel-workspace.ts /
+		// `shouldDerivePanelTabsInRender` in render.ts) — a real `fetch()` there
+		// fails at the browser level ("URL scheme file is not supported"),
+		// which several fixtures assert zero console errors for. Only real
+		// gateway pages have this endpoint to ask.
+		if (typeof window !== "undefined" && window.location.protocol === "file:") return;
+		const sid = this.session?.sessionId;
+		if (!sid) return;
+		const key = `${sid}:${this.session?.state.messages.length ?? 0}`;
+		if (this._contextTraceFetchedFor === key) return;
+		this._contextTraceFetchedFor = key;
+		// Fire-and-forget — render() does not await (matches `_maybeRefreshArchivedProposals`).
+		void this._refreshContextTrace(sid);
+	}
 
 	private async _refreshArchivedProposalTypes(sessionId: string): Promise<void> {
 		if (this._archivedProposalsFetchedFor === sessionId) return;
@@ -1823,6 +1875,7 @@ export class AgentInterface extends LitElement {
 			if (streamingMessage && m === streamingMessage) return false;
 			return !streamingMessageId || m.id !== streamingMessageId;
 		});
+		this._maybeRefreshContextTrace();
 		return html`
 			<div class="flex flex-col gap-3">
 				${this._renderClaudeCodeCapabilityNotice()}
@@ -1830,6 +1883,7 @@ export class AgentInterface extends LitElement {
 				<message-list
 					.messages=${visibleMessages}
 					.sessionId=${this.session?.sessionId ?? ""}
+					.decisionsByTurn=${this._decisionsByTurn}
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}

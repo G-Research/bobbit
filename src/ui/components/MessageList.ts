@@ -18,6 +18,7 @@ import "./ToolPermissionCard.js";
 // landing fires.
 import { ensurePreCompactionHistory } from "../../app/lazy-widgets.js";
 import "./DeferredBlock.js";
+import type { TransparencyDecision } from "./TransparencyPanel.js";
 import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
 import {
 	isPerfFlagEnabled,
@@ -134,6 +135,15 @@ export class MessageList extends LitElement {
 	 *  compaction card appears in the transcript, so the inline expand
 	 *  affordance can call the orphan-transcript API. */
 	@property({ type: String }) sessionId: string = "";
+	/**
+	 * CLF-W1a: classifier decision outcomes, one array per user turn, in turn
+	 * order — `decisionsByTurn[i]` are the decisions recorded for the i-th
+	 * user turn in the transcript (the Nth `beforePrompt` trace entry ↔ the
+	 * Nth user turn, per the transparency-panel design doc's order-based
+	 * fallback correlation — see `AgentInterface._refreshContextTrace`).
+	 * Missing/short ⇒ that turn's `<transparency-panel>` renders nothing.
+	 */
+	@property({ type: Array }) decisionsByTurn: TransparencyDecision[][] = [];
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -156,6 +166,9 @@ export class MessageList extends LitElement {
 		const items: Array<{ key: string; template: TemplateResult }> = [];
 		let i = 0;
 		const msgs = this.messages;
+		// CLF-W1a: ordinal counter over rendered user turns, joining each one to
+		// its `decisionsByTurn[n]` entry (see that property's doc comment).
+		let userTurnIndex = 0;
 
 		while (i < msgs.length) {
 			const msg = msgs[i];
@@ -223,9 +236,11 @@ export class MessageList extends LitElement {
 			}
 
 			if (msg.role === "user" || msg.role === "user-with-attachments") {
+				const decisions = this.decisionsByTurn[userTurnIndex] ?? [];
+				userTurnIndex++;
 				items.push({
 					key: keyFor(msg),
-					template: html`<user-message .message=${msg}></user-message>`,
+					template: html`<user-message .message=${msg} .decisions=${decisions}></user-message>`,
 				});
 				i++;
 				continue;
