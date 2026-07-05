@@ -96,6 +96,7 @@ import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
 import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
+import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND } from "./agent/tool-approve-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1770,6 +1771,15 @@ export function createGateway(config: GatewayConfig) {
 	// Decision into the transparency trace but never applies it (see that
 	// file's header comment for the full design-doc rationale).
 	registerThinkingRouterClassifier(sessionManager.lifecycleHub);
+	// CLF-W2 — tool auto-approve/deny decision seam HARNESS. Allow-lists the
+	// (tool-call, tool-approve) pair so `SessionManager.requestToolGrant`'s
+	// real consult never hits `dispatchDecision`'s allow-list-rejection throw
+	// — but deliberately registers NO classifier here (unlike the thinking
+	// router above). Zero classifiers ⇒ every consult abstains ⇒ behaviour is
+	// unconditionally unchanged today, regardless of `BOBBIT_CLF_TOOL_APPROVE`.
+	// See tool-approve-classifier.ts's header for the full scope/rationale —
+	// a real production classifier is a deliberately separate follow-up PR.
+	sessionManager.lifecycleHub.allowDecisionPoint(TOOL_APPROVE_POINT, TOOL_APPROVE_KIND);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;
