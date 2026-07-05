@@ -161,3 +161,82 @@ test("POST /api/sessions leaves a goal todo when projectId validation fails", as
 		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
 	}
 });
+
+// A custom-provider model id (PR #144) commonly looks like "z-ai/glm-5.2" —
+// the id itself contains a "/". The REST create-with-model shortcut used to
+// normalize a posted `model` string with a regex that required EXACTLY one
+// "/" total, so any id-with-slash silently normalized to `undefined` and the
+// session spawned with the default model instead of the requested one — no
+// error, no warning. The WS `set_model {provider, modelId}` path was never
+// affected because provider and id travel as separate fields there. These
+// tests pin: (1) a canonical `provider/id` string where `id` itself contains
+// a "/" resolves end-to-end, matching the `indexOf("/")` (first-slash-only)
+// split convention already used downstream (SessionManager.resolveInitialModel,
+// clampRoleThinking); (2) the structured `{ provider, id }` form with a
+// slash-containing `id` also resolves; (3) a genuinely malformed `model` is a
+// loud 400, never a silent fallback to the default model.
+test("POST /api/sessions accepts a custom-provider model id string that itself contains a slash", async () => {
+	const project = await defaultProject();
+	const create = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({
+			projectId: project.id,
+			cwd: project.rootPath,
+			worktree: false,
+			model: "my-custom-provider/z-ai/glm-5.2",
+		}),
+	});
+	const created = await readJson(create);
+	expect(create.status, created.text).toBe(201);
+	const sessionId = created.json.id;
+	try {
+		const detail = await readJson(await apiFetch(`/api/sessions/${sessionId}`));
+		// Must reflect the REQUESTED slash-containing model, not the server
+		// default — a silent fallback is exactly the bug this test pins.
+		expect(detail.json.modelProvider).toBe("my-custom-provider");
+		expect(detail.json.modelId).toBe("z-ai/glm-5.2");
+	} finally {
+		await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
+	}
+});
+
+test("POST /api/sessions accepts the structured { provider, id } model form when id contains a slash", async () => {
+	const project = await defaultProject();
+	const create = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({
+			projectId: project.id,
+			cwd: project.rootPath,
+			worktree: false,
+			model: { provider: "my-custom-provider", id: "z-ai/glm-5.2" },
+		}),
+	});
+	const created = await readJson(create);
+	expect(create.status, created.text).toBe(201);
+	const sessionId = created.json.id;
+	try {
+		const detail = await readJson(await apiFetch(`/api/sessions/${sessionId}`));
+		expect(detail.json.modelProvider).toBe("my-custom-provider");
+		expect(detail.json.modelId).toBe("z-ai/glm-5.2");
+	} finally {
+		await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
+	}
+});
+
+test("POST /api/sessions rejects a malformed model with a loud 400, never a silent default-model fallback", async () => {
+	const project = await defaultProject();
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({
+			projectId: project.id,
+			cwd: project.rootPath,
+			worktree: false,
+			model: "no-slash-at-all",
+		}),
+	});
+	const body = await readJson(resp);
+
+	expect(resp.status, body.text).toBe(400);
+	expect(body.json.code).toBe("INVALID_MODEL");
+	expect(body.json.error).toContain("no-slash-at-all");
+});
