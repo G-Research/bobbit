@@ -90,6 +90,7 @@ import {
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx, type RuntimeContext } from "./agent/lifecycle-hub.js";
+import { registerThinkingRouterClassifier } from "./agent/thinking-router-classifier.js";
 import { GOAL_COMPLETED_PRESENCE_HOOKS } from "./agent/lifecycle-hooks.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -2459,6 +2460,13 @@ export function createGateway(config: GatewayConfig) {
 		runtimeResolver: async ({ packId, runtimeId, projectId, config: providerConfig }) =>
 			resolveManagedRuntimeContext(getActivePackRuntimeSupervisor(), { packId, runtimeId, projectId, config: providerConfig }),
 	});
+	// CLF-W1b — F14 thinking router: the Decision seam's first production
+	// customer, registered at construction (not inside SessionManager's own
+	// constructor, since `lifecycleHub` is assigned here, after the fact).
+	// Deterministic-only, OBSERVE MODE ONLY: `enqueuePrompt` records the
+	// Decision into the transparency trace but never applies it (see that
+	// file's header comment for the full design-doc rationale).
+	registerThinkingRouterClassifier(sessionManager.lifecycleHub);
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 	const initExtensionChannelsOnce = async (): Promise<ExtensionChannelServices | undefined> => {
 		if (extensionChannelServices) return extensionChannelServices;

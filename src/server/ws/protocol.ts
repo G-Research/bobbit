@@ -1,6 +1,8 @@
 import type { WebSocket } from "ws";
 import type { InboxEntry } from "../agent/inbox-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { Decision } from "../agent/decision-types.js";
+import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 
 /**
  * Connection-scoped auth/session-binding state stamped directly onto the `ws`
@@ -79,6 +81,22 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	createdAt: number;
+	/**
+	 * CLF-W1b (observe-mode, data-only): the F14 thinking-router `Decision`
+	 * computed at user-prompt-submit time for THIS message, stamped here so a
+	 * later wave (W2) can apply it at drain time without re-deriving it from a
+	 * message that may sit queued for a while (the "QueuedMessage decision
+	 * stamping gap" fix — without this, a decision computed at submit time
+	 * for a message that goes through the queue, rather than direct dispatch,
+	 * has nowhere to live by the time `drainQueue` actually sends it). NEVER
+	 * applied in W1b: the session's live thinking level is untouched by this
+	 * field, and nothing reads it yet.
+	 */
+	thinkingDecision?: {
+		decision: Decision<ThinkingLevel>;
+		classifierId: string;
+		ts: number;
+	};
 }
 
 export interface SessionCostSnapshot {
