@@ -104,7 +104,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		// Yield so microtasks (poke / applyPolicyThenNudge) settle.
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
@@ -126,7 +126,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id, "e3");
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -141,7 +141,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
@@ -153,7 +153,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
@@ -164,7 +164,7 @@ describe("InboxNudger — periodic tick", () => {
 		const h = makeHarness({});
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
@@ -176,7 +176,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
@@ -188,7 +188,7 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
@@ -200,20 +200,20 @@ describe("InboxNudger — periodic tick", () => {
 		enqueueDirect(h.inboxStore, h.staff.id, "e1");
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "first tick wakes once");
 
 		// Add another pending entry; without clearing the guard, no second wake.
 		enqueueDirect(h.inboxStore, h.staff.id, "e2");
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "guard suppresses the second wake");
 
 		// Simulate the agent starting its turn — clears the guard.
 		h.nudger.onAgentStart(h.session.id);
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 2, "post-agent_start tick wakes again");
@@ -235,7 +235,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.session.rpcClient.compact = vi.fn(compactImpl);
 		h.enqueuePrompt.mockImplementation(async () => { order.push("enqueue"); });
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
@@ -252,7 +252,7 @@ describe("InboxNudger — contextPolicy", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -269,7 +269,7 @@ describe("InboxNudger — contextPolicy", () => {
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -314,7 +314,7 @@ describe("InboxNudger.start/stop", () => {
 		h.nudger.start();
 		h.nudger.stop();
 
-		vi.advanceTimersByTime(15_000 * 5);
+		await vi.advanceTimersByTimeAsync(15_000 * 5);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 	});
@@ -326,7 +326,7 @@ describe("InboxNudger.start/stop", () => {
 		h.nudger.start();
 		h.nudger.start();
 
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);

@@ -306,11 +306,11 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 
 		// Transient blip: worker momentarily finishes, then resumes immediately.
 		fireWorker("agent_end");
-		vi.advanceTimersByTime(1_000); // < 5s window
+		await vi.advanceTimersByTimeAsync(1_000); // < 5s window
 		fireWorker("agent_start");
 
 		// Advance well past the intended 5s debounce window.
-		vi.advanceTimersByTime(6_000);
+		await vi.advanceTimersByTimeAsync(6_000);
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -330,7 +330,7 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 
 		// Worker finishes and stays idle — no resume.
 		fireWorker("agent_end");
-		vi.advanceTimersByTime(6_000); // past the 5s debounce window
+		await vi.advanceTimersByTimeAsync(6_000); // past the 5s debounce window
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -349,12 +349,12 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 
 		// Worker finishes, then is dismissed before the debounce window elapses.
 		fireWorker("agent_end");
-		vi.advanceTimersByTime(1_000);
+		await vi.advanceTimersByTimeAsync(1_000);
 		await team.dismissRole(workerSessionId);
 
 		// Advance past the 5s window: a pending timer (post-fix) must have been
 		// cleared on removal, so no nudge fires against the torn-down session.
-		vi.advanceTimersByTime(6_000);
+		await vi.advanceTimersByTimeAsync(6_000);
 
 		assert.equal(
 			workerIdleNudgeCount(),

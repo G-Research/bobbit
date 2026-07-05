@@ -29,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_MARKET_PACKS = path.join(__dirname, "..", "market-packs");
+const REPO_MARKET_PACKS = path.join(__dirname, "..", "..", "market-packs");
 
 const builtinPacksMod = await import("../../src/server/agent/builtin-packs.ts");
 const { resolveBuiltinPacksDir, builtinFirstPartyPackEntries, BUILTIN_PACK_SCOPE } = builtinPacksMod;

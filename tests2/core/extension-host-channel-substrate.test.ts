@@ -26,7 +26,7 @@ type ChannelTarget = {
 
 async function importExpected(modulePath: string): Promise<AnyRecord> {
 	try {
-		return await import(modulePath) as AnyRecord;
+		return await import(/* @vite-ignore */ modulePath) as AnyRecord;
 	} catch (err: any) {
 		assert.fail(`expected channel implementation dependency ${modulePath}: ${err?.message ?? err}`);
 	}
@@ -114,8 +114,8 @@ function contribution(overrides: AnyRecord = {}): AnyRecord {
 }
 
 async function makeRegistryHarness(opts: { contrib?: AnyRecord; now?: () => number } = {}): Promise<AnyRecord> {
-	const permitsMod = await importExpected("../src/server/extension-host/channel-open-permits.ts");
-	const registryMod = await importExpected("../src/server/extension-host/channel-registry.ts");
+	const permitsMod = await importExpected("../../src/server/extension-host/channel-open-permits.ts");
+	const registryMod = await importExpected("../../src/server/extension-host/channel-registry.ts");
 	const contrib = opts.contrib ?? contribution();
 	const opened: AnyRecord[] = [];
 	const inbound: unknown[] = [];
@@ -196,7 +196,7 @@ function channelId(ch: AnyRecord): string {
 describe("channel open permits", () => {
 	it("requires valid one-shot permits bound to session/pack/contribution/channel/singleton", async () => {
 		let now = 1_000;
-		const mod = await importExpected("../src/server/extension-host/channel-open-permits.ts");
+		const mod = await importExpected("../../src/server/extension-host/channel-open-permits.ts");
 		const permits = construct(mod, ["ChannelOpenPermitStore", "ChannelOpenPermitService", "OpenPermitService"], { now: () => now, ttlMs: 100 }, "open permits");
 		const base = target({ singletonKey: "primary" });
 
@@ -215,7 +215,7 @@ describe("channel open permits", () => {
 
 describe("channel frame validation", () => {
 	it("accepts only v1 text/json frames and rejects binary/invalid shapes", async () => {
-		const mod = await importExpected("../src/server/extension-host/channel-types.ts");
+		const mod = await importExpected("../../src/server/extension-host/channel-types.ts");
 		assertFrameAccepted(mod, { kind: "text", data: "hello" }, { maxFrameBytes: 128 });
 		assertFrameAccepted(mod, { kind: "json", data: { op: "resize", cols: 80, rows: 24 } }, { maxFrameBytes: 128 });
 		assertFrameRejected(mod, { kind: "bytes", data: [1, 2, 3] }, /binary|bytes|kind/i);

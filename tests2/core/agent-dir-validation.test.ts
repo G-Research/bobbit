@@ -17,9 +17,9 @@ type ValidationResult = {
 };
 
 async function loadValidationFn(): Promise<(input: string, projectRoot: string) => Promise<ValidationResult> | ValidationResult> {
-	for (const specifier of ["../src/server/agent-dir-config.ts", "../src/server/bobbit-dir.ts"]) {
+	for (const specifier of ["../../src/server/agent-dir-config.ts", "../../src/server/bobbit-dir.ts"]) {
 		try {
-			const mod = await import(specifier) as Record<string, any>;
+			const mod = await import(/* @vite-ignore */ specifier) as Record<string, any>;
 			if (typeof mod.validateAgentDirTarget === "function") {
 				return (input, projectRoot) => mod.validateAgentDirTarget(input, projectRoot);
 			}

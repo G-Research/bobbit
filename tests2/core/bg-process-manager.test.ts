@@ -160,7 +160,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		h.mgr.registerWait(SESSION, controller);
 
 		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 50, controller.signal);
-		vi.advanceTimersByTime(50);
+		await vi.advanceTimersByTimeAsync(50);
 
 		return waitPromise.then((result) => {
 			assert.ok(result);
@@ -196,7 +196,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		for (let i = 0; i < 200; i++) {
 			const p = h.mgr.waitForExit(SESSION, info.id, 1, signal);
 			await Promise.resolve();
-			vi.advanceTimersByTime(1);
+			await vi.advanceTimersByTimeAsync(1);
 			await p;
 		}
 
@@ -275,7 +275,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 			assert.ok(result);
 			assert.equal(result!.aborted, true);
 			assert.equal(result!.timedOut, false);
-			vi.runAllTimers();
+			await vi.runAllTimersAsync();
 			h.mgr.cleanup(SESSION);
 		});
 	});
@@ -321,4 +321,4 @@ describe("BgProcessManager endTime snapshots", () => {
 });
 
 // Make sure no global mock timer state leaks between describe blocks.
-vi.timers.reset();
+vi.useRealTimers();

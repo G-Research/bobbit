@@ -817,7 +817,7 @@ describe("TeamManager", () => {
 			}
 
 			// Advance time by 5 hours — simulates a sleep/wake where all overdue intervals fire
-			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
 
 			// CORRECT behavior: only ONE nudge should be enqueued, not ~30
 			const callCount = enqueuePrompt.mock.calls.length;
@@ -866,7 +866,7 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance 5 hours — should get exactly 1 nudge (pending guard blocks the rest)
-			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
 			assert.equal(enqueuePrompt.mock.calls.length, 1, "First batch: exactly 1 nudge");
 
 			// Simulate agent processing the nudge: agent_start then agent_end
@@ -875,7 +875,7 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance another 15 minutes — should get a second nudge
-			vi.advanceTimersByTime(15 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
 			assert.ok(enqueuePrompt.mock.calls.length >= 2, "Second nudge should fire after agent processes first");
 
 			vi.useRealTimers();
@@ -918,7 +918,7 @@ describe("TeamManager", () => {
 			goal.state = "complete";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
 
 			assert.equal(enqueuePrompt.mock.calls.length, 0, "Completed goal team lead must not be nudged");
 
@@ -952,7 +952,7 @@ describe("TeamManager", () => {
 			(goal as any).archived = true;
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
 
 			assert.equal(enqueuePrompt.mock.calls.length, 0, "Archived goal team lead must not be nudged");
 
@@ -998,7 +998,7 @@ describe("TeamManager", () => {
 
 			// Advance past the 10-minute base workers-nudge delay
 			// (and keep worker streamingStartedAt under threshold by tick < 30m from its start)
-			vi.advanceTimersByTime(15 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 0,
@@ -1046,7 +1046,7 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance past the 10-minute base workers-nudge delay
-			vi.advanceTimersByTime(15 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 1,
@@ -1090,7 +1090,7 @@ describe("TeamManager", () => {
 			tlSession.status = "idle";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			vi.advanceTimersByTime(15 * 60 * 1000);
+			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 1,
@@ -1552,7 +1552,7 @@ describe("TeamManager", () => {
 
 			const calls = sm.dispatchGoalProvisionedForWorktree.mock.calls;
 			assert.ok(calls.length >= 1, "goalProvisioned must be dispatched for the member worktree");
-			const arg = calls[calls.length - 1].arguments[0];
+			const arg = calls[calls.length - 1][0];
 			assert.equal(arg.goalId, "goal-1", "dispatch must carry the effective goal id");
 			assert.equal(arg.worktreePath, result.worktreePath, "dispatch must target the member worktree path");
 			assert.equal(arg.branch, agent!.branch, "dispatch must carry the member branch");

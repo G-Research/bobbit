@@ -289,7 +289,7 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 
 			// Base no-workers delay is 5 minutes. The timer path should recover via
 			// retryLastPrompt({ auto: true }) rather than append a fresh auto-nudge.
-			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 			await Promise.resolve();
 
@@ -335,7 +335,7 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			tlSession.lastPromptText = "continue coordinating the team";
 
 			fire("agent_end");
-			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 			await Promise.resolve();
 
@@ -365,7 +365,7 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 			tlSession.lastPromptText = "continue coordinating the team";
 
 			fire("agent_end");
-			vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
+			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
 			await Promise.resolve();
 
 			assert.equal(retryLastPrompt.mock.calls.length, 0,
@@ -394,7 +394,7 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 
 			for (let i = 0; i < 3; i++) {
 				fire("agent_end");
-				vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
+				await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
 				await Promise.resolve();
 			}
 
@@ -429,7 +429,7 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 
 		// Cycle 1 — the legitimate first nudge.
 		fire("agent_end");
-		vi.advanceTimersByTime(BASE + SLACK);
+		await vi.advanceTimersByTimeAsync(BASE + SLACK);
 		assert.equal(
 			enqueuePrompt.mock.calls.length,
 			1,
@@ -444,7 +444,7 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			// Lead "finishes" its one-line reply — stays idle for the next round.
 			tlSession.status = "idle";
 			fire("agent_end");
-			vi.advanceTimersByTime(BASE + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE + SLACK);
 		}
 
 		const totalCalls = enqueuePrompt.mock.calls.length;
@@ -482,7 +482,7 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 		const SLACK = 1_000;
 
 		fire("agent_end");
-		vi.advanceTimersByTime(BASE + SLACK);
+		await vi.advanceTimersByTimeAsync(BASE + SLACK);
 		assert.equal(
 			enqueuePrompt.mock.calls.length,
 			1,
@@ -493,7 +493,7 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			fire("agent_start");
 			tlSession.status = "idle";
 			fire("agent_end");
-			vi.advanceTimersByTime(BASE + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE + SLACK);
 		}
 
 		const totalCalls = enqueuePrompt.mock.calls.length;
@@ -537,7 +537,7 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			vi.advanceTimersByTime(BASE + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE + SLACK);
 
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first no-workers nudge delivery should be attempted at the base delay");
@@ -581,9 +581,9 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			vi.advanceTimersByTime(BASE + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE + SLACK);
 			await Promise.resolve();
-			vi.advanceTimersByTime(0);
+			await vi.advanceTimersByTimeAsync(0);
 			await Promise.resolve();
 
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
@@ -625,7 +625,7 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			// First no-workers nudge reaches SessionManager but is parked behind the
 			// errored/capped team-lead state. No agent_start follows.
-			vi.advanceTimersByTime(BASE + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE + SLACK);
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first parked no-workers nudge should be enqueued at the base delay");
 			assert.equal((enqueuePrompt.mock.calls[0][2] as any)?.source, "auto-nudge",
@@ -634,7 +634,7 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 			// The next eligible no-workers nudge should still fire after the normal
 			// backoff delay. A sticky nudgePending flag suppresses this forever today.
 			tlSession.status = "idle";
-			vi.advanceTimersByTime(BASE * 2 + SLACK);
+			await vi.advanceTimersByTimeAsync(BASE * 2 + SLACK);
 			assert.equal(
 				enqueuePrompt.mock.calls.length,
 				2,
@@ -676,7 +676,7 @@ describe("TeamManager — PromptSource semantics", () => {
 		// proving the counter really was reset (not just the timer cancelled).
 		tlSession.status = "idle";
 		fire("agent_end");
-		vi.advanceTimersByTime(10 * 60 * 1000 + 1_000);
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1_000);
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"workers-nudge must fire at base 10m delay after counter reset");
 
@@ -763,12 +763,12 @@ describe("TeamManager — 12h backoff cap", () => {
 
 		// Just under 12h — must NOT fire (capped delay is 12h).
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		vi.advanceTimersByTime(TWELVE_H - 10_000);
+		await vi.advanceTimersByTimeAsync(TWELVE_H - 10_000);
 		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped nudge must not fire before 12h");
 
 		// Crossing 12h — must fire exactly once.
-		vi.advanceTimersByTime(20_000);
+		await vi.advanceTimersByTimeAsync(20_000);
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped nudge must fire at the 12h boundary, not at 2^12 * 5m");
 
@@ -788,11 +788,11 @@ describe("TeamManager — 12h backoff cap", () => {
 		fire("agent_end");
 
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		vi.advanceTimersByTime(TWELVE_H - 10_000);
+		await vi.advanceTimersByTimeAsync(TWELVE_H - 10_000);
 		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped workers-nudge must not fire before 12h");
 
-		vi.advanceTimersByTime(20_000);
+		await vi.advanceTimersByTimeAsync(20_000);
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped workers-nudge must fire at the 12h boundary");
 
@@ -816,7 +816,7 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		fire("agent_end");
 
 		// Tick partway through the 5m delay — add an idle worker before deadline.
-		vi.advanceTimersByTime(60_000);
+		await vi.advanceTimersByTimeAsync(60_000);
 		const entry = (team as any).teams.get("goal-1")!;
 		const workerSession = {
 			id: "worker-late", status: "idle", cwd: "/tmp/worker",
@@ -829,7 +829,7 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		});
 
 		// Cross the original 5m deadline.
-		vi.advanceTimersByTime(5 * 60 * 1000 + 1_000);
+		await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
 
 		// No no-workers nudge was sent, and the counter was NOT incremented.
 		const noWorkersFires = enqueuePrompt.mock.calls.filter((c: any) => {

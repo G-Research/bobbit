@@ -21,7 +21,7 @@ import { parse as yamlParse } from "yaml";
 import { applyPromptConditionals } from "../../src/server/agent/prompt-conditionals.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.join(__dirname, "..");
+const REPO = path.join(__dirname, "..", "..");
 
 describe("applyPromptConditionals", () => {
 	it("returns text unchanged when there are no conditional tags", () => {

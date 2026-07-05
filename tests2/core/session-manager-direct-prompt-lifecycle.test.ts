@@ -235,7 +235,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.promptQueue.length, 1, "expected recovered row before auto retry fires");
 
-		vi.advanceTimersByTime(1000);
+		await vi.advanceTimersByTimeAsync(1000);
 		await Promise.resolve();
 		await Promise.resolve();
 
@@ -306,7 +306,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.turnHadToolCalls, false, "pre-agent_start delivery failure should clear stale tool-call state");
 
-		vi.advanceTimersByTime(1000);
+		await vi.advanceTimersByTimeAsync(1000);
 		await flushAutoRetryMicrotasks();
 
 		assert.equal(prompt.mock.calls.length, 2, "expected initial failed delivery plus one auto retry");
@@ -341,7 +341,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		for (const expectedAttempt of [2, 3]) {
 			const pending = autoRetryPendingEvents(session).at(-1);
 			assert.ok(pending, `expected pending retry before attempt ${expectedAttempt}`);
-			vi.advanceTimersByTime(pending.retryDelayMs);
+			await vi.advanceTimersByTimeAsync(pending.retryDelayMs);
 			await flushAutoRetryMicrotasks();
 
 			const latestPending = autoRetryPendingEvents(session).at(-1);
@@ -352,7 +352,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		const finalPending = autoRetryPendingEvents(session).at(-1);
 		assert.ok(finalPending, "expected third pending retry before exhaustion");
-		vi.advanceTimersByTime(finalPending.retryDelayMs);
+		await vi.advanceTimersByTimeAsync(finalPending.retryDelayMs);
 		await flushAutoRetryMicrotasks();
 
 		assert.equal(prompt.mock.calls.length, 4, "expected initial delivery plus three bounded auto-retry attempts");
@@ -623,7 +623,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		pending.reject(new Error("Agent process exited with code 17"));
 		await assert.rejects(() => sendPromise, /Agent process exited with code 17/);
 
-		vi.advanceTimersByTime(0);
+		await vi.advanceTimersByTimeAsync(0);
 		assert.equal(prompt.mock.calls.length, 1, "terminated sessions must not redrain rejected prompts");
 		assert.equal(session.status, "terminated", "recovery must not broadcast idle over process_exit termination");
 		assert.equal(session.promptQueue.length, 0, "prompt rejected by a dead child must not be requeued");

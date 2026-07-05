@@ -130,7 +130,7 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 			assert.equal(ok, true, "wiring should succeed for a docker sandbox");
 
 			assert.equal(dispatchSpy.mock.calls.length, 1, "goalProvisioned must be dispatched exactly once");
-			const arg = dispatchSpy.mock.calls[0].arguments[0];
+			const arg = dispatchSpy.mock.calls[0][0];
 			assert.equal(arg.goalId, "goal-g1");
 			assert.equal(arg.projectId, "proj-1");
 			assert.equal(arg.branch, "goal/g1/coder-x");

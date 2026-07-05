@@ -23,14 +23,14 @@ type MigrationReport = {
 
 async function loadMigrationFn(): Promise<MigrationFn> {
 	const candidates = [
-		"../src/server/agent-dir-migration.ts",
-		"../src/server/agent-dir-config.ts",
-		"../src/server/bobbit-dir.ts",
+		"../../src/server/agent-dir-migration.ts",
+		"../../src/server/agent-dir-config.ts",
+		"../../src/server/bobbit-dir.ts",
 	];
 	const names = ["migrateAgentDirData", "copyMigrateAgentDir", "migrateAgentDir"];
 	for (const specifier of candidates) {
 		try {
-			const mod = await import(specifier) as Record<string, any>;
+			const mod = await import(/* @vite-ignore */ specifier) as Record<string, any>;
 			for (const name of names) {
 				if (typeof mod[name] === "function") {
 					return (opts) => callMigration(mod[name], opts);
