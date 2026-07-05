@@ -6,6 +6,22 @@ import { atomicWriteJsonSync, loadJsonWithBackupFallback } from "./atomic-json.j
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
+/** Severity of a single structured review finding (F3 — see docs/design). */
+export type VerificationFindingSeverity = "blocker" | "major" | "minor";
+
+/**
+ * A single structured issue reported alongside a review/QA verdict via the
+ * `verification_result` tool. Additive: reviewers may still submit only
+ * `verdict`/`summary` with no `findings` — this array is purely supplemental
+ * detail for the team-lead notification and gate-status surfaces.
+ */
+export interface VerificationFinding {
+	severity: VerificationFindingSeverity;
+	summary: string;
+	file?: string;
+	line?: number;
+}
+
 export interface GateSignalStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
@@ -21,6 +37,12 @@ export interface GateSignalStep {
 	};
 	/** Durable diagnostics for completed command steps, stored under Bobbit state. */
 	diagnostics?: GateStepDiagnostics;
+	/**
+	 * Optional structured findings reported by a reviewer/QA agent alongside
+	 * its verdict (F3). Absent on older persisted records and on any verdict
+	 * that didn't include findings — always treat as optional.
+	 */
+	findings?: VerificationFinding[];
 	/**
 	 * Lifecycle status for in-flight rows and durable terminal verdict for
 	 * completed rows. Set on initial enumeration by

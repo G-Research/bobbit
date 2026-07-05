@@ -71,4 +71,55 @@ describe("buildGateStatusSummary", () => {
 		assert.equal(summary.bypassed, 0);
 		assert.equal(summary.bypassedCount, 0);
 	});
+
+	it("surfaces compact failedFindings for a failed gate's failed steps (F3)", () => {
+		const failedGate: GateState = {
+			...gate("failed"),
+			signals: [{
+				id: "sig-1", gateId: "implementation", goalId: "goal-1", sessionId: "s1",
+				timestamp: Date.now(), commitSha: "abc",
+				verification: {
+					status: "failed",
+					steps: [{
+						name: "review", type: "llm-review", passed: false, output: "failed", duration_ms: 1,
+						findings: [
+							{ severity: "blocker", summary: "SQL injection" },
+							{ severity: "minor", summary: "nit" },
+						],
+					}],
+				},
+			}],
+		};
+
+		const summary = buildGateStatusSummary({
+			workflow: { gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }] },
+			gates: [failedGate],
+			activeVerifications: [],
+		});
+
+		assert.deepEqual(summary.gates[0]?.failedFindings, ["blocker: SQL injection", "minor: nit"]);
+		assert.deepEqual(summary.gates[0]?.failedSteps, ["review"]);
+	});
+
+	it("omits failedFindings when a failed gate's failed step has no findings (dark-compatible)", () => {
+		const failedGate: GateState = {
+			...gate("failed"),
+			signals: [{
+				id: "sig-1", gateId: "implementation", goalId: "goal-1", sessionId: "s1",
+				timestamp: Date.now(), commitSha: "abc",
+				verification: {
+					status: "failed",
+					steps: [{ name: "unit tests", type: "command", passed: false, output: "failed", duration_ms: 1 }],
+				},
+			}],
+		};
+
+		const summary = buildGateStatusSummary({
+			workflow: { gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }] },
+			gates: [failedGate],
+			activeVerifications: [],
+		});
+
+		assert.equal(summary.gates[0]?.failedFindings, undefined);
+	});
 });

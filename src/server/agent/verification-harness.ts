@@ -110,7 +110,7 @@ function retainedCommandOutputTail(outFile?: string, errFile?: string): string {
 }
 import fs from "node:fs";
 import path from "node:path";
-import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
+import type { GateStore, GateSignal, GateSignalStep, VerificationFinding, VerificationFindingSeverity } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { resolveRole as resolveRoleFromGoal, listAvailableRoles } from "./resolve-role.js";
@@ -774,6 +774,39 @@ export interface VerificationResult {
 	verdict: boolean;
 	summary: string;
 	reportHtml?: string;
+	/** Optional structured findings submitted alongside the verdict (F3). */
+	findings?: VerificationFinding[];
+}
+
+const VERIFICATION_FINDING_SEVERITIES = new Set(["blocker", "major", "minor"]);
+/** Hard cap mirroring the tool schema's `findings[].summary` maxLength (300). */
+const MAX_FINDING_SUMMARY_LEN = 300;
+const MAX_FINDINGS_PER_VERDICT = 50;
+
+/**
+ * Defensive parse for the `findings` field on POST /api/internal/verification-result.
+ * Malformed entries are dropped rather than rejecting the whole request — a
+ * reviewer that got one field wrong should not lose its (possibly hard-won)
+ * verdict + summary. Returns `undefined` when there is nothing valid to keep,
+ * so the resulting VerificationResult looks exactly like the old shape.
+ */
+export function sanitizeVerificationFindings(raw: unknown): VerificationFinding[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: VerificationFinding[] = [];
+	for (const item of raw.slice(0, MAX_FINDINGS_PER_VERDICT)) {
+		if (!item || typeof item !== "object") continue;
+		const { severity, summary, file, line } = item as Record<string, unknown>;
+		if (typeof severity !== "string" || !VERIFICATION_FINDING_SEVERITIES.has(severity)) continue;
+		if (typeof summary !== "string" || summary.length === 0) continue;
+		const finding: VerificationFinding = {
+			severity: severity as VerificationFindingSeverity,
+			summary: summary.slice(0, MAX_FINDING_SUMMARY_LEN),
+		};
+		if (typeof file === "string" && file.length > 0) finding.file = file;
+		if (typeof line === "number" && Number.isFinite(line)) finding.line = line;
+		out.push(finding);
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -958,6 +991,7 @@ type ResumedVerificationStep = {
 	output: string;
 	duration_ms: number;
 	diagnostics?: GateStepDiagnostics;
+	findings?: VerificationFinding[];
 };
 
 function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): TerminalGateSignalStepStatus {
@@ -1188,6 +1222,7 @@ export async function buildReviewPrompt(
 		"When your review is complete, you MUST call the `verification_result` tool:",
 		'- `verdict`: "pass" if no critical or high severity findings, "fail" otherwise',
 		"- `summary`: detailed markdown summary of your findings — use headings, bullet lists, code blocks with file:line references",
+		"- `findings`: on fail, also list each issue as a structured finding (severity/summary/file/line)",
 		"Your summary should be detailed markdown: use headings, bullet lists, code blocks with file references.",
 		"Structure it as: what was reviewed, specific findings with file:line, verdict rationale.",
 		"",
@@ -2230,6 +2265,7 @@ export class VerificationHarness {
 					duration_ms: r.duration_ms,
 				};
 				if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
+				if (r.findings) stepResult.findings = r.findings;
 				return stepResult;
 			}),
 		});
@@ -2268,7 +2304,7 @@ export class VerificationHarness {
 	private async _tryResumeFromSession(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; findings?: VerificationFinding[] } | null> {
 		if (!step.sessionId) return null;
 
 		const session = this.sessionManager?.getSession(step.sessionId);
@@ -2318,6 +2354,7 @@ export class VerificationHarness {
 					passed: idleResult.verdict,
 					output: idleResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					findings: idleResult.findings,
 				};
 			}
 
@@ -2329,6 +2366,7 @@ export class VerificationHarness {
 					passed: recoveryResult.verdict,
 					output: recoveryResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					findings: recoveryResult.findings,
 				};
 			}
 			if (recoveryResult.type === "errored") {
@@ -2386,6 +2424,7 @@ export class VerificationHarness {
 					passed: result2.verdict,
 					output: result2.summary,
 					duration_ms: Date.now() - step.startedAt,
+					findings: result2.findings,
 				};
 			}
 
@@ -2396,6 +2435,7 @@ export class VerificationHarness {
 					passed: postReminderRecovery.verdict,
 					output: postReminderRecovery.summary,
 					duration_ms: Date.now() - step.startedAt,
+					findings: postReminderRecovery.findings,
 				};
 			}
 			if (postReminderRecovery.type === "errored") {
@@ -2431,7 +2471,7 @@ export class VerificationHarness {
 	 */
 	private async _rerunLlmReviewStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; findings?: VerificationFinding[] } | null> {
 		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
@@ -2462,7 +2502,7 @@ export class VerificationHarness {
 		// Mirror the main verification loop: bounded 3 attempts for ordinary
 		// transient errors, unbounded retry for provider rate-limit / overload.
 		const maxBoundedAttempts = 3;
-		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
+		let result: { passed: boolean; output: string; sessionId?: string; findings?: VerificationFinding[] } = { passed: false, output: "Re-run failed." };
 		let finalAttempt = 0;
 
 		// Resolve project vars and substitute the prompt template
@@ -2509,6 +2549,7 @@ export class VerificationHarness {
 			passed: result.passed,
 			output: result.passed ? result.output : appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }),
 			duration_ms: Date.now() - startedAt,
+			findings: result.findings,
 		};
 	}
 
@@ -2517,7 +2558,7 @@ export class VerificationHarness {
 	 */
 	private async _rerunAgentQaStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; findings?: VerificationFinding[] } | null> {
 		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
@@ -2544,7 +2585,7 @@ export class VerificationHarness {
 		// overload errors still retry indefinitely with exponential backoff
 		// (cap 15 min), matching the main verification loop.
 		const maxBoundedAttempts = 2;
-		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
+		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any; findings?: VerificationFinding[] } = { passed: false, output: "Re-run failed." };
 		for (let attempt = 1; ; attempt++) {
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
@@ -2573,7 +2614,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt };
+		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt, findings: result.findings };
 	}
 
 	private readonly _stateDir: string;
@@ -3715,7 +3756,7 @@ export class VerificationHarness {
 					return { index, stepResult: cachedResult };
 				}
 
-				let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
+				let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics; findings?: VerificationFinding[] } = { passed: false, output: "No verification result." };
 				let artifact: GateSignalStep["artifact"];
 				const startTime = Date.now();
 
@@ -4063,6 +4104,7 @@ export class VerificationHarness {
 				};
 				if (artifact) stepResult.artifact = artifact;
 				if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
+				if (result.findings) stepResult.findings = result.findings;
 				return { index, stepResult };
 			};
 
@@ -4318,7 +4360,7 @@ export class VerificationHarness {
 		sessionId?: string,
 		gate?: WorkflowGate,
 		diffArtifact?: ReviewDiffArtifact | null,
-	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string; findings?: VerificationFinding[] }> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The fallback to
 		// "reviewer" preserves the legacy default — used when an `llm-review`
@@ -4355,6 +4397,7 @@ export class VerificationHarness {
 			"When your review is complete, call `verification_result`:",
 			'- verdict: "pass" or "fail" based on findings severity',
 			"- summary: detailed markdown — headings, bullet lists, code blocks with file:line references",
+			"- findings: on fail, also list each issue as a structured finding (severity/summary/file/line)",
 			"",
 			"You MUST call this tool. Going idle without calling it means your review is lost.",
 			"Do NOT emit <verdict> XML tags. Do NOT call gate_signal.",
@@ -4448,7 +4491,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
-	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string; findings?: VerificationFinding[] }> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
 		// can be paused between signal-accept and verifier-spawn. Refuse to
@@ -4633,13 +4676,13 @@ export class VerificationHarness {
 			if (result.type === "result") {
 				// Got structured result — still wait for agent to go idle (cleanup)
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
-				return { passed: result.verdict, output: result.summary, sessionId };
+				return { passed: result.verdict, output: result.summary, sessionId, findings: result.findings };
 			}
 
 			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
 			if (recoveryResult.type === "result") {
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
-				return { passed: recoveryResult.verdict, output: recoveryResult.summary, sessionId };
+				return { passed: recoveryResult.verdict, output: recoveryResult.summary, sessionId, findings: recoveryResult.findings };
 			}
 			if (recoveryResult.type === "errored") {
 				return { passed: false, output: recoveryResult.output, sessionId };
@@ -4668,13 +4711,13 @@ export class VerificationHarness {
 			]);
 
 			if (result2.type === "result") {
-				return { passed: result2.verdict, output: result2.summary, sessionId };
+				return { passed: result2.verdict, output: result2.summary, sessionId, findings: result2.findings };
 			}
 
 			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
 			if (postReminderRecovery.type === "result") {
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
-				return { passed: postReminderRecovery.verdict, output: postReminderRecovery.summary, sessionId };
+				return { passed: postReminderRecovery.verdict, output: postReminderRecovery.summary, sessionId, findings: postReminderRecovery.findings };
 			}
 			if (postReminderRecovery.type === "errored") {
 				return { passed: false, output: postReminderRecovery.output, sessionId };
@@ -4749,6 +4792,7 @@ export class VerificationHarness {
 			"After completing all scenarios, call `verification_result` to submit your results:",
 			'- `verdict`: "pass" or "fail"',
 			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
+			"- `findings`: on fail, also list each issue as a structured finding (severity/summary/file/line)",
 			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
 			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
 			"",
@@ -4770,7 +4814,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
-	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string }; findings?: VerificationFinding[] }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
 		// step.role first, then "qa-tester" / "test-engineer" / "reviewer"
@@ -4995,7 +5039,7 @@ export class VerificationHarness {
 				const artifact = result.reportHtml
 					? { content: result.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
 					: undefined;
-				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
+				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact, findings: result.findings };
 			}
 
 			// Agent went idle without calling the tool — if the last turn hit a
@@ -5019,7 +5063,7 @@ export class VerificationHarness {
 				const artifact = result2.reportHtml
 					? { content: result2.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
 					: undefined;
-				return { passed: result2.verdict, output: result2.summary, sessionId: qaSessionId, artifact };
+				return { passed: result2.verdict, output: result2.summary, sessionId: qaSessionId, artifact, findings: result2.findings };
 			}
 
 			// Hard failure
@@ -5068,7 +5112,7 @@ export class VerificationHarness {
 		timeoutMs: number,
 		roleName?: string,
 		goalId?: string,
-	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string; findings?: VerificationFinding[] }> {
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
 		// Set up verification_result promise
@@ -5236,7 +5280,7 @@ export class VerificationHarness {
 			if (result.type === "result") {
 				// Got structured result — wait briefly for agent to finish
 				await completionPromise.catch(() => {});
-				return { passed: result.verdict, output: result.summary, sessionId: subSessionId };
+				return { passed: result.verdict, output: result.summary, sessionId: subSessionId, findings: result.findings };
 			}
 
 			// Agent completed without calling the tool — send reminder
@@ -5281,7 +5325,7 @@ export class VerificationHarness {
 			]);
 
 			if (result2.type === "result") {
-				return { passed: result2.verdict, output: result2.summary, sessionId: subSessionId };
+				return { passed: result2.verdict, output: result2.summary, sessionId: subSessionId, findings: result2.findings };
 			}
 
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: subSessionId };
