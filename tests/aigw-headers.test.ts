@@ -72,8 +72,8 @@ const CLAUDE_MODEL = {
 };
 
 describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
-	it("emits the documented header literals at provider level (non-Claude models)", () => {
-		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
+	it("emits the documented header literals at provider level (non-Claude models)", async () => {
+		await writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
 		const data = readModels();
 		assert.ok(data?.providers?.aigw, "providers.aigw must exist");
 		const aigw = data.providers.aigw;
@@ -90,8 +90,8 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 		);
 	});
 
-	it("does NOT add `headers` to any individual model entry", () => {
-		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL, CLAUDE_MODEL]);
+	it("does NOT add `headers` to any individual model entry", async () => {
+		await writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL, CLAUDE_MODEL]);
 		const data = readModels();
 		const models = data.providers.aigw.models;
 		assert.ok(Array.isArray(models) && models.length === 2);
@@ -100,11 +100,11 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 		}
 	});
 
-	it("emits provider-level header even when only Claude (Bedrock-routed) models are present", () => {
+	it("emits provider-level header even when only Claude (Bedrock-routed) models are present", async () => {
 		// Bedrock provider in pi-ai ignores model.headers, but `headers` lives at
 		// the provider level — emitting it is harmless and keeps the provider
 		// shape uniform regardless of which models the gateway exposes.
-		writeAigwModelsJson("https://aigw.example/v1", [CLAUDE_MODEL]);
+		await writeAigwModelsJson("https://aigw.example/v1", [CLAUDE_MODEL]);
 		const data = readModels();
 		assert.equal(data.providers.aigw.headers["User-Agent"], EXPECTED_USER_AGENT);
 		assert.equal(
@@ -117,8 +117,8 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 		assert.equal(claudeEntry.headers, undefined);
 	});
 
-	it("header literal JSON-encodes to the documented escaped form", () => {
-		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
+	it("header literal JSON-encodes to the documented escaped form", async () => {
+		await writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
 		const f = path.join(tmp, "models.json");
 		const raw = readFileSync(f, "utf-8");
 		// JSON-encoded literal as documented in the design doc:
@@ -128,7 +128,7 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 		);
 	});
 
-	it("removeAigwModelsJson() drops the aigw block entirely (no orphan headers anywhere)", () => {
+	it("removeAigwModelsJson() drops the aigw block entirely (no orphan headers anywhere)", async () => {
 		// Pre-seed an unrelated provider to confirm we don't touch it.
 		const seeded = {
 			providers: {
@@ -136,8 +136,8 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 			},
 		};
 		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
-		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
-		removeAigwModelsJson();
+		await writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
+		await removeAigwModelsJson();
 		const data = readModels();
 		assert.equal(data.providers.aigw, undefined, "aigw provider must be gone");
 		// anthropic provider untouched + has no AI Gateway header leak.
@@ -145,7 +145,7 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 		assert.equal(data.providers.anthropic.headers, undefined, "no orphan headers on other providers");
 	});
 
-	it("does not leak AI Gateway headers onto non-aigw providers when re-written", () => {
+	it("does not leak AI Gateway headers onto non-aigw providers when re-written", async () => {
 		// Seed an anthropic provider, then run aigw write. Confirm anthropic is
 		// left alone — no AI Gateway headers synthesised on it.
 		const seeded = {
@@ -157,7 +157,7 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 			},
 		};
 		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
-		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
+		await writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
 		const data = readModels();
 		assert.deepEqual(data.providers.anthropic.headers, { "X-Existing": "keep-me" });
 		assert.equal(data.providers.anthropic.headers["User-Agent"], undefined);

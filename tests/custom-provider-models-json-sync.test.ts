@@ -207,7 +207,7 @@ describe("syncCustomProviderModelsJson — custom local provider models.json bri
 			assert.ok(readModels()?.providers?.a);
 			assert.ok(readModels()?.providers?.b);
 
-			removeCustomProviderModelsJsonEntry(configA);
+			await removeCustomProviderModelsJsonEntry(configA);
 
 			const data = readModels();
 			assert.equal(data?.providers?.a, undefined, "removed provider's entry must be gone");
