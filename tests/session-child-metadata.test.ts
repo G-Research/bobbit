@@ -9,13 +9,14 @@ import path from "node:path";
 describe("child session metadata wiring", () => {
 	it("createSession accepts and forwards PR walkthrough child metadata without delegateOf", () => {
 		const managerSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+		const spawnSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-spawn.ts"), "utf-8");
 		for (const field of [
 			"parentSessionId",
 			"childKind",
 			"readOnly",
 		]) {
 			assert.match(managerSrc, new RegExp(`${field}\\?:`), `createSession opts/SessionInfo must include ${field}`);
-			const forwards = managerSrc.match(new RegExp(`${field}:\\s*opts\\?\\.${field}`, "g")) ?? [];
+			const forwards = spawnSrc.match(new RegExp(`${field}:\\s*opts\\?\\.${field}`, "g")) ?? [];
 			assert.ok(forwards.length >= 2, `createSession must forward opts.${field} into both normal and worktree plans`);
 		}
 	});
