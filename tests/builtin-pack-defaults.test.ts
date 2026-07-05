@@ -56,6 +56,32 @@ describe("builtin-pack-defaults seed", () => {
 		assert.deepEqual([...FIRST_PARTY_PACKS_DISABLED_BY_DEFAULT], [PACK]);
 	});
 
+	// Regression pin: every FIRST_PARTY_PACKS_DISABLED_BY_DEFAULT pack must also
+	// be in scripts/copy-builtin-packs.mjs's FIRST_PARTY_PACKS allowlist, or it
+	// never actually ships in dist/server/builtin-packs/ — seedBuiltinPackDefaults
+	// then silently no-ops ("not actually shipped as a built-in") with no error,
+	// no crash, just an absent pack. This exact drop (experiment-runner missing
+	// from FIRST_PARTY_PACKS) shipped invisibly through unit tests, which point
+	// builtinPacksDir at the repo market-packs/ dir directly and never exercise
+	// the real copy-builtin-packs.mjs allowlist; only the E2E suite against a
+	// real dist build caught it (tests/e2e/ui/experiment-runner.spec.ts).
+	it("scripts/copy-builtin-packs.mjs ships every FIRST_PARTY_PACKS_DISABLED_BY_DEFAULT pack", () => {
+		const scriptPath = path.join(__dirname, "..", "scripts", "copy-builtin-packs.mjs");
+		const src = fs.readFileSync(scriptPath, "utf-8");
+		const match = src.match(/const FIRST_PARTY_PACKS = \[([^\]]*)\]/);
+		assert.ok(match, "FIRST_PARTY_PACKS allowlist must be present in scripts/copy-builtin-packs.mjs");
+		const shipped = match![1]
+			.split(",")
+			.map((s) => s.trim().replace(/^["']|["']$/g, ""))
+			.filter(Boolean);
+		for (const packName of FIRST_PARTY_PACKS_DISABLED_BY_DEFAULT) {
+			assert.ok(
+				shipped.includes(packName),
+				`"${packName}" must be in scripts/copy-builtin-packs.mjs's FIRST_PARTY_PACKS allowlist or the opt-in boot seed silently no-ops`,
+			);
+		}
+	});
+
 	it("buildFullyDisabledRefs disables every entrypoint the pack declares", () => {
 		const entry = builtinFirstPartyPackEntries(REPO_MARKET_PACKS).find((e) => e.manifest?.name === PACK);
 		assert.ok(entry, "experiment-runner must ship as a built-in");

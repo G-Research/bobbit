@@ -3,6 +3,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import {
 	apiFetch,
+	connectWs,
 	createGoal,
 	deleteGoal,
 	startTeam,
@@ -148,20 +149,35 @@ async function exerciseLauncherSurfaces(page: Page, routeId: string): Promise<vo
 	await expect(panel, "Autoresearch must remain opt-in with hard caps").toContainText(/Autoresearch is opt-in.*hard caps/i);
 }
 
+// Pack-bound surface tokens (panel/entrypoint/route) are deliberately rejected
+// over the public REST `/api/ext/surface-token` body (Host API Policy #899,
+// src/server/server.ts's "pack-bound surface tokens must be minted over the
+// trusted session WebSocket") — a same-session caller could otherwise choose
+// another active pack's id. The trusted app mints these over the app-kind
+// session WebSocket (src/app/surface-token-bridge.ts); mirror that handshake
+// here: authenticate with `clientKind: "app"` to receive a per-connection
+// `surfaceTokenKey`, then request the pack-bound mint over that connection.
 async function mintSurfaceToken(sessionId: string, panelId: string): Promise<string> {
-	const res = await apiFetch("/api/ext/surface-token", {
-		method: "POST",
-		headers: { "x-bobbit-session-id": sessionId },
-		body: JSON.stringify({
-			sessionId,
+	const conn = await connectWs(sessionId, { clientKind: "app" });
+	try {
+		const authOk = conn.messages.find((m) => m.type === "auth_ok");
+		const surfaceTokenKey = authOk?.surfaceTokenKey as string | undefined;
+		expect(surfaceTokenKey, "app-kind WS auth must return a surfaceTokenKey to mint pack-bound surface tokens").toBeTruthy();
+		const requestId = `mint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		conn.send({
+			type: "ext_surface_token",
+			requestId,
+			surfaceTokenKey,
 			packId: PACK_ID,
 			contributionKind: "panel",
 			contributionId: panelId,
-		}),
-	});
-	const text = await res.text();
-	expect(res.status, `surface-token mint failed: ${text}`).toBe(200);
-	return (JSON.parse(text) as { token: string }).token;
+		});
+		const result = await conn.waitFor((m) => m.type === "ext_surface_token_result" && m.requestId === requestId);
+		expect(result.ok, `surface-token mint failed: ${result.error}`).toBe(true);
+		return result.token as string;
+	} finally {
+		conn.close();
+	}
 }
 
 async function callExperimentRoute(sessionId: string, surfaceToken: string, name: string, body: Record<string, unknown> = {}): Promise<RouteCallResult> {

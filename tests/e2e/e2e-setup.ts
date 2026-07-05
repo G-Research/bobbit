@@ -1208,8 +1208,18 @@ export interface WsConnection {
 	close: () => void;
 }
 
-/** Connect & authenticate a WebSocket to a session. */
-export function connectWs(sessionId: string): Promise<WsConnection> {
+/**
+ * Connect & authenticate a WebSocket to a session.
+ *
+ * `clientKind: "app"` mirrors the trusted app loader's auth handshake
+ * (src/app/surface-token-bridge.ts) — the server mints a per-connection
+ * `surfaceTokenKey` (echoed on `auth_ok`) that authorizes pack-bound
+ * `ext_surface_token` mints over THIS connection. Pack-bound surface tokens
+ * (panel/entrypoint/route) are deliberately rejected over the public REST
+ * `/api/ext/surface-token` body (src/server/server.ts) — this is the only
+ * sanctioned way to mint one from a test.
+ */
+export function connectWs(sessionId: string, opts?: { clientKind?: "app" | "extension-channel" }): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 		const messages: WsMsg[] = [];
@@ -1226,7 +1236,7 @@ export function connectWs(sessionId: string): Promise<WsConnection> {
 			}
 		});
 
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: token() })));
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: token(), ...(opts?.clientKind ? { clientKind: opts.clientKind } : {}) })));
 		ws.on("error", reject);
 
 		const iv = setInterval(() => {
