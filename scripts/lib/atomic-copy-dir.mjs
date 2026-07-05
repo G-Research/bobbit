@@ -24,7 +24,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-function copyDirRecursive(src, dest, skipDirs) {
+// Exported so gapless-symlink-swap.mjs (the zero-window swap variant, see its
+// file header) can reuse the same recursive-copy semantics without
+// duplicating them.
+export function copyDirRecursive(src, dest, skipDirs) {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     if (entry.isDirectory() && skipDirs?.has(entry.name)) continue;
