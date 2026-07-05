@@ -18,6 +18,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
+// Pure static-catalog read — durable pi-ai 0.80 replacement for text-parsing
+// the vendored models.generated.js (see catalogProviderModels).
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import {
 	getModelsJsonPath as storeGetModelsJsonPath,
 	readModelsJson as storeReadModelsJson,
@@ -389,7 +392,37 @@ export function parseModelsGeneratedText(text: string): Map<string, string[]> {
 }
 
 /**
+ * Model IDs for the override providers, read from pi-ai's durable catalog API
+ * (getBuiltinModels). Primary source since pi-ai 0.80: models.generated.js
+ * became a per-provider import aggregator with no inline entries, so the
+ * text parse below returns an empty map on 0.80+ — which silently wrote zero
+ * overrides (caught by tests/e2e/context-window-overrides.spec.ts in the
+ * 0.80.3 upgrade gate). Falls back to the legacy text parse for any provider
+ * the catalog API errors on.
+ */
+function catalogProviderModels(providers: readonly string[]): Map<string, string[]> {
+	const providerModels = new Map<string, string[]>();
+	let legacy: Map<string, string[]> | undefined;
+	for (const provider of providers) {
+		try {
+			const ids = (getBuiltinModels(provider as any) as Array<{ id?: unknown }>).map(m => String(m.id)).filter(id => id && id !== "undefined");
+			if (ids.length > 0) {
+				providerModels.set(provider, ids);
+				continue;
+			}
+		} catch (err) {
+			console.error(`[aigw-manager] getBuiltinModels("${provider}") failed; falling back to models.generated.js text parse:`, err);
+		}
+		legacy ??= parseModelsGenerated();
+		const legacyIds = legacy.get(provider);
+		if (legacyIds) providerModels.set(provider, legacyIds);
+	}
+	return providerModels;
+}
+
+/**
  * Parse model IDs from pi-ai's models.generated.js, grouped by provider.
+ * LEGACY (pre-pi-0.80 layout) — kept only as catalogProviderModels' fallback.
  */
 function parseModelsGenerated(): Map<string, string[]> {
 	try {
@@ -449,7 +482,7 @@ export function applyContextWindowOverrides(data: Record<string, any>, providerM
 }
 
 export async function writeContextWindowOverrides(): Promise<void> {
-	const providerModels = parseModelsGenerated();
+	const providerModels = catalogProviderModels(CONTEXT_WINDOW_OVERRIDE_PROVIDERS);
 	const overridesWritten = await updateModelsJson(
 		(data) => applyContextWindowOverrides(data, providerModels),
 		{ logPrefix: "[aigw-manager]", write: (count) => count > 0 },
