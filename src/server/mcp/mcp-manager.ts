@@ -10,9 +10,10 @@ import type {
   McpToolResult,
   McpToolDocCache,
 } from "./mcp-types.js";
-import { bobbitConfigDir, bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitStateDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
+import { isHeadquartersProject, SYSTEM_PROJECT_ID } from "../agent/project-registry.js";
 
 export interface McpDiscoveryScope {
   cwd: string;
@@ -481,9 +482,17 @@ export class McpManager {
 
     this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
-    this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
+    this._mergeConfigFile(merged, this._manualBobbitMcpConfigPath(), "mcpServers");
 
     return merged;
+  }
+
+  private _manualBobbitMcpConfigPath(): string {
+    const projectId = this.discoveryScope.projectId;
+    if (projectId && !isHeadquartersProject(projectId) && projectId !== SYSTEM_PROJECT_ID) {
+      return path.join(normalProjectBobbitDir(this.cwd), "config", "mcp.json");
+    }
+    return path.join(bobbitConfigDir(), "mcp.json");
   }
 
   /** Read a JSON config file and merge its servers into the target. */
