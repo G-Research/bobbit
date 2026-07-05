@@ -8,8 +8,8 @@ import { test, expect } from "../gateway-harness.js";
 import type { Locator, Page } from "@playwright/test";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
-type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
-type ProposalLabel = "Goal" | "Project" | "Role" | "Tool" | "Staff";
+type ProposalType = "goal" | "project" | "role" | "tool" | "staff" | "workflow" | "skill";
+type ProposalLabel = "Goal" | "Project" | "Role" | "Tool" | "Staff" | "Workflow" | "Skill";
 
 interface ProposalCase {
 	type: ProposalType;
@@ -66,12 +66,30 @@ const CASES: ProposalCase[] = [
 		fieldKey: "name",
 		fieldValue: "parity-staff",
 	},
+	{
+		type: "workflow",
+		label: "Workflow",
+		trigger: "WORKFLOW_PROPOSAL_PARITY",
+		toolCardLabel: "Workflow Proposal",
+		panel: "workflow-proposal",
+		fieldKey: "id",
+		fieldValue: "parity-workflow",
+	},
+	{
+		type: "skill",
+		label: "Skill",
+		trigger: "SKILL_PROPOSAL_PARITY",
+		toolCardLabel: "Skill Proposal",
+		panel: "skill-proposal",
+		fieldKey: "name",
+		fieldValue: "parity-skill",
+	},
 ];
 
 // Browser E2E keeps one generic non-goal/project proposal flow as a real
 // gateway + mock-agent smoke. The full per-type rendering/dismissal matrix is
 // covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
-const BROWSER_CASES = CASES.filter((c) => c.type === "role");
+const BROWSER_CASES = CASES.filter((c) => ["role", "workflow", "skill"].includes(c.type));
 
 async function waitForProposalSlot(page: Page, type: ProposalType): Promise<void> {
 	await page.waitForFunction(

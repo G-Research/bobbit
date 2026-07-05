@@ -417,6 +417,34 @@ export class MockAgentCore {
 				output: "Tool proposal submitted.",
 			};
 		}
+		if (text.includes("WORKFLOW_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_workflow",
+				input: {
+					id: "parity-workflow",
+					name: "Parity Workflow",
+					description: "Parity workflow description.",
+					gates: [
+						{ id: "implementation", name: "Implementation", type: "agent", prompt: "Implement the change." },
+						{ id: "verification", name: "Verification", type: "command", command: "npm run check" },
+					],
+				},
+				output: "Workflow proposal submitted.",
+			};
+		}
+		if (text.includes("SKILL_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_skill",
+				input: {
+					name: "parity-skill",
+					description: "Parity skill description.",
+					argumentHint: "task",
+					tools: "read, edit",
+					content: "# parity-skill\n\nUse this skill for parity E2E coverage.",
+				},
+				output: "Skill proposal submitted.",
+			};
+		}
 		if (text.includes("STAFF_PROPOSAL_PARITY_EDIT")) {
 			return {
 				tool: "propose_staff",

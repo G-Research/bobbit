@@ -108,7 +108,7 @@ function isPanelKind(value: unknown): value is SidePanelKind {
 }
 
 function isProposalType(value: unknown): value is SidePanelProposalType {
-	return value === "goal" || value === "project" || value === "role" || value === "tool" || value === "staff";
+	return value === "goal" || value === "project" || value === "role" || value === "tool" || value === "staff" || value === "workflow" || value === "skill";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
