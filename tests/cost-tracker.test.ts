@@ -151,9 +151,11 @@ describe("CostTracker", () => {
 			assert.equal(result.totalCost, 0.3);
 		});
 
-		it("persists to disk after recording", () => {
+		it("persists to disk after recording (once flushed)", () => {
 			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 42, cost: 0.001 });
+			// recordUsage() debounces the disk write (PERF-01) — flush() forces it.
+			tracker.flush();
 
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 			assert.ok(raw["s1"]);
@@ -361,6 +363,7 @@ describe("CostTracker", () => {
 		it("cacheHitRate is NOT persisted to disk", () => {
 			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100, cacheReadTokens: 300 });
+			tracker.flush();
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"].inputTokens, 100);
 			assert.equal(raw["s1"].cacheReadTokens, 300);
@@ -389,6 +392,58 @@ describe("CostTracker", () => {
 		});
 	});
 
+	describe("debounced save (PERF-01)", () => {
+		it("coalesces multiple recordUsage calls within the debounce window into a single disk write", () => {
+			const tracker = new CostTracker(stateDir);
+			let renameCount = 0;
+			const originalRename = fs.renameSync;
+			fs.renameSync = ((...args: Parameters<typeof fs.renameSync>) => {
+				renameCount++;
+				return originalRename(...args);
+			}) as typeof fs.renameSync;
+			try {
+				tracker.recordUsage("s1", { inputTokens: 10, cost: 0.001 });
+				tracker.recordUsage("s1", { inputTokens: 10, cost: 0.001 });
+				tracker.recordUsage("s1", { inputTokens: 10, cost: 0.001 });
+				assert.equal(renameCount, 0, "recordUsage must not write to disk synchronously");
+
+				tracker.flush();
+				assert.equal(
+					renameCount,
+					1,
+					"three recordUsage calls within the debounce window must coalesce into one write",
+				);
+			} finally {
+				fs.renameSync = originalRename;
+			}
+
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"].inputTokens, 30, "the single coalesced write must contain all three updates");
+		});
+
+		it("flush() is a no-op when nothing is pending", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.flush(); // should not throw
+		});
+
+		it("flush() forces a pending debounced save immediately", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 5, cost: 0.0001 });
+			tracker.flush();
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"].inputTokens, 5);
+		});
+
+		it("removeSession writes immediately without needing flush()", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 5, cost: 0.0001 });
+			tracker.flush();
+			tracker.removeSession("s1");
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"], undefined);
+		});
+	});
+
 	describe("persistence round-trip", () => {
 		it("survives save and reload", () => {
 			const tracker1 = new CostTracker(stateDir);
@@ -400,6 +455,9 @@ describe("CostTracker", () => {
 				cost: 0.015,
 			});
 			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
+			// recordUsage() debounces the disk write (PERF-01) — flush() before
+			// constructing a second tracker that reloads from disk.
+			tracker1.flush();
 
 			const tracker2 = new CostTracker(stateDir);
 			const s1 = tracker2.getSessionCost("s1");

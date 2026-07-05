@@ -9547,9 +9547,15 @@ export class SessionManager {
 
 		// Flush any debounced store writes before exit
 		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
+			for (const ctx of this.projectContextManager.all()) {
+				ctx.sessionStore.flush();
+				// PERF-01: flush the debounced cost-tracker save so the last
+				// window of per-message cost/token counters isn't lost.
+				ctx.costTracker.flush();
+			}
 		} else if (this._testStore) {
 			this._testStore.flush();
+			this._testCostTracker?.flush();
 		}
 		// Flush pending bg-process projection writes + store epoch before exit so
 		// re-attach exit codes and dismiss removals survive a restart (the bg

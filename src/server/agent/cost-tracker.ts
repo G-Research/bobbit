@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { walkGoalSubtree } from "./goal-subtree.js";
 import type { PersistedGoal } from "./goal-store.js";
+import { atomicWriteJsonSync } from "./atomic-json.js";
 
 /**
  * Raw per-session cost counters as stored on disk and accumulated in memory.
@@ -139,14 +140,33 @@ export function withDerivedFields(raw: RawSessionCost): SessionCost {
  */
 export class CostTracker {
 	private costs: Map<string, RawSessionCost> = new Map();
-	private readonly storeDir: string;
 	private readonly storeFile: string;
 	/** Monotonically increasing tick — bumped on every cost mutation.
 	 *  Used by `computeTreeCost` for cache invalidation (tree-cost rollup). */
 	private generation = 0;
+	/**
+	 * Debounced-save timer (PERF-01). `recordUsage` fires on every
+	 * `message_end` — potentially many times per second across a busy
+	 * gateway — and used to rewrite the ENTIRE (never-pruned, see class
+	 * header below) cost store synchronously on every single call. That's
+	 * an O(total-sessions-ever) sync `writeFileSync` on the event loop per
+	 * assistant message. Mirrors `SessionStore`'s debounce: coalesce rapid
+	 * mutations into one disk write per `SAVE_DEBOUNCE_MS` window via
+	 * `save()`, with `flush()` forcing an immediate write (shutdown, tests).
+	 *
+	 * Crash-window honesty: a hard kill (`kill -9`, OOM) within the debounce
+	 * window loses at most `SAVE_DEBOUNCE_MS` of cost telemetry. Acceptable
+	 * for cost accounting (not correctness-critical, unlike session recovery
+	 * state) — `flush()` exists so graceful shutdown never loses the tail.
+	 *
+	 * `removeSession` / `backfillGoalIds` are comparatively rare (session
+	 * purge, one-shot boot migration) and keep writing immediately via
+	 * `saveNow()` — only the hot per-message path is debounced.
+	 */
+	private saveTimer: ReturnType<typeof setTimeout> | null = null;
+	private static readonly SAVE_DEBOUNCE_MS = 1000;
 
 	constructor(stateDir: string) {
-		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "session-costs.json");
 		this.load();
 	}
@@ -182,11 +202,18 @@ export class CostTracker {
 		}
 	}
 
-	private save(): void {
+	/**
+	 * Write the entire cost store to disk immediately (synchronous).
+	 * Uses the shared tmp-write + fsync + rename primitive (CON-01) so a
+	 * crash mid-write can never truncate the store — readers only ever see
+	 * the fully-old or fully-new file. No `.bak.N` rotation: unlike
+	 * SessionStore this store has no stale-snapshot recovery concern, and
+	 * every entry is cheaply re-derivable from live per-message usage going
+	 * forward, so the extra backup machinery isn't worth the added surface
+	 * here.
+	 */
+	private saveNow(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
 			// Persist the raw counters plus the stamped `goalId` / `firstSeenAt`
 			// (needed for tree-cost rollups + legacy backfill to survive reload).
 			// Derived fields (cacheHitRate) are NEVER written — recomputed on read.
@@ -203,9 +230,35 @@ export class CostTracker {
 				if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
 				data[id] = entry;
 			}
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			atomicWriteJsonSync(this.storeFile, data);
 		} catch (err) {
 			console.error("[cost-tracker] Failed to save costs:", err);
+		}
+	}
+
+	/**
+	 * Schedule a debounced save — coalesces rapid `recordUsage` mutations
+	 * (one per assistant `message_end`) into a single disk write per
+	 * `SAVE_DEBOUNCE_MS` window. See the field doc on `saveTimer` (PERF-01).
+	 */
+	private save(): void {
+		if (this.saveTimer) return; // already scheduled
+		this.saveTimer = setTimeout(() => {
+			this.saveTimer = null;
+			this.saveNow();
+		}, CostTracker.SAVE_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Flush any pending debounced save immediately. Callers should invoke
+	 * this from a graceful-shutdown path so the debounced tail is never
+	 * lost — see `ProjectContext.close()` / `SessionManager.shutdown()`.
+	 */
+	flush(): void {
+		if (this.saveTimer) {
+			clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+			this.saveNow();
 		}
 	}
 
@@ -361,10 +414,14 @@ export class CostTracker {
 		return out;
 	}
 
+	/** Structural change (session purge) — rare, so write immediately rather
+	 *  than going through the recordUsage debounce. Also cancels any pending
+	 *  debounced save so a stale in-memory snapshot can't win a save race. */
 	removeSession(sessionId: string): void {
 		if (this.costs.delete(sessionId)) {
 			this.generation++;
-			this.save();
+			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+			this.saveNow();
 		}
 	}
 
@@ -392,7 +449,10 @@ export class CostTracker {
 		}
 		if (stamped > 0) {
 			this.generation++;
-			this.save();
+			// One-shot boot migration — rare, so write immediately rather than
+			// going through the recordUsage debounce.
+			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+			this.saveNow();
 		}
 		return stamped;
 	}

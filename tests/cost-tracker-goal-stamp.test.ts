@@ -101,6 +101,9 @@ describe("CostTracker goalId stamping", () => {
 	it("goalId round-trips through save/load", () => {
 		const t1 = new CostTracker(stateDir);
 		t1.recordUsage("s1", { cost: 0.01 }, "goal-1");
+		// recordUsage() debounces the disk write (PERF-01) — flush() before
+		// constructing a second tracker that reloads from disk.
+		t1.flush();
 		const t2 = new CostTracker(stateDir);
 		assert.equal(t2.getSessionCost("s1")?.goalId, "goal-1");
 		assert.equal(t2.getGoalCost("goal-1").totalCost, 0.01);
