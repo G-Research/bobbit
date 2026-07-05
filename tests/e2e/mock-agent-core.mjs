@@ -196,6 +196,26 @@ export class MockAgentCore {
 
 	/** Detect which tool the prompt is asking for and return a canned response */
 	static respondToPrompt(text) {
+		// W2.V: POST /api/sessions/:id/notify (session-prompt-delivery.ts /
+		// api.ts::notifyProposalDecision()) delivers a system-sourced
+		// confirmation like `[SYSTEM: The user accepted your project
+		// proposal "X". ...]` as a real new turn to the proposing session —
+		// that's the intended, restored behavior (see session-notify.spec.ts).
+		// But its boilerplate wording necessarily names the proposal type
+		// ("...your project proposal...", "...your goal proposal...", etc.),
+		// which collides with this mock's plain-substring trigger matching
+		// below (e.g. `lower.includes("project proposal")`) and made the mock
+		// re-emit a brand-new propose_* tool call in response to its own
+		// accept/reject echo — reopening a just-closed proposal tab. A real
+		// LLM wouldn't reflexively re-propose off this confirmation text; only
+		// this mock's crude keyword matcher does. Recognize the exact
+		// production notify-message shape and skip straight to the default
+		// (no tool call) response instead of running it through the
+		// trigger-phrase table below.
+		if (/^\[SYSTEM: The user (?:accepted|rejected) your (?:goal|project|role|tool|staff) proposal/.test(text)) {
+			return null;
+		}
+
 		const lower = text.toLowerCase();
 
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
