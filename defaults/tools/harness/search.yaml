@@ -1,0 +1,114 @@
+name: search
+description: "Read-only full-text search over goals, sessions, messages, staff, and repo docs"
+summary: "Search goals/sessions/messages/staff and repo docs (docs/**, AGENTS.md)"
+params: [q, type?, limit?, offset?, project_id?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Harness
+docs: |-
+  Read-only BM25 full-text search over the same FlexSearch index the web UI's full search page uses — goals, sessions, messages, staff, and repo docs (`docs/**`, `AGENTS.md`, `CLAUDE.md`). Results are short highlighted snippets with ids/paths, never whole file or message bodies. Use `type: "files"` to search only static repo documentation.
+detail_docs: >-
+  ## Purpose
+
+
+  `search` gives you ranked, by-content recall over everything Bobbit already
+  indexes: prior goal specs, session titles, message history, staff profiles,
+  and now static repo documentation (`docs/**`, root `AGENTS.md`, root
+  `CLAUDE.md`). Before this tool, the only way to find operational knowledge
+  in `docs/` was an exact-keyword `rg` — a synonym miss (searching "race
+  condition" when the doc says "concurrent write") returned nothing. `search`
+  is BM25-ranked and tolerant of partial/prefix matches on natural-language
+  fields.
+
+
+  This wraps the same `GET /api/search` endpoint and
+  `projectContextManager.searchAll()` path the web UI's full search page
+  uses — no new index, no separate ranking logic, byte-identical results to
+  what a human sees in-app.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `q` | string | yes | Search query. |
+
+  | `type` | `"all" \| "goals" \| "sessions" \| "messages" \| "staff" \| "files"` | no | Restrict to one kind. Default `"all"`. |
+
+  | `limit` | number | no | Max results returned. Default 20, capped at 100 server-side. |
+
+  | `offset` | number | no | Pagination offset. Default 0. |
+
+  | `project_id` | string | no | Restrict to one project. Default: search across every registered project. |
+
+
+  ## Output envelope
+
+
+  ```
+
+  3 of 3 result(s):
+
+  - [file] docs/internals.md:1831 — Lexical search over goals, sessions, ...
+
+  - [goal] Fix search titles — First goal: Working on the thing
+
+  - [session] session-abc123 — Working on the thing
+
+  ```
+
+
+  Each result carries `type` (`goal | session | message | staff | file`), an
+  `id` you can pass to `read_session`/`read` for full context, a `snippet`
+  (~300-char highlighted excerpt — **never the whole file/message/spec**),
+  and for `file` hits a `filePath`/`startLine`/`endLine`. The `details` field
+  on the tool result carries the full structured `results` array plus
+  `total` for programmatic use.
+
+
+  ## When to Use
+
+
+  - Recall a prior decision recorded in a goal, session, or message ("we
+  chose bcrypt cost 12 in session X") instead of re-deriving or re-asking.
+
+  - Find the design rationale or debugging entry behind a non-obvious
+  invariant in `docs/` when you don't know the exact keyword the author used.
+
+  - Discover which session/goal touched a topic before reading full
+  transcripts.
+
+
+  ## When NOT to Use
+
+
+  - **Code search** — this indexes documentation prose, not source code.
+  Use `grep`/`rg` for symbols and code references (see `docs/` design notes
+  on the file-source scope).
+
+  - **Reading a known session/goal in full** — use `read_session` /
+  `read` directly once you have the id; `search` is for discovery, not bulk
+  reading.
+
+
+  ## Notes / Gotchas
+
+
+  - **Read-only.** No side effects; safe to call freely.
+
+  - **Snippets are excerpts, not full content** — always follow up with
+  `read_session` (session/message hits) or `read` (file hits, using
+  `filePath`) for the full text.
+
+  - **`files` scope is documentation only** — `docs/**`, `AGENTS.md`,
+  `CLAUDE.md`. It respects `.gitignore` and never indexes
+  `node_modules/`, `dist/`, `.git/`, or `.bobbit/`.
+
+  - **Index freshness** — the doc index refreshes on the same schedule as
+  every other source: at startup (on a schema/content mismatch) and via
+  `POST /api/search/rebuild`. It is not a live filesystem watch — very
+  recent doc edits may lag until the next rebuild.

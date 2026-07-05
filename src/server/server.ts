@@ -4050,8 +4050,8 @@ async function handleApiRoute(
 		const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20), 100);
 		const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
 		const typeParam = url.searchParams.get("type") || "all";
-		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff"]);
-		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
+		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff", "files"]);
+		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" | "files" : "all";
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));

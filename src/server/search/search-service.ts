@@ -26,6 +26,7 @@ import { GoalIndexSource } from "./sources/goal-source.js";
 import { SessionIndexSource } from "./sources/session-source.js";
 import { MessageIndexSource } from "./sources/message-source.js";
 import { StaffIndexSource } from "./sources/staff-source.js";
+import { FilesIndexSource } from "./sources/files-source.js";
 import { contentHashOf } from "./sources/hash.js";
 import { formatSessionSearchTitle } from "./sources/session-title.js";
 import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-bus.js";
@@ -57,6 +58,13 @@ export interface SearchServiceOptions {
 	progressBus?: ProgressBus;
 	/** Override staff store for rebuilds. Optional — can also be supplied to rebuildFromStores. */
 	staffStore?: StaffStore;
+	/**
+	 * Absolute path to the project root, used to index `docs/**`, `AGENTS.md`,
+	 * and `CLAUDE.md` via `FilesIndexSource` (NAV-doc-knowledge-retrieval).
+	 * Optional — when omitted, the `files` source is skipped (e.g. tests that
+	 * don't need a project root on disk).
+	 */
+	projectRoot?: string;
 }
 
 // ── SearchService ────────────────────────────────────────────────────
@@ -111,6 +119,8 @@ export class SearchService {
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
 	private readonly _staffSource = new StaffIndexSource();
+	/** Only present when `opts.projectRoot` was supplied — see rebuildFromSources. */
+	private readonly _filesSource: FilesIndexSource | null;
 
 	constructor(opts: SearchServiceOptions) {
 		this.stateDir = opts.stateDir;
@@ -118,6 +128,9 @@ export class SearchService {
 		this.dataDir = path.join(opts.stateDir, "search.flex");
 		this.progressBus = opts.progressBus ?? sharedProgressBus;
 		this.staffStore = opts.staffStore;
+		this._filesSource = opts.projectRoot
+			? new FilesIndexSource({ projectRoot: opts.projectRoot })
+			: null;
 	}
 
 	getState(): SearchServiceState {
@@ -475,7 +488,7 @@ export class SearchService {
 	search(
 		query: string,
 		opts: {
-			type?: "all" | "goals" | "sessions" | "messages" | "staff";
+			type?: "all" | "goals" | "sessions" | "messages" | "staff" | "files";
 			limit?: number;
 			offset?: number;
 			projectId?: string;
@@ -491,7 +504,7 @@ export class SearchService {
 		const types =
 			type === "all"
 				? undefined
-				: ([type] as Array<"goals" | "sessions" | "messages" | "staff">);
+				: ([type] as Array<"goals" | "sessions" | "messages" | "staff" | "files">);
 
 		const promise = this._store.search({
 			q: query,
@@ -547,6 +560,7 @@ export class SearchService {
 			this._sessionSource,
 			this._messageSource,
 			this._staffSource,
+			...(this._filesSource ? [this._filesSource] : []),
 		];
 		const indexer = this._indexer;
 		await enqueueRebuild(() => {
