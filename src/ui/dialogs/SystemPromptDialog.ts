@@ -10,6 +10,8 @@ interface PromptSection {
 	source: string;
 	content: string;
 	tokens: number;
+	/** F19: true when the AGENTS.md cascade budget (`BOBBIT_AGENTSMD_BUDGET`) truncated this section. */
+	truncated?: boolean;
 }
 
 @customElement("system-prompt-dialog")
@@ -130,6 +132,9 @@ export class SystemPromptDialog extends DialogBase {
 							style="max-width: 70%"
 						>${p.display}</span>
 						<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
+						${section.truncated
+							? html`<span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0" title="Capped by BOBBIT_AGENTSMD_BUDGET — see the marker inside the content for the omitted source path.">truncated</span>`
+							: nothing}
 						`; })()}
 					</div>
 					<span class="text-xs text-muted-foreground shrink-0">${this.formatTokens(section.tokens)}</span>

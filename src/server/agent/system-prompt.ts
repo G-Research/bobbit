@@ -60,19 +60,19 @@ function getPromptsDir(): string {
  * leading indentation. When inline with other text, the file content is
  * inserted in place of the `@ref` token (no indentation adjustment).
  */
-export function resolveMarkdownRefs(content: string, baseDir: string, seen?: Set<string>, depth = 0): string {
+export function resolveMarkdownRefs(content: string, baseDir: string, seen?: Set<string>, depth = 0, budget?: AgentsMdBudget): string {
 	if (!seen) seen = new Set();
 	const MAX_DEPTH = 5;
 
 	// First pass: whole-line refs (preserves indentation behavior)
 	content = content.replace(/^([ \t]*)@(\S+)\s*$/gm, (_match, indent: string, refPath: string) => {
-		return resolveOneRef(refPath, indent, baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ true);
+		return resolveOneRef(refPath, indent, baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ true, budget);
 	});
 
 	// Second pass: inline refs (surrounded by other text)
 	// Negative lookbehind excludes email addresses (word char before @)
 	content = content.replace(/(?<!\w)@((?:~[/\\]|\.{0,2}[/\\])?[\w./_\\-]+\.\w+)/g, (_match, refPath: string) => {
-		return resolveOneRef(refPath, "", baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ false);
+		return resolveOneRef(refPath, "", baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ false, budget);
 	});
 
 	return content;
@@ -85,6 +85,116 @@ function expandHomePath(p: string): string {
 	return p;
 }
 
+/**
+ * F19 — AGENTS.md cascade budget (see docs/internals.md "AGENTS.md cascade
+ * budget" + docs/design/agents-md-cascade-budget.md for the measurement that
+ * motivated this).
+ *
+ * Ground truth: the Project AGENTS.md cascade is, by construction, ONE
+ * "nearest" file (the project's own root `AGENTS.md`/`CLAUDE.md`, plus any
+ * additional `agents`-typed custom config directories a project explicitly
+ * opts into) whose `@ref` includes are inlined recursively (up to 5 hops)
+ * with NO size cap. Measured on a real managed project this reached ~21K
+ * tokens = 56% of a code-reviewer prompt — driven almost entirely by the
+ * `@ref` expansion, not by the root file's own prose (this repo's own
+ * AGENTS.md, e.g., is independently pinned under 6KB by
+ * tests/agents-md-budget.test.ts).
+ *
+ * Strategy (deterministic, no LLM summarization):
+ *   - The NEAREST/most-specific agents file (the first discovered entry —
+ *     always the project's own root AGENTS.md/CLAUDE.md when present) is
+ *     ALWAYS kept whole: its own literal text is never truncated by this
+ *     budget. Only the content it pulls in via `@ref` is capped.
+ *   - Any ADDITIONAL agents-type entries (opt-in custom config directories
+ *     beyond the nearest file) are treated as "ancestors": their own text,
+ *     and everything they `@ref` in, is budgeted from the start.
+ *   - Once the shared budget is exhausted, remaining content is replaced
+ *     with an explicit `<!-- ... -->` marker naming the source path, so the
+ *     agent always knows something was cut and where to read the rest —
+ *     never a silent drop.
+ *
+ * Disabled (default) when no budget is supplied anywhere — behavior is then
+ * byte-identical to pre-F19.
+ */
+export interface AgentsMdBudget {
+	/** Remaining byte budget for @-ref-injected / non-nearest content. Mutated as content is consumed. */
+	remainingBytes: number;
+	/** Record of every truncation applied, for the per-section prompt breakdown / A-B measurement. */
+	truncations: Array<{ path: string; cutBytes: number }>;
+}
+
+/** ~4 chars/token for Claude models — matches `estimateTokens()` below (kept in sync intentionally). */
+export const AGENTS_MD_BUDGET_CHARS_PER_TOKEN = 4;
+/** Guardrails on the `BOBBIT_AGENTSMD_BUDGET` env var / override — avoids a typo'd value silently disabling or effectively no-op'ing the cap. */
+export const AGENTS_MD_BUDGET_MIN_TOKENS = 500;
+export const AGENTS_MD_BUDGET_MAX_TOKENS = 500_000;
+
+export function createAgentsMdBudget(tokens: number): AgentsMdBudget {
+	return { remainingBytes: Math.max(0, Math.floor(tokens)) * AGENTS_MD_BUDGET_CHARS_PER_TOKEN, truncations: [] };
+}
+
+/**
+ * Resolve the effective AGENTS.md cascade budget (in tokens), or `undefined`
+ * when the cap is OFF (today's uncapped behavior). `overrideTokens` (e.g. a
+ * per-goal/session preference) wins when provided; otherwise falls back to
+ * the `BOBBIT_AGENTSMD_BUDGET` env var. Absent/invalid/non-positive on both
+ * ⇒ disabled. Valid values are clamped to `[AGENTS_MD_BUDGET_MIN_TOKENS, AGENTS_MD_BUDGET_MAX_TOKENS]`.
+ */
+export function resolveAgentsMdBudgetTokens(overrideTokens?: number): number | undefined {
+	const raw = overrideTokens !== undefined ? overrideTokens : parseAgentsMdBudgetEnv();
+	if (raw === undefined || !Number.isFinite(raw) || raw <= 0) return undefined;
+	const floored = Math.floor(raw);
+	if (floored < AGENTS_MD_BUDGET_MIN_TOKENS) return AGENTS_MD_BUDGET_MIN_TOKENS;
+	if (floored > AGENTS_MD_BUDGET_MAX_TOKENS) return AGENTS_MD_BUDGET_MAX_TOKENS;
+	return floored;
+}
+
+function parseAgentsMdBudgetEnv(): number | undefined {
+	const v = process.env.BOBBIT_AGENTSMD_BUDGET;
+	if (!v) return undefined;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : undefined;
+}
+
+/** Cut `text` at or before `maxBytes`, snapping to the last newline so the cut never lands mid-line. */
+function cutAtLineBoundary(text: string, maxBytes: number): string {
+	if (text.length <= maxBytes) return text;
+	if (maxBytes <= 0) return "";
+	const slice = text.slice(0, maxBytes);
+	const lastNl = slice.lastIndexOf("\n");
+	return lastNl > 0 ? slice.slice(0, lastNl) : slice;
+}
+
+/**
+ * Debit `raw` against `budget`, truncating deterministically at a line
+ * boundary when it doesn't fit. Returns the (possibly truncated) text the
+ * caller should keep resolving `@ref`s within — never re-debits the same
+ * bytes twice. Mutates `budget` in place and records the cut for the
+ * per-section breakdown.
+ */
+function debitAgentsMdBudget(raw: string, budget: AgentsMdBudget, sourcePath: string): { text: string; truncated: boolean } {
+	if (budget.remainingBytes <= 0) {
+		budget.truncations.push({ path: sourcePath, cutBytes: raw.length });
+		return { text: "", truncated: true };
+	}
+	if (raw.length <= budget.remainingBytes) {
+		budget.remainingBytes -= raw.length;
+		return { text: raw, truncated: false };
+	}
+	const kept = cutAtLineBoundary(raw, budget.remainingBytes);
+	budget.truncations.push({ path: sourcePath, cutBytes: raw.length - kept.length });
+	budget.remainingBytes = 0;
+	return { text: kept, truncated: true };
+}
+
+function agentsMdTruncatedMarker(sourcePath: string): string {
+	return `\n\n<!-- [AGENTS.md cascade budget: truncated — see ${sourcePath} for full content] -->`;
+}
+
+function agentsMdOmittedMarker(sourcePath: string): string {
+	return `<!-- [AGENTS.md cascade budget: omitted ${sourcePath} entirely — token budget exhausted; read the file directly] -->`;
+}
+
 function resolveOneRef(
 	refPath: string,
 	indent: string,
@@ -93,6 +203,7 @@ function resolveOneRef(
 	depth: number,
 	maxDepth: number,
 	wholeLine: boolean,
+	budget?: AgentsMdBudget,
 ): string {
 	const filePath = path.resolve(baseDir, expandHomePath(refPath));
 	const canonical = path.normalize(filePath);
@@ -109,10 +220,23 @@ function resolveOneRef(
 		return wholeLine ? `${indent}<!-- max import depth reached: ${refPath} -->` : `<!-- max import depth reached: ${refPath} -->`;
 	}
 
+	if (budget && budget.remainingBytes <= 0) {
+		budget.truncations.push({ path: filePath, cutBytes: -1 });
+		const marker = agentsMdOmittedMarker(refPath);
+		return wholeLine && indent ? `${indent}${marker}` : marker;
+	}
+
 	seen.add(canonical);
 	try {
-		const refContent = fs.readFileSync(filePath, "utf-8");
-		const resolved = resolveMarkdownRefs(refContent, path.dirname(filePath), seen, depth + 1);
+		let refContent = fs.readFileSync(filePath, "utf-8");
+		let truncatedHere = false;
+		if (budget) {
+			const debited = debitAgentsMdBudget(refContent, budget, filePath);
+			refContent = debited.text;
+			truncatedHere = debited.truncated;
+		}
+		const resolved = resolveMarkdownRefs(refContent, path.dirname(filePath), seen, depth + 1, budget) +
+			(truncatedHere ? agentsMdTruncatedMarker(filePath) : "");
 
 		if (wholeLine && indent) {
 			return resolved
@@ -131,13 +255,13 @@ function resolveOneRef(
  * Returns the resolved content, or empty string if no file exists.
  * Looks for AGENTS.md (case-sensitive).
  */
-export function readAgentsMd(cwd: string): string {
+export function readAgentsMd(cwd: string, budget?: AgentsMdBudget): string {
 	const agentsPath = path.join(cwd, "AGENTS.md");
 	if (!fs.existsSync(agentsPath)) return "";
 
 	try {
 		const raw = fs.readFileSync(agentsPath, "utf-8");
-		return resolveMarkdownRefs(raw, cwd);
+		return resolveMarkdownRefs(raw, cwd, undefined, 0, budget);
 	} catch {
 		return "";
 	}
@@ -148,11 +272,21 @@ export function readAgentsMd(cwd: string): string {
  * Collects entries with type "agents" from getAllConfigDirectories(),
  * reads each existing file, resolves @refs, and concatenates.
  * Falls back to readAgentsMd() if no projectConfigStore is provided.
+ *
+ * `budgetTokens` (F19) optionally caps the cascade — see
+ * `resolveAgentsMdBudgetTokens()`/`BOBBIT_AGENTSMD_BUDGET`. `undefined`
+ * (default) is uncapped and byte-identical to pre-F19 behavior. The FIRST
+ * discovered agents entry (the nearest/most-specific — normally the
+ * project's own root AGENTS.md/CLAUDE.md) is always kept whole; only its
+ * `@ref` expansions are budgeted. Any additional agents-type entries are
+ * budgeted from their own first byte.
  */
-export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfigReader): string {
+export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfigReader, budgetTokens?: number): string {
 	return profile("readAllAgentFiles", () => {
+		const budget = budgetTokens !== undefined ? createAgentsMdBudget(budgetTokens) : undefined;
+
 		if (!projectConfigStore) {
-			return readAgentsMd(cwd);
+			return readAgentsMd(cwd, budget);
 		}
 
 		const dirs = getAllConfigDirectories(cwd, projectConfigStore);
@@ -160,10 +294,25 @@ export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfi
 		bumpCount("readAllAgentFiles.files", agentEntries.length);
 
 		const parts: string[] = [];
-		for (const entry of agentEntries) {
+		for (let i = 0; i < agentEntries.length; i++) {
+			const entry = agentEntries[i];
 			try {
-				const content = fs.readFileSync(entry.path, "utf-8");
-				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
+				const raw = fs.readFileSync(entry.path, "utf-8");
+				let resolved: string;
+				if (budget && i > 0) {
+					// Not the nearest/most-specific file — budgeted like an @-ref, own text included.
+					if (budget.remainingBytes <= 0) {
+						budget.truncations.push({ path: entry.path, cutBytes: raw.length });
+						parts.push(agentsMdOmittedMarker(entry.path));
+						continue;
+					}
+					const { text: kept, truncated } = debitAgentsMdBudget(raw, budget, entry.path);
+					resolved = resolveMarkdownRefs(kept, path.dirname(entry.path), undefined, 0, budget) +
+						(truncated ? agentsMdTruncatedMarker(entry.path) : "");
+				} else {
+					// Nearest/most-specific file (or budget disabled): own text always kept whole.
+					resolved = resolveMarkdownRefs(raw, path.dirname(entry.path), undefined, 0, budget);
+				}
 				if (resolved.trim()) {
 					parts.push(resolved.trim());
 				}
@@ -332,6 +481,11 @@ export interface PromptParts {
 	workflowContext?: string;
 	/** Project config store for multi-file agent discovery */
 	projectConfigStore?: ProjectConfigReader;
+	/** Optional override for the AGENTS.md cascade token budget (F19). When
+	 *  undefined, falls back to the `BOBBIT_AGENTSMD_BUDGET` env var; when
+	 *  neither is set, the cascade is uncapped (today's behavior). See
+	 *  `resolveAgentsMdBudgetTokens()`. */
+	agentsMdBudgetTokens?: number;
 	/** Skills available for autonomous activation via the `activate_skill` tool.
 	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
 	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
@@ -441,6 +595,11 @@ export interface PromptSection {
 	content: string;
 	/** Estimated token count (~4 chars/token for Claude models) */
 	tokens: number;
+	/** True when this section's content was capped by the AGENTS.md cascade
+	 *  budget (F19) — recorded so the persisted `-prompt.json` breakdown can
+	 *  A/B measure the effect of `BOBBIT_AGENTSMD_BUDGET`. Absent/false when
+	 *  the budget is off or this section wasn't affected. */
+	truncated?: boolean;
 }
 
 /**
@@ -476,7 +635,8 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
 	// agents cwd is a container-internal path the host can't read.
 	const filesRoot = parts.projectRoot || parts.cwd;
-	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore);
+	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens);
+	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore, agentsMdBudgetTokens);
 	if (agentsMd.trim()) {
 		sections.push({ label: "Project AGENTS.md", content: "# Project AGENTS.md\n\n" + agentsMd.trim() });
 	}
@@ -605,17 +765,39 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
 	}
 
-	// 2. Agent files (individual sections per file for provenance)
+	// 2. Agent files (individual sections per file for provenance).
+	// Mirrors readAllAgentFiles()'s cascade-budget logic (F19) so the inspector
+	// shows exactly what the assembled prompt actually contains, including
+	// any truncation markers.
 	const viewerRoot = parts.projectRoot || parts.cwd;
+	const agentsMdBudgetTokens = resolveAgentsMdBudgetTokens(parts.agentsMdBudgetTokens);
+	const agentsMdBudget = agentsMdBudgetTokens !== undefined ? createAgentsMdBudget(agentsMdBudgetTokens) : undefined;
 	if (parts.projectConfigStore) {
 		const dirs = getAllConfigDirectories(viewerRoot, parts.projectConfigStore);
 		const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
-		for (const entry of agentEntries) {
+		for (let i = 0; i < agentEntries.length; i++) {
+			const entry = agentEntries[i];
 			try {
-				const content = fs.readFileSync(entry.path, "utf-8");
-				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
+				const raw = fs.readFileSync(entry.path, "utf-8");
+				let resolved: string;
+				let truncated = false;
+				if (agentsMdBudget && i > 0) {
+					if (agentsMdBudget.remainingBytes <= 0) {
+						agentsMdBudget.truncations.push({ path: entry.path, cutBytes: raw.length });
+						sections.push({ label: "Project AGENTS.md", source: entry.path, content: agentsMdOmittedMarker(entry.path), tokens: 0, truncated: true });
+						continue;
+					}
+					const debited = debitAgentsMdBudget(raw, agentsMdBudget, entry.path);
+					truncated = debited.truncated;
+					resolved = resolveMarkdownRefs(debited.text, path.dirname(entry.path), undefined, 0, agentsMdBudget) +
+						(truncated ? agentsMdTruncatedMarker(entry.path) : "");
+				} else {
+					const before = agentsMdBudget?.truncations.length ?? 0;
+					resolved = resolveMarkdownRefs(raw, path.dirname(entry.path), undefined, 0, agentsMdBudget);
+					truncated = agentsMdBudget ? agentsMdBudget.truncations.length > before : false;
+				}
 				if (resolved.trim()) {
-					sections.push({ label: "Project AGENTS.md", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
+					sections.push({ label: "Project AGENTS.md", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()), truncated });
 				}
 			} catch {
 				// skip unreadable files
@@ -625,9 +807,11 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		// Legacy fallback: single AGENTS.md with absolute path
 		const agentsPath = path.join(viewerRoot, "AGENTS.md");
 		if (fs.existsSync(agentsPath)) {
-			const content = readAgentsMd(viewerRoot);
+			const before = agentsMdBudget?.truncations.length ?? 0;
+			const content = readAgentsMd(viewerRoot, agentsMdBudget);
+			const truncated = agentsMdBudget ? agentsMdBudget.truncations.length > before : false;
 			if (content.trim()) {
-				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
+				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()), truncated });
 			}
 		}
 	}
