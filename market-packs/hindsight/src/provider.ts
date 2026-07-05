@@ -108,6 +108,11 @@ interface ContextBlock {
 const TITLE = "Relevant memory";
 const MENTAL_MODEL_TITLE = "Project memory model";
 const SUMMARY_CAP = 2000;
+// F26: overall bound on the goalCompleted retained document (lesson digest OR its
+// flat-dump fallback), mirroring SUMMARY_CAP's role for turn/compaction summaries.
+// The digest is richer than the old flat dump (worked/failed split + takeaway) but
+// still per-field-truncated and item-capped below; this is the outer backstop.
+const OUTCOME_DIGEST_CAP = 6000;
 const DEFAULT_MENTAL_MODEL_REFRESH_EVERY_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_MENTAL_MODEL_MAX_TOKENS = 1000;
 const DEFAULT_QUEUE_DRAIN_MAX = 10;
@@ -329,6 +334,13 @@ function outcomePrNumber(ctx: ProviderCtx): string | undefined {
 	return fromPr || undefined;
 }
 
+/** F26 FAIL-OPEN FALLBACK: the ORIGINAL flat outcome dump (pre-F26 shape), kept
+ *  verbatim so a `buildLessonDigest` extraction failure degrades to exactly the
+ *  behaviour that shipped before — never a thrown error, never a blocked
+ *  `goalCompleted`. Only {@link buildLessonDigest} (below) reads the richer
+ *  `gate.content` field, so a hostile/malformed value there can never break this
+ *  fallback path. Do not add fields here that {@link buildLessonDigest} doesn't
+ *  also tolerate losing — this function IS the safety net. */
 function outcomeLines(ctx: ProviderCtx, goalId: string, headSha: string, entities: EntityInput[] | undefined): string {
 	const prNumber = outcomePrNumber(ctx);
 	const title = textOf(ctx.title) ?? textOf(ctx.pullRequest?.title);
@@ -371,6 +383,109 @@ function outcomeLines(ctx: ProviderCtx, goalId: string, headSha: string, entitie
 		for (const entity of entities.slice(0, 50)) lines.push(`- ${entity.type ? `${entity.type}: ` : ""}${entity.text}`);
 	}
 	return lines.join("\n");
+}
+
+const FAILURE_STATES = new Set(["failed", "blocked", "error", "cancelled", "canceled", "abandoned"]);
+
+/** F26 (goalCompleted lesson extraction) — MECHANISM DECISION: this pack owns NO
+ *  in-process LLM call path. `client.retain`/`client.reflect`/mental-model calls
+ *  are plain REST calls into the Hindsight SERVICE; any LLM reasoning (retain-time
+ *  observation consolidation per `retainMission`/`observationsMission`, `reflect`,
+ *  mental-model synthesis) happens server-side there, driven by `cfg.llmApiKey`
+ *  which "is never used by the provider client itself, only forwarded to the
+ *  managed runtime" (see `EffectiveConfig.llmApiKey` in shared.ts). Calling
+ *  `client.reflect` from this hook would (a) not see the about-to-be-retained
+ *  content yet — reflect reasons over what's already indexed in the bank, not an
+ *  arbitrary transcript — and (b) risks the hook's tight `HOOK_CLIENT_TIMEOUT_MS`
+ *  (4s) budget on an LLM-latency call in the goalCompleted critical path.
+ *
+ *  So the fix here is PROMPT-SHAPING, not a new call: restructure the retained
+ *  document into a sectioned, lesson-shaped markdown digest (goal spec / outcome /
+ *  what worked / what failed / reusable takeaway / artifacts) so the Hindsight
+ *  service's OWN retain-time consolidation (mission-guided) has a much easier time
+ *  distilling a genuinely reusable observation, instead of reasoning over a flat,
+ *  unstructured transcript dump. The worked/failed split and takeaway line are
+ *  computed HEURISTICALLY from task/gate state here (no LLM) — they bias the
+ *  service's own reflection toward the signal, they do not replace it. */
+function buildLessonDigest(ctx: ProviderCtx, goalId: string, headSha: string, entities: EntityInput[] | undefined): string {
+	const prNumber = outcomePrNumber(ctx);
+	const title = textOf(ctx.title) ?? textOf(ctx.pullRequest?.title);
+	const sections: string[] = [];
+
+	const spec: string[] = [`# Goal completed: ${goalId}`];
+	if (title) spec.push(`Title: ${title}`);
+	if (ctx.branch) spec.push(`Branch: ${ctx.branch}`);
+	if (ctx.mergeTarget) spec.push(`Merge target: ${ctx.mergeTarget}`);
+	if (headSha !== "unknown") spec.push(`Head SHA: ${headSha}`);
+	if (ctx.completedAt) spec.push(`Completed at: ${ctx.completedAt}`);
+	sections.push(spec.join("\n"));
+
+	const outcome: string[] = ["## Outcome"];
+	if (ctx.pullRequest || prNumber) {
+		const parts = [prNumber ? `#${prNumber}` : undefined, ctx.pullRequest?.state, ctx.pullRequest?.url].filter(Boolean);
+		outcome.push(`Pull request: ${parts.join(" ") || "known"}`);
+	}
+	for (const value of normalizeList(ctx.achievements)) outcome.push(`Achievement: ${value}`);
+	for (const value of normalizeList(ctx.decisions)) outcome.push(`Decision: ${value}`);
+	if (outcome.length > 1) sections.push(outcome.join("\n"));
+
+	// Split tasks/gates by state into "what worked" vs "what failed" so the takeaway
+	// is derivable at a glance instead of buried in a flat status list.
+	const workedLines: string[] = [];
+	const failedLines: string[] = [];
+	for (const task of objectList(ctx.tasks).slice(0, 20)) {
+		const title = stringField(task, "title") ?? stringField(task, "id") ?? "task";
+		const state = stringField(task, "state") ?? "unknown";
+		const type = stringField(task, "type");
+		const result = stringField(task, "resultSummary");
+		const line = `- [${state}] ${title}${type ? ` (${type})` : ""}${result ? ` — ${truncate(result, 180)}` : ""}`;
+		(FAILURE_STATES.has(state.toLowerCase()) ? failedLines : workedLines).push(line);
+	}
+	for (const gate of objectList(ctx.gates).slice(0, 20)) {
+		const name = stringField(gate, "name") ?? stringField(gate, "gateId") ?? "gate";
+		const status = stringField(gate, "status") ?? "unknown";
+		const signalCount = typeof gate.signalCount === "number" ? `, signals=${gate.signalCount}` : "";
+		const commit = stringField(gate, "latestCommitSha");
+		// `content` (raw verification-gate diagnostic, e.g. failing check output) is
+		// NEW here — the old flat dump never read it. Deliberately not read by
+		// `outcomeLines`, so a malformed/hostile value here can only ever break THIS
+		// (already try/catch-guarded) path, never the fallback.
+		const content = stringField(gate, "content");
+		const line = `- ${name}: ${status}${signalCount}${commit ? `, commit=${commit}` : ""}${content ? ` — ${truncate(content, 200)}` : ""}`;
+		(FAILURE_STATES.has(status.toLowerCase()) ? failedLines : workedLines).push(line);
+	}
+	if (workedLines.length > 0) sections.push(["## What worked", ...workedLines].join("\n"));
+	if (failedLines.length > 0) sections.push(["## What failed", ...failedLines].join("\n"));
+
+	const takeaway: string[] =
+		failedLines.length > 0
+			? [`${failedLines.length} item(s) needed rework before this goal completed — see "What failed" for specifics before repeating this approach.`]
+			: workedLines.length > 0
+				? ["All tracked tasks/gates passed cleanly — this approach is a reasonable template for similar goals."]
+				: [];
+	if (takeaway.length > 0) sections.push(["## Reusable takeaway", ...takeaway].join("\n"));
+
+	if (entities?.length) {
+		sections.push(["## Artifacts", ...entities.slice(0, 50).map((e) => `- ${e.type ? `${e.type}: ` : ""}${e.text}`)].join("\n"));
+	}
+
+	return sections.join("\n\n");
+}
+
+/** Build the retained content for a completed goal: lesson-shaped digest by
+ *  default, degrading to the flat {@link outcomeLines} dump on ANY extraction
+ *  error (fail-open — a bug in the new digest logic must never block
+ *  `goalCompleted`). Bounded to {@link OUTCOME_DIGEST_CAP} either way. */
+function buildOutcomeContent(ctx: ProviderCtx, goalId: string, headSha: string, entities: EntityInput[] | undefined): string {
+	let content: string;
+	try {
+		content = buildLessonDigest(ctx, goalId, headSha, entities);
+	} catch {
+		// Local extraction bug, not a data-plane error — no recordError (that sticky
+		// banner is reserved for connectivity/service failures); degrade silently.
+		content = outcomeLines(ctx, goalId, headSha, entities);
+	}
+	return truncate(content, OUTCOME_DIGEST_CAP);
 }
 
 async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | undefined): Promise<ContextBlock[]> {
@@ -798,7 +913,7 @@ const provider = {
 			const prNumber = outcomePrNumber(ctx);
 			if (prNumber) tags.pr = prNumber;
 			const entities = derivedEntities(ctx);
-			const content = outcomeLines(ctx, goalId, headSha, entities);
+			const content = buildOutcomeContent(ctx, goalId, headSha, entities);
 			const metadata: Record<string, string> = { headSha };
 			if (ctx.branch) metadata.branch = ctx.branch;
 			if (ctx.mergeTarget) metadata.mergeTarget = ctx.mergeTarget;
