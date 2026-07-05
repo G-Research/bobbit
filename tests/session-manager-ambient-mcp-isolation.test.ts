@@ -230,8 +230,15 @@ describe("SessionManager ambient-MCP isolation (regression pin)", () => {
 		};
 		manager.createMcpManager = () => spyMgr;
 
+		// Post-HQ-split (upstream #932) MCP managers are PROJECT-scoped only:
+		// a projectless/cwd-only session deliberately gets NO scoped manager
+		// (fails closed — pinned by tests/headquarters-server-scope-guards.test.ts
+		// "session MCP manager resolution fails closed for projectless sessions").
+		// Pass an explicit projectId so createSession still creates + connects a
+		// scoped manager here, keeping this shutdown-disconnect pin non-vacuous.
 		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
 			sessionId: "s-ambient-mcp-shutdown",
+			projectId: "ambient-mcp-shutdown-project",
 			sandboxed: false,
 			skipAutoModel: true,
 			skipAutoThinking: true,
@@ -241,7 +248,7 @@ describe("SessionManager ambient-MCP isolation (regression pin)", () => {
 		assert.equal(
 			connectAll.mock.callCount(),
 			1,
-			"createSession must connect the scoped MCP manager it creates for this cwd — otherwise this pin is vacuous",
+			"createSession must connect the scoped MCP manager it creates for this project scope — otherwise this pin is vacuous",
 		);
 
 		await manager.shutdown();
