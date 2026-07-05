@@ -2,9 +2,9 @@
  * Guard primitives for refusing spawn-paths when a goal is paused.
  *
  * Used by:
- *   - REST handlers (`/team/spawn`, `/spawn-child`, `/gates/:id/signal`) —
- *     catch `GoalPausedError` and return `{ error, code, goalId }` with
- *     HTTP status 409.
+ *   - REST handlers (`POST /api/goals` with `parentGoalId`, `/spawn-child`,
+ *     `/gates/:id/signal`) — catch `GoalPausedError` and return
+ *     `{ error, code, goalId }` with HTTP status 409.
  *   - In-process spawn paths (`TeamManager._startTeamImpl`, `spawnRole`,
  *     `VerificationHarness.runLlmReviewViaSession`) — let the error
  *     propagate to the caller.
@@ -12,7 +12,8 @@
  * The throw-shape mirrors `GateDependencyError` (server.ts:5404) and the
  * existing `{ code, goalId, error }` REST convention.
  *
- * See `docs/design/pause-cascade.md` for the cascade design.
+ * There is no dedicated pause-cascade design doc; see the "Pause/resume
+ * cascade" bullets in `docs/design/production-subgoals-port.md`.
  */
 
 export class GoalPausedError extends Error {
@@ -25,29 +26,18 @@ export class GoalPausedError extends Error {
 }
 
 /**
- * Throw `GoalPausedError(goalId)` if the looked-up goal record has
- * `paused: true`. A missing goal (lookup returns undefined) is treated
- * as not-paused — the caller's own goal-existence check should run
- * before this guard.
- */
-export function requireGoalNotPaused(
-	goalId: string,
-	lookup: (id: string) => { paused?: boolean } | undefined,
-): void {
-	const g = lookup(goalId);
-	if (g?.paused) throw new GoalPausedError(goalId);
-}
-
-/**
  * Walk `goalId` and its `parentGoalId` ancestor chain; throw
  * `GoalPausedError(<first paused id>)` if any goal in the chain (the goal
  * itself or any ancestor) is paused. A bounded, cycle-guarded walk (cap 64,
  * mirroring `nestingDepth`) so a corrupt parent chain can never loop.
  *
  * Used by the child-creation spawn paths (`POST /api/goals` with
- * `parentGoalId`) so the pause guarantee covers the whole ancestor chain — a
- * paused grandparent must block a new descendant even when the direct parent
- * is not itself flagged paused. A missing goal terminates the walk (the
+ * `parentGoalId`) AND `TeamManager`'s in-process spawn paths
+ * (`_startTeamImpl`, `spawnRole`) so the pause guarantee covers the whole
+ * ancestor chain everywhere, not just the direct goal — a paused grandparent
+ * (or a parent left paused after a targeted `cascade:false` resume of a
+ * child) must block a new descendant/spawn even when the immediate goal is
+ * not itself flagged paused. A missing goal terminates the walk (the
  * caller's own existence check runs first).
  */
 export function requireAncestorsNotPaused(

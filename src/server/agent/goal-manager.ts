@@ -240,7 +240,8 @@ export class GoalManager {
 		this.diagnosticsStateDir = stateDir ?? (goalStore as unknown as { storeDir?: string }).storeDir;
 		// Lazy-migrate legacy paused=true + unresolved-deps goals to state='blocked'
 		// BEFORE recovering stuck setups, so that newly-blocked goals don't get
-		// their setupStatus incorrectly marked 'error'. See docs/design/pause-cascade.md.
+		// their setupStatus incorrectly marked 'error'. See the "Pause/resume
+		// cascade" bullets in docs/design/production-subgoals-port.md.
 		this._migratePausedDepsToBlocked();
 		// Mark any goals stuck in "preparing" from a previous run as error.
 		// Runs AFTER migration so that state='blocked' goals (which legitimately
