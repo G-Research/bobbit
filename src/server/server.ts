@@ -3298,19 +3298,34 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
  * canonical `provider/id` string. Accepts either the shorthand string form
  * (`"claude-code/local-claude-sonnet-4-6"`) or the structured
  * `{ provider, id }` object form the Claude Code runtime API uses. Returns
- * `undefined` for anything that doesn't cleanly resolve to a single
- * provider/id pair (defence against a malformed body silently coercing to a
- * bogus model string).
+ * `undefined` for anything that doesn't cleanly resolve to a provider/id
+ * pair — the caller must treat "`body.model` was present but didn't
+ * normalize" as a hard 400, never a silent default (see the check right
+ * after this function's call site).
+ *
+ * Only the FIRST `/` is the provider/id delimiter, matching the
+ * `indexOf("/")` convention used everywhere this canonical string is split
+ * downstream (e.g. `clampRoleThinking`, `SessionManager.resolveInitialModel`).
+ * The model id itself MAY contain further slashes — custom-provider model
+ * ids (PR #144) commonly look like `"z-ai/glm-5.2"`, so both
+ * `"<provider>/z-ai/glm-5.2"` and `{ provider, id: "z-ai/glm-5.2" }` must
+ * resolve. Only the provider segment must stay slash-free (it ends at the
+ * first `/` by construction).
  */
 function normalizePostedSessionModel(raw: unknown): string | undefined {
 	if (typeof raw === "string") {
 		const trimmed = raw.trim();
-		return /^[^/\s]+\/[^/\s]+$/.test(trimmed) ? trimmed : undefined;
+		if (!trimmed || /\s/.test(trimmed)) return undefined;
+		const slash = trimmed.indexOf("/");
+		if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+		return trimmed;
 	}
 	if (raw && typeof raw === "object") {
 		const provider = typeof (raw as any).provider === "string" ? (raw as any).provider.trim() : "";
 		const id = typeof (raw as any).id === "string" ? (raw as any).id.trim() : "";
-		if (provider && id && !provider.includes("/") && !id.includes("/")) return `${provider}/${id}`;
+		if (provider && id && !provider.includes("/") && !/\s/.test(provider) && !/\s/.test(id)) {
+			return `${provider}/${id}`;
+		}
 	}
 	return undefined;
 }
@@ -4683,6 +4698,17 @@ async function handleApiRoute(
 		// respawn/restore time) so a freshly created session spawns with the right
 		// CLI + alias instead of silently falling back to the `pi` runtime.
 		const requestedModel = normalizePostedSessionModel(body?.model);
+		// `body.model` present but unparseable must be a loud 400, NEVER a
+		// silent fallback to the default model — a caller that asked for a
+		// specific model (e.g. a custom-provider slash id) and got a different
+		// one back with no error is exactly the footgun this guards against.
+		if (body?.model !== undefined && !requestedModel) {
+			json({
+				error: `Invalid model: ${JSON.stringify(body.model)} — expected a "provider/id" string (the id may itself contain "/", e.g. "custom/z-ai/glm-5.2") or a { provider, id } object`,
+				code: "INVALID_MODEL",
+			}, 400);
+			return;
+		}
 		const requestedRuntime = body?.runtime === "claude-code" || requestedModel?.startsWith("claude-code/")
 			? "claude-code"
 			: body?.runtime === "pi"
