@@ -1,0 +1,31 @@
+name: propose_workflow
+description: "Submit a standalone workflow proposal (id, name, gates) for review"
+summary: "Propose a single workflow for the current project"
+params: [id, name, gates, description?, projectId?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Required parameters: id (stable kebab-case workflow id — an existing id
+  updates that workflow in place, a new id creates one), name (human-readable
+  workflow name), gates (array of gate objects — each with id, name,
+  dependsOn[], and verify[] steps; see defaults/workflow-authoring-guide.md
+  for the full gate/verify-step shape and defaults/roles/*.yaml-adjacent
+  workflow examples under a registered project's Workflows page).
+
+  Optional parameters: description (free-form summary), projectId (registered
+  project id; defaults to this session's project and is the authoritative
+  scope). Workflows are project-scoped only — there is no Headquarters/system
+  scope, unlike role/tool which cascade builtin → server → project.
+
+  WHEN TO USE THIS vs propose_project: this tool proposes exactly ONE
+  workflow and accepts into the project's existing workflow set (create if
+  the id is new, update in place if it already exists) without touching
+  anything else about the project. Use propose_project's `workflows[]` field
+  instead when several workflows need to change together, or when other
+  project fields (components, commands, sandbox) are changing in the same
+  proposal.
+
+  Mid-session vs setup: this tool works against an already-registered
+  project in either mode — there is no goal or session bound to it.

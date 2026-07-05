@@ -1,0 +1,34 @@
+name: propose_skill
+description: "Submit skill proposal with name, description, content"
+summary: "Propose a reusable skill (SKILL.md)"
+params: [name, description, content, argumentHint?, tools?, projectId?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Required parameters: name (kebab-case identifier — becomes the /name slash
+  command and the skills/<name>/ directory; must be unique in the target
+  scope), description (one-line summary shown in skill listings and
+  autocomplete), content (the skill's markdown body — instructions the agent
+  follows when the skill is invoked or auto-triggered; becomes SKILL.md's
+  content below the frontmatter).
+
+  Optional parameters: argumentHint (hint shown during autocomplete for
+  expected arguments, e.g. "[push]"), tools (comma-separated allowed-tools
+  list restricting what an invoking agent may use; omit to allow all),
+  projectId (registered project id; defaults to this session's project —
+  Headquarters is server/global scope).
+
+  Cascade: skills resolve through the same pack precedence as roles/tools —
+  builtin → market packs → the scope's user pack (project/global-user/
+  server) — see docs/marketplace.md. Accepting this proposal writes
+  skills/<name>/SKILL.md into the target scope's user-pack directory
+  (project: <root>/.bobbit/config/skills/<name>/SKILL.md; Headquarters:
+  <headquarters>/config/skills/<name>/SKILL.md), which shadows any
+  lower-priority skill of the same name.
+
+  Use this when a session has just worked out a non-obvious, reusable
+  procedure (e.g. the correct build-and-restart dance for a tricky bug) and
+  future agents would benefit from it as a standing instruction, instead of
+  re-discovering it from scratch.

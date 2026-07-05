@@ -95,6 +95,9 @@ import { registerPreferencesRoutes } from "./routes/preferences-routes.js";
 import { registerConfigDirectoriesRoutes } from "./routes/config-directories-routes.js";
 // STR-05: roles route-handler hoist.
 import { registerRolesRoutes } from "./routes/roles-routes.js";
+// F26: propose_skill acceptance endpoint — new route, registered directly
+// rather than added to the legacy if/else chain.
+import { registerSkillsRoutes } from "./routes/skills-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3426,6 +3429,7 @@ registerOauthAccountRoutes(coreRouteTable);
 registerPreferencesRoutes(coreRouteTable);
 registerConfigDirectoriesRoutes(coreRouteTable);
 registerRolesRoutes(coreRouteTable);
+registerSkillsRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -10941,7 +10945,10 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
-			if (proposalType === "goal" || proposalType === "staff") {
+			// Workflows are project-scoped only (no Headquarters/system-scope
+			// workflow store — see workflows-routes.ts), so a workflow proposal
+			// needs the same resolvable-project guard as goal/staff.
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "workflow") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
 				if (!sessionProjectId) {

@@ -7,9 +7,12 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: type (required) — one of goal, project, role, tool, staff;
-  old_text (required); new_text (required, may be empty). Failed edits do
-  NOT modify the file on disk. Note: there is NO "workflow" proposal type —
-  to add, remove, or modify a workflow (including its gates, verify-steps,
-  and roles) on the current project, edit the in-flight `project` proposal
-  with type="project" — workflows live under the `workflows:` YAML key.
+  Parameters: type (required) — one of goal, project, role, tool, staff,
+  workflow, skill; old_text (required); new_text (required, may be empty).
+  Failed edits do NOT modify the file on disk.
+
+  WORKFLOWS: two ways to edit a workflow's gates/verify-steps depending on
+  which proposal is in flight — a standalone `propose_workflow` draft
+  (type="workflow", one workflow) or the `workflows:` key inside a
+  `propose_project` draft (type="project", the whole project record). Edit
+  whichever one you actually seeded; they are independent drafts.

@@ -128,6 +128,13 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	// workflow/skill have no legacy per-type callback — they exist only
+	// through the unified `onProposal` path. The lookup only needs to be
+	// truthy so `_checkToolProposals` doesn't `continue` before reaching that
+	// dispatch; `(this as any)[callbackName]` resolving to undefined is fine,
+	// the `!callback && !this.onProposal` guard below still lets onProposal fire.
+	workflow: "onWorkflowProposal",
+	skill: "onSkillProposal",
 };
 
 /** Maps legacy XML proposal tag → ProposalType (replaces the per-parser
@@ -140,13 +147,18 @@ const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
 	project_proposal: "project",
 };
 
-/** Maps ProposalType → legacy per-type callback name on RemoteAgent. */
+/** Maps ProposalType → legacy per-type callback name on RemoteAgent.
+ *  workflow/skill never had a legacy XML tag (see PROPOSAL_TAG_TO_TYPE above,
+ *  which has no entry for either) — this branch is unreachable for them, but
+ *  the map must stay exhaustive over ProposalType to type-check. */
 const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
 	goal: "onGoalProposal",
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	workflow: "onWorkflowProposal",
+	skill: "onSkillProposal",
 };
 
 function parseToolPayload(value: unknown): Record<string, unknown> | null {
