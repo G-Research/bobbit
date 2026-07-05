@@ -484,10 +484,12 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 		{ registerPackRenderers },
 		{ registerPackPanels, panelInfosFromContributions },
 		{ registerPackEntrypoints, entrypointInfosFromContributions },
+		{ registerPackSettingsSections, settingsSectionInfosFromContributions },
 	] = await Promise.all([
 		import("./pack-renderers.js"),
 		import("./pack-panels.js"),
 		import("./pack-entrypoints.js"),
+		import("./pack-settings-sections.js"),
 	]);
 	const projectId = activeSessionProjectId();
 	// Tool renderers stay TOOL-scoped — reconcile from /api/tools (pack schema V1 §8.3).
@@ -505,6 +507,15 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 	const packs = await fetchContributions(projectId);
 	registerPackPanels(panelInfosFromContributions(packs), projectId, { invalidateLoaded: true });
 	registerPackEntrypoints(entrypointInfosFromContributions(packs), projectId);
+	// Settings sections are "system" scope ONLY (docs/design/
+	// pack-settings-contribution.md §4.1) — always reconciled against the
+	// HEADQUARTERS/global contribution set, independent of whichever project the
+	// active session happens to be in, so a project-scope mutation elsewhere never
+	// clobbers (or fails to reflect) the Settings page's own pack sections. A
+	// SEPARATE fetch (not `packs`, which is `projectId`-scoped) keeps this correct
+	// even when `projectId !== HEADQUARTERS_PROJECT_ID`.
+	const hqPacks = projectId === HEADQUARTERS_PROJECT_ID ? packs : await fetchContributions(HEADQUARTERS_PROJECT_ID);
+	registerPackSettingsSections(settingsSectionInfosFromContributions(hqPacks), HEADQUARTERS_PROJECT_ID, { invalidateLoaded: true });
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {

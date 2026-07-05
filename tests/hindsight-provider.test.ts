@@ -17,6 +17,7 @@ import {
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	PROJECT_RECALL_TAGS_MATCH,
+	QUEUE_EVICTIONS_KEY,
 	QUEUE_KEY,
 	RECALL_QUERY_CHARS_PER_TOKEN,
 	RECALL_QUERY_SAFE_CHAR_CEILING,
@@ -24,6 +25,7 @@ import {
 	clampRecallQuery,
 	isQueryTooLongError,
 	loadEffectiveConfig,
+	mutatePending,
 	projectConfigKey,
 	recallTagFilter,
 	validateConfigOverrides,
@@ -78,6 +80,30 @@ test("clampRecallQuery: ALWAYS enforces the token-safe ceiling, even with a high
 	assert.equal(clampRecallQuery(long, Number.NaN).length, RECALL_QUERY_SAFE_CHAR_CEILING);
 	// The ceiling sits comfortably under the 500-token cap at the conservative ratio.
 	assert.ok(RECALL_QUERY_SAFE_CHAR_CEILING / RECALL_QUERY_CHARS_PER_TOKEN < RECALL_QUERY_TOKEN_CAP);
+});
+
+// MEM-5: a head-only clamp silently dropped the TAIL of a long prompt — often the
+// actual question. Clamping must now keep content from BOTH ends.
+test("clampRecallQuery: MEM-5 keeps content from BOTH the head and the tail (not just the head)", () => {
+	const head = "HEAD".repeat(50); // 200 chars of distinctive head content
+	const middle = "m".repeat(5000); // filler that must be dropped
+	const tail = "What is the actual question here?"; // distinctive tail content
+	const long = `${head}${middle}${tail}`;
+	const clamped = clampRecallQuery(long, 300);
+	assert.equal(clamped.length, 300, "output length still matches the requested clamp exactly");
+	assert.ok(clamped.startsWith("HEAD"), "keeps SOME of the head");
+	assert.ok(clamped.endsWith(tail), "keeps the FULL tail — the old head-only clamp lost this entirely");
+	assert.ok(clamped.includes("..."), "head and tail are joined so the clamp is legible, not concatenated garbage");
+	const middleCharsRetained = clamped.split("").filter((c) => c === "m").length;
+	assert.ok(middleCharsRetained < middle.length / 10, "the bulk of the dropped middle is actually dropped, not just the head/tail split");
+});
+
+test("clampRecallQuery: falls back to a plain head-slice when the budget is too small for a joiner", () => {
+	const long = "x".repeat(50).concat("TAIL");
+	// A tiny clamp leaves no room for a meaningful joiner; must not throw or produce
+	// a nonsensical/negative-length slice.
+	const clamped = clampRecallQuery(long, 1);
+	assert.equal(clamped.length, 1);
 });
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -496,7 +522,7 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	}
 });
 
-test("retry queue: failure enqueues, cap drops oldest, drain head, status sharing, shutdown drain", async () => {
+test("retry queue: failure enqueues, cap TAIL-drops (durably counted), drain head, status sharing, shutdown drain", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
 	try {
@@ -504,20 +530,26 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// Persist a configured config so the routes treat the store as configured.
 		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
 
-		// 105 failing turns ⇒ queue caps at 100, oldest dropped (contents #6..#105).
+		// 105 failing turns ⇒ queue caps at 100. MEM-3: the queue TAIL-drops (refuses
+		// the newest, #101..#105) rather than evicting the oldest — the oldest-first
+		// FIFO backlog (about to drain next) is preserved.
 		state.failRetain = true;
 		for (let i = 1; i <= 105; i++) {
 			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
 		}
 		let q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 100, "queue capped at 100");
-		assert.equal(q[0].content, "User: turn 6", "oldest entries FIFO-evicted");
+		assert.equal(q[0].content, "User: turn 1", "oldest entry is PRESERVED (tail-drop, not head-evicted)");
+		assert.equal(q[99].content, "User: turn 100", "the 5 newest overflow turns (101-105) were refused");
+		const evictions = (await store.get(QUEUE_EVICTIONS_KEY)) as { count: number };
+		assert.equal(evictions.count, 5, "every tail-dropped entry is durably counted, not silently lost");
 
-		// status route reads the SAME pack-store queue + reports healthy.
-		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
+		// status route reads the SAME pack-store queue + reports healthy + evictions.
+		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number; queueEvictions: number };
 		assert.equal(st.configured, true);
 		assert.equal(st.healthy, true);
 		assert.equal(st.queueDepth, 100);
+		assert.equal(st.queueEvictions, 5, "status surfaces the durable eviction count");
 
 		// Recover: a later afterTurn drains the queue HEAD (one entry) before its own
 		// (now-succeeding) retain.
@@ -526,8 +558,8 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "turn 106" });
 		q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 99, "one queued head drained");
-		assert.equal(q[0].content, "User: turn 7", "head removed FIFO");
-		// drain head retained #6 + the new turn #106 ⇒ at least 2 successful retains.
+		assert.equal(q[0].content, "User: turn 2", "head removed FIFO");
+		// drain head retained #1 + the new turn #106 ⇒ at least 2 successful retains.
 		assert.ok(calls.retain.length >= retainsBefore + 2);
 
 		// sessionShutdown does a bounded one-pass drain by default.
@@ -1352,6 +1384,150 @@ test("auto-retain batching: sessionShutdown flushes the pending buffer (best-eff
 		assert.match(calls.retain[0].content, /User: tail turn/);
 		const buf = (await store.get("retain-pending:s")) as { turns: unknown[] };
 		assert.equal(buf.turns.length, 0, "buffer drained on shutdown");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── MEM-4: CAS-guarded pending-buffer mutation ─────────────────────────────────
+test("MEM-4: mutatePending retries against a concurrent write instead of losing it (CAS)", async () => {
+	const store = makeStore();
+	await store.put("retain-pending:s", { turns: [{ summary: "original", ts: 1 }], overlap: [] });
+	let getCalls = 0;
+	// A store whose SECOND get() (mutatePending's internal recheck) simulates
+	// another writer landing between our load and this recheck — exactly the
+	// afterTurn-vs-sessionShutdown race MEM-4 describes.
+	const racyStore = {
+		...store,
+		get: async (k: string) => {
+			getCalls++;
+			if (k === "retain-pending:s" && getCalls === 2) {
+				await store.put("retain-pending:s", {
+					turns: [{ summary: "original", ts: 1 }, { summary: "concurrent", ts: 2 }],
+					overlap: [],
+				});
+			}
+			return store.get(k);
+		},
+	};
+	const result = await mutatePending(racyStore as never, "s", (buf) => ({
+		turns: [...buf.turns, { summary: "mine", ts: 3 }],
+		overlap: buf.overlap,
+	}));
+	// Neither the concurrent writer's turn NOR our own is lost — the transform was
+	// retried against the freshest value instead of blindly overwriting it.
+	assert.deepEqual(result.turns.map((t) => t.summary), ["original", "concurrent", "mine"]);
+	const persisted = (await store.get("retain-pending:s")) as { turns: { summary: string }[] };
+	assert.deepEqual(persisted.turns.map((t) => t.summary), ["original", "concurrent", "mine"]);
+});
+
+test("MEM-4: interleaved flushes — a concurrent afterTurn append survives a racing sessionShutdown flush (no lost entries)", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const cfg = { ...ACTIVE, retainEveryNTurns: 50, retainOverlapTurns: 0 };
+		// Seed one already-buffered turn (as if from an earlier afterTurn).
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t1" });
+		assert.equal(calls.retain.length, 0, "buffered below the batch size");
+
+		// Pause sessionShutdown's flushPending right after its FIRST load of the
+		// pending buffer (the snapshot it will retain), so a second afterTurn can
+		// append to the SAME durable buffer in between.
+		let releaseGate: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			releaseGate = resolve;
+		});
+		let loadCount = 0;
+		const racyStore = {
+			...store,
+			get: async (k: string) => {
+				if (k === "retain-pending:s") {
+					loadCount++;
+					if (loadCount === 1) {
+						const v = await store.get(k);
+						await gate;
+						return v;
+					}
+				}
+				return store.get(k);
+			},
+		};
+
+		const shutdownPromise = provider.sessionShutdown({ config: { ...cfg }, host: { store: racyStore }, sessionId: "s" });
+		// While shutdown's flush is paused holding the stale (t1-only) snapshot, a
+		// SECOND afterTurn appends t2 to the SAME durable buffer and completes fully.
+		await provider.afterTurn({ config: { ...cfg }, host: { store }, sessionId: "s", prompt: "t2" });
+		releaseGate();
+		await shutdownPromise;
+
+		// The shutdown flush retained exactly what it saw (t1) — that part is
+		// unaffected. What matters: t2, appended AFTER its load, must NOT be wiped by
+		// the flush's buffer-advance step.
+		assert.equal(calls.retain.length, 1);
+		assert.match(calls.retain[0].content, /User: t1/);
+		assert.doesNotMatch(calls.retain[0].content, /User: t2/);
+		const buf = (await store.get("retain-pending:s")) as { turns: { summary: string }[] };
+		assert.equal(buf.turns.length, 1, "the concurrently-appended turn survives instead of being wiped by the flush's advance");
+		assert.match(buf.turns[0].summary, /User: t2/);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+// ── MEM-1b: crash-recovery sweep for stranded pending buffers ─────────────────
+test("MEM-1b: sessionSetup sweeps + flushes a STRANDED pending buffer left by a crashed session", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const staleTs = Date.now() - 6 * 60 * 60 * 1000; // 6h old — well past the 3h default floor
+		await store.put("retain-pending:crashed-session", { turns: [{ summary: "User: orphaned turn", ts: staleTs }], overlap: [] });
+
+		await provider.sessionSetup({ config: { ...ACTIVE, mentalModelEnabled: false }, host: { store }, sessionId: "current-session", prompt: "hi" });
+
+		const retained = calls.retain.find((r) => /orphaned turn/.test(r.content));
+		assert.ok(retained, "the stranded session's buffer was flushed (retained), not left stranded forever");
+		const buf = (await store.get("retain-pending:crashed-session")) as { turns: unknown[] };
+		assert.equal(buf.turns.length, 0, "the stranded buffer is cleared after the sweep flush");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("MEM-1b: the sweep never touches the CURRENT session's own buffer or a recent one", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put("retain-pending:current-session", { turns: [{ summary: "User: my own pending turn", ts: Date.now() }], overlap: [] });
+		await store.put("retain-pending:recent-other-session", { turns: [{ summary: "User: recent", ts: Date.now() - 60_000 }], overlap: [] });
+
+		await provider.sessionSetup({ config: { ...ACTIVE, mentalModelEnabled: false }, host: { store }, sessionId: "current-session", prompt: "hi" });
+
+		assert.equal(calls.retain.length, 0, "neither the current session's own buffer nor a recent one is swept");
+		const own = (await store.get("retain-pending:current-session")) as { turns: unknown[] };
+		assert.equal(own.turns.length, 1, "current session's own buffer is untouched by the sweep");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("MEM-1b: the sweep is gated — a second sessionSetup within the interval does not re-sweep", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const staleTs = Date.now() - 6 * 60 * 60 * 1000;
+		await store.put("retain-pending:crashed-a", { turns: [{ summary: "User: orphan A", ts: staleTs }], overlap: [] });
+		await provider.sessionSetup({ config: { ...ACTIVE, mentalModelEnabled: false }, host: { store }, sessionId: "current-session", prompt: "hi" });
+		assert.equal(calls.retain.length, 1, "first sweep flushes the stranded buffer");
+
+		// A second stranded buffer appears; a sessionSetup moments later must NOT
+		// sweep again immediately (interval-gated, mirrors the mental-model cadence).
+		await store.put("retain-pending:crashed-b", { turns: [{ summary: "User: orphan B", ts: staleTs }], overlap: [] });
+		await provider.sessionSetup({ config: { ...ACTIVE, mentalModelEnabled: false }, host: { store }, sessionId: "current-session", prompt: "hi again" });
+		assert.equal(calls.retain.length, 1, "no re-sweep within RETAIN_SWEEP_INTERVAL_MS");
 	} finally {
 		__setClientFactory(null);
 	}

@@ -849,3 +849,227 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(reg.getPack(undefined, "p")!.panels.length, 0);
 	});
 });
+
+// ── Settings-section contribution kind (docs/design/pack-settings-contribution.md §4.1) ──
+
+describe("loadSettingsSections (§4.1 pack-settings-contribution)", () => {
+	it("parses a valid settings/<id>.yaml, carrying scope/tab/order/preferenceKeys, and serves it via the registry", () => {
+		const root = packRoot("ss1", "pr-walkthrough");
+		w(path.join(root, "pack.yaml"), "name: pr-walkthrough\n");
+		w(
+			path.join(root, "settings", "trusted-hosts.yaml"),
+			"id: pr-walkthrough.trusted-hosts\ntitle: Trusted GitHub hosts\nscope: system\ntab: general\norder: 100\nentry: ../lib/TrustedHostsSection.js\npreferenceKeys:\n  - githubTrustedHosts\n",
+		);
+		w(path.join(root, "lib", "TrustedHostsSection.js"), "export default function() { return {}; }\n");
+		const c = loadPackContributions(root, manifest("pr-walkthrough"));
+		assert.equal(c.settingsSections.length, 1);
+		const s = c.settingsSections[0];
+		assert.equal(s.id, "pr-walkthrough.trusted-hosts");
+		assert.equal(s.title, "Trusted GitHub hosts");
+		assert.equal(s.scope, "system");
+		assert.equal(s.tab, "general");
+		assert.equal(s.order, 100);
+		assert.deepEqual(s.preferenceKeys, ["githubTrustedHosts"]);
+		assert.equal(s.packRoot, root);
+
+		const reg = new PackContributionRegistry(() => [entry(root, "server", manifest("pr-walkthrough"))]);
+		assert.equal(reg.getSettingsSection(undefined, "pr-walkthrough", "pr-walkthrough.trusted-hosts")?.id, "pr-walkthrough.trusted-hosts");
+		assert.equal(reg.getSettingsSection(undefined, "pr-walkthrough", "no-such-section"), undefined);
+
+		// Path containment: entry resolves WITHIN the pack root.
+		const entryAbs = path.resolve(path.dirname(s.sourceFile), s.entry);
+		assert.equal(isPackPathWithinRoot(root, entryAbs), true);
+	});
+
+	it("defaults order to 100 and preferenceKeys to [] when omitted", () => {
+		const root = packRoot("ss2", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "settings", "s.yaml"), "id: p.s\nscope: system\ntab: general\nentry: ../lib/a.js\n");
+		const c = loadPackContributions(root, manifest("p"));
+		assert.equal(c.settingsSections.length, 1);
+		assert.equal(c.settingsSections[0].order, 100);
+		assert.deepEqual(c.settingsSections[0].preferenceKeys, []);
+	});
+
+	it("drops a section with unsupported scope, missing tab, invalid id, or missing/unsafe entry, without crashing the scan", () => {
+		const root = packRoot("ss3", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "settings", "good.yaml"), "id: p.good\nscope: system\ntab: general\nentry: ../lib/a.js\n");
+		w(path.join(root, "settings", "bad-scope.yaml"), "id: p.badscope\nscope: project\ntab: general\nentry: ../lib/a.js\n");
+		w(path.join(root, "settings", "no-tab.yaml"), "id: p.notab\nscope: system\nentry: ../lib/a.js\n");
+		w(path.join(root, "settings", "bad-id.yaml"), "id: '1 bad'\nscope: system\ntab: general\nentry: ../lib/a.js\n");
+		w(path.join(root, "settings", "no-entry.yaml"), "id: p.noentry\nscope: system\ntab: general\n");
+		const c = loadPackContributions(root, manifest("p"));
+		assert.deepEqual(c.settingsSections.map((s) => s.id), ["p.good"]);
+	});
+
+	it("an entry escaping the pack root loads (mirrors panels — parse-time is not the containment check) but fails isPackPathWithinRoot at serve time", () => {
+		const root = packRoot("ss3b", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "settings", "escape.yaml"), "id: p.escape\nscope: system\ntab: general\nentry: ../../../evil.js\n");
+		const c = loadPackContributions(root, manifest("p"));
+		assert.equal(c.settingsSections.length, 1);
+		const s = c.settingsSections[0];
+		const entryAbs = path.resolve(path.dirname(s.sourceFile), s.entry);
+		assert.equal(isPackPathWithinRoot(s.packRoot, entryAbs), false);
+	});
+
+	it("duplicate settings-section id within a pack is a hard conflict (throws)", () => {
+		const root = packRoot("ss4", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "settings", "a.yaml"), "id: p.dup\nscope: system\ntab: general\nentry: ../lib/a.js\n");
+		w(path.join(root, "settings", "b.yaml"), "id: p.dup\nscope: system\ntab: general\nentry: ../lib/b.js\n");
+		assert.throws(() => loadPackContributions(root, manifest("p")), PackContributionError);
+	});
+
+	it("a pack with no settings/ dir yields an empty settingsSections[] (always-emit contract)", () => {
+		const root = packRoot("ss5", "bare");
+		w(path.join(root, "pack.yaml"), "name: bare\n");
+		const c = loadPackContributions(root, manifest("bare"));
+		assert.deepEqual(c.settingsSections, []);
+	});
+});
+
+// ── §4.3 defense-in-depth blocklist (S5-build amendment 2 — FULL-TIER reviewed) ──
+
+describe("guardPackAttributedPreferenceWrite (§4.3 amendment 2 — adversarial)", () => {
+	function trustedHostsRegistry(extraPreferenceKeys: string[] = []): { registry: PackContributionRegistry; root: string } {
+		const root = packRoot(`guard-${Math.random().toString(36).slice(2)}`, "pr-walkthrough");
+		w(path.join(root, "pack.yaml"), "name: pr-walkthrough\n");
+		const keys = ["githubTrustedHosts", ...extraPreferenceKeys].map((k) => `  - ${k}`).join("\n");
+		w(
+			path.join(root, "settings", "trusted-hosts.yaml"),
+			`id: pr-walkthrough.trusted-hosts\nscope: system\ntab: general\nentry: ../lib/TrustedHostsSection.js\npreferenceKeys:\n${keys}\n`,
+		);
+		w(path.join(root, "lib", "TrustedHostsSection.js"), "export default function() { return {}; }\n");
+		const registry = new PackContributionRegistry(() => [entry(root, "server", manifest("pr-walkthrough"))]);
+		return { registry, root };
+	}
+
+	const isBlockedKey = (key: string) => ["agentDir", "agentDirHistory"].includes(key) || key.startsWith("claudeCode.");
+
+	it("honors a well-behaved write within the pack's own declared allowlist", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { registry } = trustedHostsRegistry();
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["githubTrustedHosts"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.deepEqual(result, { ok: true });
+	});
+
+	it("ADVERSARIAL: hard-rejects a Claude-Code-gated key for a synthetic pack token whose OWN manifest declares it, regardless of the declaration", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		// The pack's own settings/trusted-hosts.yaml maliciously (or naively)
+		// declares a Claude-Code-runtime key in its preferenceKeys allowlist.
+		const { registry } = trustedHostsRegistry(["claudeCode.executablePath"]);
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["claudeCode.executablePath"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) {
+			assert.equal(result.status, 403);
+			assert.equal(result.key, "claudeCode.executablePath");
+		}
+	});
+
+	it("ADVERSARIAL: hard-rejects the agent-dir keys for a synthetic pack token whose OWN manifest declares them", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { registry } = trustedHostsRegistry(["agentDir"]);
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["agentDir"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 403);
+	});
+
+	it("ADVERSARIAL: a batched write mixing an allowed key with a gated key rejects the WHOLE patch (no partial-apply side channel)", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { registry } = trustedHostsRegistry(["claudeCode.defaultModel"]);
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["githubTrustedHosts", "claudeCode.defaultModel"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+	});
+
+	it("rejects a key not in the section's OWN declared allowlist (400, not honored)", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { registry } = trustedHostsRegistry();
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["someUnrelatedPreferenceKey"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 400);
+	});
+
+	it("rejects a garbage/forged token", async () => {
+		const { guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { registry } = trustedHostsRegistry();
+		const result = guardPackAttributedPreferenceWrite({
+			token: "not-a-real-token",
+			patchKeys: ["githubTrustedHosts"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 403);
+	});
+
+	it("rejects a token minted for a session-bound (panel/entrypoint/route) surface — cannot be replayed as a settings-section write", async () => {
+		const { guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const { mintSurfaceToken } = await import("../src/server/extension-host/surface-binding.ts");
+		const { registry } = trustedHostsRegistry();
+		// A real session-bound token for an unrelated panel surface — different
+		// sessionId sentinel AND different contributionId shape.
+		const foreignToken = mintSurfaceToken({ sessionId: "some-real-session", packId: "pr-walkthrough", contributionId: "panel:pr-walkthrough.panel" });
+		const result = guardPackAttributedPreferenceWrite({
+			token: foreignToken,
+			patchKeys: ["githubTrustedHosts"],
+			contributions: registry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 403);
+	});
+
+	it("rejects a token whose section is no longer installed/active (uninstall reconciliation)", async () => {
+		const { mintSettingsSectionToken, guardPackAttributedPreferenceWrite } = await import("../src/server/extension-host/settings-section-preferences.ts");
+		const emptyRegistry = new PackContributionRegistry(() => []);
+		const token = mintSettingsSectionToken("pr-walkthrough", "pr-walkthrough.trusted-hosts");
+		const result = guardPackAttributedPreferenceWrite({
+			token,
+			patchKeys: ["githubTrustedHosts"],
+			contributions: emptyRegistry,
+			projectId: undefined,
+			isBlockedKey,
+		});
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 403);
+	});
+});

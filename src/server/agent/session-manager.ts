@@ -8909,6 +8909,33 @@ export class SessionManager {
 
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
+			// MEM-1: graceful shutdown (SIGINT/SIGTERM) previously never dispatched
+			// `sessionShutdown` for still-live sessions — only archiveWithCascade and
+			// terminateSession did — so a lifecycle provider's flush-on-shutdown hook
+			// (e.g. the hindsight memory pack's pending-buffer flush + retry-queue
+			// drain) never ran on a plain gateway restart/stop, stranding whatever was
+			// buffered. Mirrors the archiveWithCascade/terminateSession dispatch sites
+			// above: best-effort and bounded by the hub's own per-provider timeouts
+			// (ModuleHost's invoke-level terminate-on-timeout — see
+			// LifecycleHub.dispatch), wrapped in try/catch so a hung/throwing provider
+			// can never block graceful shutdown.
+			if (this.lifecycleHub) {
+				try {
+					await this.lifecycleHub.dispatch("sessionShutdown", {
+						sessionId: id,
+						projectId: session.projectId,
+						scope: session.projectId ? "project" : "global",
+						cwd: session.cwd,
+						// Effective goal (goalId ?? teamGoalId) so disabled-provider
+						// filtering applies to members/delegates/reviewers too.
+						goalId: session.goalId ?? session.teamGoalId,
+						roleName: session.role,
+					});
+				} catch (err) {
+					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
+				}
+			}
+
 			// Snapshot the current active state before we kill the process.
 			// This is authoritative — the in-memory status is always correct,
 			// and we write it here to handle the case where shutdown() races

@@ -19,18 +19,20 @@ import {
 	clearError,
 	clientConfig,
 	currentQueryTimestamp,
+	DEFAULT_STRANDED_AFTER_MS,
 	enqueueRetain,
 	isActive,
 	isQueryTooLongError,
+	listStrandedPendingSessions,
 	loadPending,
 	loadQueue,
 	makeClient,
+	mutatePending,
 	nextOverlap,
 	overlayProjectConfig,
 	recallTagFilter,
 	recordError,
 	resolveConfig,
-	savePending,
 	saveQueue,
 	shouldFlushPending,
 	truncate,
@@ -653,8 +655,48 @@ async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: Store
 	}
 	// Advance the buffer regardless of success (failures are durably queued): carry
 	// bounded overlap forward, clear the primary turns so the count advances.
-	const overlap = nextOverlap(buf.turns, cfg.retainOverlapTurns);
-	await savePending(store, sessionId, { turns: [], overlap });
+	//
+	// MEM-4: do this CAS-safe, not a blind overwrite. `buf` was loaded BEFORE the
+	// (possibly slow, network-bound) retain attempt above; a CONCURRENT afterTurn
+	// for the same session can append a new turn to the durable buffer during that
+	// window. `mutatePending` re-reads immediately before writing and retries
+	// against whatever is current, so the transform below is re-evaluated against
+	// the FRESHEST buffer on every attempt — never just `buf`.
+	const processed = buf.turns;
+	const overlap = nextOverlap(processed, cfg.retainOverlapTurns);
+	await mutatePending(store, sessionId, (current) => {
+		// If `current` still starts with exactly the turns we just processed, drop
+		// only that processed prefix — anything appended AFTER our load (by a
+		// racing afterTurn) survives as still-pending, never silently dropped.
+		const stillHead =
+			current.turns.length >= processed.length &&
+			current.turns.slice(0, processed.length).every((t, i) => t.summary === processed[i].summary && t.ts === processed[i].ts);
+		const remainder = stillHead ? current.turns.slice(processed.length) : current.turns;
+		return { turns: remainder, overlap };
+	});
+}
+
+/** MEM-1b: crash-recovery sweep for stranded pending buffers. Piggybacks on
+ *  `sessionSetup` (gated to run at most once per RETAIN_SWEEP_INTERVAL_MS — see
+ *  {@link listStrandedPendingSessions}) rather than a dedicated boot hook (none
+ *  exists; adding one is a much wider change — see the shared.ts comment). Any
+ *  OTHER session's buffer that looks abandoned is flushed through the SAME
+ *  `flushPending` path a normal batch/shutdown flush uses (retain now, durably
+ *  queue on failure — never dropped), then cleared. Best-effort: attributed to
+ *  the SWEEPING session's own effective config/tags (the original session's
+ *  project context is not recoverable from the pending-buffer key alone) —
+ *  imperfect tagging is preferable to losing the content outright. */
+async function sweepStrandedPending(ctx: ProviderCtx, cfg: EffectiveConfig, store: StoreLike): Promise<void> {
+	const staleAfterMs = Math.max(cfg.retainMaxDelayMs * 3, DEFAULT_STRANDED_AFTER_MS);
+	const strandedIds = await listStrandedPendingSessions(store, sessionIdOf(ctx), staleAfterMs);
+	for (const strandedId of strandedIds) {
+		try {
+			await flushPending(ctx, cfg, store, strandedId, false);
+		} catch {
+			// Best-effort recovery sweep; a failure here must never block sessionSetup
+			// (the next sweep interval will retry).
+		}
+	}
 }
 
 const provider = {
@@ -662,6 +704,8 @@ const provider = {
 		const base = resolveConfig(ctx.config);
 		if (!isActive(base, ctx.runtime)) return { blocks: [] };
 		const cfg = await effectiveConfig(ctx, base);
+		const store = getStore(ctx);
+		if (store && base.autoRetain) await sweepStrandedPending(ctx, cfg, store);
 		const mental = await doMentalModel(ctx, cfg);
 		if (mental.state === "injected" && mental.block) return { blocks: [mental.block] };
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
@@ -691,10 +735,13 @@ const provider = {
 		// Batch (never sample): append this turn's compact summary to the durable
 		// pending buffer, then flush ONE aggregate when the batch is full or the
 		// oldest pending turn has aged past retainMaxDelayMs (hook-observed timeout).
+		// MEM-4: the append is a CAS-retry (mutatePending), not a blind load+save —
+		// a concurrent sessionShutdown flush for the SAME session can clear/advance
+		// the buffer between our load and save; retrying the append against the
+		// freshest value means this turn is never lost under that race.
 		let buf: PendingBuffer = await loadPending(store, sessionId);
 		if (summary) {
-			buf = { turns: [...buf.turns, { summary, ts: Date.now() }], overlap: buf.overlap };
-			await savePending(store, sessionId, buf);
+			buf = await mutatePending(store, sessionId, (current) => ({ turns: [...current.turns, { summary, ts: Date.now() }], overlap: current.overlap }));
 		}
 		if (shouldFlushPending(buf, cfg.retainEveryNTurns, cfg.retainMaxDelayMs, Date.now())) {
 			await flushPending(ctx, cfg, store, sessionId, false);
