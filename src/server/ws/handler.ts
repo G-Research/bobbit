@@ -18,7 +18,6 @@ import { inferMeta } from "../agent/aigw-manager.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { normalizeToolResultErrorSnapshot } from "../agent/tool-result-error-normalizer.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
@@ -541,11 +540,10 @@ export function handleWebSocketConnection(
 			// hydrates from the bridge/transcript without changing Pi attach behavior.
 			const persistedForAttach = sessionManager.getPersistedSession(sessionId);
 			if (persistedForAttach?.runtime === "claude-code" || persistedForAttach?.modelProvider === "claude-code") {
-				session.rpcClient.getMessages?.()
-					.then(async (msgs: any) => {
+				sessionManager.getMessagesSnapshotBase(session)
+					.then((msgs: any) => {
 						if (!msgs?.success) return;
-						const hydrated = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgs.data ?? msgs);
-						const raw = normalizeToolResultErrorSnapshot(hydrated as any);
+						const raw = msgs.data;
 						let data: any = raw;
 						if (Array.isArray(raw)) {
 							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);
@@ -1073,14 +1071,17 @@ export function handleWebSocketConnection(
 					const tStart = perf ? performance.now() : 0;
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
-					const msgsResp = await session.rpcClient.getMessages();
+					// PERF-06: memoized base (RPC + hydrate + normalize), keyed on
+					// session.eventBuffer.lastSeq — see getMessagesSnapshotBase() for
+					// the invalidation argument. Live-state splicing below (in-flight
+					// message/steers, sidecars, truncate, stamp) always runs fresh.
+					const msgsResp = await sessionManager.getMessagesSnapshotBase(session);
 					if (diagEnabled) {
 						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const hydrated = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgsResp.data);
-						const raw = normalizeToolResultErrorSnapshot(hydrated as any);
+						const raw: any = msgsResp.data;
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
@@ -1198,11 +1199,10 @@ export function handleWebSocketConnection(
 						// Refresh messages after restart so the client sees the full history
 						const restored = sessionManager.getSession(sessionId);
 						if (restored) {
-							restored.rpcClient.getMessages?.()
-								.then(async (msgs: any) => {
+							sessionManager.getMessagesSnapshotBase(restored)
+								.then((msgs: any) => {
 									if (!msgs) return;
-									const hydrated = await sessionManager.hydrateClaudeCodeSnapshotMessages(sessionId, msgs.data ?? msgs);
-									const raw = normalizeToolResultErrorSnapshot(hydrated as any);
+									const raw = msgs.data ?? msgs;
 									let data: any = raw;
 									if (Array.isArray(raw)) {
 										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);

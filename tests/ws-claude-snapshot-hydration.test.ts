@@ -49,6 +49,19 @@ function makeManager(session: any, persisted: any, hydrate = mock.fn(async (_id:
 		withSessionCostInState: mock.fn((_id: string, data: unknown) => data),
 		getPendingToolPermission: mock.fn(() => undefined),
 		hydrateClaudeCodeSnapshotMessages: hydrate,
+		// Fake stand-in for SessionManager.getMessagesSnapshotBase(). This test
+		// exercises handler.ts wiring the attach path and the explicit
+		// `get_messages` path through the shared hydrate step, not PERF-06's
+		// memoization (that's covered directly against the real SessionManager
+		// in session-manager-snapshot-memo.test.ts) — so this fake intentionally
+		// does NOT cache, preserving the original per-call
+		// hydrate.mock.callCount() assertions below.
+		getMessagesSnapshotBase: mock.fn(async (s: any) => {
+			const msgsResp = await s.rpcClient.getMessages();
+			if (!msgsResp?.success) return msgsResp;
+			const hydrated = await hydrate(s.id, msgsResp.data);
+			return { ...msgsResp, data: hydrated };
+		}),
 	};
 }
 
