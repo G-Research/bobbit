@@ -69,6 +69,22 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
+// Machine-readable summary support (see scripts/run-playwright-e2e.mjs and
+// scripts/playwright-json-summary.mjs). scripts/run-playwright-e2e.mjs sets
+// BOBBIT_E2E_JSON_REPORT_PATH to a run-scoped file before spawning; the
+// wrapper reads that file after the child exits and derives the honest,
+// ANSI-free `[e2e-summary]` line from it — never from the `list`/`line`
+// human reporter's decorated stdout, which is what let an ANSI erase
+// sequence mask a real failure count across five merge windows. The JSON
+// reporter with `outputFile` set writes silently to disk with no stdout
+// output of its own, so human output (list/line) is byte-identical whether
+// or not this is enabled. A direct `npx playwright test --config
+// playwright-e2e.config.ts` invocation without the env var set is
+// unaffected — this reporter is simply absent.
+const jsonSummaryReporters: Array<[string, Record<string, unknown>]> = process.env.BOBBIT_E2E_JSON_REPORT_PATH
+	? [["json", { outputFile: process.env.BOBBIT_E2E_JSON_REPORT_PATH }]]
+	: [];
+
 // Keep three retries as the project-level flake absorber for broad E2E runs.
 // Deterministic failures still fail after the retry budget is exhausted.
 export default {
@@ -92,6 +108,7 @@ export default {
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
 		...recordScreenReporters,
+		...jsonSummaryReporters,
 	],
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",

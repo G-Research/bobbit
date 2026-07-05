@@ -10,11 +10,12 @@
  * each Playwright worker its own process-local cache directory.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { formatE2ESummaryLine, formatE2ESummaryUnavailableLine, summarizePlaywrightReport } from "./playwright-json-summary.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -23,6 +24,16 @@ const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
 function sanitizeSegment(value) {
   return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "run";
 }
+
+// Shared run identifier used for both the transform-cache dir (when not
+// explicitly overridden) and the JSON-summary artifact filename below — kept
+// stable regardless of which cache-dir branch runs so concurrent invocations
+// (this repo commonly runs overlapping E2E commands from multiple worktrees)
+// never collide on their summary artifact either.
+const runId = sanitizeSegment(
+  process.env.BOBBIT_E2E_RUN_ID?.trim()
+    || `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
+);
 
 function e2eTempRoot() {
   if (existsSync("/.dockerenv")) return "/tmp";
@@ -42,10 +53,6 @@ function makeRunCacheDir() {
   const explicit = process.env.PWTEST_CACHE_DIR?.trim();
   if (explicit) return { cacheDir: resolve(explicit), baseRoot: undefined, owned: false };
 
-  const runId = sanitizeSegment(
-    process.env.BOBBIT_E2E_RUN_ID?.trim()
-      || `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
-  );
   const baseRoot = resolve(cacheRootOverride() || e2eTempRoot());
   return { cacheDir: join(baseRoot, "pwtest-transform-cache", runId), baseRoot, owned: true };
 }
@@ -66,6 +73,13 @@ env.BOBBIT_TEST_NO_REMOTE = env.BOBBIT_TEST_NO_REMOTE || "1";
 env.NODE_DISABLE_COMPILE_CACHE = "1";
 delete env.NODE_COMPILE_CACHE;
 env.NODE_OPTIONS = [`--require=${cacheBootstrap}`, env.NODE_OPTIONS].filter(Boolean).join(" ");
+
+// Machine-readable summary (see scripts/playwright-json-summary.mjs). Lives
+// inside cacheDir — read back below BEFORE cacheDir is cleaned up.
+// playwright-e2e.config.ts adds a `json` reporter writing here, alongside
+// (not instead of) the human list/line reporter, whenever this is set.
+const jsonReportPath = join(cacheDir, "playwright-report.json");
+env.BOBBIT_E2E_JSON_REPORT_PATH = jsonReportPath;
 
 if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
   console.error(`[e2e] BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT=${cacheDir}`);
@@ -88,6 +102,34 @@ const result = spawnSync(invocation.command, [...invocation.args, "test", "--con
   stdio: "inherit",
   shell: invocation.shell,
 });
+
+// Derive the honest, ANSI-free `[e2e-summary]` line from Playwright's own
+// JSON reporter output — NEVER from the human list/line reporter's stdout
+// (an ANSI erase-prefix on that reporter's "N failed" line is exactly what
+// masked real failures across five merge windows). Read this BEFORE the
+// cacheDir cleanup below, since jsonReportPath lives inside it. Best-effort:
+// a parse failure here must never crash the wrapper or change its exit code.
+try {
+  const raw = readFileSync(jsonReportPath, "utf8");
+  const report = JSON.parse(raw);
+  const counts = summarizePlaywrightReport(report);
+  console.log(formatE2ESummaryLine(counts));
+
+  const artifactDir = join(projectRoot, "test-results", "e2e-summary");
+  mkdirSync(artifactDir, { recursive: true });
+  const artifactPath = join(artifactDir, `${runId}.json`);
+  writeFileSync(artifactPath, JSON.stringify({
+    ...counts,
+    exitCode: result.status ?? null,
+    signal: result.signal ?? null,
+    generatedAt: new Date().toISOString(),
+    runId,
+  }, null, 2));
+  console.log(`[e2e-summary-artifact] ${artifactPath}`);
+} catch (err) {
+  const reason = err?.message || String(err);
+  console.error(formatE2ESummaryUnavailableLine(reason));
+}
 
 if (ownsCacheDir && process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1") {
   try {

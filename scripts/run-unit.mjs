@@ -32,6 +32,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveUnitSelection } from "./test-unit-args.mjs";
+import { computeUnitSummary, formatUnitSummaryLine } from "./unit-summary.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -287,6 +288,10 @@ const totalSecs = ((Date.now() - overallStart) / 1000).toFixed(1);
 const failed = results.filter((r) => r.code !== 0);
 console.log(`\n[run-unit] total wall time ${totalSecs}s`);
 console.log(`[run-unit] result summary: ${results.map((r) => `${r.label}=${r.code === 0 ? "pass" : `fail(${r.code})`}`).join(", ")}`);
+// Plain, ANSI-free, machine-parseable line for gate orchestration — see
+// scripts/unit-summary.mjs. Deliberately separate from the two lines above,
+// which are for human eyes and may grow free-text in the future.
+console.log(formatUnitSummaryLine(computeUnitSummary(results)));
 
 if (failed.length > 0) {
 	console.error(`\n[run-unit] ${failed.length} runner(s) failed. Replaying last ${failureTailLines} non-empty output lines per failed runner so gate tails include the useful error:`);
