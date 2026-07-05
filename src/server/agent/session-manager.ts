@@ -106,6 +106,7 @@ import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import type { Decision } from "./decision-types.js";
 import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID, isThinkingRouterApplyMode } from "./thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND, isToolApproveEnforceMode, isAutoDenyDecision, type ToolApproveVerdict } from "./tool-approve-classifier.js";
+import { ToolPermissionAuditLog, type ToolPermissionAuditDecision, type ToolPermissionAuditSource } from "./tool-permission-audit-log.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -504,6 +505,7 @@ export interface SessionInfo {
 		reject: (err: Error) => void;
 		toolName: string;
 		toolGroup: string;
+		toolApproveDecision?: Decision<ToolApproveVerdict>;
 		timer: ReturnType<typeof setTimeout>;
 		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
 		 * verbatim to late-joining clients so we never burn a fresh global seq
@@ -919,6 +921,8 @@ export interface SessionManagerOptions {
 	prStatusStore?: PrStatusStore;
 	/** Process-lifetime Extension Host channel services, wired by server.ts when available. */
 	extensionChannels?: ExtensionChannelServices;
+	/** Durable tool-permission ask audit log. Override is primarily for tests. */
+	toolPermissionAuditLog?: ToolPermissionAuditLog;
 }
 
 function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
@@ -1038,6 +1042,7 @@ export class SessionManager {
 	private _testCostTracker: CostTracker | null = null;
 	/** @internal Test-only search index (used when no PCM is available). */
 	private _testSearchIndex: SearchService | null = null;
+	private toolPermissionAuditLog!: ToolPermissionAuditLog;
 	private colorStore?: ColorStore;
 	private roleManager?: RoleManager;
 	/**
@@ -1453,6 +1458,7 @@ export class SessionManager {
 		this.projectContextManager = options?.projectContextManager ?? null;
 		this.prStatusStore = options?.prStatusStore ?? null;
 		this._extensionChannels = options?.extensionChannels;
+		this.toolPermissionAuditLog = options?.toolPermissionAuditLog ?? new ToolPermissionAuditLog(bobbitStateDir());
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -4574,6 +4580,7 @@ export class SessionManager {
 					granted: false,
 					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
 				});
+				this.appendToolPermissionAudit(session, pending, "denied", "auto");
 				return session.allowedTools ?? [];
 			}
 		}
@@ -4622,6 +4629,7 @@ export class SessionManager {
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
 			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			this.appendToolPermissionAudit(session, pending, "granted", "user");
 			return resultTools;
 		}
 
@@ -4652,6 +4660,28 @@ export class SessionManager {
 		}
 	}
 
+	private appendToolPermissionAudit(
+		session: SessionInfo,
+		ask: { toolName: string; toolGroup?: string; toolApproveDecision?: Decision<ToolApproveVerdict> },
+		decision: ToolPermissionAuditDecision,
+		source: ToolPermissionAuditSource,
+	): void {
+		try {
+			this.toolPermissionAuditLog.append(session.id, {
+				ts: Date.now(),
+				sessionId: session.id,
+				...(session.projectId ? { projectId: session.projectId } : {}),
+				toolName: ask.toolName,
+				...(ask.toolGroup ? { toolGroup: ask.toolGroup } : {}),
+				decision,
+				source,
+				...(ask.toolApproveDecision ? { toolApproveDecision: ask.toolApproveDecision } : {}),
+			});
+		} catch (err) {
+			console.warn(`[session-manager] tool-permission audit append failed for session ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
 	/**
 	 * Called by the guard extension's long-poll endpoint. Creates a pending
 	 * grant request, broadcasts to UI clients, and returns a promise that
@@ -4664,7 +4694,9 @@ export class SessionManager {
 		// If a previous grant request is still pending, resolve it as denied
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
@@ -4696,6 +4728,7 @@ export class SessionManager {
 		// mechanics via a directly-registered test classifier.
 		const toolApproveDecision = this.lifecycleHub ? await this.consultToolApproveHub(session, toolName, toolGroup) : undefined;
 		if (isToolApproveEnforceMode() && isAutoDenyDecision(toolApproveDecision)) {
+			this.appendToolPermissionAudit(session, { toolName, toolGroup, toolApproveDecision }, "denied", "auto");
 			return { granted: false, reason: toolApproveDecision.rationale ?? "Auto-denied by the tool-approve decision seam (CLF-W2, enforce mode)" };
 		}
 
@@ -4711,11 +4744,13 @@ export class SessionManager {
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
 			const timer = setTimeout(() => {
+				const pending = session.pendingGrantRequest;
 				session.pendingGrantRequest = undefined;
 				resolve({ granted: false });
+				if (pending) this.appendToolPermissionAudit(session, pending, "denied", "timeout");
 			}, 5 * 60 * 1000); // 5 minute timeout
 
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, toolApproveDecision, timer, seq, ts };
 		});
 
 		// Broadcast to UI clients
@@ -4747,6 +4782,7 @@ export class SessionManager {
 		const pending = session.pendingGrantRequest;
 		session.pendingGrantRequest = undefined;
 		pending.resolve({ granted: false });
+		this.appendToolPermissionAudit(session, pending, "denied", "user");
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
@@ -8019,7 +8055,9 @@ export class SessionManager {
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			pending.resolve({ granted: false });
+			this.appendToolPermissionAudit(session, pending, "denied", "auto");
 			session.pendingGrantRequest = undefined;
 		}
 
