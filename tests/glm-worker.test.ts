@@ -1,8 +1,35 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, extractFileBlocks, looksLikeDiff, applyUnifiedDiff } from "../scripts/glm-worker.mjs";
+import {
+	parseArgs,
+	extractFileBlocks,
+	looksLikeDiff,
+	applyUnifiedDiff,
+	selectGenerationPath,
+} from "../scripts/glm-worker.mjs";
 
 describe("glm-worker.mjs pure helpers", () => {
+	describe("selectGenerationPath", () => {
+		it("defaults to codex when BOBBIT_GLM_WORKER is unset (ADDENDUM #30 stand-down)", () => {
+			const result = selectGenerationPath({});
+			assert.equal(result.path, "codex");
+			assert.match(result.reason, /BOBBIT_GLM_WORKER/);
+		});
+
+		it("defaults to codex for falsy/empty BOBBIT_GLM_WORKER values", () => {
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "" }).path, "codex");
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "0" }).path, "codex");
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "false" }).path, "codex");
+		});
+
+		it("re-arms the GLM branch only on explicit opt-in", () => {
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "1" }).path, "glm");
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "true" }).path, "glm");
+			assert.equal(selectGenerationPath({ BOBBIT_GLM_WORKER: "YES" }).path, "glm");
+		});
+	});
+
+
 	describe("parseArgs", () => {
 		it("parses spec/workdir/env-file/round/token flags", () => {
 			const args = parseArgs([
