@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
-import { promisify } from "node:util";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, shouldSkipRemotePush } from "../skills/git.js";
@@ -16,8 +14,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
-
-const pExecFile = promisify(execFileCb);
+import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 
 /** Final worktree paths produced by provisioning, before the goalProvisioned hook + ready flip. */
 type ProvisionedWorktree = {
@@ -136,6 +133,8 @@ export class GoalManager {
 	private baseRefResolver?: (projectId: string) => string | undefined;
 	private liveSessionResolver?: () => WorktreeReferenceRecord[];
 	private readonly diagnosticsStateDir?: string;
+	private readonly commandRunner: CommandRunner;
+	private readonly clock: Clock;
 	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
 		this.baseRefResolver = resolver;
 	}
@@ -210,10 +209,12 @@ export class GoalManager {
 		return [];
 	}
 
-	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore, stateDir?: string) {
+	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore, stateDir?: string, deps: { commandRunner?: CommandRunner; clock?: Clock } = {}) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
 		this.diagnosticsStateDir = stateDir ?? (goalStore as unknown as { storeDir?: string }).storeDir;
+		this.commandRunner = deps.commandRunner ?? realCommandRunner;
+		this.clock = deps.clock ?? realClock;
 		// Lazy-migrate legacy paused=true + unresolved-deps goals to state='blocked'
 		// BEFORE recovering stuck setups, so that newly-blocked goals don't get
 		// their setupStatus incorrectly marked 'error'. See docs/design/pause-cascade.md.
@@ -608,7 +609,7 @@ export class GoalManager {
 				const configuredBaseRef = goal.projectId && this.baseRefResolver
 					? this.baseRefResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, childBaseBranch, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, childBaseBranch, { worktreeRoot: worktreeRootOverride, configuredBaseRef, commandRunner: this.commandRunner });
 					// Defense-in-depth: if no worktree-able git sub-repo remained
 					// (createWorktreeSet skips the non-git container and non-git
 					// sub-repos), fall back gracefully to no-worktree. The goal
@@ -650,7 +651,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set provisioned for goal "${goal.title}" at ${set.container}`);
 					return { worktreePath: set.container, cwd: offsetCwd, repoWorktrees };
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch, configuredBaseRef });
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch, configuredBaseRef, commandRunner: this.commandRunner });
 				// Per-component setup — non-fatal on failure. Mirrors the multi-repo
 				// branch above so component.relativePath is honored.
 				if (components && components.length > 0) {
@@ -681,7 +682,7 @@ export class GoalManager {
 				console.error(`[goal-manager] Worktree setup attempt ${attempt + 1} failed for goal "${goal.title}":`, err);
 				if (attempt === 0) {
 					// Brief delay before retry
-					await new Promise(resolve => setTimeout(resolve, 1000));
+					await new Promise<void>(resolve => this.clock.setTimeout(() => resolve(), 1000));
 				}
 			}
 		}
@@ -786,7 +787,7 @@ export class GoalManager {
 			throw err;
 		}
 
-		const result = await mergeChildBranchLocal(parent.branch, child.branch, parentCwd);
+		const result = await mergeChildBranchLocal(parent.branch, child.branch, parentCwd, this.commandRunner);
 
 		const outcome: MergeChildOutcome = { ...result, pushed: false };
 
@@ -794,7 +795,7 @@ export class GoalManager {
 		// (worktree stays diagnostic).
 		if (!result.conflict && (result.merged || result.alreadyMerged) && !shouldSkipRemotePush()) {
 			try {
-				await pExecFile("git", ["push", "origin", parent.branch], { cwd: parentCwd, timeout: 30_000 });
+				await this.commandRunner.execFile("git", ["push", "origin", parent.branch], { cwd: parentCwd, timeout: 30_000 });
 				outcome.pushed = true;
 			} catch (err) {
 				outcome.pushError = err instanceof Error ? err.message : String(err);
@@ -1011,12 +1012,12 @@ export class GoalManager {
 		// If toggling team mode ON for a non-team goal, auto-create worktree
 		if (updates.team === true && !existing.team && !existing.worktreePath) {
 			const cwd = updates.cwd ?? existing.cwd;
-			if (await isGitRepo(cwd)) {
-				const repoRoot = await getRepoRoot(cwd);
+			if (await isGitRepo(cwd, this.commandRunner)) {
+				const repoRoot = await getRepoRoot(cwd, this.commandRunner);
 				const title = updates.title ?? existing.title;
 				const branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 				try {
-					const result = await createWorktree(repoRoot, branch);
+					const result = await createWorktree(repoRoot, branch, { commandRunner: this.commandRunner });
 					updates.repoPath = repoRoot;
 					updates.branch = branch;
 					// Also update cwd to the worktree

@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { realCommandRunner, type CommandRunner } from "./gateway-deps.js";
 
 export type AgentDirSource = "BOBBIT_AGENT_DIR" | "persisted" | "default";
 
@@ -233,7 +233,7 @@ export function recordAgentDirHistory(dir: string, stateDir = runtimeStateDir, p
 	return history;
 }
 
-export function validateAgentDirTarget(input: unknown, projectRoot: string): AgentDirValidationResult {
+export function validateAgentDirTarget(input: unknown, projectRoot: string, commandRunner: CommandRunner = realCommandRunner): AgentDirValidationResult {
 	const rawInput = typeof input === "string" ? input : "";
 	if (rawInput.trim().length === 0) {
 		return validationError("EMPTY_PATH", "Enter an agent directory path.", rawInput);
@@ -246,7 +246,7 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string): Age
 	}
 
 	const normalizedProjectRoot = normalizeAbsolutePath(projectRoot);
-	const gitRoot = resolveGitWorktreeRoot(normalizedProjectRoot);
+	const gitRoot = resolveGitWorktreeRoot(normalizedProjectRoot, commandRunner);
 	const gitRootForComparison = safeRealpath(gitRoot) ?? gitRoot;
 	const allowedDefault = defaultAgentDir(normalizedProjectRoot);
 	const allowedDefaultCandidates = [allowedDefault, realpathForExistingPrefix(allowedDefault) ?? allowedDefault];
@@ -483,14 +483,15 @@ function mergeAgentDirHistory(
 	return history;
 }
 
-function resolveGitWorktreeRoot(projectRoot: string): string {
+function resolveGitWorktreeRoot(projectRoot: string, commandRunner: CommandRunner = realCommandRunner): string {
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for git worktree root detection");
 	try {
-		const output = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+		const output = commandRunner.execFileSync("git", ["rev-parse", "--show-toplevel"], {
 			cwd: projectRoot,
 			encoding: "utf-8",
 			stdio: ["ignore", "pipe", "ignore"],
 			timeout: 5000,
-		}).trim();
+		}).toString().trim();
 		if (output) return normalizeAbsolutePath(output);
 	} catch {
 		// Fall back to the configured project root when git is unavailable.

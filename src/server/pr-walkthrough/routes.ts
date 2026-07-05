@@ -1,10 +1,9 @@
-import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { SandboxScope } from "../auth/sandbox-token.js";
@@ -44,7 +43,6 @@ const prwReadReceiptKey = (jobId: string, receiptId: string): string => `${prwRe
 const prwReviewBindingQuota = (jobId: string) => ({ quotaScope: { prefix: prwReviewPrefix(jobId), profile: "default" as const } });
 const prwReviewDraftQuota = (jobId: string) => ({ quotaScope: { prefix: `${prwReviewPrefix(jobId)}draft/`, profile: "review-draft" as const } });
 
-const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
 
 type JsonReader = (req: http.IncomingMessage) => Promise<any>;
@@ -146,6 +144,7 @@ export type PrWalkthroughRouteDeps = {
 	/** Resolves the authentic caller session id from `X-Bobbit-Session-Secret`
 	 *  (Decision C — REQUIRED for the binding-routed submit-yaml/bundle paths). */
 	sessionSecretStore?: SessionSecretStore;
+	commandRunner?: CommandRunner;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -413,14 +412,14 @@ async function resolveRequestCwd(body: Record<string, unknown>, deps: PrWalkthro
 async function resolveLocalWithDelegation(cwd: string, baseSha: string, headSha: string, deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughResolveResult> {
 	const delegated = await tryResolveLocalWithModules(cwd, baseSha, headSha, deps, context);
 	if (delegated) return delegated;
-	return resolveLocalFallback(cwd, baseSha, headSha);
+	return resolveLocalFallback(cwd, baseSha, headSha, deps.commandRunner ?? realCommandRunner);
 }
 
 async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha: string, deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughResolveResult | undefined> {
 	const gitModule = await optionalPrModule("git-changeset");
 	const resolveLocalChangeset = gitModule?.resolveLocalChangeset;
 	if (typeof resolveLocalChangeset !== "function") return undefined;
-	const resolved = await resolveLocalChangeset({ cwd, baseSha, headSha });
+	const resolved = await resolveLocalChangeset({ cwd, baseSha, headSha, commandRunner: deps.commandRunner ?? realCommandRunner });
 	if (isResolveResult(resolved)) return resolved;
 
 	const changeset = resolved?.changeset ?? resolved?.metadata ?? resolved;
@@ -443,7 +442,7 @@ async function tryResolveGithubWithDelegation(input: Record<string, unknown>, de
 	const module = await optionalPrModule("github-adapter");
 	const resolveGithubPr = module?.resolveGithubPr;
 	if (typeof resolveGithubPr !== "function") return undefined;
-	const resolved = await resolveGithubPr(input);
+	const resolved = await resolveGithubPr({ ...input, commandRunner: deps.commandRunner ?? realCommandRunner });
 	return normalizeGithubResolvedWalkthrough(resolved, deps, context);
 }
 
@@ -589,18 +588,18 @@ function isDiffBlock(value: any): value is DiffBlock {
 	);
 }
 
-async function resolveLocalFallback(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult> {
-	const base = await git(cwd, ["rev-parse", "--verify", `${baseSha}^{commit}`]).catch(() => {
+async function resolveLocalFallback(cwd: string, baseSha: string, headSha: string, commandRunner: CommandRunner = realCommandRunner): Promise<WalkthroughResolveResult> {
+	const base = await git(cwd, ["rev-parse", "--verify", `${baseSha}^{commit}`], commandRunner).catch(() => {
 		throw new Error(`Invalid baseSha: ${baseSha}`);
 	});
-	const head = await git(cwd, ["rev-parse", "--verify", `${headSha}^{commit}`]).catch(() => {
+	const head = await git(cwd, ["rev-parse", "--verify", `${headSha}^{commit}`], commandRunner).catch(() => {
 		throw new Error(`Invalid headSha: ${headSha}`);
 	});
 	const fullBase = base.trim();
 	const fullHead = head.trim();
-	const diff = await git(cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", fullBase, fullHead]);
-	const nameStatus = await git(cwd, ["diff", "--name-status", "-M", "-C", fullBase, fullHead]);
-	const shortstat = await git(cwd, ["diff", "--shortstat", fullBase, fullHead]).catch(() => "");
+	const diff = await git(cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", fullBase, fullHead], commandRunner);
+	const nameStatus = await git(cwd, ["diff", "--name-status", "-M", "-C", fullBase, fullHead], commandRunner);
+	const shortstat = await git(cwd, ["diff", "--shortstat", fullBase, fullHead], commandRunner).catch(() => "");
 	const warnings: WalkthroughWarning[] = [];
 	const blocks = parseUnifiedDiff(diff, warnings);
 	applyNameStatus(blocks, nameStatus);
@@ -933,9 +932,9 @@ function isResolveResult(value: any): value is WalkthroughResolveResult {
 	return typeof value?.changesetId === "string" && value?.changeset && Array.isArray(value?.cards) && Array.isArray(value?.warnings);
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
-	const { stdout } = await execFile("git", args, { cwd, maxBuffer: 20 * 1024 * 1024 });
-	return stdout;
+async function git(cwd: string, args: string[], commandRunner: CommandRunner = realCommandRunner): Promise<string> {
+	const { stdout } = await commandRunner.execFile("git", args, { cwd, maxBuffer: 20 * 1024 * 1024 });
+	return stdout.toString();
 }
 
 function parseShortstat(shortstat: string, fallbackFiles: number): { filesChanged: number; additions: number; deletions: number } {

@@ -17,6 +17,7 @@ import { performance } from "node:perf_hooks";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { componentRoot } from "./worktree-paths.js";
 import type { Component } from "../agent/project-config-store.js";
+import { realClock, type Clock } from "../gateway-deps.js";
 
 /**
  * Single source of truth for the worktree-setup timeout fallback.
@@ -66,20 +67,22 @@ export interface RunComponentSetupsOpts {
 	timeoutMs?: number;
 	/** Caller-supplied exec — host or in-container. */
 	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
+	clock?: Clock;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, label: string, clock: Clock = realClock): Promise<T> {
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+		const timer = clock.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
 		p.then(
-			(v) => { clearTimeout(timer); resolve(v); },
-			(e) => { clearTimeout(timer); reject(e); },
+			(v) => { clock.clearTimeout(timer); resolve(v); },
+			(e) => { clock.clearTimeout(timer); reject(e); },
 		);
 	});
 }
 
 export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<void> {
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKTREE_SETUP_TIMEOUT_MS;
+	const clock = opts.clock ?? realClock;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	const counters = diagEnabled ? { components: opts.components.length, skippedByEnv: 0, commands: 0, successes: 0, failures: 0 } : undefined;
@@ -114,7 +117,7 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 
 			const componentStart = diagEnabled ? performance.now() : 0;
 			try {
-				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), timeoutMs, `[worktree-setup] ${c.name}`);
+				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), timeoutMs, `[worktree-setup] ${c.name}`, clock);
 				if (counters) counters.successes++;
 				console.log(`[worktree-setup] ${c.name}: ok`);
 				if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:component", performance.now() - componentStart, { commands: 1, successes: 1, failures: 0 });

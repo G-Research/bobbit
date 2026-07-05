@@ -118,6 +118,7 @@ function readState(name, envVar) {
 }
 const gwUrl = readState("gateway-url", "BOBBIT_GATEWAY_URL");
 const gwToken = readState("token", "BOBBIT_TOKEN");
+const fetchImpl = (...args) => globalThis.fetch(...args);
 
 // Minimal token redaction for surfaced error bodies — strip long Bearer-ish blobs.
 function redact(s) {
@@ -139,7 +140,7 @@ async function fetchCredential(signal) {
   if (gwUrl) {
     let res;
     try {
-      res = await fetch(gwUrl + "/api/sessions/" + SESSION_ID + "/google-code-assist/token", {
+      res = await fetchImpl(gwUrl + "/api/sessions/" + SESSION_ID + "/google-code-assist/token", {
         method: "GET",
         headers: { "Authorization": "Bearer " + gwToken },
         signal,
@@ -351,7 +352,7 @@ async function* sseChunks(bearer, body, options) {
     timer = setTimeout(() => controller.abort(), options.timeoutMs);
   }
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { "Authorization": "Bearer " + bearer, "Content-Type": "application/json" },
       body: JSON.stringify(body),

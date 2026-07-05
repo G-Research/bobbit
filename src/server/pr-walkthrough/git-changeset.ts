@@ -1,6 +1,4 @@
-import { spawn } from "node:child_process";
-
-import { execFileSafe } from "../exec-file-safe.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { PrWalkthroughChangesetRef, WalkthroughLimits, WalkthroughWarning } from "../../shared/pr-walkthrough/types.js";
 import { changesetIdForLocal } from "../../shared/pr-walkthrough/ids.js";
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
@@ -11,6 +9,7 @@ export interface ResolveLocalChangesetRequest {
 	baseSha: string;
 	headSha: string;
 	limits?: Partial<WalkthroughLimits>;
+	commandRunner?: CommandRunner;
 }
 
 export interface LocalChangesetResolveResult {
@@ -37,15 +36,16 @@ const GIT_TIMEOUT_MS = 30_000;
 
 export async function resolveLocalChangeset(request: ResolveLocalChangesetRequest): Promise<LocalChangesetResolveResult> {
 	const limits = { ...DEFAULT_LIMITS, ...request.limits };
+	const commandRunner = request.commandRunner ?? realCommandRunner;
 	const [baseSha, headSha] = await Promise.all([
-		verifyCommit(request.cwd, request.baseSha, "baseSha"),
-		verifyCommit(request.cwd, request.headSha, "headSha"),
+		verifyCommit(request.cwd, request.baseSha, "baseSha", commandRunner),
+		verifyCommit(request.cwd, request.headSha, "headSha", commandRunner),
 	]);
 
 	const [shortstatRaw, nameStatusRaw, diffCapture] = await Promise.all([
-		runGit(request.cwd, ["diff", "--shortstat", `${baseSha}..${headSha}`]),
-		runGit(request.cwd, ["diff", "--name-status", "-M", "-C", `${baseSha}..${headSha}`]),
-		runGitLimited(request.cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", `${baseSha}..${headSha}`], limits.maxDiffBytes + 64_000),
+		runGit(request.cwd, ["diff", "--shortstat", `${baseSha}..${headSha}`], undefined, commandRunner),
+		runGit(request.cwd, ["diff", "--name-status", "-M", "-C", `${baseSha}..${headSha}`], undefined, commandRunner),
+		runGitLimited(request.cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", `${baseSha}..${headSha}`], limits.maxDiffBytes + 64_000, commandRunner),
 	]);
 
 	const warnings: WalkthroughWarning[] = [];
@@ -110,28 +110,33 @@ export function parseNameStatus(raw: string): NameStatusRecord[] {
 
 export { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 
-async function verifyCommit(cwd: string, ref: string, label: string): Promise<string> {
+async function verifyCommit(cwd: string, ref: string, label: string, commandRunner: CommandRunner): Promise<string> {
 	try {
-		return (await runGit(cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+		return (await runGit(cwd, ["rev-parse", "--verify", `${ref}^{commit}`], undefined, commandRunner)).trim();
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(`Invalid ${label} ref "${ref}": ${message}`);
 	}
 }
 
-async function runGit(cwd: string, args: readonly string[], maxBuffer = 10_000_000): Promise<string> {
-	const result = await execFileSafe("git", args, {
+async function runGit(cwd: string, args: readonly string[], maxBuffer = 10_000_000, commandRunner: CommandRunner = realCommandRunner): Promise<string> {
+	const result = await commandRunner.execFile("git", args, {
 		cwd,
 		encoding: "utf8",
 		timeout: GIT_TIMEOUT_MS,
 		maxBuffer,
 	});
-	return result.stdout;
+	return result.stdout.toString();
 }
 
-async function runGitLimited(cwd: string, args: readonly string[], maxBytes: number): Promise<{ stdout: string; truncated: boolean }> {
+async function runGitLimited(cwd: string, args: readonly string[], maxBytes: number, commandRunner: CommandRunner = realCommandRunner): Promise<{ stdout: string; truncated: boolean }> {
 	return new Promise((resolve, reject) => {
-		const child = spawn("git", args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+		if (!commandRunner.spawn) throw new Error("CommandRunner.spawn is required for limited git diff capture");
+		const child = commandRunner.spawn("git", args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+		if (!child.stdout || !child.stderr) {
+			reject(new Error("git diff capture did not provide stdout/stderr pipes"));
+			return;
+		}
 		const chunks: Buffer[] = [];
 		const stderr: Buffer[] = [];
 		let capturedBytes = 0;

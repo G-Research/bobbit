@@ -25,9 +25,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, isUnresolvedHeadWorktreeError, type WorktreeResult } from "../skills/git.js";
@@ -38,8 +36,7 @@ import type { Component } from "./project-config-store.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
 import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, type WorktreePoolSnapshot } from "./worktree-inventory.js";
 import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
-
-const execFile = promisify(execFileCb);
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
@@ -57,15 +54,15 @@ function gitChildLabel(args: readonly string[]): string {
 	return cmd ? `git ${cmd}` : "git";
 }
 
-async function execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+async function execGit(args: readonly string[], options?: any, commandRunner: CommandRunner = realCommandRunner): Promise<{ stdout: string; stderr: string }> {
 	if (!cpuDiagnosticsEnabled()) {
-		return await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+		return await commandRunner.execFile("git", args, options) as unknown as { stdout: string; stderr: string };
 	}
 	const start = performance.now();
 	let success = 0;
 	let errorCode = "none";
 	try {
-		const result = await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+		const result = await commandRunner.execFile("git", args, options) as unknown as { stdout: string; stderr: string };
 		success = 1;
 		return result;
 	} catch (err) {
@@ -80,15 +77,16 @@ async function execGit(args: readonly string[], options?: any): Promise<{ stdout
 	}
 }
 
-function execGitSync(args: readonly string[], options?: any): Buffer | string {
+function execGitSync(args: readonly string[], options?: any, commandRunner: CommandRunner = realCommandRunner): Buffer | string {
+	if (!commandRunner.execFileSync) throw new Error("CommandRunner.execFileSync is required for synchronous git operations");
 	if (!cpuDiagnosticsEnabled()) {
-		return execFileSync("git", args, options);
+		return commandRunner.execFileSync("git", args, options);
 	}
 	const start = performance.now();
 	let success = 0;
 	let errorCode = "none";
 	try {
-		const result = execFileSync("git", args, options);
+		const result = commandRunner.execFileSync("git", args, options);
 		success = 1;
 		return result;
 	} catch (err) {
@@ -159,13 +157,13 @@ export function isPoolBranch(branch: string): boolean {
  * (not a git repo, command failure, missing git binary). Logs a warn when
  * resolution changes the path so nested-rootPath misuse is visible.
  */
-function resolveRepoToplevel(p: string): string {
+function resolveRepoToplevel(p: string, commandRunner: CommandRunner = realCommandRunner): string {
 	try {
 		const out = execGitSync(["rev-parse", "--show-toplevel"], {
 			cwd: p,
 			timeout: 5_000,
 			stdio: ["ignore", "pipe", "ignore"],
-		}).toString().trim();
+		}, commandRunner).toString().trim();
 		if (!out) return p;
 		const resolved = path.resolve(out);
 		const input = path.resolve(p);
@@ -178,20 +176,20 @@ function resolveRepoToplevel(p: string): string {
 	}
 }
 
-async function moveWorktree(repoPath: string, oldPath: string, newPath: string): Promise<void> {
+async function moveWorktree(repoPath: string, oldPath: string, newPath: string, commandRunner: CommandRunner = realCommandRunner): Promise<void> {
 	if (oldPath === newPath) return;
 	await execGit(["worktree", "move", oldPath, newPath], {
 		cwd: repoPath,
 		timeout: 30_000,
-	});
+	}, commandRunner);
 }
 
-async function currentBranchUpstream(worktreePath: string, branch: string): Promise<string | null> {
+async function currentBranchUpstream(worktreePath: string, branch: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
 	try {
 		const { stdout } = await execGit(["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`], {
 			cwd: worktreePath,
 			timeout: 5_000,
-		});
+		}, commandRunner);
 		const upstream = stdout.trim();
 		return upstream || null;
 	} catch {
@@ -199,12 +197,12 @@ async function currentBranchUpstream(worktreePath: string, branch: string): Prom
 	}
 }
 
-async function clearBranchUpstream(worktreePath: string, branch: string): Promise<void> {
+async function clearBranchUpstream(worktreePath: string, branch: string, commandRunner: CommandRunner = realCommandRunner): Promise<void> {
 	try {
 		await execGit(["branch", "--unset-upstream", branch], {
 			cwd: worktreePath,
 			timeout: 5_000,
-		});
+		}, commandRunner);
 	} catch {
 		// No upstream is already safe; continue with direct config cleanup as a belt-and-suspenders fallback.
 	}
@@ -213,21 +211,21 @@ async function clearBranchUpstream(worktreePath: string, branch: string): Promis
 			await execGit(["config", "--unset-all", key], {
 				cwd: worktreePath,
 				timeout: 5_000,
-			});
+			}, commandRunner);
 		} catch {
 			// Key absent or branch name requires Git's quoted subsection form; branch --unset-upstream handled normal cases.
 		}
 	}
 }
 
-async function ensureClaimedBranchSafeUpstream(worktreePath: string, branch: string): Promise<void> {
-	const inherited = await currentBranchUpstream(worktreePath, branch);
+async function ensureClaimedBranchSafeUpstream(worktreePath: string, branch: string, commandRunner: CommandRunner = realCommandRunner): Promise<void> {
+	const inherited = await currentBranchUpstream(worktreePath, branch, commandRunner);
 	if (!inherited) return;
 
 	// Claim must never wait on the network or leave a claimed short-lived branch
 	// tracking a remote branch by default. Drop inherited tracking immediately.
-	await clearBranchUpstream(worktreePath, branch);
-	const upstream = await currentBranchUpstream(worktreePath, branch);
+	await clearBranchUpstream(worktreePath, branch, commandRunner);
+	const upstream = await currentBranchUpstream(worktreePath, branch, commandRunner);
 	if (upstream) {
 		throw new Error(`branch ${branch} still tracks ${upstream} after upstream safety cleanup`);
 	}
@@ -238,6 +236,7 @@ export class WorktreePool {
 	private filling = false;
 	private repoPath: string;
 	private targetSize: number;
+	private commandRunner: CommandRunner;
 
 	/**
 	 * Live resolver for the project's components[] — called fresh on every
@@ -279,8 +278,9 @@ export class WorktreePool {
 	 * construction, `this.repoPath` is always the git root (or, when the
 	 * supplied path isn't a git working tree at all, the original input).
 	 */
-	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string; projectRoot?: string }) {
-		this.repoPath = resolveRepoToplevel(opts.repoPath);
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; setupTimeoutResolver?: () => number | string | undefined; worktreeRoot?: string; projectRoot?: string; commandRunner?: CommandRunner }) {
+		this.commandRunner = opts.commandRunner ?? realCommandRunner;
+		this.repoPath = resolveRepoToplevel(opts.repoPath, this.commandRunner);
 		this.targetSize = opts.targetSize ?? 2;
 		this.componentsResolver = opts.componentsResolver;
 		this.baseRefResolver = opts.baseRefResolver;
@@ -288,6 +288,11 @@ export class WorktreePool {
 		this.worktreeRoot = opts.worktreeRoot;
 		this.resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: opts.projectRoot ?? opts.repoPath, worktreeRoot: opts.worktreeRoot });
 	}
+
+	private execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+		return execGit(args, options, this.commandRunner);
+	}
+
 
 	/** Whether the given components list implies multi-repo fill. */
 	private isMultiRepo(components: Component[] | undefined): boolean {
@@ -413,30 +418,30 @@ export class WorktreePool {
 
 		// 1. Rename branch (fast — local ref op).
 		try {
-			await execGit(["branch", "-m", entry.branchName, targetBranch], {
+			await this.execGit(["branch", "-m", entry.branchName, targetBranch], {
 				cwd: entry.worktreePath,
 				timeout: 10_000,
 			});
 		} catch (err) {
 			if (counters) counters.branchRenameErrors = 1;
 			console.error(`[worktree-pool] Branch rename failed (${entry.branchName} → ${targetBranch}):`, err);
-			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
+			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
 			recordClaimTimer();
 			return null;
 		}
 
 		try {
-			await ensureClaimedBranchSafeUpstream(entry.worktreePath, targetBranch);
+			await ensureClaimedBranchSafeUpstream(entry.worktreePath, targetBranch, this.commandRunner);
 		} catch (err) {
 			if (counters) counters.upstreamSafetyErrors = 1;
 			console.error(`[worktree-pool] Upstream safety cleanup failed for ${targetBranch}:`, err);
 			try {
-				await execGit(["branch", "-m", targetBranch, entry.branchName], {
+				await this.execGit(["branch", "-m", targetBranch, entry.branchName], {
 					cwd: entry.worktreePath,
 					timeout: 10_000,
 				});
 			} catch { /* best-effort */ }
-			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
+			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
 			recordClaimTimer();
 			return null;
 		}
@@ -451,7 +456,7 @@ export class WorktreePool {
 		let finalPath = entry.worktreePath;
 		if (newPath !== entry.worktreePath) {
 			try {
-				await moveWorktree(this.repoPath, entry.worktreePath, newPath);
+				await moveWorktree(this.repoPath, entry.worktreePath, newPath, this.commandRunner);
 				finalPath = newPath;
 			} catch (err) {
 				if (counters) counters.moveErrors = 1;
@@ -460,12 +465,12 @@ export class WorktreePool {
 				// then clean up so the caller can fall back to createWorktree without
 				// stepping on a half-renamed entry.
 				try {
-					await execGit(["branch", "-m", targetBranch, entry.branchName], {
+					await this.execGit(["branch", "-m", targetBranch, entry.branchName], {
 						cwd: entry.worktreePath,
 						timeout: 10_000,
 					});
 				} catch { /* best-effort */ }
-				cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
+				cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
 				recordClaimTimer();
 				return null;
 			}
@@ -507,7 +512,7 @@ export class WorktreePool {
 			} catch (err) {
 				console.warn(`[worktree-pool] multi-repo claim aborted: container rename ${entry.worktreePath} → ${newContainer} failed: ${err instanceof Error ? err.message : err}`);
 				for (const w of worktrees) {
-					cleanupWorktree(w.repoPath, w.worktreePath, entry.branchName, true).catch(() => {});
+					cleanupWorktree(w.repoPath, w.worktreePath, entry.branchName, true, this.commandRunner).catch(() => {});
 				}
 				return null;
 			}
@@ -522,17 +527,17 @@ export class WorktreePool {
 				: path.join(finalContainer, path.relative(entry.worktreePath, oldWtPath));
 			let renamed = false;
 			try {
-				await execGit(["branch", "-m", entry.branchName, targetBranch], {
+				await this.execGit(["branch", "-m", entry.branchName, targetBranch], {
 					cwd: newWtPath,
 					timeout: 10_000,
 				});
 				renamed = true;
 				try {
-					await ensureClaimedBranchSafeUpstream(newWtPath, targetBranch);
+					await ensureClaimedBranchSafeUpstream(newWtPath, targetBranch, this.commandRunner);
 				} catch (err) {
 					console.warn(`[worktree-pool] multi-repo: upstream safety cleanup failed for ${w.repo}: ${err instanceof Error ? err.message : err}`);
 					try {
-						await execGit(["branch", "-m", targetBranch, entry.branchName], {
+						await this.execGit(["branch", "-m", targetBranch, entry.branchName], {
 							cwd: newWtPath,
 							timeout: 10_000,
 						});
@@ -545,7 +550,7 @@ export class WorktreePool {
 			// Repair admin entry so `git worktree list` / future ops see the new path.
 			if (finalContainer !== entry.worktreePath) {
 				try {
-					await execGit(["worktree", "repair", newWtPath], {
+					await this.execGit(["worktree", "repair", newWtPath], {
 						cwd: w.repoPath,
 						timeout: 15_000,
 					});
@@ -594,13 +599,13 @@ export class WorktreePool {
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? { calls: 1, fetchResetErrors: 0, success: 0 } : undefined;
 		try {
-			const skipRemoteGitForTests = await shouldSkipRemoteGitForTests(worktreePath, "origin");
+			const skipRemoteGitForTests = await shouldSkipRemoteGitForTests(worktreePath, "origin", this.commandRunner);
 			if (!skipRemoteGitForTests) {
 				try {
-					await execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
+					await this.execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
 					const configured = this.baseRefResolver?.();
-					const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured);
-					await execGit(["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+					const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured, this.commandRunner);
+					await this.execGit(["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
 				} catch (err) {
 					if (counters) counters.fetchResetErrors = 1;
 					console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
@@ -658,7 +663,7 @@ export class WorktreePool {
 
 			let branch: string;
 			try {
-				const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wtPath, timeout: 5_000 });
+				const { stdout } = await this.execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wtPath, timeout: 5_000 });
 				branch = stdout.trim();
 			} catch {
 				return null;
@@ -715,7 +720,7 @@ export class WorktreePool {
 
 					const gitFile = path.join(container, ".git");
 					if (!fs.existsSync(gitFile)) { if (counters) counters.gitMissing++; continue; }
-					const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: container, timeout: 5_000 });
+					const { stdout } = await this.execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: container, timeout: 5_000 });
 					const branch = stdout.trim();
 					const verdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot: wtRoot, candidatePath: container, branch, activeWorktreePaths, gitMetadataExists: true });
 					if (!verdict.eligible) { if (verdict.reason === "referenced-by-live-session" && counters) counters.activeSkipped++; continue; }
@@ -792,6 +797,7 @@ export class WorktreePool {
 						const set = await createWorktreeSet(this.repoPath, components, branchName, undefined, {
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
+							commandRunner: this.commandRunner,
 							pushPolicy: "local-only",
 						});
 						if (set.worktrees.length === 0) {
@@ -815,6 +821,7 @@ export class WorktreePool {
 							pushPolicy: "local-only",
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
+							commandRunner: this.commandRunner,
 						});
 						container = result.worktreePath;
 						entry = {
@@ -894,7 +901,7 @@ export class WorktreePool {
 			return;
 		}
 		await Promise.allSettled(
-			entries.map(e => cleanupWorktree(this.repoPath, e.worktreePath, e.branchName, true)),
+			entries.map(e => cleanupWorktree(this.repoPath, e.worktreePath, e.branchName, true, this.commandRunner)),
 		);
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: entries.length });
 		console.log(`[worktree-pool] Drained ${entries.length} pre-built worktree(s)`);

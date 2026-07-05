@@ -12,7 +12,6 @@
  * See `docs/design/pack-based-marketplace.md` §7, §8.
  */
 
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +34,7 @@ import {
 	type McpGatewayBrowsePack,
 	type McpGatewaySkippedEntry,
 } from "./mcp-gateway-source.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 /** Install scopes — builtin is never an install target. */
 export type InstallScope = "global-user" | "server" | "project";
@@ -367,6 +367,7 @@ export interface MarketplaceInstallerOptions {
 	globalUserBase: string;
 	/** Override git runner (tests). Returns stdout; throws on failure. */
 	gitRunner?: (args: string[], cwd: string) => string;
+	commandRunner?: CommandRunner;
 }
 
 interface ScopeContext {
@@ -383,8 +384,10 @@ export class MarketplaceInstaller {
 
 	private git(args: string[], cwd: string): string {
 		if (this.opts.gitRunner) return this.opts.gitRunner(args, cwd);
+		const commandRunner = this.opts.commandRunner ?? realCommandRunner;
+		if (!commandRunner.execFileSync) throw new MarketplaceError("git_failed", "CommandRunner.execFileSync is required for marketplace git operations");
 		try {
-			return execFileSync("git", args, { cwd, stdio: "pipe", encoding: "utf-8", timeout: 120_000 }) as string;
+			return commandRunner.execFileSync("git", args, { cwd, stdio: "pipe", encoding: "utf-8", timeout: 120_000 }).toString();
 		} catch (err) {
 			const e = err as { stderr?: Buffer | string; message?: string };
 			const stderr = e.stderr ? (typeof e.stderr === "string" ? e.stderr : e.stderr.toString("utf-8")) : "";
