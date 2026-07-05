@@ -33,7 +33,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
-import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
+import { SessionStore, type PersistedSession, type WorktreePushPolicy, type SessionRuntime } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
@@ -5779,7 +5779,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; runtime?: SessionRuntime; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -5911,6 +5911,7 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
+				runtime: opts?.runtime,
 				sessionScopedAllowedTools,
 				worktreePath,
 				worktreePushPolicy: opts?.worktreePushPolicy,
@@ -5997,6 +5998,7 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
+			runtime: opts?.runtime,
 			worktreePushPolicy: opts?.worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
@@ -7231,6 +7233,13 @@ export class SessionManager {
 		repoPath?: string;
 		branch?: string;
 		repoWorktrees?: Record<string, string>;
+		runtime?: SessionRuntime;
+		claudeCodeSessionId?: string;
+		claudeCodeExecutable?: string;
+		claudeCodePermissionMode?: string;
+		claudeCodeModelAlias?: string;
+		modelProvider?: string;
+		modelId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
@@ -7271,6 +7280,13 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
+				runtime: ps?.runtime ?? "pi",
+				claudeCodeSessionId: ps?.claudeCodeSessionId,
+				claudeCodeExecutable: ps?.claudeCodeExecutable,
+				claudeCodePermissionMode: ps?.claudeCodePermissionMode,
+				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
+				modelProvider: ps?.modelProvider,
+				modelId: ps?.modelId,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 				repoPath: ps?.repoPath || s.repoPath,
@@ -7813,7 +7829,15 @@ export class SessionManager {
 
 	/** Persist model provider/id so archived sessions can display model info. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
-		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
+		this.resolveStoreForSession(sessionId).update(sessionId, {
+			modelProvider: provider,
+			modelId,
+			// Claude Code's "model" IS the CLI alias — keep the persisted alias in
+			// lockstep with modelId so a `set_model` switch is reflected in both
+			// the generic (provider, modelId) fields AND the claudeCodeModelAlias
+			// field the Claude Code runtime API and spawn/respawn paths read.
+			...(provider === "claude-code" ? { claudeCodeModelAlias: modelId } : {}),
+		});
 	}
 
 	/** Persist per-session image generation model override. Validates against the
