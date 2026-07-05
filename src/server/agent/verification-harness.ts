@@ -147,6 +147,7 @@ import {
 	getSortedPhases,
 	computeEarlyReviewPhases,
 	isParallelReviewsEnabled,
+	isRetryAfterCommandFailure,
 	type PhaseGroup,
 	isCommandStepSkippable,
 	readyToMergeUnresolvedBuiltinFailure,
@@ -4034,7 +4035,8 @@ export class VerificationHarness {
 			// "Gap analysis"/"Code quality review"/"Bug hunt" at phase 2 in the
 			// default workflows) has no DATA dependency on the command phases
 			// (Build/typecheck/unit/e2e) that precede it — only the decision to
-			// keep its verdict does. Under BOBBIT_PARALLEL_REVIEWS=1, start that
+			// keep its verdict does. By default (opt-out via
+			// BOBBIT_PARALLEL_REVIEWS=0), start that
 			// block concurrently with the command phases and join right where it
 			// would naturally run in the loop below.
 			//
@@ -4048,7 +4050,16 @@ export class VerificationHarness {
 			// as the serial path would have. Default OFF: earlyPhasePromises stays
 			// empty, so every phase falls through to the unchanged `else` branch
 			// below — byte-identical to pre-VER-07 behavior.
-			const parallelReviewsFlag = isParallelReviewsEnabled(process.env.BOBBIT_PARALLEL_REVIEWS);
+			// Retry-aware early-start guard: even when the flag is on, stay
+			// fully serial when this signal is a re-verification following a
+			// command-track failure of the SAME gate (its most recent
+			// completed prior signal failed a non-review step). Those retries
+			// are disproportionately likely to fail the command track again,
+			// and early-starting reviewers just recreates the measured waste
+			// case (discarded reviewer spawns, ~4.4K prompt tokens per failed
+			// gate run for a 3-reviewer phase). See isRetryAfterCommandFailure.
+			const parallelReviewsFlag = isParallelReviewsEnabled(process.env.BOBBIT_PARALLEL_REVIEWS)
+				&& !isRetryAfterCommandFailure(gateState?.signals ?? [], signal.id);
 			const earlyReviewPhases = parallelReviewsFlag
 				? computeEarlyReviewPhases(sortedPhases, phaseGroups)
 				: new Set<number>();
@@ -4086,7 +4097,7 @@ export class VerificationHarness {
 						early.catch(() => { /* observed at join */ });
 						earlyPhasePromises.set(phase, early);
 					}
-					console.log(`[verification] BOBBIT_PARALLEL_REVIEWS=1 — started review phase(s) [${orderedEarlyPhases.join(", ")}] concurrently with the command track for gate ${signal.gateId}`);
+					console.log(`[verification] parallel reviews (default-on; opt-out via BOBBIT_PARALLEL_REVIEWS=0) — started review phase(s) [${orderedEarlyPhases.join(", ")}] concurrently with the command track for gate ${signal.gateId}`);
 				}
 			}
 
