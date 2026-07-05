@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-import { synthesiseWalkthroughCards, validateSynthesisedCards } from "../../src/server/pr-walkthrough/card-synthesis.ts";
+import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../src/server/pr-walkthrough/card-synthesis.ts";
 import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../src/server/pr-walkthrough/routes.ts";
 import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../src/server/pr-walkthrough/walkthrough-store.ts";
 
@@ -308,8 +308,8 @@ function changeset() {
 	};
 }
 
-function file(filePath: string, status: string, diffBlocks: ReturnType<typeof block>[], extra: Record<string, unknown> = {}) {
-	return { filePath, status, diffBlocks, ...extra };
+function file(filePath: string, status: string, diffBlocks: ReturnType<typeof block>[], extra: Record<string, unknown> = {}): WalkthroughParsedFile {
+	return { filePath, status, diffBlocks, ...extra } as unknown as WalkthroughParsedFile;
 }
 
 function block(id: string, filePath: string, changedLines: number) {

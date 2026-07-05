@@ -65,7 +65,7 @@ async function withDefaultHeadquartersDirEnv<T>(run: () => Promise<T> | T): Prom
 }
 
 describe("validateAgentDirTarget", () => {
-	it("accepts and creates the default <projectRoot>/.bobbit/headquarters/agent path inside the worktree", async (t) => {
+	it("accepts and creates the default <projectRoot>/.bobbit/headquarters/agent path inside the worktree", async () => {
 		await withDefaultHeadquartersDirEnv(async () => {
 			const validate = await loadValidationFn();
 			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-");
@@ -80,7 +80,7 @@ describe("validateAgentDirTarget", () => {
 		});
 	});
 
-	it("accepts nested paths under the default Headquarters agent directory", async (t) => {
+	it("accepts nested paths under the default Headquarters agent directory", async () => {
 		await withDefaultHeadquartersDirEnv(async () => {
 			const validate = await loadValidationFn();
 			const projectRoot = makeGitProject("bobbit-agent-dir-validation-default-nested-");
@@ -95,7 +95,7 @@ describe("validateAgentDirTarget", () => {
 		});
 	});
 
-	it("rejects non-default paths inside the git worktree", async (t) => {
+	it("rejects non-default paths inside the git worktree", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-inside-");
 		onTestFinished(() => cleanup(projectRoot));
@@ -106,7 +106,7 @@ describe("validateAgentDirTarget", () => {
 		assert.equal(result.error?.code, "INSIDE_WORKTREE");
 	});
 
-	it("resolves relative inputs against project root before applying worktree checks", async (t) => {
+	it("resolves relative inputs against project root before applying worktree checks", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-relative-");
 		onTestFinished(() => cleanup(projectRoot));
@@ -170,7 +170,7 @@ describe("validateAgentDirTarget", () => {
 		assert.equal(fs.existsSync(createdInside), false, "validation must reject before creating through the symlink");
 	});
 
-	it("creates outside-worktree targets and verifies read/write access", async (t) => {
+	it("creates outside-worktree targets and verifies read/write access", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-project-");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-outside-"));
@@ -189,7 +189,7 @@ describe("validateAgentDirTarget", () => {
 		assert.deepEqual(probes, [], "validation probe files must be cleaned up");
 	});
 
-	it("returns structured errors for empty paths and file targets", async (t) => {
+	it("returns structured errors for empty paths and file targets", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-errors-");
 		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-file-"));

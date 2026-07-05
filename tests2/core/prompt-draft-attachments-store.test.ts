@@ -23,7 +23,6 @@ import { PromptDraftAttachmentsStore } from "../../src/ui/storage/stores/prompt-
 import type { Attachment } from "../../src/ui/utils/attachment-utils.ts";
 import type { StorageBackend } from "../../src/ui/storage/types.ts";
 
-const STORE_NAME = "prompt-draft-attachments";
 
 /** Minimal in-memory StorageBackend — only the methods the store uses. */
 function makeFakeBackend(): StorageBackend {

@@ -45,12 +45,17 @@ test.describe("Session story API invariants", () => {
 		});
 		expect(patchResp.ok).toBe(true);
 
-		await expect(async () => {
-			const resp = await apiFetch(`/api/sessions/${sessionId}`);
-			expect(resp.ok).toBe(true);
-			const data = await resp.json();
-			expect(data.title).toBe("My Custom Title");
-			expect(data.colorIndex).toBe(5);
-		}).toPass({ timeout: 5_000 });
+		await expect.poll(async () => {
+			try {
+				const resp = await apiFetch(`/api/sessions/${sessionId}`);
+				expect(resp.ok).toBe(true);
+				const data = await resp.json();
+				expect(data.title).toBe("My Custom Title");
+				expect(data.colorIndex).toBe(5);
+				return true;
+			} catch {
+				return false;
+			}
+		}, { timeout: 5_000 }).toBe(true);
 	});
 });

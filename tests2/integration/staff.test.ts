@@ -1,5 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, defaultProject, apiFetch } from "./_e2e/e2e-setup.js";
+import { readE2EToken, defaultProject, apiFetch } from "./_e2e/e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).
@@ -11,7 +11,6 @@ import { readE2EToken, base, defaultProject, apiFetch } from "./_e2e/e2e-setup.j
  *   npm run build:server && npx playwright test tests/e2e/staff.spec.ts --config playwright-e2e.config.ts
  */
 
-function GW_URL() { return base(); }
 
 // ---------------------------------------------------------------------------
 // Helpers

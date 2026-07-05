@@ -3,7 +3,7 @@
  * Goal: understand if there's a window where user message_end can be lost.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { createSession, connectWs, messageEndPredicate, agentEndPredicate } from "./_e2e/e2e-setup.js";
+import { createSession, connectWs, agentEndPredicate } from "./_e2e/e2e-setup.js";
 
 test("capture event order after prompt", async () => {
 	const sessionId = await createSession();

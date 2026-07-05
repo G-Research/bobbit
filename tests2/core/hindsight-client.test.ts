@@ -16,7 +16,6 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createClient, HindsightError } from "../../market-packs/hindsight/src/hindsight-client.ts";
-// @ts-expect-error — .mjs stub has no type declarations; shape documented in the file.
 import { startHindsightStub } from "../../tests/e2e/hindsight-stub.mjs";
 
 interface Stub {
@@ -119,7 +118,7 @@ describe("hindsight-client — round-trips against the stub", () => {
 		const recDefault = stub.retained("bobbit").at(-1)!;
 		assert.equal(recDefault.async, true);
 
-		const call = stub.calls.findLast((c) => c.path === "/v1/default/banks/bobbit/memories")!;
+		const call = [...stub.calls].reverse().find((c) => c.path === "/v1/default/banks/bobbit/memories")!;
 		assert.equal(call.method, "POST");
 	});
 

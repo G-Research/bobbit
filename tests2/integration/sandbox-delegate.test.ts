@@ -76,9 +76,9 @@ test.describe("Sandbox Delegate", () => {
 					const m = await getSessionMeta(delegateId);
 					return m ?? null;
 				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
-				expect(meta.cwd).toBe(hostCwd);
+				expect(meta!.cwd).toBe(hostCwd);
 				// Non-sandboxed parent → delegate should not be sandboxed
-				expect(meta.sandboxed).toBeFalsy();
+				expect(meta!.sandboxed).toBeFalsy();
 			} finally {
 				await deleteSession(delegateId);
 			}
@@ -115,9 +115,9 @@ test.describe("Sandbox Delegate", () => {
 					const m = await getSessionMeta(delegateId);
 					return m ?? null;
 				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
-				expect(meta.cwd).toBe(hostCwd);
+				expect(meta!.cwd).toBe(hostCwd);
 				// Parent is NOT sandboxed, so delegate should not be sandboxed either
-				expect(meta.sandboxed).toBeFalsy();
+				expect(meta!.sandboxed).toBeFalsy();
 			} finally {
 				await deleteSession(delegateId);
 			}
@@ -149,7 +149,7 @@ test.describe("Sandbox Delegate", () => {
 					const m = await getSessionMeta(delegateId);
 					return m ?? null;
 				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
-				expect(meta.delegateOf).toBe(parentId);
+				expect(meta!.delegateOf).toBe(parentId);
 			} finally {
 				await deleteSession(delegateId);
 			}

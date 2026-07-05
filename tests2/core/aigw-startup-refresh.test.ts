@@ -21,7 +21,7 @@ guardProcessEnv();
  *   4. When aigw is NOT configured, returns false; pre-existing models.json
  *      is untouched by this call.
  */
-import { describe, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";

@@ -343,7 +343,7 @@ describe("truncateLargeToolContentInMessages", () => {
 			_originalLength: large.length,
 			preview: large.slice(0, 512),
 		});
-		assert.strictEqual(bigMsg.content[1].input.content, large, "original not mutated");
+		assert.strictEqual((bigMsg as any).content[1].input.content, large, "original not mutated");
 	});
 
 	it("supports toolCall/arguments format", () => {

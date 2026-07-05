@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { GateSignal } from "../../src/server/agent/gate-store.ts";
 
 // Isolated temp dir for harness persistence
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
@@ -253,7 +254,7 @@ describe("container resolution in verifyGateSignal", () => {
 		(VerificationHarness.prototype as any).runCommandStep = originalRunCommandStep;
 	});
 
-	function makeSignal(goalId: string, gateId: string) {
+	function makeSignal(goalId: string, gateId: string): GateSignal {
 		return {
 			id: `signal-${Date.now()}`,
 			goalId,
@@ -261,7 +262,7 @@ describe("container resolution in verifyGateSignal", () => {
 			content: "test content",
 			metadata: {},
 			createdAt: Date.now(),
-		};
+		} as unknown as GateSignal;
 	}
 
 	function makeGate(gateId: string): any {

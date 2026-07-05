@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import YAML from "yaml";
 
 const { resolveGrantPolicy } = await import("../../src/server/agent/tool-activation.ts");
-import type { GrantPolicy, GroupPolicyProvider } from "../../src/server/agent/tool-activation.ts";
+import type { GroupPolicyProvider } from "../../src/server/agent/tool-activation.ts";
+type GrantPolicy = "allow" | "ask" | "never";
 
 const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
 const ROLES_DIR = path.join(DEFAULTS_DIR, "roles");

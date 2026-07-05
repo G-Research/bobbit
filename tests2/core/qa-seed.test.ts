@@ -147,7 +147,7 @@ describe("qa-seed: file creation", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-seed-hq-override-"));
 		try {
 			const hqDir = path.join(dir, "custom-headquarters");
-			const env = { ...process.env, BOBBIT_DIR: hqDir };
+			const env: Record<string, string | undefined> = { ...process.env, BOBBIT_DIR: hqDir };
 			delete env.BOBBIT_PI_DIR;
 			execFileSync("node", [SEED_SCRIPT, dir], { stdio: "pipe", env });
 			assert.ok(

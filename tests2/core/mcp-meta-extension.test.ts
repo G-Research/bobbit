@@ -186,7 +186,7 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		return fs.mkdtempSync(path.join(os.tmpdir(), "mcp-meta-ext-"));
 	}
 
-	function setIsolatedBobbit(t: any): void {
+	function setIsolatedBobbit(_t: any): void {
 		const dir = tmpBobbitDir();
 		const orig = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = dir;

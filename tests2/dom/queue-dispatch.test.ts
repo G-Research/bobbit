@@ -7,7 +7,8 @@ __syncBeforeAll(() => __syncCE());
 // present for uniformity per the migration guide.
 import { describe, expect, it } from "vitest";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
-import type { QueuedMessage } from "../../src/server/ws/protocol.js";
+import type { QueuedMessage as ProtocolQueuedMessage } from "../../src/server/ws/protocol.js";
+type QueuedMessage = ProtocolQueuedMessage & { isFollowUp?: boolean };
 
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const MAX_RECOVER_DRAIN_RETRIES = 2;
@@ -375,9 +376,9 @@ describe("Queue Dispatch Integration", () => {
 
 	it("(1) enqueue 3 items, steer middle, dequeue returns steered first", () => {
 		const q = new PromptQueue();
-		const a = q.enqueue("A");
+		q.enqueue("A");
 		const b = q.enqueue("B");
-		const c = q.enqueue("C");
+		q.enqueue("C");
 
 		q.steer(b.id);
 
@@ -545,7 +546,7 @@ describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("streaming");
 
 		// Enqueue A, B, C
-		const a = sim.enqueue("A");
+		sim.enqueue("A");
 		const b = sim.enqueue("B");
 		const c = sim.enqueue("C");
 
@@ -601,9 +602,9 @@ describe("Queue Dispatch Integration", () => {
 		const sim = new DispatchSimulator();
 
 		sim.enqueue("Running"); // direct dispatch
-		const a = sim.enqueue("A");
+		sim.enqueue("A");
 		const b = sim.enqueue("B");
-		const c = sim.enqueue("C");
+		sim.enqueue("C");
 
 		// Remove B from queue
 		sim.queue.remove(b!.id);
@@ -825,7 +826,7 @@ describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("streaming");
 
 		// Queue messages.
-		const msgA = sim.enqueue("MsgA");
+		sim.enqueue("MsgA");
 		const msgB = sim.enqueue("MsgB");
 		expect(sim.queue.length).toBe(2);
 
@@ -859,7 +860,7 @@ describe("Queue Dispatch Integration", () => {
 		sim.enqueue("Running");
 
 		// Queue A, B, C.
-		const msgA = sim.enqueue("A");
+		sim.enqueue("A");
 		const msgB = sim.enqueue("B");
 		const msgC = sim.enqueue("C");
 
@@ -899,10 +900,10 @@ describe("Queue Dispatch Integration", () => {
 
 	it("dequeueAllSteered pops all consecutive steered messages from front", () => {
 		const q = new PromptQueue();
-		const a = q.enqueue("A", { isSteered: true });
-		const b = q.enqueue("B", { isSteered: true });
-		const c = q.enqueue("C"); // not steered
-		const d = q.enqueue("D", { isSteered: true }); // steered but after a non-steered
+		q.enqueue("A", { isSteered: true });
+		q.enqueue("B", { isSteered: true });
+		q.enqueue("C"); // not steered
+		q.enqueue("D", { isSteered: true }); // steered but after a non-steered
 
 		// Reorder puts steered first: A, B, D, C
 		const arr = q.toArray();

@@ -179,7 +179,7 @@ const piAnthropicOpus48 = (() => {
 })();
 
 describe("pi-ai model catalog", () => {
-	it("exposes Claude Opus 4.8 metadata", { skip: piAnthropicOpus48 ? false : "requires pi-ai 0.77.0+ catalog" }, () => {
+	it("exposes Claude Opus 4.8 metadata", { skip: !piAnthropicOpus48 }, () => {
 		const model = piAnthropicOpus48!;
 		assert.match(model.id, /claude-opus-4-8/);
 		assert.equal(model.name, "Claude Opus 4.8");

@@ -11,7 +11,6 @@ import {
 	waitForHealth,
 	statusPredicate,
 	queueLenPredicate,
-	agentEndPredicate,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 
@@ -271,10 +270,6 @@ test.describe("Queue E2E", () => {
 			await conn.waitFor(statusPredicate("idle"));
 
 			// Check there are no message_start events after the abort
-			const messageStarts = conn.messages.filter(
-				(m: WsMsg) =>
-					m.type === "event" && m.data?.type === "message_start",
-			);
 			// There might be a message_start from the original turn, but no NEW ones
 			// after abort. The agent_end after abort should be the last lifecycle event.
 			const agentEnds = conn.messages.filter(

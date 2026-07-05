@@ -94,7 +94,7 @@ function reportBucket(report: unknown, bucket: keyof MigrationReport): string {
 }
 
 describe("agent directory copy migration", () => {
-	it("copies only allowlisted files/directories and preserves the source", async (t) => {
+	it("copies only allowlisted files/directories and preserves the source", async () => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
 		onTestFinished(() => cleanup(root));
@@ -114,7 +114,7 @@ describe("agent directory copy migration", () => {
 		assert.match(reportText(report), /sessions|auth\.json|models\.json|settings\.json|google-code-assist\.json|bin/);
 	});
 
-	it("skips existing destination files by default", async (t) => {
+	it("skips existing destination files by default", async () => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
 		onTestFinished(() => cleanup(root));
@@ -132,7 +132,7 @@ describe("agent directory copy migration", () => {
 		assert.match(reportBucket(report, "skipped"), /auth\.json|transcript\.jsonl|rg/);
 	});
 
-	it("overwrites existing destination files only when overwrite is explicit", async (t) => {
+	it("overwrites existing destination files only when overwrite is explicit", async () => {
 		const migrate = await loadMigrationFn();
 		const { root, source, dest } = makeTree();
 		onTestFinished(() => cleanup(root));
@@ -150,7 +150,7 @@ describe("agent directory copy migration", () => {
 		assert.match(reportBucket(report, "overwritten"), /auth\.json|transcript\.jsonl|rg/);
 	});
 
-	it("reports missing allowlisted entries without creating placeholders", async (t) => {
+	it("reports missing allowlisted entries without creating placeholders", async () => {
 		const migrate = await loadMigrationFn();
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-migration-missing-"));
 		const source = path.join(root, "source-agent");
@@ -166,7 +166,7 @@ describe("agent directory copy migration", () => {
 		assert.match(reportBucket(report, "missing"), /auth\.json|models\.json|settings\.json|google-code-assist\.json|bin/);
 	});
 
-	it("rejects same source and destination before copying", async (t) => {
+	it("rejects same source and destination before copying", async () => {
 		const migrate = await loadMigrationFn();
 		const { root, source } = makeTree();
 		onTestFinished(() => cleanup(root));
@@ -177,7 +177,7 @@ describe("agent directory copy migration", () => {
 		assert.equal(fs.existsSync(path.join(source, "auth.json")), true, "source is preserved");
 	});
 
-	it("rejects destination nested inside source before creating it", async (t) => {
+	it("rejects destination nested inside source before creating it", async () => {
 		const migrate = await loadMigrationFn();
 		const { root, source } = makeTree();
 		onTestFinished(() => cleanup(root));
@@ -224,7 +224,7 @@ describe("agent directory copy migration", () => {
 		assert.equal(read(path.join(dest, "auth.json")), "auth.json-source", "safe root files may still be copied into the selected destination");
 	});
 
-	it("rejects source nested inside destination before copying", async (t) => {
+	it("rejects source nested inside destination before copying", async () => {
 		const migrate = await loadMigrationFn();
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-migration-nested-source-"));
 		onTestFinished(() => cleanup(root));

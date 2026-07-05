@@ -39,8 +39,8 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 		assert.equal(host.capabilities.has("store"), true);
 		// `callRoute`/`ui` are CLIENT-ONLY surfaces: NOT members of the server host
 		// capability map (Fix 3). `has()` returns false for them — not a gap, by design.
-		assert.equal((host.capabilities as Record<string, unknown>).callRoute, undefined);
-		assert.equal((host.capabilities as Record<string, unknown>).ui, undefined);
+		assert.equal((host.capabilities as unknown as Record<string, unknown>).callRoute, undefined);
+		assert.equal((host.capabilities as unknown as Record<string, unknown>).ui, undefined);
 		assert.equal(host.capabilities.has("callRoute"), false);
 		assert.equal(host.capabilities.has("ui"), false);
 		assert.equal(host.capabilities.has("nonexistent"), false);
@@ -54,7 +54,7 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 
 	it("does NOT expose a gateway member (escape hatch removed)", () => {
 		const host = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
-		assert.equal((host as Record<string, unknown>).gateway, undefined);
+		assert.equal((host as unknown as Record<string, unknown>).gateway, undefined);
 	});
 });
 
@@ -62,9 +62,9 @@ describe("createServerHostApi — Fix B: NO server-side session.postMessage", ()
 	it("the server host session API does NOT expose postMessage (driving the agent is client-only)", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t" });
 		// Reads remain; the write capability is intentionally absent on the server host.
-		assert.equal(typeof (host.session as Record<string, unknown>).readTranscript, "function");
-		assert.equal(typeof (host.session as Record<string, unknown>).readToolCall, "function");
-		assert.equal((host.session as Record<string, unknown>).postMessage, undefined);
+		assert.equal(typeof (host.session as unknown as Record<string, unknown>).readTranscript, "function");
+		assert.equal(typeof (host.session as unknown as Record<string, unknown>).readToolCall, "function");
+		assert.equal((host.session as unknown as Record<string, unknown>).postMessage, undefined);
 	});
 });
 

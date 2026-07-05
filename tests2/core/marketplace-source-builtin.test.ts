@@ -121,7 +121,7 @@ describe("built-in source guards (§11.1)", () => {
 		const baseStore = new ProjectConfigStore(cfgDir);
 		const baseRegistry = new PackContributionRegistry(
 			enumerate,
-			(scope, projectId, packName) => baseStore.getPackActivation(scope, packName).entrypoints ?? [],
+			(scope, _projectId, packName) => baseStore.getPackActivation(scope as any, packName).entrypoints ?? [],
 		);
 		const baseEntrypoints = baseRegistry.getPack(undefined, PACK)?.entrypoints ?? [];
 		const entrypointListNames = baseEntrypoints
@@ -150,7 +150,7 @@ describe("built-in source guards (§11.1)", () => {
 		// the pack registers ZERO user-facing entrypoints (launchers + deep-link gone).
 		const restartedRegistry = new PackContributionRegistry(
 			enumerate,
-			(scope, projectId, packName) => restarted.getPackActivation(scope, packName).entrypoints ?? [],
+			(scope, _projectId, packName) => restarted.getPackActivation(scope as any, packName).entrypoints ?? [],
 		);
 		const pack = restartedRegistry.getPack(undefined, PACK);
 		assert.ok(pack, "the built-in pack still resolves after restart");

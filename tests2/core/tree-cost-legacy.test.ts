@@ -52,8 +52,8 @@ try {
 	importError = String(err);
 }
 
-function pendingReason(): string | false {
-	return importError ? `pending impl — ${importError}` : false;
+function pendingReason(): boolean {
+	return importError !== undefined;
 }
 
 const ZERO_ENTRY = (goalId = "g1"): BreakdownLike => ({ goalId, costUsd: 0, tokensIn: 0, tokensOut: 0 });

@@ -75,7 +75,7 @@ function seedAdminToken(stateRoot: string, stateDir: string): () => void {
 }
 
 describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates", () => {
-	function setup(opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof vi.fn>; createSpy: ReturnType<typeof vi.fn> } {
+	function setup(_opts?: { hostCwd?: string }): { sm: any; restoreEnv: () => void; dispatchSpy: ReturnType<typeof vi.fn>; createSpy: ReturnType<typeof vi.fn> } {
 		const stateRoot = makeTmpDir("sandbox-wiring-");
 		const prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;

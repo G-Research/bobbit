@@ -88,7 +88,8 @@ describe("Session auto-worktree decision", () => {
 		// separate code path; tested here as a contract-shape check.
 
 		it("team agent gets worktree when goal has repoPath", () => {
-			const useWorktree = !!"/path/to/repo";
+			const repoPath: string = "/path/to/repo";
+			const useWorktree = !!repoPath;
 			assert.equal(useWorktree, true);
 		});
 

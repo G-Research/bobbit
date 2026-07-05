@@ -219,7 +219,7 @@ function routeHunks(cwd: string, base: string, head: string): Array<{ file: stri
 	return hunks;
 }
 
-function seedGitRepo(t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): { cwd: string; baseSha: string; headSha: string; hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> } {
+function seedGitRepo(_t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): { cwd: string; baseSha: string; headSha: string; hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> } {
 	const cwd = fs.mkdtempSync(join(os.tmpdir(), "prw-route-git-"));
 	onTestFinished(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } });
 	git(cwd, ["init"]);
@@ -237,7 +237,7 @@ function seedGitRepo(t: any, afterFiles: Record<string, string>, beforeFiles: Re
 	return { cwd, baseSha: base, headSha: head, hunks: routeHunks(cwd, base, head) };
 }
 
-async function withCwd<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+async function withCwd(cwd: string, fn: () => Promise<any>): Promise<any> {
 	const previous = process.cwd();
 	process.chdir(cwd);
 	try { return await fn(); }
@@ -263,7 +263,7 @@ test("PR walkthrough routes load under pack-root module confinement", async () =
 				toolUseId: "tu-prw",
 				tool: "pr-walkthrough/publish",
 				workingDir: process.cwd(),
-				host: { capabilities: { store: true }, store },
+				host: { capabilities: { store: true }, store } as any,
 			},
 			arg: { body: { op: "submissionStatus", jobId } },
 			workingDir: process.cwd(),
@@ -554,7 +554,7 @@ positive_notes: []`);
 	assert.deepEqual(docsCard.diffBlocks, []);
 });
 
-test("PR walkthrough quota regression: finalize persists binding metadata after scoped review payloads exceed legacy quota", async (t) => {
+test("PR walkthrough quota regression: finalize persists binding metadata after scoped review payloads exceed legacy quota", async () => {
 	const quotaRoot = fs.mkdtempSync(join(os.tmpdir(), "prw-route-quota-"));
 	onTestFinished(() => { try { fs.rmSync(quotaRoot, { recursive: true, force: true }); } catch { /* best effort */ } });
 	const { ctx, store, packStore, packId } = await seedQuotaCtx(quotaRoot);

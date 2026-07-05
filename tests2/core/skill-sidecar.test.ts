@@ -9,7 +9,7 @@ guardProcessEnv();
 /**
  * Unit tests for skill-sidecar.ts — round-trip + missing-sidecar fallback.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

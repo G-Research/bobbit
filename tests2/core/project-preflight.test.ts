@@ -264,11 +264,11 @@ test("path.long warns on Windows for path > 200 chars", { skip: process.platform
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function chmodSkipReason(): string | false {
-	if (process.platform === "win32") return "chmod permission bits are no-ops on Windows";
+function chmodSkipReason(): boolean {
+	if (process.platform === "win32") return true;
 	// On POSIX, root bypasses permission checks — chmod restrictions become meaningless.
 	if (typeof process.getuid === "function" && process.getuid() === 0) {
-		return "running as root — chmod restrictions are bypassed";
+		return true;
 	}
 	return false;
 }

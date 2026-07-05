@@ -16,7 +16,7 @@ import { getToolState, isSkippedToolResult } from "../../src/ui/tools/renderer-r
 // live (see gate-signal-renderer.test.ts for the rationale).
 import "../../src/ui/lazy/safe-markdown-block.js";
 
-const toolResult = (data: any, isError = false) => ({ isError, content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] });
+const toolResult = (data: any, isError = false) => ({ isError, content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] }) as unknown as import("@earendil-works/pi-ai").ToolResultMessage;
 
 function renderInspect(params: any, result?: any, isStreaming?: boolean): HTMLElement {
 	const container = document.createElement("div");

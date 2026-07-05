@@ -18,8 +18,6 @@ guardProcessEnv();
  */
 import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
 const tmpRoot = makeTmpDir("force-abort-grace-test-");

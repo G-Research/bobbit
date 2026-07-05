@@ -18,7 +18,6 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import WebSocket from "ws";
-import type { GatewayFixture } from "../../harness/gateway.js";
 import { currentScope, ensureGateway, gatewaySync } from "./runtime.js";
 
 export { ensureGateway };

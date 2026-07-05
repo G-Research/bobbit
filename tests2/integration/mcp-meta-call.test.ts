@@ -16,7 +16,7 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "./_e2e/e2e-setup.js";
 import path from "node:path";
-import type { GatewayInfo } from "./_e2e/in-process-harness.js";
+import type { GatewayFixture as GatewayInfo } from "../harness/gateway.js";
 
 // ─── Stub MCP plumbing ─────────────────────────────────────────────────
 
@@ -32,7 +32,8 @@ class FakeMcpClient {
 	}
 }
 
-const STUB_OPS = [
+type StubOp = { name: string; description: string; inputSchema: any };
+const STUB_OPS: StubOp[] = [
 	{
 		name: "echo",
 		description: "Echo a message back.",
@@ -68,7 +69,7 @@ async function makeFakeMcpManager(
 	gw: GatewayInfo,
 	serverName = "fake-server",
 	opts?: Record<string, unknown>,
-	toolDefs = STUB_OPS,
+	toolDefs: StubOp[] = STUB_OPS,
 	activeSubNamespaces?: string[],
 ) {
 	const { McpManager } = await import("../../src/server/mcp/mcp-manager.js");
@@ -100,7 +101,7 @@ async function seedFakeScopedMcpManager(
 	gw: GatewayInfo,
 	projectId: string,
 	serverName = "fake-server",
-	toolDefs = STUB_OPS,
+	toolDefs: StubOp[] = STUB_OPS,
 	activeSubNamespaces?: string[],
 ) {
 	const scopeKey = `project:${projectId}`;

@@ -20,7 +20,6 @@ const project = (id = "p1"): ProjectLike => ({ id, name: id, rootPath: `/tmp/${i
 
 function goal(over: Partial<GoalLike> & { id: string }): GoalLike {
 	return {
-		id: over.id,
 		title: over.id,
 		projectId: "p1",
 		state: "todo",
@@ -31,7 +30,6 @@ function goal(over: Partial<GoalLike> & { id: string }): GoalLike {
 
 function session(over: Partial<SessionLike> & { id: string }): SessionLike {
 	return {
-		id: over.id,
 		projectId: "p1",
 		createdAt: 0,
 		status: "idle",
@@ -174,8 +172,8 @@ describe("buildSidebarTree", () => {
 		assert.equal(childA.indentPx, 6);
 		assert.equal(grand.indentPx, 12);
 		assert.equal(root.context.descendantCount, 3);
-		assert.equal(childA.context.displayTitleSuffix, "child-" );
-		assert.equal(childB.context.displayTitleSuffix, "child-" );
+		assert.equal((childA.context as any).displayTitleSuffix, "child-" );
+		assert.equal((childB.context as any).displayTitleSuffix, "child-" );
 		assert.equal(root.defaultExpanded, false, "goal rows default collapsed; polling must not auto-open sub-goals in the builder");
 	});
 
@@ -429,7 +427,7 @@ describe("buildSidebarTree", () => {
 		const groups = model.sessionChildrenNodesBySessionId.get("parent") ?? [];
 		assert.deepEqual(groups.map(g => g.nodeKey.kind === "session-children" ? g.nodeKey.childClass : ""), ["delegate"]);
 		assert.deepEqual(groups[0]?.context.childSessionKeys.map(k => model.flatByKey.get(k)?.entityId), ["live-delegate"]);
-		assert.equal(groups[0]?.children[0]?.context.childClass, "delegate");
+		assert.equal((groups[0]?.children[0]?.context as any)?.childClass, "delegate");
 		assert.equal(groups[0]?.defaultExpanded, false);
 		assert.equal(groups[0]?.expanded, false);
 	});

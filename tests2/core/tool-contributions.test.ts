@@ -171,7 +171,7 @@ describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rej
 				{ id: "malformed", kind: "session-menu", label: "Malformed Icon", icon: 42, target: { route: "demo.route" } },
 			],
 			FP,
-		) as Array<Record<string, unknown>>;
+		) as unknown as Array<Record<string, unknown>>;
 
 		assert.equal(parsed.length, 4, "invalid icon values must not drop otherwise-valid launchers");
 		assert.equal(parsed.find((e) => e.id === "terminal")?.icon, "terminal");
@@ -184,7 +184,7 @@ describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rej
 		const parsed = parseEntrypoints(
 			[{ id: "r", kind: "route", routeId: "demo.deep", icon: "terminal", target: { panelId: "demo.viewer" }, paramKeys: [] }],
 			FP,
-		) as Array<Record<string, unknown>>;
+		) as unknown as Array<Record<string, unknown>>;
 		assert.equal(parsed.length, 1);
 		assert.equal(parsed[0].icon, undefined);
 	});

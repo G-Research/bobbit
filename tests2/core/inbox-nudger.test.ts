@@ -101,7 +101,7 @@ function enqueueDirect(inboxStore: InstanceType<typeof InboxStore>, staffId: str
 }
 
 describe("InboxNudger — periodic tick", () => {
-	it("wakes an idle staff with pending entries on the next tick", async (t) => {
+	it("wakes an idle staff with pending entries on the next tick", async () => {
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -120,7 +120,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("uses pluralised wording for multiple pending entries", async (t) => {
+	it("uses pluralised wording for multiple pending entries", async () => {
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id, "e1");
 		enqueueDirect(h.inboxStore, h.staff.id, "e2");
@@ -136,7 +136,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("does NOT wake a streaming staff", async (t) => {
+	it("does NOT wake a streaming staff", async () => {
 		const h = makeHarness({ sessionStatus: "streaming" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -147,7 +147,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("does NOT wake a starting staff", async (t) => {
+	it("does NOT wake a starting staff", async () => {
 		const h = makeHarness({ sessionStatus: "starting" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -158,7 +158,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("does NOT wake when inbox is empty", async (t) => {
+	it("does NOT wake when inbox is empty", async () => {
 		const h = makeHarness({});
 		h.nudger.start();
 
@@ -168,7 +168,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("skips paused / retired staff", async (t) => {
+	it("skips paused / retired staff", async () => {
 		const h = makeHarness({ staffState: "paused" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -179,7 +179,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("skips staff with no currentSessionId", async (t) => {
+	it("skips staff with no currentSessionId", async () => {
 		const h = makeHarness({ currentSessionId: undefined });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -190,7 +190,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.stop();
 	});
 
-	it("guards re-nudge via nudgePending until onAgentStart clears it", async (t) => {
+	it("guards re-nudge via nudgePending until onAgentStart clears it", async () => {
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id, "e1");
 		h.nudger.start();
@@ -218,7 +218,7 @@ describe("InboxNudger — periodic tick", () => {
 });
 
 describe("InboxNudger — contextPolicy", () => {
-	it("\"compact\" runs session.rpcClient.compact(120_000) BEFORE enqueuePrompt", async (t) => {
+	it("\"compact\" runs session.rpcClient.compact(120_000) BEFORE enqueuePrompt", async () => {
 		const h = makeHarness({ contextPolicy: "compact" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -240,7 +240,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.nudger.stop();
 	});
 
-	it("\"preserve\" skips compact and goes straight to enqueuePrompt", async (t) => {
+	it("\"preserve\" skips compact and goes straight to enqueuePrompt", async () => {
 		const h = makeHarness({ contextPolicy: "preserve" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -254,7 +254,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.nudger.stop();
 	});
 
-	it("tolerates an rpcClient without a compact() method (test double)", async (t) => {
+	it("tolerates an rpcClient without a compact() method (test double)", async () => {
 		const h = makeHarness({ contextPolicy: "compact" });
 		// Drop compact entirely.
 		(h.session.rpcClient as any).compact = undefined;
@@ -299,7 +299,7 @@ describe("InboxNudger.poke fast-path", () => {
 });
 
 describe("InboxNudger.start/stop", () => {
-	it("stop clears the interval (no further ticks)", async (t) => {
+	it("stop clears the interval (no further ticks)", async () => {
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -310,7 +310,7 @@ describe("InboxNudger.start/stop", () => {
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 	});
 
-	it("start is idempotent (calling twice does not double-tick)", async (t) => {
+	it("start is idempotent (calling twice does not double-tick)", async () => {
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();

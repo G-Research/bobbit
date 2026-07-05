@@ -153,6 +153,8 @@ const staff: PersistedStaff[] = [
 		createdAt: 1_700_000_000_000,
 		updatedAt: 1_700_000_100_000,
 		projectId: "proj-a",
+		accessory: "",
+		sandboxed: false,
 	},
 	{
 		id: "staff2-empty",
@@ -165,6 +167,8 @@ const staff: PersistedStaff[] = [
 		memory: "",
 		createdAt: 1_700_000_000_000,
 		updatedAt: 1_700_000_000_000,
+		accessory: "",
+		sandboxed: false,
 	},
 ];
 

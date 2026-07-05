@@ -8,7 +8,7 @@
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import path from "node:path";
 import { resolveAssetPath } from "../../src/server/preview/path-guard.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";

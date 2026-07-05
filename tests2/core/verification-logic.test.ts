@@ -25,7 +25,6 @@ import {
 	computeAllPassed,
 	TRANSIENT_ERROR_PATTERNS,
 	TRANSIENT_ERROR_REGEXES,
-	QA_NON_TRANSIENT_PATTERNS,
 	detectJsonValidationError,
 	// New classifier for provider overload / rate-limit / quota-throttle.
 	// Used by SessionManager to pick the unbounded backoff policy.

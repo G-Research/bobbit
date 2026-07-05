@@ -21,7 +21,7 @@ function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	try {
 		const result = fn(new PreferencesStore(dir));
 		if (result && typeof (result as any).finally === "function") {
-			return (result as Promise<unknown>).finally(() => {
+			return (result as unknown as Promise<unknown>).finally(() => {
 				rmSync(dir, { recursive: true, force: true });
 			}) as T;
 		}

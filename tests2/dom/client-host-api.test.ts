@@ -34,7 +34,7 @@ function caps() {
 		hasInvokeAction: h.capabilities.has("invokeAction"),
 		hasCallRoute: h.capabilities.has("callRoute"),
 		hasUnknown: h.capabilities.has("nope"),
-		hasGatewayMember: (h as Record<string, unknown>).gateway !== undefined,
+		hasGatewayMember: (h as unknown as Record<string, unknown>).gateway !== undefined,
 	};
 }
 

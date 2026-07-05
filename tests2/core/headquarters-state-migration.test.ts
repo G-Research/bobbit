@@ -404,7 +404,7 @@ describe("Headquarters directory migration", () => {
 
 		const projects = readJson<Array<Record<string, unknown>>>(path.join(dirs.headquartersStateDir, "projects.json"));
 		assert.ok(projects.some(project => project.id === oldId), "same-root normal project must remain visible as itself");
-		assert.equal(projects.some(project => project.id === HEADQUARTERS_PROJECT_ID && project.id !== oldId), false, "migration does not manufacture HQ before ensureHeadquartersProject");
+		assert.equal(projects.some(project => project.id === HEADQUARTERS_PROJECT_ID && project.id !== (oldId as string)), false, "migration does not manufacture HQ before ensureHeadquartersProject");
 		assert.equal(fs.existsSync(path.join(dirs.headquartersStateDir, "sessions.json")), false, "missing projectId records are ambiguous and not imported into Headquarters when same-root evidence exists");
 		assert.equal(fs.existsSync(path.join(dirs.headquartersConfigDir, "project.yaml")), false, "same-root normal config must not become HQ config");
 		assert.equal(

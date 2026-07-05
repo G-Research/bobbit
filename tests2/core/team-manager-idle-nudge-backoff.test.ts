@@ -40,6 +40,7 @@ const TEST_BOBBIT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nudge-back
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_BOBBIT_DIR, "state", "team-state.json");
 function clearTeamStore() { try { fs.unlinkSync(TEAM_STORE_FILE); } catch { /* ignore */ } }
@@ -179,7 +180,7 @@ const DEFAULT_CONFIG = {
 	roleStore: createMockRoleStore(),
 	colorStore: createMockColorStore(),
 	taskManager: createMockTaskManager(),
-};
+} as unknown as TeamManagerConfig;
 
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
 

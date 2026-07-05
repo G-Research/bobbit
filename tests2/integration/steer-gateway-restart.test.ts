@@ -74,7 +74,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 					queueLen: storeState?.messageQueue?.length ?? 0,
 					ledger: storeState?.inFlightSteerTexts ?? [],
 				};
-			}, { timeout: 10_000, intervals: [50, 100, 250] }).toEqual({
+			}, { timeout: 10_000, interval: 50 }).toEqual({
 				queueLen: 0,
 				ledger: [steeredText],
 			});
@@ -134,12 +134,12 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 
 			// Step 5 — final count after the restored turn has settled. Both sentinels
 			// must appear exactly once across all user-message bodies.
-			const userBodies = await pollUntil(async () => {
+			const userBodies = (await pollUntil(async () => {
 				const bodies = await readUserBodies();
 				return countOccurrences(bodies, "RESTART_M1") === 1 && countOccurrences(bodies, "RESTART_M2") === 1
 					? bodies
 					: null;
-			}, { timeoutMs: 10_000, intervalMs: 250, label: "restored in-flight steer persisted exactly once" });
+			}, { timeoutMs: 10_000, intervalMs: 250, label: "restored in-flight steer persisted exactly once" }))!;
 			expect(countOccurrences(userBodies, "RESTART_M1")).toBe(1);
 			expect(countOccurrences(userBodies, "RESTART_M2")).toBe(1);
 

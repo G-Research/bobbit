@@ -35,7 +35,7 @@ function installPrWalkthroughLauncher(): void {
 			target: { action: "spawn", route: "run", panelId: "pr-walkthrough.panel" },
 		},
 	] as any, "project-a");
-	setLauncherHostFactory((sessionId: string, packId: string, contributionId: string) => ({
+	setLauncherHostFactory((sessionId: string | undefined, packId: string, contributionId: string) => ({
 		capabilities: { callRoute: true } as any,
 		callRoute: async (route: string, init?: { body?: unknown }) => {
 			callRouteCalls.push({ route, sessionId, packId, contributionId, body: init?.body });

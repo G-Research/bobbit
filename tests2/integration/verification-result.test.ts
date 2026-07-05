@@ -74,10 +74,8 @@ test.describe("POST /api/internal/verification-result", () => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 		expect(harness).toBeTruthy();
 
-		let resolved: any = null;
 		const promise = new Promise<any>((resolve) => {
 			harness.pendingResults.set("test-session-pass", (result: any) => {
-				resolved = result;
 				resolve(result);
 			});
 		});
@@ -108,10 +106,8 @@ test.describe("POST /api/internal/verification-result", () => {
 	test("resolves pending verification result with fail verdict", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 
-		let resolved: any = null;
 		const promise = new Promise<any>((resolve) => {
 			harness.pendingResults.set("test-session-fail", (result: any) => {
-				resolved = result;
 				resolve(result);
 			});
 		});

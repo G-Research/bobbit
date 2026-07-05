@@ -258,7 +258,7 @@ describe("runCommandStep tree-kill", () => {
 
 			await harness.cancelStaleVerifications(goalId, gateId);
 
-			const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve");
+			const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve") as { passed: boolean; output: string };
 			assert.strictEqual(result.passed, false);
 			assert.ok(
 				/cancelled\s+\u2014\s+killed subprocess tree/.test(result.output),

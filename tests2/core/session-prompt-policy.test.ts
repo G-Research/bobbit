@@ -35,7 +35,7 @@ function mockToolManager() {
 			return tools;
 		},
 		getToolByName(name: string) {
-			return tools.find((tool) => tool.name.toLowerCase() === name.toLowerCase());
+			return tools.find((tool) => tool.name?.toLowerCase() === name.toLowerCase());
 		},
 		getToolProviders() {
 			return providers;

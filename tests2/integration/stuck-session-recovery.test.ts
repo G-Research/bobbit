@@ -13,7 +13,6 @@ import {
 	waitForHealth,
 	statusPredicate,
 	apiFetch,
-	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 
 test.describe("Stuck-session recovery (implicit unstick)", () => {

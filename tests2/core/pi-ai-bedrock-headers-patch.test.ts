@@ -6,8 +6,6 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 
 import { ensurePiAiBedrockHeadersPatch } from "../../src/server/agent/pi-ai-bedrock-headers-patch.ts";
 

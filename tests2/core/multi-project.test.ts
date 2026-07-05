@@ -16,7 +16,7 @@ guardProcessEnv();
  */
 import fs from "node:fs";
 import path from "node:path";
-import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 

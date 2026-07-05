@@ -44,15 +44,15 @@ function makeGroupPolicyStore(subgoalsEnabled: boolean | undefined): import("../
 /** Team-lead role excerpt — has always-allow for all Children tools. */
 const TEAM_LEAD_ROLE = {
 	toolPolicies: {
-		goal_spawn_child: "always-allow" as const,
-		goal_plan_propose: "always-allow" as const,
-		goal_merge_child: "always-allow" as const,
-		goal_pause: "always-allow" as const,
-		goal_resume: "always-allow" as const,
-		goal_archive_child: "always-allow" as const,
-		goal_plan_status: "always-allow" as const,
-		goal_decide_mutation: "always-allow" as const,
-		goal_set_policy: "always-allow" as const,
+		goal_spawn_child: "always-allow" as any,
+		goal_plan_propose: "always-allow" as any,
+		goal_merge_child: "always-allow" as any,
+		goal_pause: "always-allow" as any,
+		goal_resume: "always-allow" as any,
+		goal_archive_child: "always-allow" as any,
+		goal_plan_status: "always-allow" as any,
+		goal_decide_mutation: "always-allow" as any,
+		goal_set_policy: "always-allow" as any,
 	},
 };
 

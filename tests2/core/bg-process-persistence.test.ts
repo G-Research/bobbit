@@ -282,7 +282,7 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		return rec;
 	}
 
-	it("ALIVE (nonce match) → re-attach reads spool tail then captures eventual real exit code", async (t) => {
+	it("ALIVE (nonce match) → re-attach reads spool tail then captures eventual real exit code", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
@@ -546,7 +546,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		assert.equal(p.terminalReason, "normal");
 	});
 
-	it("Fix (HIGH): hard kill with NO status within the grace window → killed/null only AFTER the grace window", (t) => {
+	it("Fix (HIGH): hard kill with NO status within the grace window → killed/null only AFTER the grace window", () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const killCalls: any[] = [];
 		const h = makeHarness({ env: { isHostPidAlive: () => false, killHostTree: (pid, sig) => killCalls.push([pid, sig]) } });
@@ -566,7 +566,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		assert.ok(killCalls.length >= 1, "host kill issued");
 	});
 
-	it("Fix (HIGH): killed process whose status lands AFTER liveness goes false → REAL exit code captured (not killed/null)", (t) => {
+	it("Fix (HIGH): killed process whose status lands AFTER liveness goes false → REAL exit code captured (not killed/null)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => false } }); // dead the instant we check
 		const S = freshSession();
@@ -778,7 +778,7 @@ describe("BgProcessManager — disk caps", () => {
 });
 
 describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
-	it("rebases offset to 0 when spool shrinks below it (no stall)", (t) => {
+	it("rebases offset to 0 when spool shrinks below it (no stall)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
@@ -791,7 +791,7 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		tailer.stop();
 	});
 
-	it("copytruncates the spool once consumed and over cap", (t) => {
+	it("copytruncates the spool once consumed and over cap", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
@@ -803,7 +803,7 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		tailer.stop();
 	});
 
-	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", (t) => {
+	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
 		const file = path.join(dir, "x.spool");
@@ -831,7 +831,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		return c;
 	}
 
-	it("rebases the offset DOWN to the current size when the spool is copytruncated mid-tail", (t) => {
+	it("rebases the offset DOWN to the current size when the spool is copytruncated mid-tail", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		let size = 0;
 		const child = fakeChild();
@@ -851,7 +851,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		tailer.stop();
 	});
 
-	it("does NOT rebase while the spool only grows", (t) => {
+	it("does NOT rebase while the spool only grows", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
 		let size = 0;
 		const child = fakeChild();

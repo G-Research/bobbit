@@ -10,10 +10,8 @@ import { dirname, join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId, registerProject } from "./_e2e/e2e-setup.js";
 
-let token: string;
-
 test.beforeAll(() => {
-	token = readE2EToken();
+	readE2EToken();
 });
 
 type SeededSession = {
@@ -1371,7 +1369,7 @@ test.describe("archived session worktree maintenance", () => {
 				reasonCategory: "already-cleaned",
 				localBranchExists: true,
 			});
-			expect(byRepo.get(".").selectionCategories).toEqual(expect.arrayContaining(["archived-session", "multi-repo"]));
+			expect((byRepo.get(".") as any).selectionCategories).toEqual(expect.arrayContaining(["archived-session", "multi-repo"]));
 			expect(byRepo.get("packages/api")).toMatchObject({
 				title: "Archived multi-repo worktree",
 				repo: "packages/api",
@@ -1386,7 +1384,7 @@ test.describe("archived session worktree maintenance", () => {
 				reasonCategory: "already-cleaned",
 				localBranchExists: true,
 			});
-			expect(byRepo.get("packages/api").selectionCategories).toEqual(expect.arrayContaining(["archived-session", "multi-repo"]));
+			expect((byRepo.get("packages/api") as any).selectionCategories).toEqual(expect.arrayContaining(["archived-session", "multi-repo"]));
 		} finally {
 			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
 			tryDeleteBranch(repoPath, branch);

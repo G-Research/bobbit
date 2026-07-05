@@ -22,7 +22,7 @@ type GateStoreCall =
 	| { kind: "updateSignalVerification"; signalId: string; update: any }
 	| { kind: "updateGateStatus"; goalId: string; gateId: string; status: string };
 
-function makeHarness(t: TestContext) {
+function makeHarness(_t: TestContext) {
 	const root = makeTmpDir("verif-command-lifecycle-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
@@ -292,7 +292,7 @@ test("command step settles from process exit when inherited stdio delays close",
 			return Number.isFinite(pid) && pid > 0 ? pid : false;
 		}, 3_000, 25);
 
-		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio");
+		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio") as { passed: boolean; output: string };
 		assert.equal(result.passed, true, `${MARKER}: the exited command should be treated as the authoritative result even when a descendant holds stdio open.`);
 		assert.match(result.output, /stdio-close-delay-parent-exiting/, `${MARKER}: output written before the immediate process exit should be retained.`);
 		assert.match(result.output, /stdio did not close/i, `${MARKER}: delayed-close fallback should explain why Bobbit finalized from process exit.`);
@@ -649,7 +649,7 @@ test("restart cancellation hydrates persisted active state and retries until com
 	}
 });
 
-test("cancelled persisted command kill intent is processed on resume before active file cleanup", async (t) => {
+test("cancelled persisted command kill intent is processed on resume before active file cleanup", async () => {
 	const root = makeTmpDir("verif-command-cancel-resume-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });

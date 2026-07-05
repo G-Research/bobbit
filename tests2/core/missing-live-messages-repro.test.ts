@@ -110,7 +110,7 @@ describe("missing live messages after dormant revive", () => {
 			promptQueue: new PromptQueue(),
 		});
 
-		const restoreGates: Array<ReturnType<typeof deferred>> = [];
+		const restoreGates: Array<ReturnType<typeof deferred<void>>> = [];
 		const restoredSessions: any[] = [];
 		manager.restoreSession = vi.fn(async () => {
 			const restoreIndex = restoreGates.length + 1;

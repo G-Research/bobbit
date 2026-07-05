@@ -9,21 +9,24 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import type { ToolManager } from "../../src/server/agent/tool-manager.js";
+import type { McpManager } from "../../src/server/mcp/mcp-manager.js";
+import type { GroupPolicyProvider } from "../../src/server/agent/tool-activation.js";
 
 const { computeEffectiveAllowedTools, computeToolActivationArgs, resolveGrantPolicy, writeMcpProxyExtensions, mcpPolicyKeys, mcpPolicyPrefix } = await import("../../src/server/agent/tool-activation.ts");
 
 // Minimal mock ToolManager — only needs getToolByName()
-function mockToolManager(tools: Record<string, { grantPolicy?: string }>) {
+function mockToolManager(tools: Record<string, { grantPolicy?: string }>): ToolManager {
 	return {
 		getToolByName(name: string) {
 			const key = Object.keys(tools).find(k => k.toLowerCase() === name.toLowerCase());
 			return key ? tools[key] : undefined;
 		},
-	};
+	} as unknown as ToolManager;
 }
 
 // Minimal mock GroupPolicyStore
-function mockGroupPolicyStore(policies: Record<string, string>) {
+function mockGroupPolicyStore(policies: Record<string, string>): GroupPolicyProvider {
 	return {
 		getGroupPolicy(group: string) {
 			return policies[group] || null;
@@ -31,7 +34,7 @@ function mockGroupPolicyStore(policies: Record<string, string>) {
 		getAll() {
 			return policies;
 		},
-	};
+	} as unknown as GroupPolicyProvider;
 }
 
 // ── Priority resolution ─────────────────────────────────────────────
@@ -353,7 +356,7 @@ describe("computeToolActivationArgs", () => {
 		const toolManager = {
 			getToolProviders: () => providers,
 			getExtensionPath: (groupDir: string, filename: string) => `${toolsBase}/${groupDir}/${filename}`,
-		};
+		} as unknown as ToolManager;
 
 		const activation = computeToolActivationArgs(undefined, toolManager, process.cwd());
 
@@ -384,8 +387,8 @@ describe("computeToolActivationArgs", () => {
 			getAvailableTools: () => availableTools,
 			getToolByName: (name: string) => availableTools.find((tool) => tool.name === name),
 			getExtensionPath: (groupDir: string, filename: string) => `${toolsBase}/${groupDir}/${filename}`,
-		};
-		const mcpManager = {
+		} as unknown as ToolManager;
+		const mcpManager = ({
 			getServerStatuses: () => [],
 			getToolInfos: () => [
 				{
@@ -405,13 +408,13 @@ describe("computeToolActivationArgs", () => {
 					inputSchema: { type: "object", properties: {} },
 				},
 			],
-		};
+		}) as unknown as McpManager;
 		const groupPolicyStore = mockGroupPolicyStore({
 			Ask: "allow",
 			"mcp__nano-banana": "never",
 			"mcp__playwright": "never",
 		});
-		const role = { toolPolicies: { Gates: "ask", Tasks: "ask" } };
+		const role = { toolPolicies: { Gates: "ask" as const, Tasks: "ask" as const } };
 
 		const allowed = computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager);
 		const allowedNames = allowed.map((e: { name: string }) => e.name);

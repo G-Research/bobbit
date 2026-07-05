@@ -10,7 +10,6 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd, apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
-let token: string;
 
 /** Helper: minimal valid v2 workflow body (gates-based) */
 function minimalWorkflow(id: string, name?: string) {
@@ -32,7 +31,7 @@ function minimalWorkflow(id: string, name?: string) {
 }
 
 test.beforeAll(async () => {
-	token = readE2EToken();
+	readE2EToken();
 });
 
 test.describe("Workflow CRUD API", () => {
