@@ -1,6 +1,7 @@
 // src/server/agent/orchestration-core.ts
 //
 import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionPromptMode } from "./session-prompt-delivery.js";
+import { MUTATING_TOOLS } from "./read-only-tool-policy.js";
 
 // OrchestrationCore — the ONE goal-agnostic implementation of "launch and
 // orchestrate a child agent (a new, properly-scoped principal)".
@@ -43,8 +44,16 @@ export const SPAWN_VERBS: readonly string[] = ["team_delegate", "team_spawn"];
  * Mirrors the intent of WALKTHROUGH_ALLOWED_TOOLS (which swaps `bash` for the
  * command-policed `readonly_bash`); a generic delegate has no policed shell, so
  * raw `bash`/`bash_bg` are dropped outright.
+ *
+ * SINGLE SOURCE OF TRUTH: this is a re-export of `MUTATING_TOOLS` from
+ * `read-only-tool-policy.ts` (eligibility-signal lane) under this call site's
+ * established name, so this deny-set and the in-process-bridge eligibility
+ * check's deny-set can never drift apart. See that module's header for the
+ * other consumer and for why it's a DIFFERENT axis than session-manager.ts's
+ * `NARROW_WORKER_TOOLS` (an allow-list that deliberately includes
+ * write/edit/bash).
  */
-export const READ_ONLY_DENY_TOOLS: readonly string[] = ["write", "edit", "bash", "bash_bg", "generate_image"];
+export const READ_ONLY_DENY_TOOLS: readonly string[] = MUTATING_TOOLS;
 
 export type ChildKind = "delegate" | "team" | "pr-walkthrough" | "host-agents" | (string & {});
 export type SpawnLifecycle = "bare" | "full";
