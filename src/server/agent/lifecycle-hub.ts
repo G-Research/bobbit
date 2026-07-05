@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { ActionError } from "../extension-host/action-dispatcher.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
-import { packIdFromRoot } from "./pack-contributions.js";
+import { packIdFromRoot, type ProviderContribution } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
@@ -155,6 +155,26 @@ const AUTHORITIES: ReadonlySet<ContextBlockAuthority> = new Set(["memory", "skil
 
 /** Shared empty set returned by the disabled-providers fast paths (no allocation). */
 const EMPTY_SET: ReadonlySet<string> = new Set<string>();
+
+/**
+ * EXT-06 transparency marker: a provider that DID return candidate blocks but
+ * ends up with ZERO kept blocks purely because the shared budget (post
+ * fair-share, see `applyBudgets`) had no room left for it — as opposed to a
+ * thrown error, a timeout, or every candidate being malformed — used to be
+ * silent (FINDINGS.md EXT-06: "the user sees no error and cannot tell that an
+ * installed extension's context was dropped"). Surfaced in both the returned
+ * `diagnostics` and the persisted `TraceProviderRow.error` for that provider.
+ */
+const STARVATION_MARKER = "context omitted: shared budget exhausted";
+
+/** Per-provider outcome of a single (concurrent) provider hook invocation —
+ *  everything `dispatch()` needs to rebuild `collected`/`diagnostics`/
+ *  `traceStates` in REGISTRATION order once all providers have settled. */
+interface ProviderRunResult {
+	blocks: ContextBlock[];
+	diagnostic?: HubDiagnostic;
+	trace: ProviderTraceState;
+}
 
 export class LifecycleHub {
 	private readonly registry: PackContributionRegistry;
@@ -364,6 +384,84 @@ export class LifecycleHub {
 		return { diagnostics };
 	}
 
+	/**
+	 * Run a single provider's hook invocation. Encapsulates the FULL per-provider
+	 * try/catch (request build → invoke → validate/extract blocks, or classify the
+	 * failure as a timeout/thrown-error) as a standalone async unit so `dispatch()`
+	 * can fan these out concurrently (EXT-04) instead of awaiting them one at a
+	 * time. Never throws — every outcome (success, malformed blocks, thrown error,
+	 * timeout) is captured in the returned `ProviderRunResult`, so `Promise.allSettled`
+	 * in `dispatch()` should only ever see `"fulfilled"`.
+	 */
+	private async runProvider(
+		provider: ProviderContribution,
+		hook: LifecycleHook,
+		base: Omit<HookCtx, "budget" | "config" | "gateway">,
+	): Promise<ProviderRunResult> {
+		const packId = packIdFromRoot(provider.packRoot);
+		// Managed-runtime context (P3): for a provider linked to a runtime, resolve
+		// `ctx.runtime` (baseUrl/headers/status) WITHOUT starting Docker. Absent for
+		// external mode / a stopped runtime / when no resolver is wired — the provider
+		// then stays dormant via its own isActive(cfg, ctx.runtime) gate.
+		const runtime = await this.resolveProviderRuntime(provider, base.projectId);
+		const hookCtx: HookCtx = {
+			...base,
+			config: provider.config ?? {},
+			budget: { maxTokens: provider.budget.maxTokens },
+			gateway: this.gatewayInfo(),
+			...(runtime ? { runtime } : {}),
+		};
+		// Provider-scoped, store-only host (least privilege). The LIVE object stays
+		// in the parent (module-host-worker strips it before serialization) and
+		// services the worker's proxied store calls — the durable retain queue /
+		// diagnostics path. packId is derived from the contribution's pack root.
+		const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId });
+		const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
+		const t0 = performance.now();
+		try {
+			const result = await this.moduleHost.invoke({
+				url,
+				packRoot: provider.packRoot,
+				epoch: 0,
+				exportKind: "providers",
+				member: hook,
+				ctx: { ...hookCtx, workingDir: base.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
+				arg: undefined,
+				workingDir: base.cwd,
+			}, provider.budget.timeoutMs);
+			const ms = Math.round(performance.now() - t0);
+
+			const candidates = extractBlocks(result);
+			const blocks: ContextBlock[] = [];
+			let malformed = 0;
+			for (const candidate of candidates) {
+				const block = validateBlock(candidate, provider.id);
+				if (!block) {
+					malformed++;
+					continue;
+				}
+				blocks.push(block);
+			}
+			const error = malformed > 0 ? "malformed block(s) dropped" : undefined;
+			return {
+				blocks,
+				diagnostic: error ? { providerId: provider.id, hook, error, ms } : undefined,
+				trace: { id: provider.id, ms, malformed, error },
+			};
+		} catch (err) {
+			const ms = Math.round(performance.now() - t0);
+			const message = err instanceof Error ? err.message : String(err);
+			const timeout = (err instanceof ActionError && err.status === 504) || message.includes("timed out");
+			return {
+				blocks: [],
+				diagnostic: timeout
+					? { providerId: provider.id, hook, timeout: true, ms }
+					: { providerId: provider.id, hook, error: message, ms },
+				trace: { id: provider.id, ms, malformed: 0, error: timeout ? "timeout" : message },
+			};
+		}
+	}
+
 	async dispatch(
 		hook: LifecycleHook,
 		base: Omit<HookCtx, "budget" | "config" | "gateway">,
@@ -374,78 +472,66 @@ export class LifecycleHub {
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
 
-		for (const provider of providers) {
-			const packId = packIdFromRoot(provider.packRoot);
-			// Managed-runtime context (P3): for a provider linked to a runtime, resolve
-			// `ctx.runtime` (baseUrl/headers/status) WITHOUT starting Docker. Absent for
-			// external mode / a stopped runtime / when no resolver is wired — the provider
-			// then stays dormant via its own isActive(cfg, ctx.runtime) gate.
-			const runtime = await this.resolveProviderRuntime(provider, base.projectId);
-			const hookCtx: HookCtx = {
-				...base,
-				config: provider.config ?? {},
-				budget: { maxTokens: provider.budget.maxTokens },
-				gateway: this.gatewayInfo(),
-				...(runtime ? { runtime } : {}),
-			};
-			// Provider-scoped, store-only host (least privilege). The LIVE object stays
-			// in the parent (module-host-worker strips it before serialization) and
-			// services the worker's proxied store calls — the durable retain queue /
-			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId });
-			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
-			const t0 = performance.now();
-			let ms = 0;
-			try {
-				const result = await this.moduleHost.invoke({
-					url,
-					packRoot: provider.packRoot,
-					epoch: 0,
-					exportKind: "providers",
-					member: hook,
-					ctx: { ...hookCtx, workingDir: base.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
-					arg: undefined,
-					workingDir: base.cwd,
-				}, provider.budget.timeoutMs);
-				ms = Math.round(performance.now() - t0);
+		// EXT-04 (shared-deadline fan-out): providers race CONCURRENTLY instead of
+		// stacking their timeouts serially — `dispatch()` as a whole now takes as
+		// long as the SLOWEST provider (bounded by its own `budget.timeoutMs`, via
+		// ModuleHost's existing per-invoke terminate-on-timeout) rather than the SUM
+		// of every provider's timeout. No additional hub-level deadline is needed:
+		// the fan-out already turns "sum of N timeouts" into "max of N timeouts" for
+		// free, and each provider's own timeout accounting is untouched (still
+		// measured from ITS OWN `t0` inside `runProvider`, independent of how many
+		// other providers are running alongside it).
+		//
+		// `Promise.allSettled` resolves its results array in the SAME order as the
+		// input array regardless of completion order (a language guarantee, not a
+		// race) — so `settled[i]` always corresponds to `providers[i]`, and the loop
+		// below rebuilds `collected`/`diagnostics`/`traceStates` in REGISTRATION
+		// order, byte-identical to the pre-fix serial code's ordering, even though
+		// execution now overlaps in wall-clock time. See
+		// tests/lifecycle-hub.test.ts's ordering-determinism + shared-deadline pins.
+		//
+		// CLF coordination: a future model-backed classifier cascade
+		// (`dispatchDecision`, EXT-05 core) can be layered onto this fan-out without
+		// breaking order, since ordering is keyed off the STATIC `providers` array,
+		// never off completion timing.
+		const settled = await Promise.allSettled(providers.map((provider) => this.runProvider(provider, hook, base)));
 
-				const candidates = extractBlocks(result);
-				let malformed = 0;
-				for (const candidate of candidates) {
-					const block = validateBlock(candidate, provider.id);
-					if (!block) {
-						malformed++;
-						continue;
-					}
-					collected.push(block);
-				}
-				if (malformed > 0) {
-					diagnostics.push({ providerId: provider.id, hook, error: "malformed block(s) dropped", ms });
-				}
-				traceStates.set(provider.id, { id: provider.id, ms, malformed, error: malformed > 0 ? "malformed block(s) dropped" : undefined });
-			} catch (err) {
-				ms = Math.round(performance.now() - t0);
-				const message = err instanceof Error ? err.message : String(err);
-				if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
-					diagnostics.push({ providerId: provider.id, hook, timeout: true, ms });
-					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "timeout" });
-				} else {
-					diagnostics.push({ providerId: provider.id, hook, error: message, ms });
-					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: message });
-				}
+		for (let i = 0; i < providers.length; i++) {
+			const provider = providers[i];
+			const outcome = settled[i];
+			if (outcome.status === "rejected") {
+				// `runProvider` catches everything internally, so this is unreachable in
+				// practice — kept as a defensive fallback so a future refactor can't
+				// silently turn a rejection into a hung/absent trace row.
+				const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+				diagnostics.push({ providerId: provider.id, hook, error: message, ms: 0 });
+				traceStates.set(provider.id, { id: provider.id, ms: 0, malformed: 0, error: message });
+				continue;
 			}
+			const { blocks, diagnostic, trace } = outcome.value;
+			collected.push(...blocks);
+			if (diagnostic) diagnostics.push(diagnostic);
+			traceStates.set(provider.id, trace);
 		}
 
 		const perProviderMax = new Map(providers.map((p) => [p.id, p.budget.maxTokens]));
 		const budgeted = applyBudgets(collected, perProviderMax, this.globalMaxTokens);
 		const traceRows = providers.map((provider): TraceProviderRow => {
 			const state = traceStates.get(provider.id) ?? { id: provider.id, ms: 0, malformed: 0 };
+			const blocksCount = budgeted.kept.filter((block) => block.providerId === provider.id).length;
+			const omittedCount = budgeted.omitted.filter(({ block }) => block.providerId === provider.id).length + state.malformed;
+			// EXT-06 transparency: a provider that contributed candidates but ends with
+			// ZERO kept blocks purely because the shared budget had no room — no error,
+			// no timeout, nothing malformed — used to be silent. Only fires when nothing
+			// else already explains the zero (a real error/timeout takes precedence).
+			const starved = blocksCount === 0 && omittedCount > 0 && !state.error;
+			if (starved) diagnostics.push({ providerId: provider.id, hook, error: STARVATION_MARKER, ms: state.ms });
 			return {
 				id: provider.id,
 				ms: state.ms,
-				blocks: budgeted.kept.filter((block) => block.providerId === provider.id).length,
-				omitted: budgeted.omitted.filter(({ block }) => block.providerId === provider.id).length + state.malformed,
-				...(state.error ? { error: state.error } : {}),
+				blocks: blocksCount,
+				omitted: omittedCount,
+				...(state.error ? { error: state.error } : starved ? { error: STARVATION_MARKER } : {}),
 			};
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
