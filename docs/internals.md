@@ -237,7 +237,14 @@ Regression coverage lives in `tests/team-manager-ghost-workers.test.ts`, alongsi
 
 The verification system is split into two modules:
 - **`verification-harness.ts`** - orchestration: session lifecycle, WS event broadcasting, process spawning, retry logic, persistence. Also implements the **blocking-tool** contract used by `verification_result`: a tool extension POSTs a verdict, which resolves the Promise registered when the gate signal started verification. See [docs/blocking-tools.md](blocking-tools.md) for the pattern. The `ask_user_choices` tool uses a different, non-blocking shape - see [docs/non-blocking-ask.md](non-blocking-ask.md).
-- **`verification-logic.ts`** - pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
+- **`verification-logic.ts`** - pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps`/`resolveGateCacheMode` (step-cache reuse for re-signals — SHA-exact by default, content-keyed under `BOBBIT_GATE_CACHE=content`; see below), `isParallelReviewsEnabled`/`computeEarlyReviewPhases`/`isRetryAfterCommandFailure` (VER-07 parallel reviews; see below), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
+
+#### Parallel reviews (VER-07) & gate step cache
+
+Two verification-throughput levers, both resolved from env at signal time in `verifyGateSignal`:
+
+- **Parallel reviews are default-on.** `isParallelReviewsEnabled` (`verification-logic.ts`) treats any `BOBBIT_PARALLEL_REVIEWS` value other than the literal `"0"` as enabled — flipped from opt-in after a dark-flags A/B measured −42.8% pass-path wall-clock. `computeEarlyReviewPhases` conservatively identifies the first contiguous block of review-only phases following the leading command phases (anything not matching the clean "commands, then reviews" shape stays serial) and the harness starts those reviewer sessions concurrently with the command track; their verdicts are only *kept* once the preceding command phases pass. A **retry-aware guard** (`isRetryAfterCommandFailure`) suppresses the early start when the same gate's most recent completed signal failed a non-review step — such retries are disproportionately likely to fail the command track again, and early-started reviewers would just be discarded (the one measured cost of the feature). With the flag off or the guard firing, phase ordering is byte-identical to the pre-VER-07 serial path.
+- **Gate step cache modes.** `resolveGateCacheMode(process.env.BOBBIT_GATE_CACHE)` defaults to `"sha"`: `buildStepCache`/`canSkipAllSteps` reuse a passed step result on re-signal only for a byte-identical commit SHA. `BOBBIT_GATE_CACHE=content` widens reuse: a step declaring `cacheInputGlobs` (a `VerifyStep` field) can be reused across *different* SHAs when none of its declared globs changed between the two commits; a step without `cacheInputGlobs` stays SHA-exact in either mode, and any env value other than the literal `"content"` resolves to `"sha"` — misconfiguration can only be more conservative, never silently widen reuse. Seeded default workflows ship `cacheInputGlobs` on their Build/Type check/Unit tests command steps. Full step-cache semantics and safety analysis: [docs/goals-workflows-tasks.md](goals-workflows-tasks.md).
 
 #### Reviewer `kind` & restart resume
 
@@ -1429,6 +1436,10 @@ Grant responses are scoped deltas, not the full effective allowed-tool surface. 
 
 MCP group grants include both canonical operation names (`mcp__<server>__<operation>` or gateway sub-namespace variants) and model-facing MCP meta-tool names (`mcp_<server>` / `mcp_<server>__<sub>`). The canonical names preserve internal MCP operation enforcement, while the meta-tool names let the guard correlate the real model-facing pending request. The response still contains only the approved MCP group, not unrelated `ask` tools.
 
+### Grant audit log
+
+Every grant/deny decision — including auto-approvals and timeouts — is appended as a JSONL row (`{ts, sessionId, projectId?, toolName, toolGroup?, decision: "granted" | "denied", source: "user" | "auto" | "timeout", toolApproveDecision?}`) to `<server-cwd>/.bobbit/state/tool-permission-audit/<sessionId>.jsonl` by `ToolPermissionAuditLog` (`src/server/agent/tool-permission-audit-log.ts`). Each file is capped at 2 MB: on overflow the newest entries are kept and older lines are trimmed via an atomic tmp-write + rename. Corrupt partial lines are skipped on read. The log is disk-only for now — no REST endpoint exposes it.
+
 ### Policy resolution cascade
 
 Resolution order is unchanged (first non-null wins):
@@ -1607,7 +1618,7 @@ Spawn-pinned models are still read-back verified before a session becomes idle/l
 
 ### Pool-claimed sessions
 
-The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too - there is no special pool path that emits two `model_change` events. The remaining two-event case is the aigw cold-cache discovery fallback, where the model is not resolvable at spawn time.
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. (A separate warm **pi-process** pool exists — `src/server/agent/pi-process-pool.ts`, pre-spawned `IRpcBridge` child processes keyed by project/cwd/resolved-args fingerprint — but it is dark by default: `BOBBIT_WARM_POOL=1` opts in, and `claim()` misses fall back to the cold path byte-identically. See [docs/design/warm-pi-process-pool.md](design/warm-pi-process-pool.md).) When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too - there is no special pool path that emits two `model_change` events. The remaining two-event case is the aigw cold-cache discovery fallback, where the model is not resolvable at spawn time.
 
 ### Out of scope
 
@@ -1628,6 +1639,18 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
 
 For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md).
+
+---
+
+## Deterministic thinking-level router (`BOBBIT_CLF_THINKING_ROUTER`)
+
+`src/server/agent/thinking-router-classifier.ts` matches each submitted prompt against a small deterministic rule table (`\bultrathink\b` and `\bthink harder\b` → `xhigh`; first match wins, word-boundary regexes) and records the decision through the decision-seam framework. By default the router is **observe-only** telemetry. Setting `BOBBIT_CLF_THINKING_ROUTER=enforce` (the exact string — any other value, including `"observe"`, stays observe-only) makes `SessionManager.enqueuePrompt` apply the matched level transiently for that turn via `rpcClient.setThinkingLevel`; the pre-apply level is remembered in live `SessionInfo` and restored on the next apply-mode prompt where the router does not select. Neither the escalation nor the restore marker is persisted as `spawnPinnedThinkingLevel`.
+
+**Precedence (pinned invariant):** the router must lose to any config a human already committed to. Apply mode never fires when `SessionManager.resolveRoleThinkingLevel(session)` returns a role-level override, or when `session.thinkingLevelUserPinned` is set (only by the explicit `set_thinking_level` WS action, never by spawn-time default resolution). See `SessionManager.canApplyThinkingRouterDecision`. An `abstain` never calls `setThinkingLevel` in either mode.
+
+**Pack-authorable rules (S7):** a pack can extend or replace the rule table by declaring a provider with `kind: "selector"` and `id: "thinking-router-rules"` (`providers/<id>.yaml`) carrying a flat `config` with `rules: [{id, pattern, flags?, level}]` and `mode: "extend" | "override"` (unknown/absent ⇒ `extend` — additive, never silently drops the built-ins). `resolveEffectiveThinkingRules()` resolves the effective table **once at construction time** (`listProviders` is synchronous — no moduleHost, no per-prompt dispatch) and fails open to the built-in table on a missing provider, a `listProviders` throw, or a config with no valid entries; individually malformed rules are dropped with a warning while valid ones are kept. Only `i`/`s` regex flags are accepted (`g`/`y` would make the reused `RegExp.test()` stateful).
+
+The same decision-seam framework also carries **observe-only classifiers** for model-tier, gate-risk, and swarm-topology choices (`model-tier-classifier.ts`, `gate-risk-classifier.ts`, `swarm-topology-classifier.ts`). These record would-have-chosen labels for future evidence-gathering and have no enforce mode — they never alter live model selection, workflow gating, or team topology.
 
 ---
 
@@ -1814,6 +1837,10 @@ The sync runs:
 - immediately on `DELETE /api/custom-providers/:id` via `removeCustomProviderModelsJsonEntry()` (no need to wait for a full re-discovery pass).
 
 A provider whose config still exists but is temporarily unreachable is left untouched (its stale `models.json` entry self-heals on the next successful sync) — deletion is the only path that removes an entry outright.
+
+**Serialized `models.json` writes.** All read-modify-write cycles against `<agentDir>/models.json` go through `updateModelsJson()` (`src/server/agent/models-json-store.ts`), which chains callers on a module-level promise queue so concurrent writers — AI Gateway discovery (`aigw-manager.ts`), custom-provider sync and overrides (`model-registry.ts`), and OpenAI model additions (`openai-model-additions.ts`) — can't interleave and clobber each other's updates.
+
+**Write-only API keys.** A custom provider's stored `apiKey` is write-only: every read path returns the entry through `redactCustomProviderConfig()` (`model-registry.ts`), which omits `apiKey` and adds a `hasApiKey` boolean instead, so `GET /api/custom-providers` and the mutation response bodies never echo the secret back to the browser. `POST /api/custom-providers/test` falls back to the stored key server-side only when the requested `baseUrl` matches the stored entry (`baseUrlsMatchForStoredKey`), so a connection probe can't be redirected to exfiltrate the key to an attacker-controlled URL.
 
 **Recipe: point Bobbit at a local Ollama server.**
 
@@ -2617,6 +2644,19 @@ Agent process → message_update (full content)
 
 ---
 
+## Read-tool dedup & spill
+
+The builtin `read` tool is wrapped with two default-on token-economy layers (`defaults/tools/_builtins/read-dedup.ts`, `read-spill.ts`, shared plumbing in `read-tool-shared.ts`, wired in `_builtins/extension.ts`):
+
+- **Repeat-read dedup (F24).** An exact repeat of a previous `(path, offset, limit)` query against a file whose mtime+size are unchanged returns a short "unchanged since <ts>" stub instead of re-sending the full bytes. The cache is per-session (it lives in the wrapper closure of the one pi subprocess per session), bounded at 500 entries with FIFO eviction, and caches text-only results. Fail-open guardrails: a different offset/limit range, any stat failure, or a path the conservative resolver can't handle all fall through to the real tool unstubbed.
+- **Oversized-read spill (F1(a)).** A plain read (no offset/limit) that trips pi's built-in 2000-line/50KB truncation cap gets the full file written to `<BOBBIT_DIR>/state/read-spill/<sessionId>/` and the tool result replaced with a head+tail excerpt plus the spill path, so the model can grep the spilled file directly instead of paginating re-reads.
+
+Both layers fail open to pi's original untouched result on any resolve/stat error. Tests: `tests/read-dedup.test.ts`, `tests/read-spill.test.ts`.
+
+This is distinct from [Large content truncation](#large-content-truncation) above, which is outbound (broadcast/EventBuffer) truncation of large tool *inputs*; the read wrappers are input-side token economy for the agent's own transcript.
+
+---
+
 ## Server-backed side-panel workspace
 
 Every session persists a `sidePanelWorkspace` record with the open right-panel tabs, active tab, tab order, and size mode. The server is the authority so the same workspace survives refreshes/restarts and converges across browser contexts. Closed tabs are authoritative absence: render/content caches and localStorage must not recreate them. Full behavior, REST routes, popout links, and migration rules live in [docs/side-panel-workspace.md](side-panel-workspace.md).
@@ -3198,6 +3238,15 @@ The recovery path suppresses re-enqueue only when an inbound agent event has adv
 
 ---
 
+## Session lifecycle fence (restore/respawn coordination)
+
+`SessionLifecycleFence` (`src/server/agent/session-lifecycle-fence.ts`, extracted from `session-manager.ts` as cohort 3 of the SessionManager decomposition) owns the per-session restore/respawn coordination state:
+
+- **Restore coordinators** — a per-session mutex: concurrent revive triggers (a prompt to a dormant session racing a WS attach, for example) join the in-flight restore promise instead of replacing each other and splitting clients across stale `SessionInfo` objects.
+- **Respawn generations** — a monotonic per-session generation counter: stale `SessionInfo` writers must no-op when behind the current generation.
+
+`SessionManager` keeps same-named delegating accessors over the fence's maps so existing call sites (`enqueuePrompt` joins `restoreCoordinators`; `restoreSession` stamps the generation) and tests keep the same surface.
+
 ## Viewer WebSocket
 
 The `/ws/viewer` endpoint provides a sessionless WebSocket connection for the goal dashboard to receive live gate and team events while no agent session is active.
@@ -3245,6 +3294,14 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 ---
 
+## REST route registry
+
+`handleApiRoute()` (`src/server/server.ts`) is being migrated off its legacy if/else chain onto a generic `RouteTable` (`src/server/routes/route-table.ts`). Route families are extracted cohort-by-cohort into `src/server/routes/<family>-routes.ts` modules (projects, project-config, marketplace, staff-inbox, pack-runtimes, workflows, review-annotations, session-utility, maintenance, server-system, staff-mcp-operator, oauth-account, preferences, config-directories, roles, skills) and registered against the shared `coreRouteTable`; paths not yet migrated still fall through to the legacy chain. Match precedence in the table is explicit, not registration-order: exact literal routes first (O(1) map lookup), then `:param` routes, then `/*` prefix routes.
+
+`HandleApiRouteDeps` (`server.ts`) is the explicit dependency interface threaded into `handleApiRoute` and the extracted handlers, replacing ambient closure state so route handlers take their collaborators as parameters. The migration protocol, cohort history, and precedence rules live in [docs/design/route-registry.md](design/route-registry.md).
+
+---
+
 ## Disk state
 
 ### `defaults/` - version controlled (shipped builtins)
@@ -3258,7 +3315,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
-Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. Read at runtime by `BuiltinConfigProvider`.
+Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs` (builtin packs by `scripts/copy-builtin-packs.mjs`), both via a gapless symlink swap (`scripts/lib/gapless-symlink-swap.mjs::atomicReplaceDirGapless`): the destination becomes a symlink into a versioned sibling dir repointed with a single atomic `rename()`, so a concurrent reader — including a Docker sandbox bind-mount resolving the path mid-rebuild — always sees a fully-old or fully-new tree, never an empty/partial one. Falls back to the older two-rename `atomicReplaceDir` when symlinks aren't supported; `BOBBIT_DIST_NO_SYMLINK=1` forces the fallback (set by `scripts/prepublish-build.mjs` so published tarballs contain a real directory). Read at runtime by `BuiltinConfigProvider`.
 
 ### `.bobbit/config/` - runtime overrides (gitignored)
 
@@ -3283,7 +3340,8 @@ Each registered project has its own state directory. All store data is scoped to
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` | FlexSearch index (JSON files under `index/` plus `meta.json`). See [Semantic search](#semantic-search). |
-| `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
+| `session-costs.json` | `CostTracker` | Cumulative token/cost data. See [Session cost display](session-cost.md). |
+| `session-cost-turns.json` | `CostTracker` | Append-only per-turn usage rows, stored alongside (not instead of) the cumulative totals; capped at 500 rows per session. |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` - global, gitignored
@@ -3308,6 +3366,7 @@ Only truly global state lives in the server's central state directory.
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
+| `tool-permission-audit/` | `tool-permission-audit-log.ts` | Per-session JSONL grant/deny audit rows (2 MB cap per file). See [Grant audit log](#grant-audit-log). |
 
 ### Active agent directory
 

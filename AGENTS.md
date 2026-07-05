@@ -18,7 +18,7 @@ UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Serve
 
 Where things live. Use this to orient, then `rg` for the symbol.
 
-- **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WebSocket in `src/server/ws/`.
+- **Server REST/WS**: `src/server/` — REST entry in `server.ts::handleApiRoute()`, route-family modules in `src/server/routes/`, WebSocket in `src/server/ws/`.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. `bash_bg` processes persist + re-attach across restart via `bg-process-{manager,store,runner}.ts`; state under `<stateDir>/bg-processes/`. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md).
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
