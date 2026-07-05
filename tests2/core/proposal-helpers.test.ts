@@ -2,6 +2,9 @@
 // Source: tests/proposal-helpers.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for `src/app/proposal-helpers.ts`.
  *

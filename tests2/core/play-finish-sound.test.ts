@@ -2,6 +2,9 @@
 // Source: tests/play-finish-sound.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for src/app/play-finish-sound.ts — the shared read/write helper
  * behind the header <bell-toggle> and the Settings beep checkbox.

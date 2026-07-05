@@ -22,8 +22,16 @@ import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config
 export function guardProcessEnv(): void {
 	const snapshot = new Map<string, string | undefined>();
 	for (const key of Object.keys(process.env)) snapshot.set(key, process.env[key]);
+	// Also snapshot globalThis.fetch: several tests override it with a mock; if not
+	// restored the mock bleeds into the next file's real loopback fetch (a rotating
+	// order-dependent flake in the http-server contract tests).
+	const g = globalThis as { fetch?: typeof fetch };
+	const hadFetch = Object.prototype.hasOwnProperty.call(globalThis, "fetch");
+	const priorFetch = g.fetch;
 
 	afterAll(() => {
+		if (hadFetch) g.fetch = priorFetch;
+		else if (Object.prototype.hasOwnProperty.call(globalThis, "fetch")) delete (g as Record<string, unknown>).fetch;
 		// The agent-dir runtime is a module-memory singleton derived from
 		// BOBBIT_DIR/BOBBIT_AGENT_DIR. Restoring env alone leaves its cache pointing
 		// at this file's dir, so the NEXT file in the shared fork reads the wrong

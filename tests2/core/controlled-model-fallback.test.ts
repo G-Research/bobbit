@@ -2,6 +2,9 @@
 // Source: tests/controlled-model-fallback.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Reproducing regression tests for the controlled session model fallback policy.
  *
