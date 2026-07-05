@@ -4989,7 +4989,7 @@ export class SessionManager {
 					console.warn(`[swarm-governor] abort() failed for session ${session.id} (non-fatal):`, err);
 				}
 			} else if (action?.kind === "hard-kill") {
-				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason)
+				this._verificationHarness?.hardKillSwarmNode(stampGoalId, action.reason, { killReason: "governor-budget" })
 					.catch((err) => console.warn(`[swarm-governor] hardKillSwarmNode failed for goal ${stampGoalId} (non-fatal):`, err));
 			}
 		}
