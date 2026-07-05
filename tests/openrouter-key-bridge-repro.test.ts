@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { makeTmpDir } from "./helpers/tmp.ts";
+import { stubMcp } from "./helpers/mcp-stub.ts";
 
 const tmpRoot = makeTmpDir("openrouter-key-bridge-repro-");
 const stateDir = path.join(tmpRoot, "state");
@@ -146,6 +147,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			archive: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 
 		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
 			sessionId: "s-openrouter-initial-direct",
@@ -198,6 +200,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			archive: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 
 		await manager.restoreSession(ps);
 
@@ -227,6 +230,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn((_id: string, fields: any) => { updates.push(fields); }),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 
 		const session: any = {
 			id: "s-openrouter-auth-failure",
@@ -300,6 +304,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 		const session: any = {
 			id: "s-openrouter-auth-waiter",
 			title: "OpenRouter auth waiter",
@@ -348,6 +353,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 		const session: any = {
 			id: "s-openrouter-terminated-auth-failure",
 			status: "terminated",
@@ -384,6 +390,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 		const session: any = {
 			id: "s-openrouter-retry-no-duplicate",
 			title: "OpenRouter retry no duplicate",
@@ -422,6 +429,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 		const session: any = {
 			id: "s-openrouter-agent-turn-redaction",
 			status: "streaming",
@@ -465,6 +473,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			update: mock.fn(() => {}),
 		};
 		managers.push(manager);
+		stubMcp(manager);
 		let rejectPrompt!: (err: Error) => void;
 		const prompt = mock.fn(() => new Promise((_resolve, reject) => { rejectPrompt = reject; }));
 		const session: any = {
