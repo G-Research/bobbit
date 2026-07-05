@@ -1,21 +1,21 @@
 {
 	"$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, journeys, entries[] }",
 	"generatedBy": "scripts/testing-v2/gen-inventory.mjs",
-	"note": "DO NOT hand-edit blindly — re-run `node scripts/testing-v2/gen-inventory.mjs`. Curated overrides live in the generator (DAILY_OVERRIDES / CONTRACT_INTEGRATION / JOURNEY_RULES).",
+	"note": "DO NOT hand-edit blindly — re-run `node scripts/testing-v2/gen-inventory.mjs`. Curated overrides live in the generator (CLASSIFICATION_OVERRIDES / DAILY_OVERRIDES / CONTRACT_INTEGRATION / JOURNEY_RULES).",
 	"censusTotal": 1105,
 	"buckets": {
-		"daily": 53,
-		"v2-browser": 220,
+		"daily": 42,
+		"v2-browser": 215,
 		"v2-core": 499,
-		"v2-dom": 146,
-		"v2-integration": 187
+		"v2-dom": 151,
+		"v2-integration": 198
 	},
 	"methods": {
-		"adapter": 267,
+		"adapter": 259,
 		"codemod": 500,
-		"relocate": 53,
-		"retire-with-mapping": 139,
-		"rewrite": 146
+		"relocate": 42,
+		"retire-with-mapping": 153,
+		"rewrite": 151
 	},
 	"journeys": {
 		"journey-session-lifecycle": "Session create / actions / status / fork / navigate",
@@ -98,14 +98,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses ResizeObserver at tests/agent-interface-scroll-hardening.spec.ts:12 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/agent-interface-scroll.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses ResizeObserver at tests/agent-interface-scroll.spec.ts:4 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/agents-md-budget.test.ts",
@@ -263,10 +263,10 @@
 		},
 		{
 			"file": "tests/ask-user-choices-widget.spec.ts",
-			"bucket": "v2-dom",
-			"method": "rewrite",
+			"bucket": "v2-browser",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Browser fixture uses Playwright boundingBox() at tests/ask-user-choices-widget.spec.ts:280 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/auto-retry-policy.test.ts",
@@ -336,14 +336,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses ResizeObserver at tests/bg-process-pills.spec.ts:142 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/bg-process-popover.spec.ts",
-			"bucket": "v2-dom",
-			"method": "rewrite",
+			"bucket": "v2-browser",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/fixtures/bg-process-popover.html:249 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/bg-process-renderer.spec.ts",
@@ -354,10 +354,10 @@
 		},
 		{
 			"file": "tests/bg-process-states.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: dropdown/status fixture uses clicks and text assertions only; no geometry APIs (tests/bg-process-states.spec.ts:207-218)."
 		},
 		{
 			"file": "tests/bg-process-windows-restart.test.ts",
@@ -375,10 +375,10 @@
 		},
 		{
 			"file": "tests/bg-wait-timer.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: LiveTimer elapsed-text fixture only; no geometry/interaction API (tests/bg-wait-timer.spec.ts:18-21)."
 		},
 		{
 			"file": "tests/binaries-resolver.test.ts",
@@ -441,7 +441,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getAnimations() at tests/canvas-eye-getanimations.spec.ts:2 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/child-ready-to-merge-helper.test.ts",
@@ -511,7 +511,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/collapse-scroll-bugs.spec.ts:13 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/color-migration.spec.ts",
@@ -585,10 +585,10 @@
 		},
 		{
 			"file": "tests/context-cost-stats.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: getContextTotalCostText is a fixture helper name, not getContext/canvas (tests/context-cost-stats.spec.ts:169-182)."
 		},
 		{
 			"file": "tests/context-trace-store.test.ts",
@@ -686,14 +686,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/default-tool-renderer.spec.ts:60 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/defer-offscreen-render.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses IntersectionObserver at tests/defer-offscreen-render.spec.ts:8 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/delegate-helper-policy-plumbing.test.ts",
@@ -914,10 +914,10 @@
 		},
 		{
 			"file": "tests/e2e/bg-process-sandbox-guard.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox bg-process guard."
+			"rationale": "Read in daily re-audit: header says Docker-dependent coverage lives in manual integration; this file mutates session flags in the in-process harness only (tests/e2e/bg-process-sandbox-guard.spec.ts:3-8)."
 		},
 		{
 			"file": "tests/e2e/bg-wait-steer-abort.spec.ts",
@@ -1271,10 +1271,10 @@
 		},
 		{
 			"file": "tests/e2e/host-agents-sandbox-inheritance.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox inheritance for host agents."
+			"rationale": "Read in daily re-audit: deterministic real gateway + mock agent, explicitly never test:manual (tests/e2e/host-agents-sandbox-inheritance.spec.ts:1-11)."
 		},
 		{
 			"file": "tests/e2e/host-agents.spec.ts",
@@ -1740,38 +1740,38 @@
 		},
 		{
 			"file": "tests/e2e/sandbox-archive.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox archive lifecycle."
+			"rationale": "Read in daily re-audit: archived-message path uses mock agent jsonl and host fs; no Docker/container runtime (tests/e2e/sandbox-archive.spec.ts:3-7,48-59)."
 		},
 		{
 			"file": "tests/e2e/sandbox-branch-reconcile.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox branch reconcile."
+			"rationale": "Read in daily re-audit: header says tests run without Docker and manual integration covers Docker reconciliation (tests/e2e/sandbox-branch-reconcile.spec.ts:7-14)."
 		},
 		{
 			"file": "tests/e2e/sandbox-delegate.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox delegate."
+			"rationale": "Read in daily re-audit: header says these tests do NOT require Docker and use mock-agent REST API coverage (tests/e2e/sandbox-delegate.spec.ts:7-12)."
 		},
 		{
 			"file": "tests/e2e/sandbox-pentest.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox escape/pen-test."
+			"rationale": "Read in daily re-audit: header says no Docker; verifies docker-arg builder/config structure directly (tests/e2e/sandbox-pentest.spec.ts:6-12)."
 		},
 		{
 			"file": "tests/e2e/sandbox-persistence.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox persistence across restart."
+			"rationale": "Read in daily re-audit: persists sandbox metadata and accepts Docker-unavailable failure path; no real container required (tests/e2e/sandbox-persistence.spec.ts:3-7,42-73)."
 		},
 		{
 			"file": "tests/e2e/sandbox-recovery.spec.ts",
@@ -1782,31 +1782,31 @@
 		},
 		{
 			"file": "tests/e2e/sandbox-restore.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox restore."
+			"rationale": "Read in daily re-audit: header says no Docker; intercepts applySandboxWiring boundary (tests/e2e/sandbox-restore.spec.ts:3-8,61-67)."
 		},
 		{
 			"file": "tests/e2e/sandbox-security.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox security boundaries."
+			"rationale": "Read in daily re-audit: header says no Docker; registers SandboxTokenStore tokens and makes HTTP requests only (tests/e2e/sandbox-security.spec.ts:3-9)."
 		},
 		{
 			"file": "tests/e2e/sandbox-token.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Real Docker sandbox scoped-token exec."
+			"rationale": "Read in daily re-audit: scoped-token store/guard and health endpoint assertions only; no Docker runtime (tests/e2e/sandbox-token.spec.ts:1-4,34-139)."
 		},
 		{
 			"file": "tests/e2e/sandbox.spec.ts",
-			"bucket": "daily",
-			"method": "relocate",
+			"bucket": "v2-integration",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Sets sandbox=docker; real Docker container runtime."
+			"rationale": "Read in daily re-audit: header states this does not require Docker; tests REST/config/status behavior (tests/e2e/sandbox.spec.ts:3-5,32-80)."
 		},
 		{
 			"file": "tests/e2e/search-admin-api.spec.ts",
@@ -2179,14 +2179,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/add-project-flow.spec.ts:44 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/add-project-footer-stability.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Read in re-audit: measures footer Playwright boundingBox() stability at tests/e2e/ui/add-project-footer-stability.spec.ts:28-32."
 		},
 		{
 			"file": "tests/e2e/ui/add-project-multi-repo-subset.spec.ts",
@@ -2265,14 +2265,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getAnimations() at tests/e2e/ui/archived-blob.spec.ts:52 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/archived-session-actions.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/archived-session-actions.spec.ts:256 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/artifacts-pack.spec.ts",
@@ -2450,7 +2450,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/dynamic-chat-tabs.spec.ts:106 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/escape-aborts-anywhere.spec.ts",
@@ -2502,14 +2502,16 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/gate-status-cross-surface.spec.ts:153 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/git-status-untracked-race.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-multi-repo"
+			],
+			"rationale": "Read in re-audit: requestAnimationFrame is only a flush helper; consolidate git-status race into multi-repo/git journey (tests/e2e/ui/git-status-untracked-race.spec.ts:32)."
 		},
 		{
 			"file": "tests/e2e/ui/github-trusted-hosts.spec.ts",
@@ -2559,11 +2561,9 @@
 		{
 			"file": "tests/e2e/ui/goal-edit-modal.spec.ts",
 			"bucket": "v2-browser",
-			"method": "retire-with-mapping",
-			"replacement": [
-				"journey-goal-editing"
-			],
-			"rationale": "Non-geometry browser E2E — consolidate into journey-goal-editing."
+			"method": "adapter",
+			"replacement": [],
+			"rationale": "Browser E2E uses Playwright boundingBox() at tests/e2e/ui/goal-edit-modal.spec.ts:17 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/goal-empty-workflows-banner.spec.ts",
@@ -2586,9 +2586,11 @@
 		{
 			"file": "tests/e2e/ui/goal-metadata.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-goal-editing"
+			],
+			"rationale": "Read in re-audit: form/tab metadata flow with no geometry API; consolidate into goal-editing journey (tests/e2e/ui/goal-metadata.spec.ts:118-154)."
 		},
 		{
 			"file": "tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts",
@@ -2611,9 +2613,11 @@
 		{
 			"file": "tests/e2e/ui/goal-proposal-offscreen-return.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-proposals"
+			],
+			"rationale": "Read in re-audit: off-screen proposal guard uses app state and rAF flush only; consolidate into proposals journey (tests/e2e/ui/goal-proposal-offscreen-return.spec.ts:122-193)."
 		},
 		{
 			"file": "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts",
@@ -2674,7 +2678,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/goal-tabs-wiring.spec.ts:69 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/headquarters.spec.ts",
@@ -2717,7 +2721,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/jump-to-last-prompt.spec.ts:69 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/local-only-policy-status.spec.ts",
@@ -2749,30 +2753,36 @@
 		{
 			"file": "tests/e2e/ui/marketplace-mcp.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-marketplace-packs"
+			],
+			"rationale": "Read in re-audit: marketplace MCP UI tabs/keyboard only, no real MCP subprocess or geometry (tests/e2e/ui/marketplace-mcp.spec.ts:229-350)."
 		},
 		{
 			"file": "tests/e2e/ui/marketplace.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-marketplace-packs"
+			],
+			"rationale": "Read in re-audit: marketplace tabs/search/keyboard flows only; no geometry API (tests/e2e/ui/marketplace.spec.ts:374-448)."
 		},
 		{
 			"file": "tests/e2e/ui/mid-session-project-proposal.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-proposals"
+			],
+			"rationale": "Read in re-audit: project proposal tab lifecycle with no geometry API; consolidate into proposals journey (tests/e2e/ui/mid-session-project-proposal.spec.ts:80-107)."
 		},
 		{
 			"file": "tests/e2e/ui/mobile-review-commenting.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses matchMedia at tests/e2e/ui/mobile-review-commenting.spec.ts:10 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/mobile-staff-sidebar.spec.ts",
@@ -2804,16 +2814,20 @@
 		{
 			"file": "tests/e2e/ui/notification-policy.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-notification-policy"
+			],
+			"rationale": "Read in re-audit: notification policy assertions; rAF is only a flush helper (tests/e2e/ui/notification-policy.spec.ts:44)."
 		},
 		{
 			"file": "tests/e2e/ui/open-session-new-window.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-session-sharing"
+			],
+			"rationale": "Non-geometry browser E2E — consolidate into journey-session-sharing."
 		},
 		{
 			"file": "tests/e2e/ui/optional-steps.spec.ts",
@@ -2856,14 +2870,16 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/pill-overflow-promotion.spec.ts:59 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/plan-archived-children.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-team-delegate"
+			],
+			"rationale": "Read in re-audit: archived-child plan tab flow with no geometry API (tests/e2e/ui/plan-archived-children.spec.ts:122-124)."
 		},
 		{
 			"file": "tests/e2e/ui/plan-tab-archived-children.spec.ts",
@@ -2888,14 +2904,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/pr-walkthrough-pack.spec.ts:787 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/pre-compaction-history.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/preparing-ux.spec.ts",
@@ -2911,7 +2927,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/preview-durable-restart.spec.ts:121 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/preview-happy-path.spec.ts",
@@ -2927,7 +2943,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/project-assistant-saved-state.spec.ts:47 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/project-assistant.spec.ts",
@@ -2943,7 +2959,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/project-drag-reorder.spec.ts:130 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/project-management.spec.ts",
@@ -2986,28 +3002,30 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/proposal-inline-comments.spec.ts:343 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-proposals"
+			],
+			"rationale": "Non-geometry browser E2E — consolidate into journey-proposals."
 		},
 		{
 			"file": "tests/e2e/ui/proposal-panel-streaming.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/proposal-panel-streaming.spec.ts:54 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/proposal-revision-snapshots.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/proposal-revision-snapshots.spec.ts:73 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/proposal-spec-survives-navigate.spec.ts",
@@ -3032,7 +3050,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses matchMedia at tests/e2e/ui/pwa-lifecycle.spec.ts:14 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/queue-ui.spec.ts",
@@ -3055,16 +3073,20 @@
 		{
 			"file": "tests/e2e/ui/replace-bobbit-text.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-debug-tools"
+			],
+			"rationale": "Read in re-audit: asserts canvas element is replaced/restored but never exercises canvas API/drawing; consolidate into debug-tools journey (tests/e2e/ui/replace-bobbit-text.spec.ts:30-94)."
 		},
 		{
 			"file": "tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-crash-restart"
+			],
+			"rationale": "Read in re-audit: websocket/live-row ordering with rAF flush only; consolidate into crash/restart journey (tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts:134)."
 		},
 		{
 			"file": "tests/e2e/ui/review-pane.spec.ts",
@@ -3107,7 +3129,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/session-actions.spec.ts:116 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/session-created-push-sync.spec.ts",
@@ -3177,7 +3199,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/settings-mobile-tabs.spec.ts:16 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/settings-model-fallback.spec.ts",
@@ -3202,14 +3224,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/side-panel-tabs.spec.ts:43 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-actions-menu.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-actions-menu.spec.ts:77 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
@@ -3270,7 +3292,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-font-scale.spec.ts:161 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
@@ -3295,14 +3317,16 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-indent.spec.ts:142 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-sidebar-nav-search-keyboard"
+			],
+			"rationale": "Read in re-audit: Ctrl+Arrow navigation smoke with no geometry API; consolidate into sidebar keyboard journey (tests/e2e/ui/sidebar-keyboard-nav.spec.ts:275-291)."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-mobile-archived-per-project.spec.ts",
@@ -3345,7 +3369,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-resize.spec.ts:13 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/sidebar-search-filter.spec.ts",
@@ -3458,11 +3482,9 @@
 		{
 			"file": "tests/e2e/ui/staff-inbox.spec.ts",
 			"bucket": "v2-browser",
-			"method": "retire-with-mapping",
-			"replacement": [
-				"journey-staff"
-			],
-			"rationale": "Non-geometry browser E2E — consolidate into journey-staff."
+			"method": "adapter",
+			"replacement": [],
+			"rationale": "Browser E2E uses Playwright boundingBox() at tests/e2e/ui/staff-inbox.spec.ts:127 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/staff-role.spec.ts",
@@ -3550,7 +3572,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/stories-navigation.spec.ts:38 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/stories-projects.spec.ts",
@@ -3647,14 +3669,16 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/tail-chat-real-stream.spec.ts:62 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-session-lifecycle"
+			],
+			"rationale": "Read in re-audit: navigation/persistence smoke, no geometry API; consolidate into session-lifecycle journey (tests/e2e/ui/tail-chat-session-navigate.spec.ts:1-57)."
 		},
 		{
 			"file": "tests/e2e/ui/team-delegate.spec.ts",
@@ -3670,7 +3694,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/terminal-pack.spec.ts:224 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/e2e/ui/tool-ask-policy.spec.ts",
@@ -3693,9 +3717,11 @@
 		{
 			"file": "tests/e2e/ui/tree-cost-rollup.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-cost-tracking"
+			],
+			"rationale": "Read in re-audit: tree cost rollup data/UI assertions with no geometry API (tests/e2e/ui/tree-cost-rollup.spec.ts:1-443)."
 		},
 		{
 			"file": "tests/e2e/ui/unseen-activity.spec.ts",
@@ -3718,9 +3744,11 @@
 		{
 			"file": "tests/e2e/ui/workflow-editor.spec.ts",
 			"bucket": "v2-browser",
-			"method": "adapter",
-			"replacement": [],
-			"rationale": "Browser E2E using geometry/interaction APIs — stays in Chromium (v2-browser smoke)."
+			"method": "retire-with-mapping",
+			"replacement": [
+				"journey-workflow-editor"
+			],
+			"rationale": "Non-geometry browser E2E — consolidate into journey-workflow-editor."
 		},
 		{
 			"file": "tests/e2e/ui/workflow-page-scope.spec.ts",
@@ -4058,7 +4086,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/follow-tail.spec.ts:36 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/gate-dependency-enforcement.test.ts",
@@ -4132,10 +4160,10 @@
 		},
 		{
 			"file": "tests/gate-verification-reconcile.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: verification reconciliation fixture has DOM/state assertions only; no geometry API (tests/gate-verification-reconcile.spec.ts:1-349)."
 		},
 		{
 			"file": "tests/gate-verification-snapshot.test.ts",
@@ -4181,10 +4209,10 @@
 		},
 		{
 			"file": "tests/git-status-interactions.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: dropdown interactions use rAF only for portal flush; no geometry API (tests/git-status-interactions.spec.ts:19-23)."
 		},
 		{
 			"file": "tests/git-status-local-only-policy.test.ts",
@@ -4233,14 +4261,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/git-status-widget.spec.ts:124 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/git-widget-portal.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/git-widget-portal.spec.ts:26 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/gitattributes-lf.test.ts",
@@ -4713,10 +4741,10 @@
 		},
 		{
 			"file": "tests/markdown-dollar-template.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: markdown rendering fixture uses rAF only as render flush; no geometry API (tests/markdown-dollar-template.spec.ts:102)."
 		},
 		{
 			"file": "tests/markdown-throttle.spec.ts",
@@ -4884,7 +4912,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses drag-and-drop/DataTransfer at tests/message-editor-attach.spec.ts:144 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/message-editor-ctrl-arrow.spec.ts",
@@ -4898,7 +4926,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: IME composition guard is the test contract (tests/message-editor-ime.spec.ts:2,28)."
 		},
 		{
 			"file": "tests/message-editor-pack-slash.spec.ts",
@@ -4912,21 +4940,21 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses drag-and-drop/DataTransfer at tests/message-editor-queue.spec.ts:143 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/message-editor-send.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses canvas element/API at tests/message-editor-send.spec.ts:66 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/message-editor-size-guard.spec.ts",
-			"bucket": "v2-dom",
-			"method": "rewrite",
+			"bucket": "v2-browser",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Browser fixture uses IME composition at tests/fixtures/message-editor-ime.html:3 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/message-editor-slash.spec.ts",
@@ -4982,7 +5010,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: compares Playwright element boundingBox() positions for mobile header overlap (tests/mobile-goal-preview.spec.ts:16-27)."
 		},
 		{
 			"file": "tests/mobile-header-race.spec.ts",
@@ -4996,21 +5024,21 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/mobile-header.html:128 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/mobile-review-annotation.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/mobile-review-annotation.spec.ts:152 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/mobile-scroll-keyboard.spec.ts",
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/mobile-scroll-keyboard.spec.ts:34 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/mock-agent-core-image-echo.test.ts",
@@ -5217,10 +5245,10 @@
 		},
 		{
 			"file": "tests/pack-entrypoints-reconcile.spec.ts",
-			"bucket": "v2-dom",
-			"method": "rewrite",
+			"bucket": "v2-browser",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Browser fixture uses drag-and-drop/DataTransfer at tests/pack-entrypoints-reconcile.spec.ts:92 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/pack-marketplace.test.ts",
@@ -5528,7 +5556,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/pr-walkthrough-panel-parity.spec.ts:482 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/pr-walkthrough-readonly-policy.test.ts",
@@ -5938,10 +5966,10 @@
 		},
 		{
 			"file": "tests/render-debounce.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: debounce fixture exercises requestAnimationFrame scheduling only; no real layout API (tests/render-debounce.spec.ts:24-58)."
 		},
 		{
 			"file": "tests/render-highlighted-text.spec.ts",
@@ -6375,7 +6403,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/scroll-anchor-shrink.spec.ts:13 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/search-box.spec.ts",
@@ -6757,10 +6785,10 @@
 		},
 		{
 			"file": "tests/settings-models-tab-redesign.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: models-tab fixture resets state and asserts text/form UI; no geometry API (tests/settings-models-tab-redesign.spec.ts:132-286)."
 		},
 		{
 			"file": "tests/shared-worktree-guard-repro.test.ts",
@@ -6823,7 +6851,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: spies on HTMLCanvasElement.toDataURL() and canvas-derived image output (tests/sidebar-bobbit-datauri-cache.spec.ts:51-55)."
 		},
 		{
 			"file": "tests/sidebar-collapse.spec.ts",
@@ -7096,14 +7124,14 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: spies on CanvasRenderingContext2D.drawImage and canvas element persistence (tests/streaming-bobbit-canvas-ref.spec.ts:47-55,83-86)."
 		},
 		{
 			"file": "tests/streaming-message-container-set-message.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: streaming-message fixture uses rAF only to flush batched updates; no geometry API (tests/streaming-message-container-set-message.spec.ts:65-83)."
 		},
 		{
 			"file": "tests/strip-token-git-url.test.ts",
@@ -7551,7 +7579,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses scroll geometry at tests/ui-fixtures/chat-scroll.spec.ts:74 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/ui-fixtures/compaction-widget.spec.ts",
@@ -7565,7 +7593,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts:88 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/ui-fixtures/find-tool.spec.ts",
@@ -7607,7 +7635,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/ui-fixtures/preview-panel.spec.ts:78 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/ui-fixtures/preview-reopen.spec.ts",
@@ -7670,7 +7698,7 @@
 			"bucket": "v2-browser",
 			"method": "adapter",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Browser fixture uses getBoundingClientRect() at tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts:120 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/ui-fixtures/sidebar-archived-fixture.spec.ts",
@@ -7695,10 +7723,10 @@
 		},
 		{
 			"file": "tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts",
-			"bucket": "v2-browser",
-			"method": "adapter",
+			"bucket": "v2-dom",
+			"method": "rewrite",
 			"replacement": [],
-			"rationale": "Browser fixture using geometry/interaction APIs — needs a real layout engine (Chromium)."
+			"rationale": "Read in re-audit: lightweight keyboard-nav fixture uses DOM order and Ctrl+Arrow events only; no geometry API (tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts:242-286)."
 		},
 		{
 			"file": "tests/ui-fixtures/sidebar-navigation-fixture.spec.ts",
@@ -7765,10 +7793,10 @@
 		},
 		{
 			"file": "tests/verification-dedup.spec.ts",
-			"bucket": "v2-dom",
-			"method": "rewrite",
+			"bucket": "v2-browser",
+			"method": "adapter",
 			"replacement": [],
-			"rationale": "Non-geometry browser fixture — rewrite to render under happy-dom (vitest dom project)."
+			"rationale": "Browser fixture uses Playwright boundingBox() at tests/verification-dedup.spec.ts:188 — needs Chromium real-browser fidelity."
 		},
 		{
 			"file": "tests/verification-docker-blast-radius.test.ts",
