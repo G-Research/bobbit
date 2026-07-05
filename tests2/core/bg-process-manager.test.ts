@@ -26,6 +26,7 @@ import type { ChildProcess } from "node:child_process";
 
 import { BgProcessManager, type SpawnFn, type BgEnv, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
 import { BgProcessStore } from "../../src/server/agent/bg-process-store.ts";
+import { createManualClock } from "../harness/clock.js";
 
 // --- Fake child plumbing --------------------------------------------------
 
@@ -63,9 +64,10 @@ function makeManager(env?: Partial<BgEnv>) {
 		killHostTree: env?.killHostTree ?? ((pid, sig) => killCalls.push([pid, sig])),
 		dockerCli: env?.dockerCli ?? (() => ({ code: 0, stdout: "" })),
 	};
-	const mgr = new BgProcessManager(() => undefined, spawn, () => store, tailerFactory, fullEnv);
+	const clock = createManualClock();
+	const mgr = new BgProcessManager(() => undefined, spawn, () => store, tailerFactory, fullEnv, clock);
 	return {
-		mgr, stateDir, store,
+		mgr, stateDir, store, clock,
 		last: () => { if (!last) throw new Error("spawn not called"); return last; },
 		killCalls,
 		/** Drive a clean exit: write the status file then emit the child `exit` hint. */
@@ -149,9 +151,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		h.mgr.cleanup(SESSION);
 	});
 
-	it("timeout fires deterministically under fake timers", (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
-
+	it("timeout fires deterministically under fake timers", () => {
 		const h = makeManager();
 		const SESSION = freshSession();
 		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
@@ -160,7 +160,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		h.mgr.registerWait(SESSION, controller);
 
 		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 50, controller.signal);
-		await vi.advanceTimersByTimeAsync(50);
+		h.clock.advance(50);
 
 		return waitPromise.then((result) => {
 			assert.ok(result);
@@ -172,8 +172,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		});
 	});
 
-	it("does not leak abort listeners across many cycles", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
+	it("does not leak abort listeners across many cycles", async () => {
 		const h = makeManager();
 		const SESSION = freshSession();
 		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
@@ -196,7 +195,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		for (let i = 0; i < 200; i++) {
 			const p = h.mgr.waitForExit(SESSION, info.id, 1, signal);
 			await Promise.resolve();
-			await vi.advanceTimersByTimeAsync(1);
+			h.clock.advance(1);
 			await p;
 		}
 
@@ -261,9 +260,7 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 		assert.equal(result, null);
 	});
 
-	it("pre-aborted signal returns immediately without arming the timer", (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
-
+	it("pre-aborted signal returns immediately without arming the timer", () => {
 		const h = makeManager();
 		const SESSION = freshSession();
 		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
@@ -275,7 +272,9 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 			assert.ok(result);
 			assert.equal(result!.aborted, true);
 			assert.equal(result!.timedOut, false);
-			await vi.runAllTimersAsync();
+			// Drain past the would-be timeout window; a bounded advance avoids draining
+			// the self-rescheduling status-poll interval forever (runAll would loop).
+			h.clock.advance(10_000);
 			h.mgr.cleanup(SESSION);
 		});
 	});

@@ -3,6 +3,11 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 /**
  * Unit tests for server-module worker isolation
  * (src/server/extension-host/module-host-worker.ts + module-host-bootstrap.ts +
@@ -260,7 +265,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 	it("a pack module importing a SIBLING within its pack root resolves", async () => {
 		const dir = packDir();
 		writeInDir(dir, "helper.mjs", `export const v = 42;`);
-		const url = writeInDir(dir, "entry.mjs", `import { v } from "../../tests/helper.mjs";\nexport const actions = { run: async () => v };`);
+		const url = writeInDir(dir, "entry.mjs", `import { v } from "./helper.mjs";\nexport const actions = { run: async () => v };`);
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
 			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, dir)), 42);
@@ -278,7 +283,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 		const url = writeInDir(
 			path.join(root, "tools", "demo"),
 			"actions.mjs",
-			`import { v } from "../../../lib/helper.mjs";\nexport const actions = { run: async () => v };`,
+			`import { v } from "../../lib/helper.mjs";\nexport const actions = { run: async () => v };`,
 		);
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
@@ -293,7 +298,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 		const dir = packDir();
 		// The escape target lives in `tmp`, OUTSIDE the pack root `dir`.
 		fs.writeFileSync(path.join(tmp, `outside-rel-${caseSeq}.mjs`), `export const x = "stolen";`);
-		const url = writeInDir(dir, "entry.mjs", `import { x } from "../../outside-rel-${caseSeq}.mjs";\nexport const actions = { run: async () => x };`);
+		const url = writeInDir(dir, "entry.mjs", `import { x } from "../outside-rel-${caseSeq}.mjs";\nexport const actions = { run: async () => x };`);
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
 			await assert.rejects(
@@ -337,7 +342,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 			t.skip("symlink creation not permitted on this platform");
 			return;
 		}
-		const url = writeInDir(dir, "entry.mjs", `import { s } from "../../tests/link.mjs";\nexport const actions = { run: async () => s };`);
+		const url = writeInDir(dir, "entry.mjs", `import { s } from "./link.mjs";\nexport const actions = { run: async () => s };`);
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
 			await assert.rejects(
@@ -358,7 +363,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 			assert.equal(await mh.invoke(req(okUrl, "run", bareCtx(), {}, dir)), "function");
 			// But module-import containment still rejects a file: escape out of the pack root.
 			fs.writeFileSync(path.join(tmp, `escape-${caseSeq}.mjs`), `export const x = "stolen";`);
-			const escUrl = writeInDir(dir, "entry-escape.mjs", `import { x } from "../../escape-${caseSeq}.mjs";\nexport const actions = { run: async () => x };`);
+			const escUrl = writeInDir(dir, "entry-escape.mjs", `import { x } from "../escape-${caseSeq}.mjs";\nexport const actions = { run: async () => x };`);
 			await assert.rejects(
 				() => mh.invoke(req(escUrl, "run", bareCtx(), {}, dir)),
 				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),

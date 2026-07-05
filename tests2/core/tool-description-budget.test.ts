@@ -3,6 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Tool description byte-budget — pinning test for the "Tighten tool descriptions"
  * goal. Every byte in `tool.description` and every nested JSON Schema property

@@ -3,6 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import { describe, it } from "vitest";
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";

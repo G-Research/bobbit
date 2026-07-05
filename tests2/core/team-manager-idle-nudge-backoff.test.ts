@@ -3,6 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: mock.method has no 1:1 vi.* mapping — review timers/module/method/reset semantics | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 // Reproducing test for the idle-nudge backoff bug in TeamManager.
 //
 // Bug: subscribeTeamLeadEvents() calls clearIdleNudgeTimer(goalId) on every

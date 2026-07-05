@@ -105,7 +105,7 @@ export default async function (pi) {
 		const dir = tempDir();
 		try {
 			write(path.join(dir, "helper.ts"), "export const toolName: string = 'ts_tool';\n");
-			const entry = write(path.join(dir, "extension.ts"), "import { toolName } from '../../tests/helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName, description: 'from ts' }); }\n");
+			const entry = write(path.join(dir, "extension.ts"), "import { toolName } from './helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName, description: 'from ts' }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "ok", result.diagnostic?.message);
 			assert.deepEqual(result.tools.map((tool) => tool.name), ["ts_tool"]);
@@ -119,7 +119,7 @@ export default async function (pi) {
 		const dir = tempDir();
 		try {
 			write(path.join(dir, "helper.js"), "module.exports = { toolName: 'local_cjs_tool' };\n");
-			const entry = write(path.join(dir, "extension.ts"), "const { toolName } = require('../../tests/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const entry = write(path.join(dir, "extension.ts"), "const { toolName } = require('./helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "ok", result.diagnostic?.message);
 			assert.deepEqual(result.tools.map((tool) => tool.name), ["local_cjs_tool"]);
@@ -133,7 +133,7 @@ export default async function (pi) {
 		try {
 			const extensionRoot = path.join(dir, "pi-extensions", "demo");
 			const outsideHelper = write(path.join(dir, "outside", "helper.ts"), "export const toolName = 'outside_tool';\n");
-			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from '../../../outside/helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from '../../outside/helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
@@ -159,7 +159,7 @@ export default async function (pi) {
 			} catch {
 				return;
 			}
-			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from '../../tests/linked-helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from './linked-helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
@@ -175,12 +175,12 @@ export default async function (pi) {
 			write(path.join(dir, "outside", "data.json"), JSON.stringify({ toolName: "outside_json_tool" }));
 			write(path.join(dir, "outside", "helper.js"), "module.exports = { toolName: 'outside_js_tool' };\n");
 
-			const jsonEntry = write(path.join(extensionRoot, "json-require.ts"), "const data = require('../../../outside/data.json');\nexport default function (pi: any): void { pi.registerTool({ name: data.toolName }); }\n");
+			const jsonEntry = write(path.join(extensionRoot, "json-require.ts"), "const data = require('../../outside/data.json');\nexport default function (pi: any): void { pi.registerTool({ name: data.toolName }); }\n");
 			const jsonResult = discoverPiExtensionToolsSync(jsonEntry, { trustAccepted: true });
 			assert.equal(jsonResult.status, "failed");
 			assert.equal(jsonResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
 
-			const jsEntry = write(path.join(extensionRoot, "js-require.ts"), "const helper = require('../../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
+			const jsEntry = write(path.join(extensionRoot, "js-require.ts"), "const helper = require('../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
 			const jsResult = discoverPiExtensionToolsSync(jsEntry, { trustAccepted: true });
 			assert.equal(jsResult.status, "failed");
 			assert.equal(jsResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
@@ -219,7 +219,7 @@ export default async function (pi) {
 			} catch {
 				return;
 			}
-			const entry = write(path.join(extensionRoot, "extension.ts"), "const helper = require('../../tests/linked-helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "const helper = require('./linked-helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
 			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
@@ -421,7 +421,7 @@ export default async function (pi) {
 	it("changes cache keys when local helper sources change", () => {
 		const dir = tempDir();
 		try {
-			const entry = write(path.join(dir, "extension.mjs"), "import '../../tests/helper.js'; export default function () {}\n");
+			const entry = write(path.join(dir, "extension.mjs"), "import './helper.js'; export default function () {}\n");
 			const helper = write(path.join(dir, "helper.js"), "export const value = 1;\n");
 			const first = computePiExtensionDiscoveryCacheKey(entry);
 			fs.writeFileSync(helper, "export const value = 2;\n", "utf-8");

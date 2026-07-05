@@ -3,6 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Unit tests for CostTracker — per-session token/cost accounting with disk persistence.
  * Uses a temp directory via BOBBIT_DIR env var to isolate from real state.

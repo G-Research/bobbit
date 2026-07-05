@@ -3,6 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 /**
  * Tests for `CostTracker.backfillGoalIds` — one-shot lazy migration that
  * stamps `goalId` onto legacy cost entries from a resolver (typically

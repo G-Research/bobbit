@@ -4,6 +4,9 @@
 // Review: mutates process.env — wrapped in withEnv(patch, fn) so BOBBIT_DIR /
 // BOBBIT_SECRETS_DIR are restored in a finally (forks are shared, isolate:false).
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert";
 import fs from "node:fs";

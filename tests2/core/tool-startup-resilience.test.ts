@@ -105,7 +105,7 @@ describe("tool startup resilience", () => {
 			description: "broken config session prompt override",
 		});
 		writeFile(fixture.configAgentExtension, [
-			"import '../../tests/missing-local-gateway.js';",
+			"import './missing-local-gateway.js';",
 			"export default function extension() { return {}; }",
 			"",
 		].join("\n"));
@@ -174,7 +174,7 @@ describe("tool startup resilience", () => {
 			description: "broken config session prompt override",
 		});
 		writeFile(fixture.configAgentExtension, [
-			"import '../../tests/missing-local-gateway.js';",
+			"import './missing-local-gateway.js';",
 			"export default function extension() { return {}; }",
 			"",
 		].join("\n"));
@@ -270,7 +270,7 @@ describe("tool startup resilience", () => {
 			provider: "provider:\n  type: bobbit-extension\n  extension: valid-extension.ts",
 		});
 		writeFile(fixture.configAgentExtension, [
-			"import '../../tests/missing-local-gateway.js';",
+			"import './missing-local-gateway.js';",
 			"export default function extension() { return {}; }",
 			"",
 		].join("\n"));
@@ -359,7 +359,7 @@ describe("tool startup resilience", () => {
 			provider: "provider:\n  type: bobbit-extension\n  extension: extension.ts",
 		});
 		writeFile(customExtension, [
-			"import '../../tests/missing-local-helper.js';",
+			"import './missing-local-helper.js';",
 			"export default function extension() { return {}; }",
 			"",
 		].join("\n"));

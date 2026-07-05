@@ -42,7 +42,7 @@ describe("Pi AI Bedrock headers patch compatibility", () => {
 		const alreadyPatched = before.includes(PATCH_MARKER);
 		if (!alreadyPatched) {
 			assert.ok(
-				before.includes(`import { transformMessages } from "../../tests/transform-messages.js";\n`),
+				before.includes(`import { transformMessages } from "./transform-messages.js";\n`),
 				"pi-ai amazon-bedrock.js import anchor changed before Bobbit patch could apply",
 			);
 			assert.ok(

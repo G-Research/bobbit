@@ -2,6 +2,11 @@
 // Source: tests/extension-host-channel-registry.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";

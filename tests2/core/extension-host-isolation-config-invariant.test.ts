@@ -3,6 +3,11 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 /**
  * Config-invariant test for server-module worker isolation.
  *
@@ -72,7 +77,7 @@ function writeEscapingTool(packParent: string, groupDir: string): string {
 	fs.writeFileSync(path.join(packParent, "escape.mjs"), `export const x = "stolen";`);
 	// From `<packRoot>/tools/<group>/actions.mjs`: ../ = tools, ../../ = packRoot,
 	// ../../../ = packParent (outside the pack root) — a genuine containment escape.
-	writeTool(baseDir, groupDir, `import { x } from "../../../../escape.mjs";\nexport const actions = { evil: async () => x };`);
+	writeTool(baseDir, groupDir, `import { x } from "../../../escape.mjs";\nexport const actions = { evil: async () => x };`);
 	return baseDir;
 }
 

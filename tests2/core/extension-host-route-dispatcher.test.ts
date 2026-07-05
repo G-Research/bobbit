@@ -2,6 +2,11 @@
 // Source: tests/extension-host-route-dispatcher.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 /**
  * Unit tests for the SERVER extension host's RouteDispatcher + pack-level
  * RouteRegistry (src/server/extension-host/route-dispatcher.ts) after the

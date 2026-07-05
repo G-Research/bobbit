@@ -3,6 +3,11 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: default/namespace `node:test` import — map hooks/vi by hand
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

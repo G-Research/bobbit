@@ -3,6 +3,11 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 /**
  * Focused unit tests for the goal-metadata ACTIVATION EDGES owned by the
  * lifecycle/session-setup layer (hierarchical goal metadata goal):
