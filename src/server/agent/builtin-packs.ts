@@ -43,13 +43,11 @@ export const BUILTIN_PACK_SCOPE = "server" as const;
  * carries the built `lib/` bundles) without touching dist.
  */
 export function resolveBuiltinPacksDir(override?: string): string {
-	if (override) return override;
-	if (process.env.BOBBIT_BUILTIN_PACKS_DIR) return process.env.BOBBIT_BUILTIN_PACKS_DIR;
-	// Default: dist/server/agent/ → ../builtin-packs/market-packs.
-	const distPath = path.join(__dirname, "..", "builtin-packs", "market-packs");
-	if (fs.existsSync(distPath)) return distPath;
-	// Source/test run (src/server/agent/): fall back to the repo-root market-packs.
-	return path.join(__dirname, "..", "..", "..", "market-packs");
+	return (
+		override ??
+		process.env.BOBBIT_BUILTIN_PACKS_DIR ??
+		path.join(__dirname, "..", "builtin-packs", "market-packs")
+	);
 }
 
 /**
