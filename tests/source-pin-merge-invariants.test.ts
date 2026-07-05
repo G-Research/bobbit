@@ -663,4 +663,31 @@ describe("Source pin — merge-loss invariants", () => {
 			"tests/session-setup-claude-code-preexisting.test.ts.",
 		);
 	});
+	it("verification-harness.ts filters claude-code review models before set_model/initialModel (restored by the w2-review-model-filter-restore fix, Finding W2.N-b)", () => {
+		const text = read("src/server/agent/verification-harness.ts");
+		assert.ok(
+			text.includes("export function isClaudeCodeReviewModel(")
+			&& text.includes("export function resolvePiBackedReviewInitialModel(")
+			&& text.includes("export function filterPiBackedReviewModelForSetModel(")
+			&& (text.match(/const _pre\w*InitialModel = resolvePiBackedReviewInitialModel\(/g) ?? []).length === 3
+			&& (text.match(/const piRoleModel_[rqs] = filterPiBackedReviewModelForSetModel\(roleModel_[rqs]\);/g) ?? []).length === 3
+			&& (text.match(/const reviewModelPref = filterPiBackedReviewModelForSetModel\(this\.preferencesStore\.get\("default\.reviewModel"\) as string \| undefined\);/g) ?? []).length === 3,
+			"src/server/agent/verification-harness.ts must filter claude-code/* runtime model\n" +
+			"selections out of every Pi-backed review/QA spawn path (reviewer, agent-qa, and\n" +
+			"the legacy direct sub-session) before they reach spawn-time initialModel,\n" +
+			"applyModelString, or applyReviewModelOverrides. Without this filter a\n" +
+			"claude-code/* role model or default.reviewModel preference silently spawns the\n" +
+			"Claude Code runtime for a verification session or sends Pi an unsupported\n" +
+			"`set_model claude-code/*` command, hard-failing the gate. Originally added by\n" +
+			"58f720cf alongside the resolvePreExistingTranscriptSetupMode hunk pinned above\n" +
+			"(same commit, session-setup.ts); silently dropped by the same merge commit\n" +
+			"b687d93d, but in this file (verification-harness.ts had 7 references to\n" +
+			"filterPiBackedReviewModelForSetModel on the first parent, 0 on the merge\n" +
+			"result); restored by the w2-review-model-filter-restore fix (Finding W2.N-b, the\n" +
+			"second half of the 58f720cf silent merge-drop, W2.N-a being the session-setup.ts\n" +
+			"restore above). DO NOT delete this pin — restore the dropped filtering instead.\n" +
+			"Independently pinned by the behavioural tests in\n" +
+			"tests/verification-runtime-filter.test.ts.",
+		);
+	});
 });
