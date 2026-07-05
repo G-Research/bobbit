@@ -9,7 +9,7 @@ __syncBeforeAll(() => __syncCE());
 // entry's window helpers + fetch mock as module functions. Playwright `:visible`
 // has no meaning under happy-dom (no layout); hidden/diagnostic rows are gated by
 // conditional rendering, so we assert element presence/absence + fetchLog instead.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let render: typeof import("lit").render;
 let renderSettingsPage: typeof import("../../../src/app/settings-page.js").renderSettingsPage;
@@ -185,6 +185,12 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
+// The render callback is installed once in beforeAll, so it must be neutralized
+// once here (not per-test) — otherwise a debounced straggler render scheduled by
+// this file fires doRender into a torn-down / foreign container under
+// isolate:false (the state module is shared across files).
+afterAll(() => { setRenderApp(() => {}); });
+
 describe("Maintenance tab fixture (v2-dom)", () => {
 	it("renders maintenance sections with worktree cleanup disabled before scan", async () => {
 		await setupMaintenance();
@@ -258,13 +264,32 @@ describe("Maintenance tab fixture (v2-dom)", () => {
 		const card = worktreeCard();
 
 		const cbSel = (id: string) => `[data-worktree-id="${id}"] input[type="checkbox"]`;
+		const getScans = () => fetchLog.filter((e) => e.method === "GET" && e.url === "/api/maintenance/worktrees").length;
 		testid("worktree-cleanup-scan", card)!.click();
+		// worktreeInventoryReport is module-scoped (shared across this file's tests under
+		// isolate:false), so setupMaintenance renders the PRIOR test's stale rows before
+		// this scan's GET resolves. Waiting only for arch-alpha's presence would pass
+		// immediately on that stale row and let the scan's late-resolving GET clobber the
+		// post-cleanup rescan (re-adding arch-alpha). Wait for THIS scan's GET to be issued
+		// and its report/selection update to fully settle first.
+		await waitFor(() => getScans() >= 1);
+		await settle();
+		await settle();
 		await waitFor(() => !!worktreeCard().querySelector(cbSel("arch-alpha")));
 		// Clear any (default) selection, then select ONLY arch-alpha, so the POST
 		// carries exactly its id regardless of the shared default-selection state.
 		testid("worktree-cleanup-clear-selection", worktreeCard())!.click();
 		await waitFor(() => (worktreeCard().querySelector(cbSel("arch-alpha")) as HTMLInputElement | null)?.checked === false);
-		(worktreeCard().querySelector(cbSel("arch-alpha")) as HTMLElement).click();
+		// The row checkbox is bound to the @change handler (toggleWorktreeInventorySelection).
+		// happy-dom's HTMLInputElement.click() flips `.checked` but does NOT fire the
+		// `change` event, so the selection Set would stay empty and cleanup-selected
+		// would no-op. Drive the real handler explicitly (guide's checkbox pattern).
+		const archCb = worktreeCard().querySelector(cbSel("arch-alpha")) as HTMLInputElement;
+		archCb.checked = true;
+		archCb.dispatchEvent(new Event("change", { bubbles: true }));
+		// Let the @change handler's debounced renderApp() flush so the selection is
+		// stable and reflected in the card before we trigger the cleanup POST.
+		await settle();
 		await waitFor(() => (worktreeCard().querySelector(cbSel("arch-alpha")) as HTMLInputElement | null)?.checked === true);
 		(worktreeCard().querySelector('[data-action="cleanup-selected-worktrees"]') as HTMLElement).click();
 

@@ -109,6 +109,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// Neutralize the shared renderApp callback so a rAF-debounced straggler
+	// scheduled by this file cannot fire *another* file's renderer into a
+	// torn-down / foreign container (isolate:false shares the state module).
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 });

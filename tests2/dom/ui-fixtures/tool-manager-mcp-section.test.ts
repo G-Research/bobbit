@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
 import { clearToolPageState, loadToolPageData, renderToolManagerPage } from "../../../src/app/tool-manager-page.js";
 import { setRenderApp } from "../../../src/app/state.js";
+import { setConfigScope } from "../../../src/app/config-scope.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
 
@@ -154,9 +155,14 @@ beforeEach(() => {
 	document.body.appendChild(div);
 	installFetch();
 	setRenderApp(doRender);
+	// Defend against a leaked config scope from a prior file (e.g.
+	// goal-workflow-editor sets a project scope): this fixture asserts the
+	// "system"/headquarters default projectId in its policy PUT payloads.
+	setConfigScope("system");
 });
 
 afterEach(() => {
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 	mcpServers = [];

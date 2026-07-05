@@ -67,6 +67,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 	localStorage.clear();

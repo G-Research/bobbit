@@ -7,7 +7,7 @@ __syncBeforeAll(() => __syncCE());
 // + search-status-dot) into #app and drives it via a mocked /api/search/* and
 // window `bobbit-index-event` CustomEvents. This port imports the SAME real modules
 // and replicates the entry's window helpers + fetch mock as module functions.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let render: typeof import("lit").render;
 let renderSettingsPage: typeof import("../../../src/app/settings-page.js").renderSettingsPage;
@@ -132,6 +132,12 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 });
+
+// The render callback is installed once in beforeAll, so it must be neutralized
+// once here (not per-test) — otherwise a debounced straggler render scheduled by
+// this file fires doRender into a torn-down / foreign container under
+// isolate:false (the state module is shared across files).
+afterAll(() => { setRenderApp(() => {}); });
 
 describe("Search Index maintenance panel fixture (v2-dom)", () => {
 	it("renders stats and section headings", async () => {

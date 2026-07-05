@@ -7,7 +7,7 @@ __syncBeforeAll(() => __syncCE());
 // modal path (dialogs.showOAuthExpiryModal via dialogs-lazy) plus the Account-tab
 // re-auth flow. This port imports the SAME real modules and replicates the entry's
 // window helpers + fetch mock as module functions under happy-dom.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let authenticateGateway: typeof import("../../../src/app/session-manager.js").authenticateGateway;
 let renderAccountTab: typeof import("../../../src/app/settings-page.js").renderAccountTab;
@@ -193,6 +193,12 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 	window.location.hash = "";
 });
+
+// The render callback is installed once in beforeAll, so it must be neutralized
+// once here (not per-test) — otherwise a debounced straggler render scheduled by
+// this file fires renderAccountFixture into a torn-down / foreign container
+// under isolate:false (the state module is shared across files).
+afterAll(() => { setRenderApp(() => {}); });
 
 describe("OAuth expiry modal fixture (v2-dom)", () => {
 	const expired = (expires: number): OAuthStatus => ({ authenticated: false, expires });

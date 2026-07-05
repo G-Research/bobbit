@@ -112,6 +112,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 	prefsStore = {};

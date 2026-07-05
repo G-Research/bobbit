@@ -9,7 +9,7 @@ __syncBeforeAll(() => __syncCE());
 // helpers as module functions. The gate/step bodies are ALWAYS in the DOM (expand
 // is CSS-only, no layout under happy-dom), so we assert element presence/absence +
 // values + the captured PUT payload rather than Playwright CSS visibility.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let render: typeof import("lit").render;
 let renderWorkflowPage: typeof import("../../../src/app/workflow-page.js").renderWorkflowPage;
@@ -157,9 +157,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// Restore the shared config scope: setConfigScope(PROJECT_ID) in setup mutates
+	// a module-global in config-scope.js that would otherwise leak "fixture-project"
+	// into later files (e.g. tool-manager, which expects the "system" default).
+	setConfigScope("system");
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 });
+
+// The render callback is installed once in beforeAll, so it must be neutralized
+// once here (not per-test) — otherwise a debounced straggler render scheduled by
+// this file fires doRender into a torn-down / foreign container under
+// isolate:false (the state module is shared across files).
+afterAll(() => { setRenderApp(() => {}); });
 
 describe("Goal/workflow editor fixture (v2-dom)", () => {
 	it("agent-qa type shows prompt textarea and hides command-only controls", async () => {

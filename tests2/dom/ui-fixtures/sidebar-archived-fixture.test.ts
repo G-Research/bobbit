@@ -294,6 +294,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// Prevent a debounced straggler render from firing renderFixture into a
+	// torn-down / foreign container under isolate:false (shared state module).
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 	restoreCanvas();
