@@ -106,6 +106,13 @@ export interface InstalledPackWire {
 	sourceStatus: "ok" | "unknown";
 	/** Source-level diagnostics for gateway entries skipped while preserving install/update compatibility. */
 	mcpGatewayDiagnostics?: MarketplaceMcpGatewayDiagnostics;
+	/** Mirrors `manifest.defaultDisabled`: the pack ships DORMANT (default-disabled)
+	 *  and resolves with all entities de-activated until explicitly enabled or
+	 *  already configured. Stable wire field the Marketplace UI keys on. */
+	defaultDisabled?: boolean;
+	/** UI intent alias of {@link defaultDisabled}: enabling a default-disabled pack
+	 *  should route through the guided setup wizard rather than a bare toggle. */
+	requiresGuidedSetup?: boolean;
 }
 
 /** Coded error so the REST layer can map to HTTP statuses. */
@@ -829,7 +836,16 @@ export class MarketplaceInstaller {
 				const manifest = readManifest(dir);
 				const meta = readMeta(dir);
 				if (manifest && meta) {
-					rows.set(d.name, { scope: c.scope, packName: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta) });
+					rows.set(d.name, {
+						scope: c.scope,
+						packName: d.name,
+						manifest,
+						meta,
+						status: "ok",
+						...this.computeSourceState(meta),
+						defaultDisabled: manifest.defaultDisabled === true,
+						requiresGuidedSetup: manifest.defaultDisabled === true,
+					});
 				} else if (manifest || meta) {
 					// Partial / corrupt install — surface so the UI can offer cleanup.
 					// Corrupt rows never offer an update and report an unknown source.
