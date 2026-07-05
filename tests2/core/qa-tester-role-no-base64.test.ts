@@ -25,7 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const roleFile = path.resolve(__dirname, "../defaults/roles/qa-tester.yaml");
+const roleFile = path.resolve(__dirname, "../../defaults/roles/qa-tester.yaml");
 
 test("qa-tester.yaml does not instruct the agent to embed base64 / data URIs", () => {
 	const text = fs.readFileSync(roleFile, "utf-8");

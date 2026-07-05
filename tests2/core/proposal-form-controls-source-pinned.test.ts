@@ -33,7 +33,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RENDER_TS = path.join(__dirname, "..", "src", "app", "proposal-panels.ts");
+const RENDER_TS = path.join(__dirname, "..", "..", "src", "app", "proposal-panels.ts");
 
 describe("Goal proposal modal — subgoal controls source-pin", () => {
 	it("proposal-panels.ts contains goal-form-subgoals-toggle test id", () => {

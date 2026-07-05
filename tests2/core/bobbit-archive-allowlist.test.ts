@@ -21,9 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { GATEWAY_OWNED_FILES } from "../../src/server/agent/bobbit-archive.js";
 
-const SERVER_DIR = path.join(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
+const SERVER_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..",
 	"src",
 	"server",
 );

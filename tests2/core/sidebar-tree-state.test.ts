@@ -2,7 +2,7 @@
 // Source: tests/sidebar-tree-state.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { sidebarTreeKey } from "../../src/app/sidebar-tree-builder.ts";
 import type { SidebarTreeNodeKey } from "../../src/app/sidebar-tree-builder.ts";
@@ -34,8 +34,11 @@ function installStorage(initial?: Record<string, string>): FakeStorage {
 	return fake;
 }
 
-async function importFresh(tag: string): Promise<typeof import("../../src/app/sidebar-tree-state.ts")> {
-	return await import(/* @vite-ignore */ `../../src/app/sidebar-tree-state.ts?${tag}-${Date.now()}-${Math.random()}`);
+async function importFresh(_tag: string): Promise<typeof import("../../src/app/sidebar-tree-state.ts")> {
+	// Re-execute module top-level (reads localStorage at init) via resetModules;
+	// vitest's module runner does not support query-string cache busting.
+	vi.resetModules();
+	return await import("../../src/app/sidebar-tree-state.ts");
 }
 
 function storedExpansion(store: Map<string, string>): Record<string, string> {

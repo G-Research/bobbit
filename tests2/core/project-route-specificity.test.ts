@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SERVER_PATH = path.join(__dirname, "..", "src", "server", "server.ts");
+const SERVER_PATH = path.join(__dirname, "..", "..", "src", "server", "server.ts");
 
 function findRegexClosingSlash(literal: string): number {
 	let escaped = false;

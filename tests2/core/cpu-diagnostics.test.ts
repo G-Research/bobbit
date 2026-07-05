@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { describe, it, afterEach } from "vitest";
+import { describe, it, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,8 +22,11 @@ function restoreEnv(): void {
 	}
 }
 
-async function importFresh(tag: string): Promise<typeof import("../../src/server/agent/cpu-diagnostics.ts")> {
-	return await import(/* @vite-ignore */ `../../src/server/agent/cpu-diagnostics.ts?${tag}-${Date.now()}-${Math.random()}`);
+async function importFresh(_tag: string): Promise<typeof import("../../src/server/agent/cpu-diagnostics.ts")> {
+	// Re-execute the module top-level (reads env at init) instead of query cache-
+	// busting, which vitest's module runner does not support.
+	vi.resetModules();
+	return await import("../../src/server/agent/cpu-diagnostics.ts");
 }
 
 function tempFile(name: string): { dir: string; file: string } {

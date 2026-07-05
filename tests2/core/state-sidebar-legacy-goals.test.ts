@@ -2,7 +2,7 @@
 // Source: tests/state-sidebar-legacy-goals.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { test, afterEach } from "vitest";
+import { test, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { sidebarTreeKey } from "../../src/app/sidebar-tree-builder.ts";
 
@@ -62,7 +62,10 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	const { store } = installBrowserGlobals({
 		[LEGACY_EXPANDED_GOALS_KEY]: JSON.stringify(["goal-live", "goal-archived"]),
 	});
-	const stateModule = await import(/* @vite-ignore */ `../../src/app/state.ts?legacy-goals-${Date.now()}-${Math.random()}`);
+	// Fresh state.ts (reads localStorage at init); its internal sidebar-tree-state
+	// dep is the SAME registry instance the test imports next (shared, not reset).
+	vi.resetModules();
+	const stateModule = await import("../../src/app/state.ts");
 	const sidebarTreeState = await import("../../src/app/sidebar-tree-state.js");
 
 	assert.equal(sidebarTreeState.isGoalExpanded("goal-live"), true, "legacy expanded goal should migrate initially");
@@ -81,7 +84,11 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	);
 	assert.equal(storedUnifiedExpansion(store)[sidebarTreeKey({ kind: "goal", goalId: "goal-live" })], "collapsed");
 
-	const reloadedSidebarTreeState = await import(/* @vite-ignore */ `../../src/app/sidebar-tree-state.ts?legacy-goals-reload-${Date.now()}-${Math.random()}`);
+	// Simulate a page reload: a fresh sidebar-tree-state instance re-reading storage.
+	// resetModules only affects FUTURE imports; the already-captured stateModule /
+	// sidebarTreeState references stay live.
+	vi.resetModules();
+	const reloadedSidebarTreeState = await import("../../src/app/sidebar-tree-state.ts");
 	assert.equal(reloadedSidebarTreeState.isGoalExpanded("goal-live"), false, "stale legacy expansion must not override stored unified collapse on reload");
 	assert.equal(reloadedSidebarTreeState.getSidebarTreePreference({ kind: "goal", goalId: "goal-live" }), "collapsed");
 

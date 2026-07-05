@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-const ROOT = join(import.meta.dirname ?? ".", "..");
+const ROOT = join(import.meta.dirname ?? ".", "..", "..");
 const SCAN_DIRS = [
 	join(ROOT, "src", "server", "agent"),
 	join(ROOT, "src", "app"),

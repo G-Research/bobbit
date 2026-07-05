@@ -27,7 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.join(__dirname, "..");
+const REPO_ROOT = path.join(__dirname, "..", "..");
 const read = (p: string) => fs.readFileSync(path.join(REPO_ROOT, p), "utf-8");
 
 function assertTextInOrder(text: string, needles: string[], message: string): void {

@@ -37,7 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SERVER_TS = path.join(__dirname, "..", "src", "server", "server.ts");
+const SERVER_TS = path.join(__dirname, "..", "..", "src", "server", "server.ts");
 
 describe("Server boot — Subgoals feature gate wiring", () => {
 	it("server.ts calls groupPolicyStore.setSubgoalsEnabledGetter at boot", () => {

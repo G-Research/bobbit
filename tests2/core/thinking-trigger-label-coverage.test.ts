@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { THINKING_LEVELS } from "../../src/shared/thinking-levels.js";
 
-const ROOT = join(import.meta.dirname ?? ".", "..");
+const ROOT = join(import.meta.dirname ?? ".", "..", "..");
 const SRC = join(ROOT, "src", "ui", "components", "AgentInterface.ts");
 
 function extractFunctionBody(src: string, name: string): string {

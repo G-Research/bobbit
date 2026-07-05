@@ -20,6 +20,21 @@ import {
 	publishClientStatus,
 } from "../../src/app/session-event-bus.ts";
 
+// vitest's node environment does not expose the CustomEvent global that
+// src/app/session-event-bus.ts uses inside its publish helpers; provide the
+// standard constructor. (Used only at publish time, so defining it here — after
+// the module import — is early enough.)
+if (typeof (globalThis as { CustomEvent?: unknown }).CustomEvent !== "function") {
+	class CustomEventPolyfill<T = unknown> extends Event {
+		readonly detail: T;
+		constructor(type: string, init?: EventInit & { detail?: T }) {
+			super(type, init);
+			this.detail = init?.detail as T;
+		}
+	}
+	(globalThis as { CustomEvent?: unknown }).CustomEvent = CustomEventPolyfill;
+}
+
 describe("subscribeHostSessionEvent — own-session scoping (cross-session leak fix)", () => {
 	it("a BOUND subscriber receives ONLY its own session's events", () => {
 		const seen: string[] = [];

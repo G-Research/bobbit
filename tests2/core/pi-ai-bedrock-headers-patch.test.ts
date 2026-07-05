@@ -14,15 +14,18 @@ import { ensurePiAiBedrockHeadersPatch } from "../../src/server/agent/pi-ai-bedr
 const PATCH_MARKER = "bobbit-pi-ai-bedrock-headers-patch-v1";
 
 function packageRootFromResolved(specifier: string): string {
-	const resolved = createRequire(import.meta.url).resolve(specifier);
-	let dir = path.dirname(resolved);
+	// pi-ai exposes import-condition-only exports; vitest strips import.meta.resolve
+	// and createRequire.resolve can't see import-only exports. Locate the installed
+	// package dir by walking node_modules from cwd (equivalent to the real root).
+	let dir = process.cwd();
 	while (true) {
-		if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+		const cand = path.join(dir, "node_modules", specifier);
+		if (fs.existsSync(path.join(cand, "package.json"))) return cand;
 		const parent = path.dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
 	}
-	throw new Error(`Could not find package root for ${specifier} from ${resolved}`);
+	throw new Error(`Could not find package root for ${specifier} under any node_modules`);
 }
 
 function installedAmazonBedrockProviderFile(): string {
