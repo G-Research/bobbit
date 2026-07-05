@@ -102,7 +102,7 @@ import { isSessionSelectableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import type { Decision } from "./decision-types.js";
-import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID } from "./thinking-router-classifier.js";
+import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID, isThinkingRouterApplyMode } from "./thinking-router-classifier.js";
 import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND, isToolApproveEnforceMode, isAutoDenyDecision, type ToolApproveVerdict } from "./tool-approve-classifier.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -444,6 +444,18 @@ export interface SessionInfo {
 	spawnPinnedModel?: string;
 	/** Thinking level passed via `--thinking` at spawn time, if any. */
 	spawnPinnedThinkingLevel?: string;
+	/**
+	 * CLF-W3 — true only when the user EXPLICITLY changed this session's
+	 * thinking level via the `set_thinking_level` ws action (ws/handler.ts) —
+	 * never set by spawn-time role/preference resolution, which also writes
+	 * `spawnPinnedThinkingLevel` but is not a human decision. Consulted by
+	 * `canApplyThinkingRouterDecision` so the F14 thinking-router's apply mode
+	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`) can never silently override a
+	 * setting the user picked on purpose. In-memory only — does not currently
+	 * survive a session restore/respawn (flagged as a known gap, not fixed
+	 * this wave; re-setting it is one click).
+	 */
+	thinkingLevelUserPinned?: boolean;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -3018,13 +3030,15 @@ export class SessionManager {
 	 * than letting the caller hold onto a stale reference.
 	 */
 	/**
-	 * CLF-W1b — consult the built-in F14 thinking-level router (registered at
-	 * construction, see `registerThinkingRouterClassifier` in `server.ts`) for
-	 * this submitted prompt. OBSERVE MODE ONLY: the caller must not apply the
-	 * returned `Decision` (no `setThinkingLevel`) — it exists purely so the
-	 * outcome gets traced (`dispatchDecision` → `ContextTraceStore.appendDecision`)
-	 * and, when the message goes on to be queued rather than dispatched
-	 * directly, can be stamped onto the `QueuedMessage` row for a later wave.
+	 * CLF-W1b/W3 — consult the built-in F14 thinking-level router (registered
+	 * at construction, see `registerThinkingRouterClassifier` in `server.ts`)
+	 * for this submitted prompt. The outcome is ALWAYS traced (`dispatchDecision`
+	 * → `ContextTraceStore.appendDecision`) and, when the message goes on to be
+	 * queued rather than dispatched directly, stamped onto the `QueuedMessage`
+	 * row. `applyIfSelected` (CLF-W3) is passed straight through to
+	 * `dispatchDecision`'s own `opts.applyIfSelected` so the recorded outcome's
+	 * `applied` field matches what the caller is ABOUT to do with a `select` —
+	 * this method itself never calls `setThinkingLevel`; see `enqueuePrompt`.
 	 *
 	 * Returns `undefined` (rather than throwing) when the (point,kind) pair
 	 * isn't registered on the hub (e.g. a bare test `LifecycleHub` built
@@ -3042,18 +3056,39 @@ export class SessionManager {
 	 * `rpcClient.prompt` was already called synchronously before the caller
 	 * awaits `enqueuePrompt`'s own returned promise.
 	 */
-	private async consultThinkingRouterHub(session: SessionInfo, text: string): Promise<Decision<ThinkingLevel> | undefined> {
+	private async consultThinkingRouterHub(session: SessionInfo, text: string, applyIfSelected: boolean): Promise<Decision<ThinkingLevel> | undefined> {
 		try {
 			return await this.lifecycleHub!.dispatchDecision<ThinkingLevel>(
 				THINKING_ROUTER_POINT,
 				THINKING_ROUTER_KIND,
 				{ sessionId: session.id, projectId: session.projectId, goalId: session.goalId, cwd: session.cwd },
 				{ text },
+				{ applyIfSelected },
 			);
 		} catch (err) {
 			console.warn(`[session-manager] thinking-router dispatchDecision failed for session ${session.id} (non-fatal, observe-mode only): ${err instanceof Error ? err.message : String(err)}`);
 			return undefined;
 		}
+	}
+
+	/**
+	 * CLF-W3 — precedence gate for the F14 thinking-router's apply mode
+	 * (`BOBBIT_CLF_THINKING_ROUTER=enforce`). The classifier's per-prompt
+	 * `select` must LOSE to any thinking-level config a human (or a role
+	 * author) already committed to:
+	 *   - a role-level `thinkingLevel` override (`resolveRoleThinkingLevel`) —
+	 *     the role author made an explicit, considered choice for this role;
+	 *   - `session.thinkingLevelUserPinned` — the user explicitly changed this
+	 *     session's thinking level via the composer's slider (`set_thinking_level`
+	 *     ws action), a deliberate in-session decision.
+	 * Neither is "the spawn-time default resolved to something" (role/pref
+	 * cascade with no explicit override) — that case has no human decision to
+	 * protect, so apply mode is free to route per-prompt as usual.
+	 */
+	private canApplyThinkingRouterDecision(session: SessionInfo): boolean {
+		if (session.thinkingLevelUserPinned) return false;
+		if (this.resolveRoleThinkingLevel(session)) return false;
+		return true;
 	}
 
 	/**
@@ -3125,19 +3160,17 @@ export class SessionManager {
 
 		session.lastPromptSource = opts?.source ?? "user";
 
-		// CLF-W1b — F14 thinking-level router, OBSERVE MODE ONLY. Consulted once
-		// per `enqueuePrompt` call (the single pre-dispatch funnel design doc §3
+		// CLF-W1b/W3 — F14 thinking-level router. Consulted once per
+		// `enqueuePrompt` call (the single pre-dispatch funnel design doc §3
 		// names — direct/queued/extension/steer paths all converge here), on the
 		// user's verbatim `text` (never `dispatchText`, since the keyword rules
 		// describe user intent, not model-facing/expanded content). The returned
-		// Decision is recorded into the transparency trace by `dispatchDecision`
-		// itself (`ContextTraceStore.appendDecision`) — NOTHING here applies it;
-		// the session's live thinking level is untouched this wave (design doc
-		// §10 Wave 1 vs Wave 2). Fail-open/non-fatal: absence of a hub, an
-		// unregistered (point,kind) pair (e.g. a bare test `LifecycleHub` that
-		// never wired the router), or any classifier error must never block a
-		// prompt from dispatching — see design doc §6.1 (advisory kinds default
-		// fail-open).
+		// Decision is ALWAYS recorded into the transparency trace by
+		// `dispatchDecision` itself (`ContextTraceStore.appendDecision`).
+		// Fail-open/non-fatal: absence of a hub, an unregistered (point,kind)
+		// pair (e.g. a bare test `LifecycleHub` that never wired the router), or
+		// any classifier error must never block a prompt from dispatching — see
+		// design doc §6.1 (advisory kinds default fail-open).
 		// Guarded HERE (not inside the helper): when there is no hub at all —
 		// true for the overwhelming majority of today's tests and any deployment
 		// that never wires one — this must introduce ZERO extra microtask ticks
@@ -3146,7 +3179,38 @@ export class SessionManager {
 		// yields at least once even if the awaited async function resolves
 		// synchronously, so the guard has to live outside the `await`, not just
 		// inside it.
-		const thinkingRouterDecision = this.lifecycleHub ? await this.consultThinkingRouterHub(session, text) : undefined;
+		let thinkingRouterDecision: Decision<ThinkingLevel> | undefined;
+		if (this.lifecycleHub) {
+			// CLF-W3 apply mode: whether we WILL apply a `select` is decided here,
+			// from the mode flag + precedence (role/user-pinned) ONLY — never from
+			// the classifier's actual choice, which doesn't exist yet. Passed into
+			// the consult so the recorded outcome's `applied` field matches what
+			// we're about to do below. Observe mode (absent/"observe") always
+			// resolves `canApplyThinking` to `false`, keeping this byte-identical
+			// to CLF-W1b when the flag isn't set.
+			const canApplyThinking = isThinkingRouterApplyMode() && this.canApplyThinkingRouterDecision(session);
+			thinkingRouterDecision = await this.consultThinkingRouterHub(session, text, canApplyThinking);
+			if (canApplyThinking && thinkingRouterDecision?.kind === "select") {
+				try {
+					// Clamp against the session's CURRENT bound model before applying —
+					// same defense-in-depth every other live setThinkingLevel call site
+					// uses (ws/handler.ts's set_thinking_level, tryApplyDefaultThinkingLevel)
+					// so a classifier "xhigh" select degrades gracefully on a model that
+					// doesn't support it instead of sending an unsupported level to the
+					// runtime. Falls back to the raw choice when no model is known yet.
+					let levelToApply: ThinkingLevel = thinkingRouterDecision.choice;
+					const persisted = this.resolveStoreForSession(session.id).get(session.id);
+					if (persisted?.modelId) {
+						const clamped = clampThinkingLevelForModel(levelToApply, persisted.modelProvider, persisted.modelId);
+						if (clamped) levelToApply = clamped;
+					}
+					await session.rpcClient.setThinkingLevel(levelToApply);
+					console.log(`[session-manager] CLF-W3 thinking-router APPLIED "${levelToApply}" for session ${session.id} (turn-scoped, not persisted)`);
+				} catch (err) {
+					console.warn(`[session-manager] CLF-W3 thinking-router apply failed for ${session.id} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			}
+		}
 		// Stamped onto the QueuedMessage row at BOTH enqueue call sites below
 		// (the queued-path fix) — data-only, read by no code yet.
 		const thinkingDecisionStamp: QueuedMessage["thinkingDecision"] = thinkingRouterDecision
