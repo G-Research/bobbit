@@ -191,6 +191,9 @@ export class ProjectContext {
     // the older epoch, tripping the stale-snapshot guard and silently dropping
     // every subsequent save (re-attach exit code + dismiss).
     this.bgProcessStore.flush();
+    // Flush the debounced cost-tracker save (PERF-01) so the last window of
+    // per-message cost/token counters isn't lost on a graceful shutdown.
+    this.costTracker.flush();
     await this.searchIndex.close();
   }
 }
