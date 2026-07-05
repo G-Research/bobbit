@@ -213,3 +213,111 @@ test.describe("Transparency Panel — real F14 thinking router (CLF-W1b)", () =>
 		await expect(rows).toContainText("matched deterministic rule 'ultrathink'");
 	});
 });
+
+/**
+ * CLF-W2: tool auto-approve/deny decision seam HARNESS at
+ * `SessionManager.requestToolGrant` (see
+ * `src/server/agent/tool-approve-classifier.ts`'s header for the full
+ * design). Unlike CLF-W1b's F14 router, `server.ts` registers NO production
+ * classifier at (tool-call, tool-approve) this wave — it only allow-lists the
+ * pair — so this test drives the fake-classifier pattern CLF-W1a's own test
+ * established, but against the REAL `requestToolGrant` production call site
+ * (not a direct `dispatchDecision` call) to prove the seam's observe-mode
+ * no-op end to end: a registered classifier's `select(deny)` decision must be
+ * recorded and visible in the panel, but must NOT auto-deny the tool ask —
+ * the ordinary human-ask long-poll flow still has to be resolved explicitly
+ * (`denyToolPermission`, mirroring a real "Deny" click).
+ */
+test.describe("Transparency Panel — tool-approve decision seam (CLF-W2, observe mode)", () => {
+	let sessionId = "";
+
+	test.afterEach(async () => {
+		if (sessionId) {
+			try {
+				await deleteSession(sessionId);
+			} catch {
+				/* best-effort cleanup */
+			}
+			sessionId = "";
+		}
+	});
+
+	test("a tool-approve select(deny) is recorded and rendered, but does not auto-deny in observe mode", async ({ page, gateway }) => {
+		sessionId = await createSession();
+
+		const hub = gateway.sessionManager?.lifecycleHub;
+		expect(hub).toBeTruthy();
+
+		// Register a fake classifier at the CLF-W2 (point, kind) pair — the
+		// same registration seam CLF-W0b/W1a's own tests use. No production
+		// code registers a classifier here (server.ts only allow-lists the
+		// pair — see tool-approve-classifier.ts); this simulates a future
+		// real classifier.
+		const unregister = hub.registerDecisionClassifier("tool-call", "tool-approve", {
+			id: "e2e-fake-tool-approve-classifier",
+			evaluate: () => ({ kind: "select", choice: "deny", rationale: 'deny tool "fake_tool" (group fake-group) — e2e fixture' }),
+		});
+
+		try {
+			// 1. Drive the REAL per-turn dispatch() call site — creates a real
+			// persisted TraceEntry (hook: "beforePrompt") for this session, same
+			// synthesis trick the CLF-W1a/W1b tests above use.
+			const beforePromptResp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
+				method: "POST",
+				body: JSON.stringify({ prompt: "hello" }),
+			});
+			expect(beforePromptResp.ok).toBe(true);
+
+			// 2. Drive the REAL production call site directly (in-process, no
+			// real agent/tool call needed): `requestToolGrant` awaits the seam
+			// consult before creating its pending-grant request, so poll for it
+			// rather than assuming synchronous timing (see
+			// tests/session-manager-tool-approve.test.ts's own
+			// `waitForPendingGrant` helper for why).
+			const grantPromise = gateway.sessionManager!.requestToolGrant(sessionId, "fake_tool", "fake-group");
+			await expect
+				.poll(() => gateway.sessionManager!.getSession(sessionId)?.pendingGrantRequest !== undefined, { timeout: 5_000 })
+				.toBe(true);
+
+			// Observe mode (default, no BOBBIT_CLF_TOOL_APPROVE): the classifier
+			// selected "deny", but requestToolGrant must NOT auto-apply it — the
+			// human-ask flow's promise stays pending until explicitly resolved,
+			// exactly like a real user clicking "Deny".
+			gateway.sessionManager!.denyToolPermission(sessionId, "fake_tool");
+			const result = await grantPromise;
+			expect(result).toEqual({ granted: false });
+
+			// 3. Drive the actual user-visible turn so the transcript has a user
+			// row to render the panel under.
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await sendMessage(page, "hello");
+			await waitForAgentResponse(page);
+
+			const toggle = page.locator('[data-testid="transparency-panel-toggle"]').first();
+			await expect(toggle).toBeVisible({ timeout: 15_000 });
+			// 2 decisions: this test's tool-approve fixture + the real F14
+			// router's own abstain, recorded by the production `enqueuePrompt`
+			// call site (CLF-W1b) — same two-decisions shape as the CLF-W1a test
+			// above, for the same reason.
+			await expect(toggle).toContainText("2 decisions");
+
+			await toggle.click();
+			const rows = page.locator('[data-testid="transparency-panel-rows"]');
+			await expect(rows).toBeVisible();
+			await expect(rows).toContainText("tool-call");
+			await expect(rows).toContainText("tool-approve");
+			await expect(rows).toContainText("selected: deny");
+
+			// Expand the row's own detail toggle for consulted id + rationale —
+			// the rationale is where a real classifier would name the tool,
+			// matched rule, and role (design doc's "full transparency, nothing
+			// hidden from users" program rule — see tool-approve-classifier.ts).
+			await page.locator('[data-testid="transparency-panel-row-toggle"]').first().click();
+			await expect(rows).toContainText("e2e-fake-tool-approve-classifier");
+			await expect(rows).toContainText('deny tool "fake_tool" (group fake-group)');
+		} finally {
+			unregister();
+		}
+	});
+});

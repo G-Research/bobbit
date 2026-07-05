@@ -78,6 +78,7 @@ import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import type { Decision } from "./decision-types.js";
 import { THINKING_ROUTER_POINT, THINKING_ROUTER_KIND, THINKING_ROUTER_CLASSIFIER_ID } from "./thinking-router-classifier.js";
+import { TOOL_APPROVE_POINT, TOOL_APPROVE_KIND, isToolApproveEnforceMode, isAutoDenyDecision, type ToolApproveVerdict } from "./tool-approve-classifier.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -4674,6 +4675,29 @@ export class SessionManager {
 	}
 
 	/**
+	 * CLF-W2 — consult the tool-approve decision seam (harness only, see
+	 * `tool-approve-classifier.ts`) for this tool-permission ask. Returns
+	 * `undefined` (rather than throwing) whenever the consult can't produce a
+	 * usable Decision — no hub, an unregistered (point,kind) pair, or the
+	 * classifier itself erroring — this consult must never block a tool ask
+	 * from reaching the human-approval flow. Mirrors
+	 * `consultThinkingRouterHub`'s fail-open discipline exactly.
+	 */
+	private async consultToolApproveHub(session: SessionInfo, toolName: string, toolGroup: string): Promise<Decision<ToolApproveVerdict> | undefined> {
+		try {
+			return await this.lifecycleHub!.dispatchDecision<ToolApproveVerdict>(
+				TOOL_APPROVE_POINT,
+				TOOL_APPROVE_KIND,
+				{ sessionId: session.id, projectId: session.projectId, goalId: session.goalId, cwd: session.cwd },
+				{ toolName, toolGroup, roleName: session.role },
+			);
+		} catch (err) {
+			console.warn(`[session-manager] tool-approve dispatchDecision failed for session ${session.id} (non-fatal, observe-mode only): ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+	}
+
+	/**
 	 * Called by the guard extension's long-poll endpoint. Creates a pending
 	 * grant request, broadcasts to UI clients, and returns a promise that
 	 * resolves when the user grants/denies or after a 5-minute timeout.
@@ -4687,6 +4711,37 @@ export class SessionManager {
 			clearTimeout(session.pendingGrantRequest.timer);
 			session.pendingGrantRequest.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
+		}
+
+		// CLF-W2 — tool-approve decision seam consult (see
+		// tool-approve-classifier.ts's header for the full design/scope).
+		// Guarded OUTSIDE the await (matches `consultThinkingRouterHub`'s own
+		// call site in `enqueuePrompt`): when there is no hub at all — true for
+		// the overwhelming majority of today's tests and any deployment that
+		// never wires one — this introduces ZERO extra microtask ticks before
+		// the pre-existing synchronous frame-allocation below.
+		//
+		// OBSERVE MODE (default): the Decision (if any) is recorded via
+		// `dispatchDecision`'s own trace/transparency-panel wiring; nothing
+		// below changes — the human-ask flow always runs.
+		// ENFORCE MODE (`BOBBIT_CLF_TOOL_APPROVE=enforce`): only the safe
+		// direction ever short-circuits — a `select` with `choice: "deny"`
+		// resolves this call immediately, BEFORE the frame-allocation /
+		// broadcast below, so no `tool_permission_needed` ever reaches the UI
+		// and no pending-grant timer is started (design doc §6.4: deny is the
+		// only always-safe tool verdict). A `select` with `choice: "allow"` is
+		// deliberately NOT auto-applied this wave — it needs the CQ-03
+		// operator-confirmation permit for widening, which is out of scope
+		// here — so it falls through to the human-ask flow exactly like an
+		// abstain. Ships dark today: `server.ts` only allow-lists this
+		// (point,kind) pair, it registers no classifier, so this consult
+		// always abstains in production and the enforce branch is provably
+		// unreachable regardless of the flag — see
+		// tests/session-manager-tool-approve.test.ts for the exercised
+		// mechanics via a directly-registered test classifier.
+		const toolApproveDecision = this.lifecycleHub ? await this.consultToolApproveHub(session, toolName, toolGroup) : undefined;
+		if (isToolApproveEnforceMode() && isAutoDenyDecision(toolApproveDecision)) {
+			return { granted: false, reason: toolApproveDecision.rationale ?? "Auto-denied by the tool-approve decision seam (CLF-W2, enforce mode)" };
 		}
 
 		// Stamp seq+ts so client reducer can order this frame relative to live
