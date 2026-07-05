@@ -1,7 +1,7 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
-import { resolveGatewayDeps, type GatewayDeps } from "./gateway-deps.js";
+import { resolveGatewayDeps, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1175,7 +1175,28 @@ async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: str
 }
 
 // ── Async git helpers (avoid blocking event loop) ──
-async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+function splitGitShellCommand(cmd: string): string[] {
+	const trimmed = cmd.trim();
+	if (!trimmed.startsWith("git ")) throw new Error(`Unsupported git command: ${cmd}`);
+	const body = trimmed.slice(4).trim();
+	const matches = body.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+	return matches.map(part => {
+		if ((part.startsWith('"') && part.endsWith('"')) || (part.startsWith("'") && part.endsWith("'"))) return part.slice(1, -1);
+		return part;
+	});
+}
+
+async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	if (commandRunner) {
+		if (containerId) {
+			const { stdout } = await commandRunner.execFile("docker", [
+				"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
+			], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+			return String(stdout).trim();
+		}
+		const { stdout } = await commandRunner.execFile("git", splitGitShellCommand(cmd), { cwd, encoding: "utf-8", timeout });
+		return String(stdout).trim();
+	}
 	if (containerId) {
 		// Run inside Docker container
 		const { stdout } = await execFileAsync("docker", [
@@ -1186,11 +1207,21 @@ async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: s
 	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
 	return stdout.trim();
 }
-async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string): Promise<string> {
-	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
+async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	try { return await execGit(cmd, cwd, 5000, containerId, commandRunner); } catch { return fallback; }
 }
 
-async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	if (commandRunner) {
+		if (containerId) {
+			const { stdout } = await commandRunner.execFile("docker", [
+				"exec", "-w", cwd, containerId, "git", ...args,
+			], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+			return String(stdout).trim();
+		}
+		const { stdout } = await commandRunner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
+		return String(stdout).trim();
+	}
 	if (containerId) {
 		const { stdout } = await execFileAsync("docker", [
 			"exec", "-w", cwd, containerId, "git", ...args,
@@ -1201,8 +1232,8 @@ async function execGitArgs(args: string[], cwd: string, timeout = 5000, containe
 	return stdout.trim();
 }
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
-async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string): Promise<string> {
-	try { return await execGitArgs(args, cwd, 5000, containerId); } catch { return fallback; }
+async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	try { return await execGitArgs(args, cwd, 5000, containerId, commandRunner); } catch { return fallback; }
 }
 
 function branchPublishGitArgs(branch: string): {
@@ -1551,18 +1582,18 @@ function parseCommitChangedFiles(output: string): CommitChangedFile[] {
 	});
 }
 
-async function assertCommitExists(cwd: string, commit: string, containerId?: string): Promise<void> {
+async function assertCommitExists(cwd: string, commit: string, containerId?: string, commandRunner?: CommandRunner): Promise<void> {
 	if (!isValidCommitSha(commit)) throw new Error("INVALID_COMMIT");
 	try {
-		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId);
+		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId, commandRunner);
 	} catch {
 		throw new Error("INVALID_COMMIT");
 	}
 }
 
-async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string): Promise<CommitChangedFile[]> {
-	await assertCommitExists(cwd, sha, containerId);
-	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId);
+async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string, commandRunner?: CommandRunner): Promise<CommitChangedFile[]> {
+	await assertCommitExists(cwd, sha, containerId, commandRunner);
+	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId, commandRunner);
 	return parseCommitChangedFiles(out);
 }
 
@@ -1648,19 +1679,18 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string): Promise<string> {
-	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
+async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
-	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
+	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
 
 	let diff = "";
 	if (commit) {
 		if (!file || isUnsafeGitPath(file)) throw new Error("INVALID_PATH");
-		await assertCommitExists(cwd, commit, containerId);
-		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId);
+		await assertCommitExists(cwd, commit, containerId, commandRunner);
+		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId, commandRunner);
 		const renamedFile = changedFiles.find(f => f.status === "R" && (f.path === file || f.oldPath === file));
 		const pathspecs = renamedFile?.oldPath ? [renamedFile.oldPath, renamedFile.path] : [file];
-		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId);
+		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId, commandRunner);
 	} else if (file) {
 		// Sanitize: reject path traversal, absolute paths, drive letters
 		if (isUnsafeGitPath(file)) {
@@ -1670,48 +1700,43 @@ async function getGitDiff(cwd: string, file?: string, containerId?: string, comm
 			// Run git diff inside container
 			// Argument-vector execution — `file` is never parsed by a shell.
 			if (hasHead) {
-				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId, commandRunner);
 			} else {
-				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId)
-					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId, commandRunner)
+					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId, commandRunner);
 			}
 			if (!diff.trim()) {
-				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId, commandRunner);
 			}
 		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
-			diff = stdout;
+			diff = await execGitArgs(["diff", "HEAD", "--", file], cwd, 5000, undefined, commandRunner);
 		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached", "--", file], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff", "--", file], opts);
-			diff = s1 + s2;
+			diff = await execGitArgs(["diff", "--cached", "--", file], cwd, 5000, undefined, commandRunner)
+				+ await execGitArgs(["diff", "--", file], cwd, 5000, undefined, commandRunner);
 		}
 		// Try untracked if empty (host path only — container path handled above)
 		if (!diff.trim() && !containerId) {
 			try {
 				const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
-				const { stdout } = await execFileAsync("git", ["diff", "--no-index", devNull, "--", file], opts);
-				diff = stdout;
+				diff = await execGitArgs(["diff", "--no-index", devNull, "--", file], cwd, 5000, undefined, commandRunner);
 			} catch (e: any) {
 				// git diff --no-index exits 1 when there are differences
-				if (e.stdout) diff = e.stdout;
+				if (e.stdout) diff = String(e.stdout);
 			}
 		}
 	} else {
 		if (containerId) {
 			if (hasHead) {
-				diff = await execGitSafe("git diff HEAD", cwd, "", containerId);
+				diff = await execGitSafe("git diff HEAD", cwd, "", containerId, commandRunner);
 			} else {
-				diff = await execGitSafe("git diff --cached", cwd, "", containerId)
-					+ await execGitSafe("git diff", cwd, "", containerId);
+				diff = await execGitSafe("git diff --cached", cwd, "", containerId, commandRunner)
+					+ await execGitSafe("git diff", cwd, "", containerId, commandRunner);
 			}
 		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD"], opts);
-			diff = stdout;
+			diff = await execGitArgs(["diff", "HEAD"], cwd, 5000, undefined, commandRunner);
 		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached"], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff"], opts);
-			diff = s1 + s2;
+			diff = await execGitArgs(["diff", "--cached"], cwd, 5000, undefined, commandRunner)
+				+ await execGitArgs(["diff"], cwd, 5000, undefined, commandRunner);
 		}
 	}
 
@@ -1767,7 +1792,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
 	globalAgentDir();
-	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
+	if (cpuDiagnosticsEnabled()) getCpuDiagnostics(gatewayDeps.clock);
 
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
@@ -1818,11 +1843,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
 
-	const projectConfigStore = new ProjectConfigStore(configDir);
+	const projectConfigStore = new ProjectConfigStore(configDir, gatewayDeps.fsImpl);
 
 	// Initialize per-project contexts. Headquarters shares the server-scope
 	// ProjectConfigStore so server/HQ writes cannot stale-read or clobber.
-	const projectContextManager = new ProjectContextManager(projectRegistry, { headquartersProjectConfigStore: projectConfigStore });
+	const projectContextManager = new ProjectContextManager(projectRegistry, {
+		headquartersProjectConfigStore: projectConfigStore,
+		fsImpl: gatewayDeps.fsImpl,
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+	});
 	projectContextManager.initAll();
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
@@ -1865,9 +1895,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	const colorStore = new ColorStore(stateDir);
-	const prStatusStore = new PrStatusStore(stateDir);
-	const preferencesStore = new PreferencesStore(stateDir);
-	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
+	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
+	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
+	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -1914,6 +1944,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		groupPolicyStore,
 		projectContextManager,
 		prStatusStore,
+		clock: gatewayDeps.clock,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -1963,7 +1994,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// scope `base` via scopePaths() (design §1.3.1). Server base is the
 	// project root (getProjectRoot()), global-user is the home dir, project is
 	// each project's rootPath.
-	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
+	const marketplaceSourceStore = new MarketplaceSourceStore(configDir, gatewayDeps.fsImpl);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
@@ -2222,7 +2253,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: new ContextTraceStore(bobbitStateDir()),
+		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl),
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -2315,6 +2346,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		sessionManager,
 		staffManager,
 		inboxStore: crossProjectInboxStore,
+		clock: gatewayDeps.clock,
 	});
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
@@ -2330,7 +2362,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
 	}
 
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock);
 	triggerEngine.start();
 	inboxNudger.start();
 
@@ -2401,7 +2433,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		toolManager,
 		orchestrationCore,
-	});
+	}, undefined, gatewayDeps.clock);
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
@@ -2418,12 +2450,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				return undefined;
 			}
 		},
+		undefined,
+		undefined,
+		gatewayDeps.clock,
 	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
 
-	const cleanupInterval = setInterval(() => {
+	const cleanupInterval = gatewayDeps.clock.setInterval(() => {
 		rateLimiter.cleanup();
 	}, 60_000);
 
@@ -2551,7 +2586,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2914,7 +2949,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock });
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -3159,7 +3194,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -3436,7 +3471,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// connections forces clients to reconnect to the NEW server.
 				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
 				server.close();
-				clearInterval(cleanupInterval);
+				gatewayDeps.clock.clearInterval(cleanupInterval);
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
@@ -3645,6 +3680,10 @@ async function handleApiRoute(
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionChannelServices?: ExtensionChannelServices,
+	fetchImpl: typeof fetch = fetch,
+	commandRunner?: CommandRunner,
+	fsImpl?: FsLike,
+	clock?: Clock,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5728,7 +5767,7 @@ async function handleApiRoute(
 			if (Number.isFinite(n) && n > 0) limit = Math.min(n, 1000);
 		}
 		try {
-			const entries = new ContextTraceStore(bobbitStateDir()).readTrace(sessionId, limit);
+			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl).readTrace(sessionId, limit);
 			json({ entries });
 		} catch (err: any) {
 			jsonError(500, err);
@@ -9303,7 +9342,7 @@ async function handleApiRoute(
 			let sendId = modelId;
 			try {
 				const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-				const r = await fetch(modelsUrl, { signal: AbortSignal.timeout(5000) });
+				const r = await fetchImpl(modelsUrl, { signal: AbortSignal.timeout(5000) });
 				if (r.ok) {
 					const data = await r.json() as { data?: Array<{ id: string }> };
 					if (Array.isArray(data.data)) {
@@ -9323,7 +9362,7 @@ async function handleApiRoute(
 			}
 			const started = Date.now();
 			try {
-				const resp = await fetch(chatUrl, {
+				const resp = await fetchImpl(chatUrl, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
@@ -11077,7 +11116,7 @@ async function handleApiRoute(
 			diffCwd = goalRepoWorktrees[repoParam];
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid, commit);
+			const diff = await getGitDiff(diffCwd, file, cid, commit, commandRunner);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -13325,7 +13364,7 @@ async function handleApiRoute(
 			if (entry) diffCwd = entry.worktreePath;
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid, commit);
+			const diff = await getGitDiff(diffCwd, file, cid, commit, commandRunner);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -14455,7 +14494,8 @@ async function handleApiRoute(
 		bgProcessManager.registerWait(sessionId, controller);
 		try {
 			await streamBgWaitResponse(res, () =>
-				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal));
+				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal),
+				{ clock });
 		} finally {
 			bgProcessManager.unregisterWait(sessionId, controller);
 		}

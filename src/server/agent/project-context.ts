@@ -21,6 +21,7 @@ import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
+import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -71,8 +72,11 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner } = {}) {
     this.project = project;
+    const fsImpl = opts.fsImpl;
+    const clock = opts.clock;
+    const commandRunner = opts.commandRunner;
     const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
     if (isHeadquarters) {
       this.bobbitDir = bobbitDir();
@@ -85,19 +89,19 @@ export class ProjectContext {
     }
 
     // Instantiate state stores with project-scoped state directory
-    this.goalStore = new GoalStore(this.stateDir);
-    this.sessionStore = new SessionStore(this.stateDir);
-    this.bgProcessStore = new BgProcessStore(this.stateDir);
-    this.gateStore = new GateStore(this.stateDir);
+    this.goalStore = new GoalStore(this.stateDir, fsImpl);
+    this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
+    this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
+    this.gateStore = new GateStore(this.stateDir, fsImpl);
     this.taskStore = new TaskStore(this.stateDir);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
-    this.inboxStore = new InboxStore(this.stateDir);
+    this.inboxStore = new InboxStore(this.stateDir, fsImpl);
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
-    this.costTracker = new CostTracker(this.stateDir);
+    this.costTracker = new CostTracker(this.stateDir, fsImpl);
     this.secretsStore = new SecretsStore(this.stateDir);
-    this.planMutationStore = new PlanMutationStore(this.stateDir);
+    this.planMutationStore = new PlanMutationStore(this.stateDir, undefined, fsImpl, clock);
 
     // Instantiate config stores with project-scoped config directory.
     // ProjectConfigStore must come before WorkflowStore — the inline
@@ -109,7 +113,7 @@ export class ProjectContext {
     this.roleStore = new RoleStore(this.configDir);
     this.projectConfigStore = isHeadquarters && opts.headquartersProjectConfigStore
       ? opts.headquartersProjectConfigStore
-      : new ProjectConfigStore(this.configDir);
+      : new ProjectConfigStore(this.configDir, fsImpl);
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
@@ -117,7 +121,7 @@ export class ProjectContext {
     // GoalManager depends on workflowStore (GoalManager requires WorkflowStore — fail-loud). Constructed
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
-    this.goalManager = new GoalManager(this.goalStore, this.workflowStore);
+    this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock });
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */
