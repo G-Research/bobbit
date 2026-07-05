@@ -253,7 +253,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		return response({ submitted: persistedReviewSubmitted() });
 	}
 	if (url.includes("/proposal/") || url.includes("/draft")) return response({ ok: true });
-	if (url === "/api/sandbox-status") return response({ available: false, configured: false });
+	if (url.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	return response({ ok: true });
 }) as typeof window.fetch;
 

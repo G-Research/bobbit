@@ -108,7 +108,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		return json({ agents: archivedSessions().map((s) => ({ sessionId: s.id, title: s.title, role: s.role, teamLeadSessionId: s.teamLeadSessionId, createdAt: s.createdAt, archivedAt: s.archivedAt })) });
 	}
 	if (url === "/api/preferences") return json({ subgoalsEnabled: true });
-	if (url === "/api/sandbox-status") return json({ available: false, configured: false });
+	if (url.startsWith("/api/sandbox-status")) return json({ available: false, configured: false });
 	return json({ ok: true });
 }) as typeof window.fetch;
 

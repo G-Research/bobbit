@@ -107,7 +107,11 @@ async function stopGW(gw: GW): Promise<void> {
 }
 
 function api(gw: GW, path: string, opts: RequestInit = {}) {
-	if ((opts.method || "GET").toUpperCase() === "POST" && path === "/api/sessions" && gw.defaultProjectId) {
+	const method = (opts.method || "GET").toUpperCase();
+	if (method === "GET" && path === "/api/sandbox-status" && gw.defaultProjectId) {
+		path = `/api/sandbox-status?projectId=${encodeURIComponent(gw.defaultProjectId)}`;
+	}
+	if (method === "POST" && path === "/api/sessions" && gw.defaultProjectId) {
 		try {
 			const body = typeof opts.body === "string" && opts.body ? JSON.parse(opts.body) : {};
 			if (body && typeof body === "object" && !body.projectId) {

@@ -4225,10 +4225,14 @@ async function handleApiRoute(
 
 	// GET /api/sandbox-status
 	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
-		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
+		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
+		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
-		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
 		json({ ...status, configured });
 		return;
@@ -4236,8 +4240,15 @@ async function handleApiRoute(
 
 	// POST /api/sandbox-image/build
 	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+		const body = await readBody(req).catch(() => null);
+		const projectId = (body && typeof body === "object" && typeof (body as any).projectId === "string")
+			? (body as any).projectId
+			: url.searchParams.get("projectId") || undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
+		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
+		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
 			return;
@@ -7222,7 +7233,11 @@ async function handleApiRoute(
 	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveTools(projectId);
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolvedProjectId = resolvedProject.projectId;
+		const effectiveConfigProjectId = normalizeConfigProjectId(resolvedProjectId);
+		const resolved = configCascade.resolveTools(resolvedProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
 		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
 		// the renderer/action endpoints + /api/ext/contributions use) so a tool
@@ -7232,7 +7247,7 @@ async function handleApiRoute(
 		// pack-scoped contribution field.
 		const toolPackTm = resolveActionToolManager(
 			toolManager,
-			projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined,
+			effectiveConfigProjectId ? projectContextManager.getOrCreate(effectiveConfigProjectId)?.toolManager : undefined,
 		);
 		const tools: Array<Record<string, unknown>> = resolved.map(r => {
 			const out = withOrigin(r as any);
@@ -7245,14 +7260,14 @@ async function handleApiRoute(
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId }))) {
+			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: resolvedProjectId }))) {
 				if (!resolvedNames.has(t.name)) {
 					tools.push({ ...t, origin: t.origin ?? "mcp" });
 				}
 			}
 		}
-		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId)));
-		const toolDiagnostics = toolDiagnosticsForProject(projectId);
+		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(resolvedProjectId)));
+		const toolDiagnostics = toolDiagnosticsForProject(resolvedProjectId);
 		attachToolDiagnostics(tools, toolDiagnostics);
 		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
 		return;
@@ -9615,7 +9630,9 @@ async function handleApiRoute(
 	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveRoles(projectId);
+		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
+		const resolved = configCascade.resolveRoles(resolvedProject.projectId);
 		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}

@@ -12,7 +12,7 @@ import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, getConfigApiProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 import { renderModelRow, formatModelPref } from "./settings-page.js";
 import { HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession } from "./headquarters.js";
 
@@ -95,7 +95,8 @@ let originalPrompts: Map<string, string> = new Map(); // type -> original conten
  * fetching unscoped `/api/roles`. See `_proposalRolesCache` in render.ts.
  */
 export async function fetchRolesForProject(projectId?: string): Promise<RoleData[]> {
-	const url = projectId ? `/api/roles?projectId=${encodeURIComponent(projectId)}` : "/api/roles";
+	const apiProjectId = !projectId || projectId === "system" ? HEADQUARTERS_PROJECT_ID : projectId;
+	const url = `/api/roles?projectId=${encodeURIComponent(apiProjectId)}`;
 	try {
 		const res = await gatewayFetch(url);
 		if (!res.ok) return [];
@@ -108,7 +109,7 @@ export async function fetchRolesForProject(projectId?: string): Promise<RoleData
 }
 
 async function fetchRolesScoped(): Promise<RoleData[]> {
-	return fetchRolesForProject(getConfigProjectId());
+	return fetchRolesForProject(getConfigApiProjectId());
 }
 
 export async function loadRolePageData(): Promise<void> {
@@ -118,7 +119,7 @@ export async function loadRolePageData(): Promise<void> {
 	saving = false;
 	deleting = false;
 	renderApp();
-	const scopedProjectId = getConfigProjectId();
+	const scopedProjectId = getConfigApiProjectId();
 	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(scopedProjectId), fetchGroupPolicies(scopedProjectId)]);
 	roles = r;
 	availableTools = t;
