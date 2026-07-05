@@ -569,6 +569,23 @@ verify:
 
 **WebSocket events:** The server broadcasts `gate_verification_phase_started` before each phase begins, including the phase number and which step indices belong to it. Step-level events (`gate_verification_step_started`, `gate_verification_step_complete`) include an optional `phase` field. The goal dashboard uses these to show phase progression in real time.
 
+##### Parallel reviews (`BOBBIT_PARALLEL_REVIEWS`)
+
+By default, phases are strictly serial: on a fully green gate, wall-clock is `build → typecheck/unit/e2e → reviews`, even though `llm-review` steps only read the branch diff (and already-resolved upstream-gate metadata) — never a same-gate command step's output. Gating them behind the command suite trades latency for nothing on the happy path.
+
+Set `BOBBIT_PARALLEL_REVIEWS=1` (default: unset/off — this changes the observable timing of a high-stakes verification loop, so it's opt-in per program policy) to start the **leading contiguous block of homogeneous `llm-review` phases** — the reviews that sit immediately after the leading command phases, e.g. "Gap analysis"/"Code quality review"/"Bug hunt" at phase 1 above — concurrently with those command phases instead of waiting for them. Detection (`computeEarlyReviewPhases` in `verification-logic.ts`) is conservative and falls back to the unchanged serial path whenever the shape isn't a clean "commands, then reviews[, then more commands]":
+
+- A phase containing a mix of review and non-review steps counts as non-review for this purpose.
+- Only the first contiguous review-only run is eligible; a second, non-contiguous review phase later in the gate (reviews interleaved with more commands) stays fully serial.
+- A trailing non-review phase after the review block (e.g. `agent-qa` "QA testing") keeps its existing gating — it still waits for every earlier phase, review block included.
+
+**Safety — verdicts are never committed directly off the early-started promise.** The gate's join point re-enters the exact same phase-failure logic used today:
+
+- If the command phase(s) before the review block **fail**, the concurrently-computed review verdicts are discarded — the harness terminates any reviewer session still running — and the persisted result is the identical `"Skipped — earlier phase failed"` the fully-serial path would have produced. No review verdict from a doomed run is ever surfaced.
+- If the command phase(s) **pass**, the real review verdicts are committed exactly as the serial path would have.
+
+With the flag off (default), `earlyReviewPhases` is never computed and every phase runs through the unchanged code path — byte-identical ordering to pre-VER-07 behavior.
+
 #### Verification step artifacts
 
 Step results can carry an optional `artifact` containing rich content that would be too large or structured for the short `output` summary field.

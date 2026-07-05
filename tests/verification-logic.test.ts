@@ -13,6 +13,8 @@ import {
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
+	computeEarlyReviewPhases,
+	isParallelReviewsEnabled,
 	isCommandStepSkippable,
 	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
@@ -729,6 +731,106 @@ describe("getSortedPhases", () => {
 
 	it("returns empty array for empty map", () => {
 		assert.deepEqual(getSortedPhases(new Map()), []);
+	});
+});
+
+// ===================================================================
+// isParallelReviewsEnabled / computeEarlyReviewPhases (VER-07)
+// ===================================================================
+
+function reviewStep(name: string, opts: Record<string, unknown> = {}): any {
+	return { name, type: "llm-review" as const, ...opts };
+}
+
+describe("isParallelReviewsEnabled", () => {
+	it("is off for undefined, empty, and any value other than the literal \"1\"", () => {
+		assert.equal(isParallelReviewsEnabled(undefined), false);
+		assert.equal(isParallelReviewsEnabled(""), false);
+		assert.equal(isParallelReviewsEnabled("0"), false);
+		assert.equal(isParallelReviewsEnabled("true"), false);
+		assert.equal(isParallelReviewsEnabled("yes"), false);
+	});
+
+	it("is on only for the literal string \"1\"", () => {
+		assert.equal(isParallelReviewsEnabled("1"), true);
+	});
+});
+
+describe("computeEarlyReviewPhases", () => {
+	it("returns the default general/feature/bug-fix shape: commands (0,1) then a review block (2)", () => {
+		const steps = [
+			step("Build", { phase: 0 }),
+			step("Type check", { phase: 1 }),
+			step("Unit tests", { phase: 1 }),
+			reviewStep("Gap analysis", { phase: 2 }),
+			reviewStep("Code quality review", { phase: 2 }),
+			reviewStep("Bug hunt", { phase: 2 }),
+		];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], [2]);
+	});
+
+	it("excludes a trailing non-review phase (e.g. agent-qa) after the review block", () => {
+		const steps = [
+			step("Build", { phase: 0 }),
+			step("Unit tests", { phase: 1 }),
+			reviewStep("Code quality review", { phase: 2 }),
+			{ name: "QA testing", type: "agent-qa", phase: 3 },
+		];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], [2]);
+	});
+
+	it("returns empty when there is no leading command block (reviews start at phase 0)", () => {
+		const steps = [
+			reviewStep("Design review", { phase: 0 }),
+			reviewStep("Gap analysis", { phase: 0 }),
+		];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		// A leading review-only phase IS a "leading contiguous review block" by
+		// this function's definition — there's nothing before it to be
+		// concurrent WITH, but the caller (verifyGateSignal) only invokes the
+		// early-start path when it has something (a command phase) to overlap
+		// with; a design-doc gate with only reviews and no command steps at all
+		// simply has no observable behavior change either way.
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], [0]);
+	});
+
+	it("does not extend past a non-contiguous second review block separated by a command phase", () => {
+		const steps = [
+			step("Build", { phase: 0 }),
+			reviewStep("Code quality review", { phase: 1 }),
+			step("Deploy to staging", { phase: 2 }),
+			reviewStep("Staging notes review", { phase: 3 }),
+		];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], [1]);
+	});
+
+	it("treats a phase with mixed step types as non-review — its reviews are not early-started", () => {
+		const steps = [
+			step("Build", { phase: 0 }),
+			step("Unit tests", { phase: 1 }),
+			reviewStep("Mixed review", { phase: 1 }),
+		];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], []);
+	});
+
+	it("returns empty for an all-command workflow (no llm-review steps)", () => {
+		const steps = [step("Build", { phase: 0 }), step("Unit tests", { phase: 1 })];
+		const groups = groupStepsByPhase(steps, steps);
+		const sorted = getSortedPhases(groups);
+		assert.deepEqual([...computeEarlyReviewPhases(sorted, groups)], []);
+	});
+
+	it("returns empty for an empty phase map", () => {
+		assert.deepEqual([...computeEarlyReviewPhases([], new Map())], []);
 	});
 });
 

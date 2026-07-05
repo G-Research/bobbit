@@ -686,6 +686,68 @@ export function getSortedPhases(groups: Map<number, unknown[]>): number[] {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel reviews (VER-07) — start test-independent llm-review phases
+// concurrently with the command phases that precede them
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve `BOBBIT_PARALLEL_REVIEWS` to on/off. Only the literal string `"1"`
+ * enables it — everything else (unset, empty, a typo) is off, matching the
+ * default-OFF / opt-in-per-program-policy posture for this A/B.
+ */
+export function isParallelReviewsEnabled(raw: string | undefined): boolean {
+	return raw === "1";
+}
+
+/**
+ * Identify the leading contiguous block of homogeneous `llm-review` phases
+ * that sits immediately after the leading block of non-review phases, e.g.
+ * `[Build(0), check/unit/e2e(1), Gap analysis/Code review/Bug hunt(2)]` ->
+ * `{2}`. Reviews in that block only ever read the branch diff and
+ * already-resolved *upstream gate* state (never a same-gate command step's
+ * output — the harness has no plumbing for that), so they have no data
+ * dependency on the command phases before them; only the decision to keep
+ * their verdict does (see `verifyGateSignal`'s early-review join logic).
+ *
+ * This is intentionally conservative and returns an empty set for anything
+ * that doesn't match the clean "commands, then reviews[, then more commands]"
+ * shape:
+ * - A phase with mixed step types (some review, some not) counts as
+ *   "non-review" for this purpose — its review steps stay on the normal
+ *   serial path rather than being partially fast-started.
+ * - Only the FIRST contiguous review-only run is returned. A later,
+ *   non-contiguous review phase (reviews interleaved with more commands,
+ *   e.g. phase 2 reviews / phase 3 command / phase 4 reviews) is left fully
+ *   serial — composing an early-start decision across an intervening
+ *   command phase would require knowing that phase's outcome, which isn't
+ *   available at kickoff time.
+ * - A trailing non-review phase (e.g. `agent-qa` "QA testing") after the
+ *   review block is left out and keeps its existing phase-gating semantics
+ *   unchanged (it still waits for every earlier phase, review block
+ *   included).
+ */
+export function computeEarlyReviewPhases(
+	sortedPhases: readonly number[],
+	phaseGroups: Map<number, PhaseGroup[]>,
+): Set<number> {
+	const early = new Set<number>();
+	let sawReviewPhase = false;
+	for (const phase of sortedPhases) {
+		const group = phaseGroups.get(phase) ?? [];
+		const isHomogeneousReview = group.length > 0 && group.every(g => g.step.type === "llm-review");
+		if (isHomogeneousReview) {
+			early.add(phase);
+			sawReviewPhase = true;
+		} else if (sawReviewPhase) {
+			// A non-review phase after the review block started — stop
+			// extending it. Everything from here on stays fully serial.
+			break;
+		}
+	}
+	return early;
+}
+
+// ---------------------------------------------------------------------------
 // Optional step partitioning
 // ---------------------------------------------------------------------------
 
