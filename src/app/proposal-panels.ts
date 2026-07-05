@@ -29,6 +29,8 @@ import {
 	type ToolInfo,
 	createStaffAgent,
 	fetchRoles,
+	createWorkflow,
+	createSkill,
 } from "./api.js";
 import {
 	renderWorkflowInspector,
@@ -2994,6 +2996,162 @@ function projectProposalPanel() {
 	`;
 }
 
+// ============================================================================
+// WORKFLOW PROPOSAL PANEL (F13)
+//
+// Unlike role/staff/project, there is no bespoke live-streaming form here —
+// the panel reads directly from the already-reactive `state.activeProposals
+// .workflow.fields` slot (the same generic seed/edit/view/restore pipeline
+// every proposal type shares) and hands it to the EXACT gate editor the
+// Workflows page and the goal-proposal Workflow tab already use
+// (`renderWorkflowEditor` — see workflow-page.ts), so id/name/description/
+// gates editing, drag-reorder, and verify-step validation all come for free.
+// Accepting POSTs to the existing /api/workflows resource — no new server
+// storage, no new editor UI.
+// ============================================================================
+let _workflowProposalDraft: Workflow | null = null;
+let _workflowProposalInitializedFrom: string | null = null;
+
+function workflowFromProposalFields(fields: Record<string, unknown>): Workflow {
+	return {
+		id: typeof fields.id === "string" ? fields.id : "",
+		name: typeof fields.name === "string" ? fields.name : "",
+		description: typeof fields.description === "string" ? fields.description : "",
+		gates: Array.isArray(fields.gates) ? (fields.gates as Workflow["gates"]) : [],
+		createdAt: 0,
+		updatedAt: 0,
+	};
+}
+
+function workflowProposalPanel(): TemplateResult {
+	const slot = state.activeProposals.workflow;
+	const fields = slot?.fields ?? {};
+	const streaming = isProposalStreaming("workflow_proposal");
+	// Re-seed the draft only when a genuinely new proposal (or revision)
+	// arrives — never on every re-render, or in-progress edits in the
+	// embedded gate editor would be clobbered.
+	const identityKey = slot ? `${slot.sessionId}:${slot.rev}` : null;
+	if (identityKey !== _workflowProposalInitializedFrom) {
+		_workflowProposalDraft = workflowFromProposalFields(fields);
+		_workflowProposalInitializedFrom = identityKey;
+	}
+	const draft = _workflowProposalDraft ?? workflowFromProposalFields(fields);
+	const projectId = typeof fields.projectId === "string" ? fields.projectId : undefined;
+
+	const handleDismiss = () => dismissTypedProposal("workflow");
+
+	const handleCreate = async () => {
+		if (!draft.id.trim() || !draft.name.trim()) return;
+		const created = await createWorkflow({ id: draft.id.trim(), name: draft.name.trim(), description: draft.description, gates: draft.gates }, projectId);
+		if (!created) return;
+		const proposalSessionId = slot?.sessionId;
+		clearProposalReviewState(proposalSessionId, "workflow");
+		delete state.activeProposals.workflow;
+		_workflowProposalDraft = null;
+		_workflowProposalInitializedFrom = null;
+		recomputeAssistantHasProposal();
+		void closeCurrentProposalPanel("workflow", proposalSessionId);
+		if (proposalSessionId) void deleteProposalFile(proposalSessionId, "workflow");
+		const { loadWorkflowPageData, navigateToWorkflowEdit } = await import("./workflow-page.js");
+		await loadWorkflowPageData();
+		navigateToWorkflowEdit(created.id);
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="workflow-proposal">
+			<div class="flex-1 overflow-y-auto p-5 ${streaming ? STREAMING_BORDER : ""}">
+				${renderWorkflowEditor({
+					workflow: draft,
+					onChange: (wf) => { _workflowProposalDraft = wf; },
+					scope: "goal-draft",
+				})}
+			</div>
+			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
+				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
+				<span data-testid="proposal-primary-submit">${Button({
+					variant: "default",
+					onClick: handleCreate,
+					disabled: !draft.id.trim() || !draft.name.trim() || streaming,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(Check, "sm")} Create Workflow</span>`,
+				})}</span>
+			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// SKILL PROPOSAL PANEL (F26 — propose_skill half)
+//
+// Same pattern as the workflow panel: reads `state.activeProposals.skill
+// .fields` directly instead of mirroring it into bespoke streaming-synced
+// `state.skillPreview*` fields (skills have no existing management UI to
+// reuse, unlike workflows' gate editor). Accepting POSTs to the new
+// POST /api/skills endpoint, which writes skills/<name>/SKILL.md into the
+// target scope's user-pack dir (skill-write.ts).
+// ============================================================================
+function skillProposalPanel(): TemplateResult {
+	ensureMarkdownBlock();
+	const slot = state.activeProposals.skill;
+	const fields = slot?.fields ?? {};
+	const streaming = isProposalStreaming("skill_proposal");
+	const name = typeof fields.name === "string" ? fields.name : "";
+	const description = typeof fields.description === "string" ? fields.description : "";
+	const content = typeof fields.content === "string" ? fields.content : "";
+	const argumentHint = typeof fields.argumentHint === "string" ? fields.argumentHint : "";
+	const tools = typeof fields.tools === "string" ? fields.tools : "";
+	const projectId = typeof fields.projectId === "string" ? fields.projectId : undefined;
+
+	const handleDismiss = () => dismissTypedProposal("skill");
+
+	const handleCreate = async () => {
+		if (!name.trim() || !description.trim() || !content.trim()) return;
+		const created = await createSkill({ name: name.trim(), description: description.trim(), content, argumentHint, tools, projectId });
+		if (!created) return;
+		const proposalSessionId = slot?.sessionId;
+		clearProposalReviewState(proposalSessionId, "skill");
+		delete state.activeProposals.skill;
+		recomputeAssistantHasProposal();
+		void closeCurrentProposalPanel("skill", proposalSessionId);
+		if (proposalSessionId) void deleteProposalFile(proposalSessionId, "skill");
+		showProposalToast(`Skill "${created.name}" created`);
+		setHashRoute("skills");
+		const { loadSkillsPageData } = await import("./skills-page.js");
+		await loadSkillsPageData();
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="skill-proposal">
+			${proposalToast()}
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				<div>
+					<div class="text-xs text-muted-foreground mb-1">Skill</div>
+					<div class="text-lg font-semibold">/${name || html`<span class="text-muted-foreground italic">Waiting for proposal…</span>`}</div>
+				</div>
+				${description ? html`<div class="text-sm text-muted-foreground">${description}</div>` : ""}
+				${argumentHint ? html`<div class="text-xs text-muted-foreground">Argument hint: <code>${argumentHint}</code></div>` : ""}
+				${tools ? html`<div class="text-xs text-muted-foreground">Allowed tools: <code>${tools}</code></div>` : ""}
+				<div class="flex-1 min-h-0 flex flex-col">
+					<div class="text-xs text-muted-foreground mb-1.5 font-medium">SKILL.md content</div>
+					<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
+						<markdown-block .content=${content || "_No content yet_"}></markdown-block>
+					</div>
+				</div>
+			</div>
+			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
+				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
+				<span data-testid="proposal-primary-submit">${Button({
+					variant: "default",
+					onClick: handleCreate,
+					disabled: !name.trim() || !description.trim() || !content.trim() || streaming,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(Check, "sm")} Create Skill</span>`,
+				})}</span>
+			</div>
+		</div>
+	`;
+}
+
 function proposalPanelForType(type: ProposalType) {
 	switch (type) {
 		case "goal": return goalProposalPanel();
@@ -3001,6 +3159,8 @@ function proposalPanelForType(type: ProposalType) {
 		case "role": return rolePreviewPanel();
 		case "tool": return toolPreviewPanel();
 		case "staff": return staffPreviewPanel();
+		case "workflow": return workflowProposalPanel();
+		case "skill": return skillProposalPanel();
 		default: return "";
 	}
 }

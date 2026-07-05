@@ -46,7 +46,7 @@ function sha(p: string): string {
 describe("proposalFilePath", () => {
 	it("places goal as .md and others as .yaml", () => {
 		assert.match(proposalFilePath(stateDir, sid, "goal"), /goal\.md$/);
-		for (const t of ["project", "role", "tool", "staff"] as ProposalType[]) {
+		for (const t of ["project", "role", "tool", "staff", "workflow", "skill"] as ProposalType[]) {
 			assert.match(proposalFilePath(stateDir, sid, t), new RegExp(`${t}\\.yaml$`));
 		}
 	});
@@ -177,6 +177,8 @@ describe("yaml proposals round-trip", () => {
 		{ type: "role", fields: { name: "r", label: "Role", prompt: "do x" } },
 		{ type: "tool", fields: { tool: "t", action: "create", content: "yaml: 1" } },
 		{ type: "staff", fields: { name: "s", prompt: "you are…" } },
+		{ type: "workflow", fields: { id: "wf-1", name: "Workflow One", gates: [{ id: "gate-1", name: "Gate One", dependsOn: [] }] } },
+		{ type: "skill", fields: { name: "my-skill", description: "Does a thing", content: "Do the thing.\n" } },
 	];
 
 	for (const c of cases) {
@@ -198,6 +200,39 @@ describe("yaml proposals round-trip", () => {
 			await deleteProposalFile(stateDir, sid, c.type);
 		});
 	}
+});
+
+describe("workflow proposal structural validation (F13)", () => {
+	it("rejects a non-array gates field with STRUCTURAL_VALIDATION_FAILED", async () => {
+		const wfSid = "sess-workflow-bad-gates";
+		const fp = proposalFilePath(stateDir, wfSid, "workflow");
+		fs.mkdirSync(path.dirname(fp), { recursive: true });
+		fs.writeFileSync(fp, "id: wf-bad\nname: Bad Workflow\ngates: not-an-array\n");
+		const parsed = await parseProposalFile(stateDir, wfSid, "workflow");
+		assert.equal(parsed.ok, false);
+		if (!parsed.ok) assert.equal(parsed.code, "STRUCTURAL_VALIDATION_FAILED");
+	});
+
+	it("rejects a gate missing an id with STRUCTURAL_VALIDATION_FAILED", async () => {
+		const wfSid = "sess-workflow-bad-gate-id";
+		const fp = proposalFilePath(stateDir, wfSid, "workflow");
+		fs.mkdirSync(path.dirname(fp), { recursive: true });
+		fs.writeFileSync(fp, "id: wf-bad2\nname: Bad Workflow 2\ngates:\n  - name: Missing id\n");
+		const parsed = await parseProposalFile(stateDir, wfSid, "workflow");
+		assert.equal(parsed.ok, false);
+		if (!parsed.ok) assert.equal(parsed.code, "STRUCTURAL_VALIDATION_FAILED");
+	});
+
+	it("accepts a well-formed single gate", async () => {
+		const wfSid = "sess-workflow-good";
+		await writeProposalFile(stateDir, wfSid, "workflow", {
+			id: "wf-good",
+			name: "Good Workflow",
+			gates: [{ id: "gate-1", name: "Gate One", dependsOn: [], verify: [] }],
+		});
+		const parsed = await parseProposalFile(stateDir, wfSid, "workflow");
+		assert.equal(parsed.ok, true, JSON.stringify(parsed));
+	});
 });
 
 describe("editProposalFile semantics", () => {

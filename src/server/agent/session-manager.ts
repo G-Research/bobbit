@@ -122,6 +122,7 @@ import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type Orches
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
+import { PiProcessPool, isWarmPoolEnabled } from "./pi-process-pool.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
 	type SessionSetupPlan,
@@ -414,6 +415,14 @@ export interface SessionInfo {
 	nonInteractive?: boolean;
 	/** Which project this session belongs to */
 	projectId?: string;
+	/**
+	 * Set only when this session's `rpcClient` came from a warm-pool claim
+	 * (docs/design/warm-pi-process-pool.md) — the pool-owned placeholder id
+	 * baked into the child process's `BOBBIT_SESSION_ID`/`BOBBIT_SESSION_SECRET`
+	 * env at spawn time. See `SessionManager.getSession()`/
+	 * `piPoolIdentityAliases` for why this alias must be resolvable.
+	 */
+	warmPoolAliasId?: string;
 	/** Allowed tools for this session */
 	allowedTools?: string[];
 	/** Server-side prompt queue */
@@ -1094,6 +1103,33 @@ export class SessionManager {
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
+	/**
+	 * Warm pool of pre-spawned non-sandboxed exec-class pi processes — see
+	 * docs/design/warm-pi-process-pool.md (wave 1). Always constructed (cheap,
+	 * holds nothing until first use); gated behind `isWarmPoolEnabled()`
+	 * (`BOBBIT_WARM_POOL=1`, default OFF) at the `PipelineContext` wiring
+	 * boundary in `buildPipelineContext()`, mirroring how `sandboxManager`
+	 * etc. are optional-by-null there. `startSweeping()` is a no-op if the
+	 * flag is off (no timer, no fills ever attempted) — see `initPiProcessPool()`.
+	 */
+	private readonly piProcessPool: PiProcessPool = new PiProcessPool();
+	/**
+	 * Alias map for warm-pool claims: a claimed pool entry's child process is
+	 * already running with `BOBBIT_SESSION_ID` baked to the POOL's own
+	 * placeholder id (unchangeable post-spawn — see rpc-bridge.ts/the design
+	 * doc §2.1). `getSession()` consults this so any code path that resolves
+	 * a session by the id a running process's OWN env/callbacks present
+	 * (e.g. the `/api/internal/mcp-call` route's `X-Bobbit-Session-Id`
+	 * header) still finds the correct live session. Entries are NOT
+	 * proactively pruned on session teardown (the four `this.sessions.delete`
+	 * call sites are not touched by this change) — a stale alias simply
+	 * resolves through to a `sessions.get()` miss once the real session is
+	 * gone, same as looking up any other dead id. This bounds the map to
+	 * "one small entry per warm-pool hit for the life of the gateway
+	 * process" — negligible relative to session volume; flagged here as a
+	 * known, accepted low-priority follow-up rather than left undocumented.
+	 */
+	private readonly piPoolIdentityAliases = new Map<string, string>();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	lifecycleHub?: LifecycleHub;
@@ -1464,6 +1500,11 @@ export class SessionManager {
 		this.prStatusStore = options?.prStatusStore ?? null;
 		this._extensionChannels = options?.extensionChannels;
 		this.toolPermissionAuditLog = options?.toolPermissionAuditLog ?? new ToolPermissionAuditLog(bobbitStateDir());
+		// Warm pi-process pool (wave 1, docs/design/warm-pi-process-pool.md).
+		// Dark by default — BOBBIT_WARM_POOL=1 opts in. When off, no sweep timer
+		// is started and `buildPipelineContext()` never hands `ctx.piProcessPool`
+		// to session-setup.ts, so `claim()`/fills are never attempted at all.
+		if (isWarmPoolEnabled()) this.piProcessPool.startSweeping();
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -1825,10 +1866,18 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
+			serverProjectConfigStore: this.projectConfigStore ?? null,
 			preferencesStore: this.preferencesStore ?? null,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
+			// Dark by default (BOBBIT_WARM_POOL=1 opts in) — see the field doc
+			// comment. Gating here (not inside pi-process-pool.ts) means a
+			// disabled pool is never even referenced by session-setup.ts's
+			// spawnAgent(), matching `claim() returns null → cold path` for
+			// "the flag is off" as just another kind of miss.
+			piProcessPool: isWarmPoolEnabled() ? this.piProcessPool : undefined,
+			registerWarmPoolIdentityAlias: (poolOwnedId, realSessionId) => this.registerWarmPoolIdentityAlias(poolOwnedId, realSessionId),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -2452,6 +2501,11 @@ export class SessionManager {
 	}
 
 	/** Get all worktree pools (for shutdown / API). */
+	/** The warm pi-process pool (wave 1) — for `drain()` at gateway shutdown. */
+	getPiProcessPool(): PiProcessPool {
+		return this.piProcessPool;
+	}
+
 	getAllWorktreePools(): Map<string, WorktreePool> {
 		return this.worktreePools;
 	}
@@ -2723,8 +2777,9 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		if (!parts.serverConfigStore) parts.serverConfigStore = this.projectConfigStore;
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		// Skills catalog — progressive disclosure (level 1) for autonomous activation.
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
@@ -2747,6 +2802,13 @@ export class SessionManager {
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts);
 		return assembleSystemPrompt(sessionId, parts);
+	}
+
+	private projectConfigStoreForPrompt(projectId?: string): import("./project-config-store.js").ProjectConfigStore | undefined {
+		if (projectId && this.projectContextManager) {
+			return this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore;
+		}
+		return this.projectConfigStore;
 	}
 
 	/**
@@ -2844,6 +2906,7 @@ export class SessionManager {
 			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
 			allowedTools: opts.allowedTools,
 			projectConfigStore: narrow ? undefined : this.projectConfigStore,
+			serverConfigStore: this.projectConfigStore,
 			sectionOrder: opts.sectionOrder,
 			promptProfile: narrow ? "narrow-worker" : undefined,
 		};
@@ -2860,6 +2923,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const ownerProjectId = session.projectId ?? persisted?.projectId;
+		const ownerProjectConfigStore = this.projectConfigStoreForPrompt(ownerProjectId);
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -2875,9 +2940,11 @@ export class SessionManager {
 				allowedTools: session.allowedTools ?? persisted.allowedTools,
 				sectionOrder,
 			});
+			parts.projectConfigStore = isNarrowDelegateAllowedTools(parts.allowedTools) ? undefined : ownerProjectConfigStore;
+			parts.serverConfigStore = this.projectConfigStore;
 			parts.dynamicContext = session.promptParts?.dynamicContext;
 			if (this.toolManager && !parts.toolDocs) {
-				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 			}
 			if (!parts.skillsCatalog) {
 				parts.skillsCatalog = this.computeSkillsCatalog(
@@ -2931,7 +2998,8 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 			};
 		} else {
@@ -2960,14 +3028,15 @@ export class SessionManager {
 				rolePrompt,
 				roleName,
 				allowedTools: session.allowedTools,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: ownerProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder,
 				promptProfile: (session.nonInteractive ?? persisted?.nonInteractive) ? "reviewer" : undefined,
 			};
 		}
 
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), undefined, undefined, parts);
 		}
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(
@@ -4729,7 +4798,14 @@ export class SessionManager {
 	 * resolves when the user grants/denies or after a 5-minute timeout.
 	 */
 	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<ToolGrantResolution> {
-		const session = this.sessions.get(sessionId);
+		// `getSession()` (not a raw `this.sessions.get()`) — the guard extension
+		// (tool-guard-extension.ts) embeds ITS OWN session id as a string literal
+		// at generation time (`const sessionId = ${JSON.stringify(sessionId)}`).
+		// For a warm-pool-claimed session (docs/design/warm-pi-process-pool.md)
+		// that embedded id is the pool's placeholder id, not the live session's
+		// real id — `getSession()` resolves the alias so tool-approval still
+		// reaches the correct session instead of 404ing.
+		const session = this.getSession(sessionId);
 		if (!session) throw new Error("Session not found");
 
 		// If a previous grant request is still pending, resolve it as denied
@@ -5625,6 +5701,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 
+			const restoreProjectConfigStore = this.projectConfigStoreForPrompt(ps.projectId);
 			const promptPath = this.assemblePrompt(ps.id, {
 				// Restore/respawn path: keep the global base prompt so it reaches
 				// restored assistant sessions.
@@ -5634,7 +5711,8 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: restoreProjectConfigStore,
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -5642,7 +5720,7 @@ export class SessionManager {
 			// Delegate restore: rebuild the system prompt from durable instructions +
 			// context — the delegate's equivalent of a worker task spec. Use the Task
 			// fields so restored delegates and prompt-section reconstruction agree.
-			const promptPath = this.assemblePrompt(ps.id, this.buildDelegatePromptParts({
+			const delegateParts = this.buildDelegatePromptParts({
 				cwd: ps.cwd,
 				// Keep AGENTS.md / project config dirs readable for sandbox or multi-repo
 				// delegates whose cwd is container-internal.
@@ -5651,7 +5729,12 @@ export class SessionManager {
 				context: ps.context,
 				allowedTools: restoredAllowedNames,
 				sectionOrder: restoreSectionOrder,
-			}));
+			});
+			delegateParts.projectConfigStore = isNarrowDelegateAllowedTools(delegateParts.allowedTools)
+				? undefined
+				: this.projectConfigStoreForPrompt(ps.projectId);
+			delegateParts.serverConfigStore = this.projectConfigStore;
+			const promptPath = this.assemblePrompt(ps.id, delegateParts);
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
@@ -5678,7 +5761,8 @@ export class SessionManager {
 				rolePrompt,
 				roleName,
 				allowedTools: restoredAllowedNames,
-				projectConfigStore: this.projectConfigStore,
+				projectConfigStore: this.projectConfigStoreForPrompt(ps.projectId),
+				serverConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
 				promptProfile: ps.nonInteractive ? "reviewer" : undefined,
 			});
@@ -7194,7 +7278,18 @@ export class SessionManager {
 	}
 
 	getSession(id: string): SessionInfo | undefined {
-		return this.sessions.get(id);
+		const direct = this.sessions.get(id);
+		if (direct) return direct;
+		// Warm-pool alias fallback — see `piPoolIdentityAliases` field doc comment.
+		const realId = this.piPoolIdentityAliases.get(id);
+		return realId ? this.sessions.get(realId) : undefined;
+	}
+
+	/** Record that `poolOwnedId` (a claimed warm-pool entry's baked env identity)
+	 *  should resolve to the live session `realSessionId` for `getSession()`
+	 *  callers. See the `piPoolIdentityAliases` field doc comment. */
+	registerWarmPoolIdentityAlias(poolOwnedId: string, realSessionId: string): void {
+		this.piPoolIdentityAliases.set(poolOwnedId, realSessionId);
 	}
 
 	/**
@@ -7229,6 +7324,18 @@ export class SessionManager {
 		goalId?: string;
 		teamGoalId?: string;
 		projectId?: string;
+		/** Eligibility-signal census (in-process-bridge-eligibility.ts step 2):
+		 *  the derived read-only-ness of the RPC bridge already constructed by
+		 *  the caller (`isReadOnlyToolPolicy` over `allowedTools`, computed
+		 *  before this bridge existed — see verification-harness.ts's legacy
+		 *  `runLlmReviewDirect`). Recorded as session metadata for display/
+		 *  persistence parity with SessionManager-spawned reviewer sessions;
+		 *  this bridge was already constructed by the caller, so it cannot
+		 *  retroactively change which bridge class backs it. */
+		readOnly?: boolean;
+		/** The resolved tool allowlist behind `readOnly` above, for the same
+		 *  metadata-parity reason. */
+		allowedTools?: string[];
 	}): () => void {
 		const eventBuffer = new EventBuffer();
 		const now = Date.now();
@@ -7250,6 +7357,8 @@ export class SessionManager {
 			goalId: opts.goalId,
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			promptQueue: new PromptQueue(),
 		};
 
@@ -7289,6 +7398,8 @@ export class SessionManager {
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
 			nonInteractive: true,
+			readOnly: opts.readOnly,
+			allowedTools: opts.allowedTools,
 			projectId: extProjectId,
 		});
 
@@ -7664,7 +7775,8 @@ export class SessionManager {
 			rolePrompt,
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
-			projectConfigStore: this.projectConfigStore,
+			projectConfigStore: this.projectConfigStoreForPrompt(session.projectId),
+			serverConfigStore: this.projectConfigStore,
 		});
 
 		// Respawn with new system prompt

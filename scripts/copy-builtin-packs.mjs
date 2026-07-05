@@ -21,10 +21,15 @@
  * (resolveBuiltinPacksDir()) is bind-mounted read-only into sandbox containers,
  * and a naive rm -rf + copy leaves it missing/partial for any container created
  * mid-rebuild.
+ *
+ * Uses the gapless symlink-swap variant (scripts/lib/gapless-symlink-swap.mjs)
+ * where the platform supports it, closing even the small residual window
+ * atomic-copy-dir's two-rename swap leaves; it fails open to atomicReplaceDir
+ * everywhere else (see that module's header for the Windows/npm-publish story).
  */
 import fs from "node:fs";
 import path from "node:path";
-import { atomicReplaceDir } from "./lib/atomic-copy-dir.mjs";
+import { atomicReplaceDirGapless } from "./lib/gapless-symlink-swap.mjs";
 
 const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "terminal", "experiment-runner"]; // explicit allowlist
 const SRC = "market-packs";
@@ -47,7 +52,7 @@ function copyDir(src, dest) {
   }
 }
 
-atomicReplaceDir(SRC, DEST, {
+atomicReplaceDirGapless(SRC, DEST, {
   populate: (staging) => {
     for (const name of FIRST_PARTY_PACKS) {
       const src = path.join(SRC, name);

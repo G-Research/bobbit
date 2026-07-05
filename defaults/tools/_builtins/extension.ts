@@ -31,9 +31,22 @@ import {
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { wrapReadToolWithDedup } from "./read-dedup.js";
+import { wrapReadToolWithSpill } from "./read-spill.js";
+import type { ReadToolDefinitionLike } from "./read-tool-shared.js";
 
 const FACTORIES: Record<string, (cwd: string) => unknown> = {
-	read: createReadToolDefinition,
+	// Wrapped (innermost first) with:
+	//  1. read-spill (F1(a)): a plain oversized read that hits pi's own
+	//     truncation cap gets spilled to disk + replaced with a head+tail
+	//     excerpt + path, instead of a head-only truncation.
+	//  2. read-dedup (F24): an exact repeat read (same path/offset/limit) of
+	//     an unchanged file returns a short stub instead of full content --
+	//     this also covers repeat reads of the (now much smaller) spilled
+	//     excerpt above, so re-reading a huge unchanged file twice doesn't
+	//     re-spill to disk each time.
+	read: (cwd: string) =>
+		wrapReadToolWithDedup(wrapReadToolWithSpill(createReadToolDefinition(cwd) as unknown as ReadToolDefinitionLike, cwd), cwd),
 	edit: createEditToolDefinition,
 	write: createWriteToolDefinition,
 	grep: createGrepToolDefinition,

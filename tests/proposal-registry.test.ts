@@ -88,8 +88,8 @@ describe("PROPOSAL_TYPE_REGISTRY.mergeFields", () => {
 		});
 	});
 
-	describe("plain-spread types (role/tool/staff)", () => {
-		for (const type of ["role", "tool", "staff"] as ProposalType[]) {
+	describe("plain-spread types (role/tool/staff/workflow/skill)", () => {
+		for (const type of ["role", "tool", "staff", "workflow", "skill"] as ProposalType[]) {
 			it(`${type}: incoming fields shallow-spread over prior`, () => {
 				const merge = PROPOSAL_TYPE_REGISTRY[type].mergeFields;
 				const prev = { a: 1, b: 2 };
@@ -176,8 +176,8 @@ describe("hasCurrentProposalSlotForSession", () => {
 });
 
 describe("isProposalType", () => {
-	it("accepts the five known types", () => {
-		for (const t of ["goal", "project", "role", "tool", "staff"]) {
+	it("accepts the seven known types", () => {
+		for (const t of ["goal", "project", "role", "tool", "staff", "workflow", "skill"]) {
 			assert.equal(isProposalType(t), true);
 		}
 	});

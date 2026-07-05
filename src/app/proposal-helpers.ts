@@ -83,6 +83,7 @@ const TRAILING_BODY_FIELDS: Partial<Record<ProposalType, readonly string[]>> = {
 	goal: ["spec"],
 	role: ["prompt"],
 	staff: ["prompt"],
+	skill: ["content"],
 };
 
 function normaliseFieldsForFingerprint(

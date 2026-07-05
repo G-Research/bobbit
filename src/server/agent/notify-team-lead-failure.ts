@@ -12,6 +12,7 @@
  */
 
 import { isRestartInterruptedStep } from "./verification-logic.js";
+import type { VerificationFinding } from "./gate-store.js";
 
 export interface FailureStepLike {
 	name: string;
@@ -20,7 +21,11 @@ export interface FailureStepLike {
 	skipped?: boolean;
 	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
 	output?: string;
+	/** Optional structured findings reported alongside the step's verdict (F3). */
+	findings?: VerificationFinding[];
 }
+
+const MAX_FINDINGS_LISTED = 5;
 
 const MAX_STEP_NAMES_LISTED = 5;
 
@@ -48,6 +53,23 @@ function isRestartInterruptedFailureStep(step: FailureStepLike): boolean {
 	if (step.passed || step.skipped) return false;
 	if (step.type === "command") return step.status === "waiting";
 	return isRestartInterruptedStep({ passed: step.passed, output: step.output ?? "", type: step.type });
+}
+
+/**
+ * Compact "severity: summary (file:line)" lines for a failed step's
+ * structured findings (F3), capped at MAX_FINDINGS_LISTED. Additive: steps
+ * without `findings` render nothing here — the caller falls back to the
+ * `gate_inspect` pointer as before.
+ */
+function appendFindingsLines(lines: string[], findings: VerificationFinding[] | undefined): void {
+	if (!findings || findings.length === 0) return;
+	const head = findings.slice(0, MAX_FINDINGS_LISTED);
+	const overflow = findings.length - head.length;
+	for (const f of head) {
+		const location = f.file ? ` (${f.file}${f.line !== undefined ? `:${f.line}` : ""})` : "";
+		lines.push(`- **${f.severity}**: ${f.summary}${location}`);
+	}
+	if (overflow > 0) lines.push(`- ...and ${overflow} more finding${overflow === 1 ? "" : "s"}`);
 }
 
 /**
@@ -94,6 +116,7 @@ export function buildVerificationFailureMessage(
 	for (const step of failed) {
 		lines.push("");
 		lines.push(`**Failed step:** ${describeFailedStep(step)}`);
+		appendFindingsLines(lines, step.findings);
 		appendInspectBlock(lines, gateInspectCommand(gateId, step.name));
 	}
 

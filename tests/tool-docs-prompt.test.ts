@@ -59,7 +59,11 @@ detail_docs: |-
 	"utf-8",
 );
 
-const { ToolManager, resolveToolsMdMode } = await import("../src/server/agent/tool-manager.ts");
+const { ToolManager, resolveToolsMdMode, TOOLS_MD_CONFIG_KEY } = await import("../src/server/agent/tool-manager.ts");
+
+function scalarStore(data: Record<string, string>) {
+	return { get: (key: string) => data[key] };
+}
 
 after(() => {
 	try { fs.rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -269,6 +273,43 @@ describe("resolveToolsMdMode", () => {
 		assert.equal(resolveToolsMdMode(), "index");
 	});
 
+	it("unset everywhere is 'full' (byte-identical default)", () => {
+		assert.equal(resolveToolsMdMode(undefined, {
+			projectConfigStore: scalarStore({}),
+			serverConfigStore: scalarStore({}),
+		}), "full");
+	});
+
+	it("uses project config when env is unset", () => {
+		assert.equal(resolveToolsMdMode(undefined, {
+			projectConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "index" }),
+			serverConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "full" }),
+		}), "index");
+	});
+
+	it("falls through to server config when project config is unset", () => {
+		assert.equal(resolveToolsMdMode(undefined, {
+			projectConfigStore: scalarStore({}),
+			serverConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "index" }),
+		}), "index");
+	});
+
+	it("env var wins over project/server config", () => {
+		process.env.BOBBIT_TOOLS_MD = "index";
+		assert.equal(resolveToolsMdMode(undefined, {
+			projectConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "full" }),
+			serverConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "full" }),
+		}), "index");
+	});
+
+	it("BOBBIT_TOOLS_MD=full wins over project/server index config", () => {
+		process.env.BOBBIT_TOOLS_MD = "full";
+		assert.equal(resolveToolsMdMode(undefined, {
+			projectConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "index" }),
+			serverConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "index" }),
+		}), "full");
+	});
+
 	it("an explicit override wins over the env var", () => {
 		process.env.BOBBIT_TOOLS_MD = "index";
 		assert.equal(resolveToolsMdMode("full"), "full");
@@ -317,6 +358,15 @@ describe("getToolDocsForPrompt — index mode (BOBBIT_TOOLS_MD=index)", () => {
 		const tm = new ToolManager(tmpConfigDir);
 		const output = tm.getToolDocsForPrompt();
 		assert.ok(!output.includes("bash("), "env var alone should switch to index mode");
+	});
+
+	it("respects project config when no explicit mode arg or env var is passed", () => {
+		const tm = new ToolManager(tmpConfigDir);
+		const output = tm.getToolDocsForPrompt(undefined, undefined, undefined, undefined, {
+			projectConfigStore: scalarStore({ [TOOLS_MD_CONFIG_KEY]: "index" }),
+			serverConfigStore: scalarStore({}),
+		});
+		assert.ok(!output.includes("bash("), "project config alone should switch to index mode");
 	});
 
 	it("is strictly smaller than full mode for the real builtin set", () => {

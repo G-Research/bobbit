@@ -282,6 +282,9 @@ const goalPlugin: ProposalTypePlugin = {
 function makeYamlPlugin(opts: {
 	type: ProposalType;
 	requiredFields: readonly string[];
+	/** Optional extra structural check run after required-field presence
+	 *  passes. Returns a ParseError to reject, or null when valid. */
+	validateExtra?: (fields: Record<string, unknown>) => ParseError | null;
 }): ProposalTypePlugin {
 	return {
 		type: opts.type,
@@ -337,6 +340,8 @@ function makeYamlPlugin(opts: {
 					};
 				}
 			}
+			const extraErr = opts.validateExtra?.(parsed as Record<string, unknown>);
+			if (extraErr) return extraErr;
 			const value: TypedProposal = { type: opts.type, fields: parsed as Record<string, unknown> };
 			return { ok: true, value };
 		},
@@ -363,12 +368,39 @@ const staffPlugin = makeYamlPlugin({
 	requiredFields: ["name", "prompt"],
 });
 
+// Single-workflow proposal (F13). Fields mirror one entry of propose_project's
+// `workflows[]` array (id, name, description, gates[]) — see
+// defaults/workflow-authoring-guide.md for the gate/verify-step shape.
+// Acceptance POSTs/PUTs this to the existing /api/workflows resource
+// (src/server/routes/workflows-routes.ts), which is project-scoped only —
+// there is no system/headquarters-scope workflow store.
+const workflowPlugin = makeYamlPlugin({
+	type: "workflow",
+	requiredFields: ["id", "name", "gates"],
+	// Reuse the same gate/verify-step structural checks propose_goal's
+	// inlineWorkflow runs, so a malformed gates array is rejected at seed/edit
+	// time instead of surfacing as a 400 only when accepted via /api/workflows.
+	validateExtra: (fields) => validateGoalInlineWorkflow(fields),
+});
+
+// Skill proposal (F26 — the propose_skill half; the goalCompleted
+// lesson-extraction reviewer that would draft these lives in the hindsight
+// pack and is a separate lane). `content` is the SKILL.md markdown body as a
+// plain YAML string field, mirroring how propose_tool carries its YAML
+// `content` field — NOT native frontmatter (that's goal's special case).
+const skillPlugin = makeYamlPlugin({
+	type: "skill",
+	requiredFields: ["name", "description", "content"],
+});
+
 const REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: goalPlugin,
 	project: projectPlugin,
 	role: rolePlugin,
 	tool: toolPlugin,
 	staff: staffPlugin,
+	workflow: workflowPlugin,
+	skill: skillPlugin,
 };
 
 export function getProposalTypePlugin(type: ProposalType): ProposalTypePlugin {

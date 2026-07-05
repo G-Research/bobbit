@@ -3,6 +3,7 @@ import type { InboxEntry } from "../agent/inbox-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import type { Decision } from "../agent/decision-types.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
+import type { ProposalType } from "../proposals/proposal-files.js";
 
 /**
  * Connection-scoped auth/session-binding state stamped directly onto the `ws`
@@ -300,8 +301,8 @@ export type ServerMessage =
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }
 	| { type: "index:error"; projectId: string; message: string; recoverable: boolean }
 	| { type: "goal_spec_changed"; goalId: string; prevSpecHash: string; newSpecHash: string; prevLen: number; newLen: number; ts: number }
-	| { type: "proposal_update"; sessionId: string; proposalType: "goal" | "project" | "role" | "tool" | "staff"; fields: Record<string, unknown>; rev: number; streaming: false; source: "edit" | "seed" | "rehydrate" | "restore" }
-	| { type: "proposal_cleared"; sessionId: string; proposalType: "goal" | "project" | "role" | "tool" | "staff" }
+	| { type: "proposal_update"; sessionId: string; proposalType: ProposalType; fields: Record<string, unknown>; rev: number; streaming: false; source: "edit" | "seed" | "rehydrate" | "restore" }
+	| { type: "proposal_cleared"; sessionId: string; proposalType: ProposalType }
 	| {
 		type: "skill_expansions";
 		data: {

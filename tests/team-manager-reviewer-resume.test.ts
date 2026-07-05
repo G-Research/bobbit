@@ -85,6 +85,10 @@ after(() => {
 		(tm as any).idleNudgeTimers.clear();
 		for (const [, t] of (tm as any).noWorkersNudgeTimers ?? []) clearInterval(t);
 		(tm as any).noWorkersNudgeTimers?.clear?.();
+		for (const [, t] of (tm as any).pendingIdleNotify ?? []) clearTimeout(t);
+		(tm as any).pendingIdleNotify?.clear?.();
+		for (const [, batch] of (tm as any).pendingLeadNotify ?? []) clearTimeout(batch.timer);
+		(tm as any).pendingLeadNotify?.clear?.();
 	}
 	try { fs.rmSync(TEST_PI_DIR, { recursive: true }); } catch { /* ignore */ }
 });
@@ -155,6 +159,14 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 		};
 		const tm = new TeamManager(sm, config);
 		_created.push(tm);
+		// This test drives the worker's 5s idle-nudge debounce with fake timers
+		// and asserts on a fixed tick budget (6s). TeamManager also coalesces
+		// worker-finished notifications into a per-team-lead quiet window
+		// (default 2s in production) before actually dispatching — shrink that
+		// window here so the fixed tick budget still covers debounce + flush
+		// deterministically, matching the pattern used by the coalescing tests
+		// in tests/team-manager-worker-idle-debounce.test.ts.
+		(tm as any).teamLeadNotifyCoalesceMs = 0;
 
 		// Verify restore reconstructed the kind field correctly.
 		const state = tm.getTeamState("goal-1");

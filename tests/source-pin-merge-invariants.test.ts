@@ -565,22 +565,23 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("server.ts wires modelResolution into the /api/roles GET routes (restored by the w2-role-model-resolution-restore fix)", () => {
-		const text = read("src/server/server.ts");
+	it("roles-routes.ts wires modelResolution into the /api/roles GET routes (restored by the w2-role-model-resolution-restore fix)", () => {
+		const text = read("src/server/routes/roles-routes.ts");
 		assertTextInOrder(
 			text,
 			[
-				"const withRoleResolution = (",
-				"modelResolution: configCascade.resolveRoleModelResolution(String(r.item.name), projectId),",
+				"function withRoleResolution(",
+				"modelResolution: ctx.configCascade.resolveRoleModelResolution(String(r.item.name), projectId),",
 				// Post-HQ-split (upstream #932) both GET routes resolve an explicit
 				// project scope first (resolveRequiredConfigProjectScope) and pass its
 				// normalized `effectiveConfigProjectId` — the pinned text follows the
 				// exact call sites but the invariant is unchanged: withRoleResolution(),
 				// not plain withOrigin(), on both /api/roles list and detail responses.
-				"json({ roles: resolved.map(r => withRoleResolution(r as any, effectiveConfigProjectId)) });",
-				"json(withRoleResolution(found as any, effectiveConfigProjectId));",
+				"json({ roles: resolved.map(r => withRoleResolution(ctx, r as any, effectiveConfigProjectId)) });",
+				"json(withRoleResolution(ctx, found as any, effectiveConfigProjectId));",
+				"json({ ...role, modelResolution: configCascade.resolveRoleModelResolution(name, effectiveConfigProjectId) });",
 			],
-			"src/server/server.ts must serialize /api/roles (list) and /api/roles/:name (detail)\n" +
+			"src/server/routes/roles-routes.ts must serialize /api/roles (list) and /api/roles/:name (detail)\n" +
 			"responses through withRoleResolution(), not the plain withOrigin() helper, so each role\n" +
 			"carries a `modelResolution` field (model/thinkingLevel source hierarchy + editability).\n" +
 			"Without this wiring the Roles UI has no way to render accurate source badges or decide\n" +
@@ -588,8 +589,8 @@ describe("Source pin — merge-loss invariants", () => {
 			"falls back to guessing from the plain model/thinkingLevel strings. Originally added by\n" +
 			"1fe14164, silently dropped by merge commit b687d93d alongside the config-cascade.ts\n" +
 			"types/method (same merge, same hunk-loss pattern as getRawPack/activeWhenConfig above);\n" +
-			"restored by the w2-role-model-resolution-restore fix. DO NOT delete this pin — restore\n" +
-			"the dropped wiring instead.",
+			"restored by the w2-role-model-resolution-restore fix, then moved to roles-routes.ts by\n" +
+			"STR-05. DO NOT delete this pin — restore the dropped wiring instead.",
 		);
 	});
 	it("server-host-api.ts exposes host.agents.spawnGoal, the experiment-runner seam (restored by W2.G)", () => {
