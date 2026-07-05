@@ -291,7 +291,11 @@ export class ProjectContextManager {
         return ctx.staffStore.get(hit.id) !== undefined;
       }
       case "file":
-        return true; // files source not in scope
+        // Files are derived from disk (docs/**, AGENTS.md, CLAUDE.md), not
+        // from a store entity with a lifecycle — there is nothing to orphan
+        // against. A stale hit (file deleted/moved since last index) self-heals
+        // on the next full rebuild rather than through this per-query check.
+        return true;
       default:
         return true;
     }

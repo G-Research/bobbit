@@ -97,7 +97,7 @@ export class ProjectContext {
     this.staffStore = new StaffStore(this.stateDir);
     this.inboxStore = new InboxStore(this.stateDir);
     this.colorStore = new ColorStore(this.stateDir);
-    this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
+    this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore, projectRoot: project.rootPath });
     this.costTracker = new CostTracker(this.stateDir);
     this.secretsStore = new SecretsStore(this.stateDir);
     this.planMutationStore = new PlanMutationStore(this.stateDir);
