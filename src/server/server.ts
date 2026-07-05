@@ -3879,24 +3879,62 @@ async function handleApiRoute(
 		return projectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : projectId;
 	}
 
-	function roleMutationProjectId(value: unknown): string | undefined {
+	function rawProjectId(value: unknown): string | undefined {
 		if (typeof value !== "string") return undefined;
 		const trimmed = value.trim();
-		if (!trimmed) return undefined;
-		return aliasSystemToHeadquartersScope(trimmed);
+		return trimmed || undefined;
+	}
+
+	function roleMutationProjectId(value: unknown): string | undefined {
+		const trimmed = rawProjectId(value);
+		return trimmed ? aliasSystemToHeadquartersScope(trimmed) : undefined;
+	}
+
+	type RequiredConfigProjectScope = {
+		ok: true;
+		requestedProjectId: string;
+		effectiveProjectId?: string;
+		context?: ProjectContext;
+	};
+	type RequiredConfigProjectScopeError = {
+		ok: false;
+		status: 400 | 404;
+		error: string;
+		code: string;
+	};
+
+	function resolveRequiredConfigProjectScope(projectIdValue: unknown, opts: { aliasSystem?: boolean } = {}): RequiredConfigProjectScope | RequiredConfigProjectScopeError {
+		const requestedProjectId = opts.aliasSystem ? roleMutationProjectId(projectIdValue) : rawProjectId(projectIdValue);
+		if (!requestedProjectId) {
+			return { ok: false, status: 400, error: "projectId required", code: "PROJECT_ID_REQUIRED" };
+		}
+		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
+		if (!effectiveProjectId) {
+			return { ok: true, requestedProjectId };
+		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId: effectiveProjectId });
+		if (!resolved.ok) return resolved;
+		const context = projectContextManager.getOrCreate(effectiveProjectId);
+		if (!context) {
+			return { ok: false, status: 404, error: `Project not found: ${effectiveProjectId}`, code: "PROJECT_NOT_FOUND" };
+		}
+		return { ok: true, requestedProjectId, effectiveProjectId, context };
+	}
+
+	function writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void {
+		json({ error: error.error, code: error.code }, error.status);
 	}
 
 	/**
 	 * Non-workflow Headquarters role mutations are server-scope aliases. Normal
 	 * project ids still resolve to that project's role store.
 	 */
-	function resolveRoleMutationTarget(rawProjectId: unknown): RoleMutationTarget | null {
-		const requestedProjectId = roleMutationProjectId(rawProjectId);
-		const effectiveProjectId = normalizeConfigProjectId(requestedProjectId);
-		if (!effectiveProjectId) return { scope: "server", store: serverRoleStore, manager: roleManager };
-		const ctx = projectContextManager.getOrCreate(effectiveProjectId);
-		if (!ctx) return null;
-		return { scope: "project", store: ctx.roleStore, projectId: effectiveProjectId };
+	function resolveRoleMutationTarget(rawProjectId: unknown): { ok: true; target: RoleMutationTarget } | RequiredConfigProjectScopeError {
+		const resolved = resolveRequiredConfigProjectScope(rawProjectId, { aliasSystem: true });
+		if (!resolved.ok) return resolved;
+		if (!resolved.effectiveProjectId) return { ok: true, target: { scope: "server", store: serverRoleStore, manager: roleManager } };
+		if (!resolved.context) return { ok: false, status: 404, error: `Project not found: ${resolved.effectiveProjectId}`, code: "PROJECT_NOT_FOUND" };
+		return { ok: true, target: { scope: "project", store: resolved.context.roleStore, projectId: resolved.effectiveProjectId } };
 	}
 
 	/**
@@ -7249,12 +7287,9 @@ async function handleApiRoute(
 		// `headquarters` for the server scope; normalize it before any downstream
 		// config/toolManager/marketplace lookup so the synthetic HQ id never leaks
 		// into project-context calls.
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) {
-			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
-			return;
-		}
-		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const effectiveConfigProjectId = projectScope.effectiveProjectId;
 		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
 		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
 		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
@@ -7265,7 +7300,7 @@ async function handleApiRoute(
 		// pack-scoped contribution field.
 		const toolPackTm = resolveActionToolManager(
 			toolManager,
-			effectiveConfigProjectId ? projectContextManager.getOrCreate(effectiveConfigProjectId)?.toolManager : undefined,
+			projectScope.context?.toolManager,
 		);
 		const tools: Array<Record<string, unknown>> = resolved.map(r => {
 			const out = withOrigin(r as any);
@@ -7297,22 +7332,24 @@ async function handleApiRoute(
 		const name = decodeURIComponent(toolMatch[1]);
 
 		if (req.method === "GET") {
-			// Resolve via the project's toolManager when a projectId is supplied so
-			// project-scope market-pack tools are visible (their `tools/` roots are
-			// wired into that context's manager — finding #1). Falls back to the
-			// server-level manager (server + global-user market packs + builtins).
-			const projectId = url.searchParams.get("projectId") || undefined;
-			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
-			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(projectId));
+			// Resolve via the selected project's toolManager so project-scope
+			// market-pack tools are visible. Headquarters normalizes to the
+			// server/global scope; missing or unknown projectId never falls back.
+			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const effectiveConfigProjectId = projectScope.effectiveProjectId;
+			const tm = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
+			const fallbackTm = fallbackToolManagerForConfig(projectScope.context?.configDir ?? bobbitConfigDir());
+			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));
 			const piTool = piRows.find((row) => row.name === name);
-			const tool = tm.getToolByName(name);
+			const tool = tm.getToolByName(name) ?? fallbackTm?.getToolByName(name);
 			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
 			// Merge in cascade origin metadata so the detail payload carries the same
 			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
 			// Without this, the tools edit page replaces the cascade list item with the
 			// raw detail and a market-pack tool loses its origin badge + read-only state.
-			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
-			const toolDiagnostics = toolDiagnosticsForProject(projectId);
+			const cascadeEntry = configCascade.resolveTools(effectiveConfigProjectId).find(r => r.item.name === name);
+			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
 			if (cascadeEntry && tool) {
 				const withMeta = withOrigin(cascadeEntry as any);
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
@@ -7338,17 +7375,35 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = toolManager.updateToolMetadata(name, {
+			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
+			const targetConfigDir = projectScope.context?.configDir ?? bobbitConfigDir();
+			const updates = {
 				description: body.description,
 				group: body.group,
 				docs: body.docs,
 				detail_docs: body.detail_docs,
 				grantPolicy: body.grantPolicy,
-			});
+			};
+			const ok = targetToolManager.updateToolMetadata(name, updates)
+				|| (fallbackToolManagerForConfig(targetConfigDir)?.updateToolMetadata(name, updates) ?? false);
 			if (!ok) { json({ error: "Tool not found" }, 404); return; }
 			json({ ok: true });
 			return;
 		}
+	}
+
+	function runtimeBuiltinToolsDir(): string {
+		const moduleDefaults = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		if (fs.existsSync(moduleDefaults)) return moduleDefaults;
+		return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "defaults", "tools");
+	}
+
+	function fallbackToolManagerForConfig(configDirForScope: string): ToolManager | null {
+		const builtinToolsDir = runtimeBuiltinToolsDir();
+		if (!fs.existsSync(builtinToolsDir)) return null;
+		return new ToolManager(configDirForScope, builtinToolsDir);
 	}
 
 	// Shared helper: find which group subdirectory contains a tool by scanning YAML files.
@@ -8052,9 +8107,9 @@ async function handleApiRoute(
 	if (toolCustomizeMatch && req.method === "POST") {
 		const name = decodeURIComponent(toolCustomizeMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		// Defense-in-depth: `system` is the hidden internal project, never a
-		// user-facing tool config scope — alias it to Headquarters/server scope.
-		const projectId = aliasSystemToHeadquartersScope(url.searchParams.get("projectId") || undefined);
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		// Find the tool in the cascade to get its origin
 		const resolved = configCascade.resolveTools(projectId);
@@ -8062,7 +8117,7 @@ async function handleApiRoute(
 		if (!source) { json({ error: "Tool not found" }, 404); return; }
 
 		// Find the groupDir by scanning tool directories to locate this tool's YAML
-		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		const builtinToolsDir = runtimeBuiltinToolsDir();
 		const serverToolsDir = path.join(bobbitConfigDir(), "tools");
 
 		// Find groupDir from the source layer
@@ -8118,9 +8173,9 @@ async function handleApiRoute(
 	if (toolOverrideMatch && req.method === "DELETE") {
 		const name = decodeURIComponent(toolOverrideMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		// Defense-in-depth: `system` is the hidden internal project, never a
-		// user-facing tool config scope — alias it to Headquarters/server scope.
-		const projectId = aliasSystemToHeadquartersScope(url.searchParams.get("projectId") || undefined);
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		// Determine the tools directory for the target scope
 		let targetToolsDir: string;
@@ -8133,7 +8188,7 @@ async function handleApiRoute(
 		}
 
 		// Find which group directory contains this tool
-		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		const builtinToolsDir = runtimeBuiltinToolsDir();
 
 		// Find groupDir in the target scope (the override we're deleting)
 		let groupDir = findToolGroupDir(name, targetToolsDir);
@@ -8154,8 +8209,9 @@ async function handleApiRoute(
 
 	// GET /api/tool-group-policies
 	if (url.pathname === "/api/tool-group-policies" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		json(configCascade.resolveToolGroupPolicies(projectId));
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		json(configCascade.resolveToolGroupPolicies(projectScope.effectiveProjectId));
 		return;
 	}
 
@@ -8172,14 +8228,9 @@ async function handleApiRoute(
 		}
 		// Scope the mutation to a project-level store when projectId is given.
 		// Headquarters/system alias to server scope (mirrors resolveRoleMutationTarget).
-		const rawProjectId = body.projectId ?? url.searchParams.get("projectId") ?? undefined;
-		const effectiveProjectId = normalizeConfigProjectId(roleMutationProjectId(rawProjectId));
-		let targetStore: ToolGroupPolicyStore = groupPolicyStore;
-		if (effectiveProjectId) {
-			const ctx = projectContextManager.getOrCreate(effectiveProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.toolGroupPolicyStore;
-		}
+		const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const targetStore: ToolGroupPolicyStore = projectScope.context?.toolGroupPolicyStore ?? groupPolicyStore;
 		targetStore.setGroupPolicy(group, body.policy || null);
 		json({ ok: true });
 		return;
@@ -9649,12 +9700,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		// Require an explicit projectId. `headquarters` aliases the server/global
 		// scope via normalizeConfigProjectId; use only the normalized value below.
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) {
-			json({ error: "projectId required", code: "PROJECT_ID_REQUIRED" }, 400);
-			return;
-		}
-		const effectiveConfigProjectId = normalizeConfigProjectId(projectId);
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const effectiveConfigProjectId = projectScope.effectiveProjectId;
 		const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
 		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
@@ -9664,8 +9712,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
 		try {
-			const target = resolveRoleMutationTarget(body?.projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(body?.projectId ?? url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 			if (target.scope === "server") {
 				const role = target.manager.createRole({
@@ -9708,20 +9757,19 @@ async function handleApiRoute(
 	if (roleCustomizeMatch && req.method === "POST") {
 		const name = decodeURIComponent(roleCustomizeMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		const resolved = configCascade.resolveRoles(projectId);
 		const source = resolved.find(r => r.item.name === name);
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
 		let targetStore: RoleStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const target = resolveRoleMutationTarget(projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
-			targetStore = target.store;
+		if (scope === "project" && projectId) {
+			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
 		} else {
-			// scope === "server" (or unspecified) → system/server layer
+			// scope === "server" (or Headquarters project scope) → system/server layer
 			targetStore = serverRoleStore;
 		}
 
@@ -9737,16 +9785,15 @@ async function handleApiRoute(
 	if (roleOverrideMatch && req.method === "DELETE") {
 		const name = decodeURIComponent(roleOverrideMatch[1]);
 		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
+		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		const projectId = projectScope.effectiveProjectId;
 
 		let targetStore: RoleStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const target = resolveRoleMutationTarget(projectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
-			targetStore = target.store;
+		if (scope === "project" && projectId) {
+			targetStore = projectScope.context?.roleStore ?? serverRoleStore;
 		} else {
-			// scope === "server" (or unspecified) → system/server layer
+			// scope === "server" (or Headquarters project scope) → system/server layer
 			targetStore = serverRoleStore;
 		}
 
@@ -9761,15 +9808,19 @@ async function handleApiRoute(
 		const name = decodeURIComponent(roleMatch[1]);
 
 		if (req.method === "GET") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const resolved = configCascade.resolveRoles(qProjectId);
+			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
+			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+			const effectiveConfigProjectId = projectScope.effectiveProjectId;
+			const resolved = configCascade.resolveRoles(effectiveConfigProjectId);
 			const found = resolved.find(r => r.item.name === name);
 			if (found) {
 				json(withOrigin(found as any));
-			} else {
+			} else if (!effectiveConfigProjectId) {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
 				json(role);
+			} else {
+				json({ error: "Role not found" }, 404);
 			}
 			return;
 		}
@@ -9777,9 +9828,9 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const target = resolveRoleMutationTarget(qProjectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			if (target.scope === "project") {
 				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
@@ -9859,9 +9910,9 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			const target = resolveRoleMutationTarget(qProjectId);
-			if (!target) { json({ error: "Project not found" }, 404); return; }
+			const resolvedTarget = resolveRoleMutationTarget(url.searchParams.get("projectId"));
+			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
+			const target = resolvedTarget.target;
 			if (target.scope === "project") {
 				target.store.remove(name);
 				json({ ok: true });

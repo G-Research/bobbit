@@ -284,11 +284,32 @@ test("config discovery APIs require explicit projectId", async (t) => {
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
-	// Tool/role discovery reads require an explicit projectId. First-party UI
-	// passes `headquarters` for server scope; missing scope must fail closed.
-	for (const pathname of ["/api/tools", "/api/roles"]) {
+	// Tool/role discovery/detail/config mutations require an explicit projectId.
+	// First-party UI passes `headquarters` for server scope; missing scope must fail closed.
+	for (const pathname of [
+		"/api/tools",
+		"/api/tools/read",
+		"/api/roles",
+		"/api/roles/team-lead",
+		"/api/tool-group-policies",
+	]) {
 		const missing = await api(baseUrl, pathname);
 		assert.equal(missing.status, 400, `${pathname} should require projectId`);
+		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
+	}
+	for (const { pathname, method, body } of [
+		{ pathname: "/api/tools/read", method: "PUT", body: { description: "x" } },
+		{ pathname: "/api/tools/read/customize?scope=project", method: "POST", body: undefined },
+		{ pathname: "/api/tools/read/override?scope=project", method: "DELETE", body: undefined },
+		{ pathname: "/api/roles", method: "POST", body: { name: "missing-project-role", label: "Missing Project" } },
+		{ pathname: "/api/roles/team-lead", method: "PUT", body: { label: "Team Lead" } },
+		{ pathname: "/api/roles/team-lead", method: "DELETE", body: undefined },
+		{ pathname: "/api/roles/coder/customize?scope=project", method: "POST", body: undefined },
+		{ pathname: "/api/roles/coder/override?scope=project", method: "DELETE", body: undefined },
+		{ pathname: "/api/tool-group-policies/bash", method: "PUT", body: { policy: "ask" } },
+	]) {
+		const missing = await api(baseUrl, pathname, body, method);
+		assert.equal(missing.status, 400, `${method} ${pathname} should require projectId`);
 		assert.equal(missing.body.code, "PROJECT_ID_REQUIRED");
 	}
 
@@ -306,9 +327,45 @@ test("config discovery APIs require explicit projectId", async (t) => {
 	assert.equal(tools.status, 200, JSON.stringify(tools.body));
 	assert.ok(Array.isArray(tools.body.tools));
 
+	const toolDetail = await api(baseUrl, "/api/tools/read?projectId=headquarters");
+	assert.equal(toolDetail.status, 200, JSON.stringify(toolDetail.body));
+	assert.equal(toolDetail.body.name, "read");
+
+	const toolUpdate = await api(baseUrl, "/api/tools/read?projectId=headquarters", { description: "Read files" }, "PUT");
+	assert.equal(toolUpdate.status, 200, JSON.stringify(toolUpdate.body));
+	const toolCustomize = await api(baseUrl, "/api/tools/read/customize?scope=project&projectId=headquarters", undefined, "POST");
+	assert.equal(toolCustomize.status, 201, JSON.stringify(toolCustomize.body));
+	const toolOverride = await api(baseUrl, "/api/tools/read/override?scope=project&projectId=headquarters", undefined, "DELETE");
+	assert.equal(toolOverride.status, 200, JSON.stringify(toolOverride.body));
+
+	const groupPolicies = await api(baseUrl, "/api/tool-group-policies?projectId=headquarters");
+	assert.equal(groupPolicies.status, 200, JSON.stringify(groupPolicies.body));
+
+	const groupPolicyUpdate = await api(baseUrl, "/api/tool-group-policies/bash?projectId=headquarters", { policy: "ask" }, "PUT");
+	assert.equal(groupPolicyUpdate.status, 200, JSON.stringify(groupPolicyUpdate.body));
+
 	const roles = await api(baseUrl, "/api/roles?projectId=headquarters");
 	assert.equal(roles.status, 200, JSON.stringify(roles.body));
 	assert.ok(Array.isArray(roles.body.roles));
+
+	const roleName = "hq-scope-guard-role";
+	const createRole = await api(baseUrl, "/api/roles", { projectId: "headquarters", name: roleName, label: "HQ Guard" });
+	assert.equal(createRole.status, 201, JSON.stringify(createRole.body));
+	const roleDetail = await api(baseUrl, `/api/roles/${roleName}?projectId=headquarters`);
+	assert.equal(roleDetail.status, 200, JSON.stringify(roleDetail.body));
+	assert.equal(roleDetail.body.name, roleName);
+	const updateRole = await api(baseUrl, `/api/roles/${roleName}?projectId=headquarters`, { label: "HQ Guard Updated" }, "PUT");
+	assert.equal(updateRole.status, 200, JSON.stringify(updateRole.body));
+	const deleteRole = await api(baseUrl, `/api/roles/${roleName}?projectId=headquarters`, undefined, "DELETE");
+	assert.equal(deleteRole.status, 200, JSON.stringify(deleteRole.body));
+
+	const customRoleName = "hq-scope-customize-role";
+	const createCustomRole = await api(baseUrl, "/api/roles", { projectId: "headquarters", name: customRoleName, label: "HQ Customize" });
+	assert.equal(createCustomRole.status, 201, JSON.stringify(createCustomRole.body));
+	const roleCustomize = await api(baseUrl, `/api/roles/${customRoleName}/customize?scope=project&projectId=headquarters`, undefined, "POST");
+	assert.equal(roleCustomize.status, 201, JSON.stringify(roleCustomize.body));
+	const roleOverride = await api(baseUrl, `/api/roles/${customRoleName}/override?scope=project&projectId=headquarters`, undefined, "DELETE");
+	assert.equal(roleOverride.status, 200, JSON.stringify(roleOverride.body));
 
 	const workflows = await api(baseUrl, "/api/workflows?projectId=headquarters");
 	assert.equal(workflows.status, 200, JSON.stringify(workflows.body));
