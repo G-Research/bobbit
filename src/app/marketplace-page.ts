@@ -2686,9 +2686,22 @@ export function ensureRuntimeCapabilities(pack: InstalledPackWire, runtimeId: st
 
 /** A managed-runtime activation row: the explicit on-enable toggle plus the
  *  consent enable-card disclosing what starting it does (design §8). Exported
- *  for the runtime-consent fixture test (row + card render together). */
+ *  for the runtime-consent fixture test (row + card render together).
+ *
+ *  Only probes the capability disclosure while the runtime is ENABLED. A
+ *  disabled runtime is dropped from the activation-filtered contribution
+ *  registry (`PackContributionRegistry.getPack` — see
+ *  `src/server/extension-host/pack-contribution-registry.ts`), so
+ *  `capabilitySummary` 404s (`PackRuntimeNotFoundError`) before the user has
+ *  ever toggled it on. Hindsight ships `defaultDisabled: true`, so probing
+ *  unconditionally spammed a `PackRuntimeNotFoundError` 404 into the server
+ *  log on every ordinary Marketplace page load. `renderRuntimeConsentCardView`
+ *  already falls back to static disclosure copy when no summary is cached, so
+ *  skipping the probe while disabled loses no user-visible disclosure — it
+ *  only stops fetching something guaranteed to fail — and a fresh, accurate
+ *  fetch fires as soon as the row re-renders with `checked: true`. */
 export function renderRuntimeRow(pack: InstalledPackWire, runtimeId: string, checked: boolean): TemplateResult {
-	ensureRuntimeCapabilities(pack, runtimeId);
+	if (checked) ensureRuntimeCapabilities(pack, runtimeId);
 	const busyKey = `activation:${pack.scope}:${pack.packName}:runtime:${runtimeId}`;
 	return html`
 		<div class="market-runtime-row" data-testid="market-runtime-${runtimeId}">
