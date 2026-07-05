@@ -284,12 +284,12 @@ describe("TeamManager ghost worker reaping", () => {
 		assert.equal(missingUnsubscribe.mock.calls.length, 1, "missing worker event subscription must be unsubscribed");
 		assert.equal(terminatedUnsubscribe.mock.calls.length, 1, "terminated worker event subscription must be unsubscribed");
 		assert.deepEqual(
-			forgetChild.mock.calls.map((call: any) => call.arguments[0]).sort(),
+			forgetChild.mock.calls.map((call: any) => call[0]).sort(),
 			["missing-reviewer-worker", "missing-worker", "terminated-reviewer-worker", "terminated-worker"],
 			"stale workers, including reviewer-role workers, should be forgotten by orchestration core without routing verification reviewers through worker cleanup",
 		);
 		assert.equal(
-			broadcastToGoal.mock.calls.some((call: any) => call.arguments[1]?.type === "team_agent_finished"),
+			broadcastToGoal.mock.calls.some((call: any) => call[1]?.type === "team_agent_finished"),
 			false,
 			"reaping dead workers must not broadcast a synthetic worker-finished event",
 		);

@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
 import { generateSessionTitle } from "../../src/server/agent/title-generator.js";
@@ -36,6 +37,10 @@ afterEach(() => {
 	if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 	else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
 	invalidateModelCache();
+	// Under vitest isolate:false the agent-dir runtime singleton is cached across
+	// files in a reused fork; drop it so a temp dir set by a test here does not leak
+	// a stale (deleted) agent dir into the next file.
+	resetAgentDirStateForTests();
 });
 
 function prefsWithManualProvider(): { prefs: PreferencesStore; dir: string } {
@@ -98,6 +103,9 @@ describe("title generation with non-AI-Gateway naming models", () => {
 	it("model completions reuse OpenAI Codex OAuth credentials, matching chat auth", async () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "bobbit-title-auth-"));
 		process.env.BOBBIT_AGENT_DIR = dir;
+		// Re-point the cached agent-dir runtime singleton at this test's dir so
+		// completeModelText resolves auth.json (via globalAuthPath()) under it.
+		resetAgentDirStateForTests();
 		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", access: "codex-oauth-token" } }));
 		const calls: any[] = [];
 		try {

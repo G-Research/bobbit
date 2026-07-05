@@ -25,6 +25,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+
+// Flush pending microtasks/IO after advancing the manual clock so async timer
+// callbacks settle before assertions.
+const flush = () => new Promise((r) => setImmediate(r));
 
 // Isolate from real ~/.bobbit state by using a temp directory. Set BEFORE
 // importing TeamManager so bobbitDir() picks it up.
@@ -175,9 +180,14 @@ const DEFAULT_CONFIG = {
 
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
 
-function createTeamManager(sm: any) {
+function createTeamManager(sm: any, clock: ManualClock) {
 	clearTeamStore();
-	const tm = new TeamManager(sm, DEFAULT_CONFIG);
+	const tm = new TeamManager(sm, DEFAULT_CONFIG, undefined, clock);
+	// The stuck-team watchdog is a separate subsystem. Under the original real
+	// wall-clock it stayed dormant (Date.now() barely moved during a test); with
+	// the injected virtual clock, advancing time would activate it and inject
+	// extra nudges. Stop it so these tests isolate the idle-nudge backoff timers.
+	tm.stopStuckSweep();
 	_createdManagers.push(tm);
 	return tm;
 }
@@ -239,7 +249,8 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 		return session;
 	};
 
-	const team = createTeamManager(sm);
+	const clock = createManualClock();
+	const team = createTeamManager(sm, clock);
 	await team.startTeam("goal-1");
 
 	const entry = (team as any).teams.get("goal-1")!;
@@ -267,7 +278,7 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 		for (const cb of eventCallbacks) cb({ type });
 	}
 
-	return { team, sm, tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire };
+	return { team, sm, tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire, clock };
 }
 
 // ---------------------------------------------------------------------------
@@ -275,116 +286,95 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — errored idle team lead auto-retry (regression)", () => {
-	it("retries an errored idle team lead instead of enqueueing no-workers [AUTO-NUDGE] cards", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("retries an errored idle team lead instead of enqueueing no-workers [AUTO-NUDGE] cards", async () => {
+		const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire, clock } = await setupTeamWithCapturedEvents();
+		tlSession.status = "idle";
+		tlSession.lastTurnErrored = true;
+		tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
+		tlSession.lastPromptText = "continue coordinating the team";
 
-		try {
-			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
-			tlSession.status = "idle";
-			tlSession.lastTurnErrored = true;
-			tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
-			tlSession.lastPromptText = "continue coordinating the team";
+		fire("agent_end");
 
-			fire("agent_end");
+		// Base no-workers delay is 5 minutes. The timer path should recover via
+		// retryLastPrompt({ auto: true }) rather than append a fresh auto-nudge.
+		clock.advance(5 * 60 * 1000 + 1_000);
+		await flush();
 
-			// Base no-workers delay is 5 minutes. The timer path should recover via
-			// retryLastPrompt({ auto: true }) rather than append a fresh auto-nudge.
-			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
-			await Promise.resolve();
-			await Promise.resolve();
-
-			assert.equal(
-				retryLastPrompt.mock.calls.length,
-				1,
-				"errored idle team lead should be recovered through retryLastPrompt, not a new prompt card",
-			);
-			assert.deepEqual(
-				retryLastPrompt.mock.calls[0],
-				[tlSession.id, { auto: true }],
-				"team-manager retry should use the existing automatic retry path",
-			);
-			const autoNudgePrompts = enqueuePrompt.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
-			);
-			assert.equal(
-				autoNudgePrompts.length,
-				0,
-				"errored idle recovery must not enqueue duplicate [AUTO-NUDGE] transcript cards",
-			);
-			const autoNudgeSteers = deliverLiveSteer.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
-			);
-			assert.equal(
-				autoNudgeSteers.length,
-				0,
-				"errored idle recovery must not steer duplicate [AUTO-NUDGE] transcript cards",
-			);
-		} finally {
-			vi.useRealTimers();
-		}
+		assert.equal(
+			retryLastPrompt.mock.calls.length,
+			1,
+			"errored idle team lead should be recovered through retryLastPrompt, not a new prompt card",
+		);
+		assert.deepEqual(
+			retryLastPrompt.mock.calls[0],
+			[tlSession.id, { auto: true }],
+			"team-manager retry should use the existing automatic retry path",
+		);
+		const autoNudgePrompts = enqueuePrompt.mock.calls.filter((call: any) =>
+			String(call[1] ?? "").includes("[AUTO-NUDGE]"),
+		);
+		assert.equal(
+			autoNudgePrompts.length,
+			0,
+			"errored idle recovery must not enqueue duplicate [AUTO-NUDGE] transcript cards",
+		);
+		const autoNudgeSteers = deliverLiveSteer.mock.calls.filter((call: any) =>
+			String(call[1] ?? "").includes("[AUTO-NUDGE]"),
+		);
+		assert.equal(
+			autoNudgeSteers.length,
+			0,
+			"errored idle recovery must not steer duplicate [AUTO-NUDGE] transcript cards",
+		);
 	});
 
-	it("suppresses unknown errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("suppresses unknown errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async () => {
+		const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire, clock } = await setupTeamWithCapturedEvents();
+		tlSession.status = "idle";
+		tlSession.lastTurnErrored = true;
+		tlSession.lastTurnErrorMessage = "model stopped with an unexplained deterministic failure";
+		tlSession.lastPromptText = "continue coordinating the team";
 
-		try {
-			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
-			tlSession.status = "idle";
-			tlSession.lastTurnErrored = true;
-			tlSession.lastTurnErrorMessage = "model stopped with an unexplained deterministic failure";
-			tlSession.lastPromptText = "continue coordinating the team";
+		fire("agent_end");
+		clock.advance(5 * 60 * 1000 + 1_000);
+		await flush();
 
-			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
-			await Promise.resolve();
-			await Promise.resolve();
-
-			assert.equal(retryLastPrompt.mock.calls.length, 0,
-				"unknown/unclassified errors must not be auto-retried by the team-manager nudge path");
-			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
-			).length, 0,
-				"unknown errored idle sessions must suppress auto-nudge transcript cards");
-			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
-			).length, 0,
-				"unknown errored idle sessions must suppress auto-nudge steer cards");
-		} finally {
-			vi.useRealTimers();
-		}
+		assert.equal(retryLastPrompt.mock.calls.length, 0,
+			"unknown/unclassified errors must not be auto-retried by the team-manager nudge path");
+		assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+			String(call[1] ?? "").includes("[AUTO-NUDGE]"),
+		).length, 0,
+			"unknown errored idle sessions must suppress auto-nudge transcript cards");
+		assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
+			String(call[1] ?? "").includes("[AUTO-NUDGE]"),
+		).length, 0,
+			"unknown errored idle sessions must suppress auto-nudge steer cards");
 	});
 
-	it("suppresses non-retryable errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("suppresses non-retryable errored idle sessions without retrying or enqueueing [AUTO-NUDGE] cards", async () => {
+		const { tlSession, enqueuePrompt, retryLastPrompt, fire, clock } = await setupTeamWithCapturedEvents();
+		tlSession.status = "idle";
+		tlSession.lastTurnErrored = true;
+		tlSession.lastTurnErrorMessage = "Authentication failed: invalid API key for provider";
+		tlSession.lastPromptText = "continue coordinating the team";
 
-		try {
-			const { tlSession, enqueuePrompt, retryLastPrompt, fire } = await setupTeamWithCapturedEvents();
-			tlSession.status = "idle";
-			tlSession.lastTurnErrored = true;
-			tlSession.lastTurnErrorMessage = "Authentication failed: invalid API key for provider";
-			tlSession.lastPromptText = "continue coordinating the team";
+		fire("agent_end");
+		clock.advance(5 * 60 * 1000 + 1_000);
+		await flush();
 
-			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
-			await Promise.resolve();
-
-			assert.equal(retryLastPrompt.mock.calls.length, 0,
-				"non-retryable errors must leave manual Retry instead of using retryLastPrompt(auto)");
-			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
-			).length, 0,
-				"non-retryable errored idle sessions must suppress auto-nudge transcript cards");
-		} finally {
-			vi.useRealTimers();
-		}
+		assert.equal(retryLastPrompt.mock.calls.length, 0,
+			"non-retryable errors must leave manual Retry instead of using retryLastPrompt(auto)");
+		assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
+			String(call[1] ?? "").includes("[AUTO-NUDGE]"),
+		).length, 0,
+			"non-retryable errored idle sessions must suppress auto-nudge transcript cards");
 	});
 
-	it("does not emit duplicate [AUTO-NUDGE] cards while session auto-retry is pending", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("does not emit duplicate [AUTO-NUDGE] cards while session auto-retry is pending", async () => {
 		let pendingAutoRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 		try {
-			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire } = await setupTeamWithCapturedEvents();
+			const { tlSession, enqueuePrompt, retryLastPrompt, deliverLiveSteer, fire, clock } = await setupTeamWithCapturedEvents();
 			tlSession.status = "idle";
 			tlSession.lastTurnErrored = true;
 			tlSession.lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
@@ -394,32 +384,29 @@ describe("TeamManager — errored idle team lead auto-retry (regression)", () =>
 
 			for (let i = 0; i < 3; i++) {
 				fire("agent_end");
-				await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
-				await Promise.resolve();
+				clock.advance(5 * 60 * 1000 + 1_000);
+				await flush();
 			}
 
 			assert.equal(retryLastPrompt.mock.calls.length, 0,
 				"team-manager must not start another retry while SessionManager auto-retry is pending");
 			assert.equal(enqueuePrompt.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+				String(call[1] ?? "").includes("[AUTO-NUDGE]"),
 			).length, 0,
 				"repeated timer ticks while auto-retry is pending must not enqueue duplicate auto-nudge cards");
 			assert.equal(deliverLiveSteer.mock.calls.filter((call: any) =>
-				String(call.arguments[1] ?? "").includes("[AUTO-NUDGE]"),
+				String(call[1] ?? "").includes("[AUTO-NUDGE]"),
 			).length, 0,
 				"repeated timer ticks while auto-retry is pending must not steer duplicate auto-nudge cards");
 		} finally {
 			if (pendingAutoRetryTimer) clearTimeout(pendingAutoRetryTimer);
-			vi.useRealTimers();
 		}
 	});
 });
 
 describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
-	it("should back off the no-workers nudge exponentially across nudge-reply cycles", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+	it("should back off the no-workers nudge exponentially across nudge-reply cycles", async () => {
+		const { tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 
 		// Base no-workers delay is 5 minutes. After the fix, the schedule should be
 		// 5m, 15m (10m wait after #1), 35m (20m wait after #2), … across cycles.
@@ -429,7 +416,8 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 
 		// Cycle 1 — the legitimate first nudge.
 		fire("agent_end");
-		await vi.advanceTimersByTimeAsync(BASE + SLACK);
+		clock.advance(BASE + SLACK);
+		await flush();
 		assert.equal(
 			enqueuePrompt.mock.calls.length,
 			1,
@@ -444,7 +432,8 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			// Lead "finishes" its one-line reply — stays idle for the next round.
 			tlSession.status = "idle";
 			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(BASE + SLACK);
+			clock.advance(BASE + SLACK);
+			await flush();
 		}
 
 		const totalCalls = enqueuePrompt.mock.calls.length;
@@ -458,21 +447,17 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 
 		// Sanity: every nudge we did send was targeted at the team lead session.
 		for (const call of enqueuePrompt.mock.calls) {
-			const [sid, msg] = call.arguments as any[];
+			const [sid, msg] = call as any[];
 			assert.equal(typeof sid, "string");
 			assert.ok(
 				String(msg).includes("[AUTO-NUDGE]"),
 				"nudge messages should be tagged [AUTO-NUDGE]",
 			);
 		}
-
-		vi.useRealTimers();
 	});
 
-	it("should back off the workers nudge exponentially across nudge-reply cycles", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
+	it("should back off the workers nudge exponentially across nudge-reply cycles", async () => {
+		const { tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
 		});
 
@@ -482,7 +467,8 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 		const SLACK = 1_000;
 
 		fire("agent_end");
-		await vi.advanceTimersByTimeAsync(BASE + SLACK);
+		clock.advance(BASE + SLACK);
+		await flush();
 		assert.equal(
 			enqueuePrompt.mock.calls.length,
 			1,
@@ -493,7 +479,8 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 			fire("agent_start");
 			tlSession.status = "idle";
 			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(BASE + SLACK);
+			clock.advance(BASE + SLACK);
+			await flush();
 		}
 
 		const totalCalls = enqueuePrompt.mock.calls.length;
@@ -504,8 +491,6 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 				`but enqueuePrompt was called ${totalCalls} times — counter is being ` +
 				`reset by agent_start on the lead's reply to its own auto-nudge`,
 		);
-
-		vi.useRealTimers();
 	});
 });
 
@@ -514,13 +499,12 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — nudgePending clears when delivery does not start a turn (regression)", () => {
-	it("does not count or log an async rejected no-workers nudge as sent before agent_start", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("does not count or log an async rejected no-workers nudge as sent before agent_start", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		try {
-			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
-			const log = vi.method(console, "log", () => {});
-			vi.method(console, "error", () => {});
+			const { team, sm, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 			let rejectDelivery: ((err: Error) => void) | undefined;
 			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
@@ -537,35 +521,35 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(BASE + SLACK);
+			clock.advance(BASE + SLACK);
+			await flush();
 
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first no-workers nudge delivery should be attempted at the base delay");
 
 			rejectDelivery?.(new Error("fetch failed"));
-			await Promise.resolve();
-			await Promise.resolve();
+			await flush();
 
 			assert.equal((team as any).nudgePending.get("goal-1"), undefined,
 				"nudgePending should clear after rejected delivery before agent_start");
 			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
 				"nudge should not be counted as sent before agent_start");
 			const sentLogs = log.mock.calls.filter((call: any) =>
-				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+				String(call[0] ?? "").includes("Sent no-workers nudge"),
 			);
 			assert.equal(sentLogs.length, 0,
 				"nudge should not be logged as sent before agent_start");
 		} finally {
-			vi.useRealTimers();
+			log.mockRestore();
+			errorSpy.mockRestore();
 		}
 	});
 
-	it("does not count or log a queued parked no-workers nudge as sent before agent_start", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+	it("does not count or log a queued parked no-workers nudge as sent before agent_start", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		try {
-			const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
-			const log = vi.method(console, "log", () => {});
+			const { team, sm, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
 				if (s) {
@@ -581,10 +565,10 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			tlSession.status = "idle";
 			fire("agent_end");
-			await vi.advanceTimersByTimeAsync(BASE + SLACK);
-			await Promise.resolve();
-			await vi.advanceTimersByTimeAsync(0);
-			await Promise.resolve();
+			clock.advance(BASE + SLACK);
+			await flush();
+			clock.advance(0);
+			await flush();
 
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first parked no-workers nudge delivery should be attempted at the base delay");
@@ -593,20 +577,18 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 			assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, 0,
 				"nudge should not be counted as sent before agent_start");
 			const sentLogs = log.mock.calls.filter((call: any) =>
-				String(call.arguments[0] ?? "").includes("Sent no-workers nudge"),
+				String(call[0] ?? "").includes("Sent no-workers nudge"),
 			);
 			assert.equal(sentLogs.length, 0,
 				"nudge should not be logged as sent before agent_start");
 		} finally {
-			vi.useRealTimers();
+			log.mockRestore();
 		}
 	});
 
-	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
+	it("does not permanently suppress later no-workers nudges after a parked auto-nudge", async () => {
 		try {
-			const { sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+			const { sm, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 			enqueuePrompt.mockImplementation((sid: string, _msg: string, opts?: any) => {
 				const s = sm._sessions.get(sid);
 				if (s) {
@@ -625,7 +607,8 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 
 			// First no-workers nudge reaches SessionManager but is parked behind the
 			// errored/capped team-lead state. No agent_start follows.
-			await vi.advanceTimersByTimeAsync(BASE + SLACK);
+			clock.advance(BASE + SLACK);
+			await flush();
 			assert.equal(enqueuePrompt.mock.calls.length, 1,
 				"first parked no-workers nudge should be enqueued at the base delay");
 			assert.equal((enqueuePrompt.mock.calls[0][2] as any)?.source, "auto-nudge",
@@ -634,7 +617,8 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 			// The next eligible no-workers nudge should still fire after the normal
 			// backoff delay. A sticky nudgePending flag suppresses this forever today.
 			tlSession.status = "idle";
-			await vi.advanceTimersByTimeAsync(BASE * 2 + SLACK);
+			clock.advance(BASE * 2 + SLACK);
+			await flush();
 			assert.equal(
 				enqueuePrompt.mock.calls.length,
 				2,
@@ -642,7 +626,6 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 					"after the parked delivery did not start a lead turn",
 			);
 		} finally {
-			vi.useRealTimers();
 		}
 	});
 });
@@ -652,10 +635,8 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — PromptSource semantics", () => {
-	it("resets both counters on agent_start when lastPromptSource = 'user'", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
+	it("resets both counters on agent_start when lastPromptSource = 'user'", async () => {
+		const { team, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
 		});
 
@@ -676,16 +657,13 @@ describe("TeamManager — PromptSource semantics", () => {
 		// proving the counter really was reset (not just the timer cancelled).
 		tlSession.status = "idle";
 		fire("agent_end");
-		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1_000);
+		clock.advance(10 * 60 * 1000 + 1_000);
+		await flush();
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"workers-nudge must fire at base 10m delay after counter reset");
-
-		vi.useRealTimers();
 	});
 
-	it("resets both counters on agent_start when lastPromptSource = 'system'", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
+	it("resets both counters on agent_start when lastPromptSource = 'system'", async () => {
 		const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
 
 		(team as any).idleNudgeCount.set("goal-1", 3);
@@ -698,13 +676,9 @@ describe("TeamManager — PromptSource semantics", () => {
 			"system-source prompt must reset workers counter");
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
 			"system-source prompt must reset no-workers counter");
-
-		vi.useRealTimers();
 	});
 
-	it("preserves both counters on agent_start when source is auto-nudge / task-notification / verification / agent", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
+	it("preserves both counters on agent_start when source is auto-nudge / task-notification / verification / agent", async () => {
 		for (const source of ["auto-nudge", "task-notification", "verification", "agent"] as const) {
 			const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
 			(team as any).idleNudgeCount.set("goal-1", 4);
@@ -718,13 +692,9 @@ describe("TeamManager — PromptSource semantics", () => {
 			assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), 6,
 				`source="${source}" must preserve no-workers counter`);
 		}
-
-		vi.useRealTimers();
 	});
 
-	it("defaults lastPromptSource to 'user' when callers don't supply source (backward compat)", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
+	it("defaults lastPromptSource to 'user' when callers don't supply source (backward compat)", async () => {
 		const { team, tlSession, sm, fire } = await setupTeamWithCapturedEvents();
 
 		// Caller does NOT pass `source` — mock's default is "user".
@@ -740,8 +710,6 @@ describe("TeamManager — PromptSource semantics", () => {
 			"default 'user' source must reset workers counter");
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
 			"default 'user' source must reset no-workers counter");
-
-		vi.useRealTimers();
 	});
 });
 
@@ -750,10 +718,8 @@ describe("TeamManager — PromptSource semantics", () => {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — 12h backoff cap", () => {
-	it("no-workers schedule caps at MAX_NO_WORKERS_NUDGE_DELAY_MS", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+	it("no-workers schedule caps at MAX_NO_WORKERS_NUDGE_DELAY_MS", async () => {
+		const { team, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 
 		// Force the counter high enough that 2^count * BASE ≫ MAX.
 		(team as any).noWorkersNudgeCount.set("goal-1", 12);
@@ -763,22 +729,20 @@ describe("TeamManager — 12h backoff cap", () => {
 
 		// Just under 12h — must NOT fire (capped delay is 12h).
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		await vi.advanceTimersByTimeAsync(TWELVE_H - 10_000);
+		clock.advance(TWELVE_H - 10_000);
+		await flush();
 		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped nudge must not fire before 12h");
 
 		// Crossing 12h — must fire exactly once.
-		await vi.advanceTimersByTimeAsync(20_000);
+		clock.advance(20_000);
+		await flush();
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped nudge must fire at the 12h boundary, not at 2^12 * 5m");
-
-		vi.useRealTimers();
 	});
 
-	it("workers schedule caps at MAX_IDLE_NUDGE_DELAY_MS", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
+	it("workers schedule caps at MAX_IDLE_NUDGE_DELAY_MS", async () => {
+		const { team, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents({
 			addIdleWorker: true,
 		});
 
@@ -788,15 +752,15 @@ describe("TeamManager — 12h backoff cap", () => {
 		fire("agent_end");
 
 		const TWELVE_H = 12 * 60 * 60 * 1000;
-		await vi.advanceTimersByTimeAsync(TWELVE_H - 10_000);
+		clock.advance(TWELVE_H - 10_000);
+		await flush();
 		assert.equal(enqueuePrompt.mock.calls.length, 0,
 			"capped workers-nudge must not fire before 12h");
 
-		await vi.advanceTimersByTimeAsync(20_000);
+		clock.advance(20_000);
+		await flush();
 		assert.equal(enqueuePrompt.mock.calls.length, 1,
 			"capped workers-nudge must fire at the 12h boundary");
-
-		vi.useRealTimers();
 	});
 });
 
@@ -805,10 +769,8 @@ describe("TeamManager — 12h backoff cap", () => {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — no-workers cycle aborts when workers appear", () => {
-	it("adding a worker before the no-workers timer fires aborts cleanly", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+	it("adding a worker before the no-workers timer fires aborts cleanly", async () => {
+		const { team, sm, tlSession, enqueuePrompt, fire, clock } = await setupTeamWithCapturedEvents();
 
 		const countBefore = (team as any).noWorkersNudgeCount.get("goal-1") ?? 0;
 
@@ -816,7 +778,8 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		fire("agent_end");
 
 		// Tick partway through the 5m delay — add an idle worker before deadline.
-		await vi.advanceTimersByTimeAsync(60_000);
+		clock.advance(60_000);
+		await flush();
 		const entry = (team as any).teams.get("goal-1")!;
 		const workerSession = {
 			id: "worker-late", status: "idle", cwd: "/tmp/worker",
@@ -829,18 +792,17 @@ describe("TeamManager — no-workers cycle aborts when workers appear", () => {
 		});
 
 		// Cross the original 5m deadline.
-		await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1_000);
+		clock.advance(5 * 60 * 1000 + 1_000);
+		await flush();
 
 		// No no-workers nudge was sent, and the counter was NOT incremented.
 		const noWorkersFires = enqueuePrompt.mock.calls.filter((c: any) => {
-			const msg = String(c.arguments[1] ?? "");
+			const msg = String(c[1] ?? "");
 			return msg.includes("no active team agents");
 		}).length;
 		assert.equal(noWorkersFires, 0,
 			"no-workers nudge must not fire once a worker has been added before the deadline");
 		assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, countBefore,
 			"aborted no-workers cycle must not increment the counter");
-
-		vi.useRealTimers();
 	});
 });

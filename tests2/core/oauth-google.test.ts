@@ -27,11 +27,12 @@
  * server binds a real ephemeral port (no network egress) and is closed when
  * the flow completes/fails.
  */
-import { describe, it, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, beforeAll, afterAll, afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-google-"));
 const agentDir = path.join(tmp, "agent");
@@ -50,6 +51,15 @@ const {
 } = await import("../../src/server/auth/oauth.js");
 
 const realFetch = globalThis.fetch;
+
+// Under vitest isolate:false the agent-dir runtime singleton is cached across
+// files in a reused fork; re-point it at THIS file's agentDir before each test so
+// oauth reads/writes (via globalAuthPath()) target agentDir/auth.json, not a
+// sibling file's dir.
+beforeEach(() => {
+	process.env.BOBBIT_AGENT_DIR = agentDir;
+	resetAgentDirStateForTests();
+});
 
 function writeAuth(data: Record<string, unknown>): void {
 	writeFileSync(authPath, JSON.stringify(data, null, 2), "utf-8");

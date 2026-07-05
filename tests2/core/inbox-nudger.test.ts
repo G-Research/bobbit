@@ -20,6 +20,7 @@ import { describe, it, afterAll, vi, afterEach } from "vitest";
 afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { createManualClock } from "../harness/clock.js";
 
 const tmpRoot = makeTmpDir("inbox-nudger-");
 
@@ -76,13 +77,15 @@ function makeHarness(opts: {
 		enqueuePrompt,
 	};
 
+	const clock = createManualClock();
 	const nudger = new InboxNudger({
 		sessionManager: sessionManager as any,
 		staffManager: staffManager as any,
 		inboxStore,
+		clock,
 	});
 
-	return { nudger, staff, session, staffManager, sessionManager, inboxStore, enqueuePrompt };
+	return { nudger, staff, session, staffManager, sessionManager, inboxStore, enqueuePrompt, clock };
 }
 
 function enqueueDirect(inboxStore: InstanceType<typeof InboxStore>, staffId: string, id = "e1") {
@@ -99,34 +102,32 @@ function enqueueDirect(inboxStore: InstanceType<typeof InboxStore>, staffId: str
 
 describe("InboxNudger — periodic tick", () => {
 	it("wakes an idle staff with pending entries on the next tick", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		// Yield so microtasks (poke / applyPolicyThenNudge) settle.
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 		const call = h.enqueuePrompt.mock.calls[0];
-		assert.equal(call.arguments[0], h.session.id);
-		assert.match(call.arguments[1], /\[INBOX\] You have 1 pending item\./);
-		assert.deepEqual(call.arguments[2], { isSteered: true });
+		assert.equal(call[0], h.session.id);
+		assert.match(call[1], /\[INBOX\] You have 1 pending item\./);
+		assert.deepEqual(call[2], { isSteered: true });
 
 		h.nudger.stop();
 	});
 
 	it("uses pluralised wording for multiple pending entries", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id, "e1");
 		enqueueDirect(h.inboxStore, h.staff.id, "e2");
 		enqueueDirect(h.inboxStore, h.staff.id, "e3");
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -136,84 +137,78 @@ describe("InboxNudger — periodic tick", () => {
 	});
 
 	it("does NOT wake a streaming staff", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ sessionStatus: "streaming" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
 
 	it("does NOT wake a starting staff", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ sessionStatus: "starting" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
 
 	it("does NOT wake when inbox is empty", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
 
 	it("skips paused / retired staff", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ staffState: "paused" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
 
 	it("skips staff with no currentSessionId", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ currentSessionId: undefined });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
 
 	it("guards re-nudge via nudgePending until onAgentStart clears it", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id, "e1");
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "first tick wakes once");
 
 		// Add another pending entry; without clearing the guard, no second wake.
 		enqueueDirect(h.inboxStore, h.staff.id, "e2");
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "guard suppresses the second wake");
 
 		// Simulate the agent starting its turn — clears the guard.
 		h.nudger.onAgentStart(h.session.id);
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 2, "post-agent_start tick wakes again");
@@ -224,7 +219,6 @@ describe("InboxNudger — periodic tick", () => {
 
 describe("InboxNudger — contextPolicy", () => {
 	it("\"compact\" runs session.rpcClient.compact(120_000) BEFORE enqueuePrompt", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ contextPolicy: "compact" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -235,7 +229,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.session.rpcClient.compact = vi.fn(compactImpl);
 		h.enqueuePrompt.mockImplementation(async () => { order.push("enqueue"); });
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
@@ -247,12 +241,11 @@ describe("InboxNudger — contextPolicy", () => {
 	});
 
 	it("\"preserve\" skips compact and goes straight to enqueuePrompt", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ contextPolicy: "preserve" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -262,14 +255,13 @@ describe("InboxNudger — contextPolicy", () => {
 	});
 
 	it("tolerates an rpcClient without a compact() method (test double)", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ contextPolicy: "compact" });
 		// Drop compact entirely.
 		(h.session.rpcClient as any).compact = undefined;
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 
@@ -308,25 +300,23 @@ describe("InboxNudger.poke fast-path", () => {
 
 describe("InboxNudger.start/stop", () => {
 	it("stop clears the interval (no further ticks)", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 		h.nudger.stop();
 
-		await vi.advanceTimersByTimeAsync(15_000 * 5);
+		h.clock.advance(15_000 * 5);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 	});
 
 	it("start is idempotent (calling twice does not double-tick)", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({});
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
 		h.nudger.start();
 
-		await vi.advanceTimersByTimeAsync(15_000);
+		h.clock.advance(15_000);
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);

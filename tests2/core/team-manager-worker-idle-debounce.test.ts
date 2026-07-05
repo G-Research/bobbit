@@ -32,6 +32,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+
+// Flush pending microtasks/IO after advancing the manual clock so async timer
+// callbacks settle before assertions.
+const flush = () => new Promise((r) => setImmediate(r));
 
 // Isolate from real ~/.bobbit state by using a temp directory. Set BEFORE
 // importing TeamManager so bobbitDir() picks it up.
@@ -182,9 +187,12 @@ const DEFAULT_CONFIG = {
 
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
 
-function createTeamManager(sm: any) {
+function createTeamManager(sm: any, clock: ManualClock) {
 	clearTeamStore();
-	const tm = new TeamManager(sm, DEFAULT_CONFIG);
+	const tm = new TeamManager(sm, DEFAULT_CONFIG, undefined, clock);
+	// Stop the separate stuck-team watchdog so the virtual clock only drives the
+	// worker-idle debounce timer under test.
+	tm.stopStuckSweep();
 	_createdManagers.push(tm);
 	return tm;
 }
@@ -232,7 +240,8 @@ async function setupTeamWithWorker() {
 	const deliverLiveSteer = vi.fn(async () => {});
 	sm.deliverLiveSteer = deliverLiveSteer;
 
-	const team = createTeamManager(sm);
+	const clock = createManualClock();
+	const team = createTeamManager(sm, clock);
 	await team.startTeam("goal-1");
 
 	const entry = (team as any).teams.get("goal-1")!;
@@ -282,16 +291,16 @@ async function setupTeamWithWorker() {
 	// Count of team-lead worker-completion nudges.
 	function workerIdleNudgeCount(): number {
 		return enqueuePrompt.mock.calls.filter((c: any) => {
-			const msg = String(c.arguments?.[1] ?? "");
+			const msg = String(c?.[1] ?? "");
 			return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
 		}).length
 			+ deliverLiveSteer.mock.calls.filter((c: any) => {
-				const msg = String(c.arguments?.[1] ?? "");
+				const msg = String(c?.[1] ?? "");
 				return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
 			}).length;
 	}
 
-	return { team, sm, entry, tlSession, workerSessionId, enqueuePrompt, fireWorker, workerIdleNudgeCount };
+	return { team, sm, entry, tlSession, workerSessionId, enqueuePrompt, fireWorker, workerIdleNudgeCount, clock };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,18 +308,18 @@ async function setupTeamWithWorker() {
 // ---------------------------------------------------------------------------
 
 describe("TeamManager — transient worker idle blip debounce (regression)", () => {
-	it("does NOT nudge the lead when a worker blips agent_end → agent_start within 5s", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
+	it("does NOT nudge the lead when a worker blips agent_end → agent_start within 5s", async () => {
+		const { fireWorker, workerIdleNudgeCount, clock } = await setupTeamWithWorker();
 
 		// Transient blip: worker momentarily finishes, then resumes immediately.
 		fireWorker("agent_end");
-		await vi.advanceTimersByTimeAsync(1_000); // < 5s window
+		clock.advance(1_000); // < 5s window
+		await flush();
 		fireWorker("agent_start");
 
 		// Advance well past the intended 5s debounce window.
-		await vi.advanceTimersByTimeAsync(6_000);
+		clock.advance(6_000);
+		await flush();
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -319,18 +328,15 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 				"(resumed within 5s) must NOT steer the team lead with a worker-completion nudge, " +
 				"but notifyTeamLead fired anyway — the worker-idle notification is not debounced/cancelled",
 		);
-
-		vi.useRealTimers();
 	});
 
-	it("delivers exactly one nudge when a worker genuinely goes idle for >=5s", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
+	it("delivers exactly one nudge when a worker genuinely goes idle for >=5s", async () => {
+		const { fireWorker, workerIdleNudgeCount, clock } = await setupTeamWithWorker();
 
 		// Worker finishes and stays idle — no resume.
 		fireWorker("agent_end");
-		await vi.advanceTimersByTimeAsync(6_000); // past the 5s debounce window
+		clock.advance(6_000); // past the 5s debounce window
+		await flush();
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -338,23 +344,21 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 			"a worker that stays idle for >=5s must produce exactly one worker-completion nudge " +
 				"(subject to the existing 30s repeat-debounce)",
 		);
-
-		vi.useRealTimers();
 	});
 
-	it("does NOT nudge against a worker removed before the 5s window elapses", async (t) => {
-		vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
-
-		const { team, workerSessionId, fireWorker, workerIdleNudgeCount } = await setupTeamWithWorker();
+	it("does NOT nudge against a worker removed before the 5s window elapses", async () => {
+		const { team, workerSessionId, fireWorker, workerIdleNudgeCount, clock } = await setupTeamWithWorker();
 
 		// Worker finishes, then is dismissed before the debounce window elapses.
 		fireWorker("agent_end");
-		await vi.advanceTimersByTimeAsync(1_000);
+		clock.advance(1_000);
+		await flush();
 		await team.dismissRole(workerSessionId);
 
 		// Advance past the 5s window: a pending timer (post-fix) must have been
 		// cleared on removal, so no nudge fires against the torn-down session.
-		await vi.advanceTimersByTimeAsync(6_000);
+		clock.advance(6_000);
+		await flush();
 
 		assert.equal(
 			workerIdleNudgeCount(),
@@ -362,7 +366,5 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 			"a worker removed before the 5s debounce window elapses must not produce a " +
 				"worker-completion nudge — the pending idle-notify timer must be cleared on removal",
 		);
-
-		vi.useRealTimers();
 	});
 });

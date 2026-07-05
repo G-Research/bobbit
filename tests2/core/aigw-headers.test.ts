@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
@@ -44,6 +45,11 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+	// Under vitest isolate:false the agent-dir runtime singleton is cached across
+	// files in a reused fork; re-point it at THIS file's tmp dir so writeAigwModelsJson
+	// (via globalAgentDir()) targets tmp/models.json rather than a sibling file's dir.
+	process.env.BOBBIT_AGENT_DIR = tmp;
+	resetAgentDirStateForTests();
 	const f = path.join(tmp, "models.json");
 	if (existsSync(f)) rmSync(f);
 });

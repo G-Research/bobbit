@@ -28,19 +28,28 @@ const SID = "11111111-2222-3333-4444-555555555555";
 const SID_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 let root: string;
-let supportsSymlink = true;
+
+// Detect symlink capability at COLLECTION time (module top-level) so the
+// `{ skip: !supportsSymlink }` test option is evaluated correctly. vitest reads
+// the option when the test is registered — before beforeAll runs — so the probe
+// cannot live in beforeAll (it would always read the initial value).
+function detectSymlinkSupport(): boolean {
+	try {
+		const probeDir = mkdtempSync(path.join(tmpdir(), "bobbit-symprobe-"));
+		const probe = path.join(probeDir, "_probe");
+		writeFileSync(probe, "x");
+		symlinkSync(probe, path.join(probeDir, "_probe-link"));
+		rmSync(probeDir, { recursive: true, force: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+const supportsSymlink = detectSymlinkSupport();
 
 beforeAll(() => {
 	root = mkdtempSync(path.join(tmpdir(), "bobbit-mount-"));
 	setPreviewRootForTesting(root);
-	try {
-		const probe = path.join(root, "_probe");
-		writeFileSync(probe, "x");
-		const link = path.join(root, "_probe-link");
-		symlinkSync(probe, link);
-	} catch {
-		supportsSymlink = false;
-	}
 });
 
 afterAll(() => {

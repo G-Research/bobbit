@@ -11,6 +11,11 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+
+// Flush pending microtasks/IO after advancing the manual clock so async timer
+// callbacks settle before assertions.
+const flush = () => new Promise((r) => setImmediate(r));
 
 // Isolate from real ~/.pi state by using a temp directory
 const TEST_PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-test-"));
@@ -177,9 +182,12 @@ const DEFAULT_CONFIG = {
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
 
 /** Create a TeamManager with a clean persisted state. */
-function createTeamManager(sm: any, config = DEFAULT_CONFIG): InstanceType<typeof TeamManager> {
+function createTeamManager(sm: any, config = DEFAULT_CONFIG, clock?: ManualClock): InstanceType<typeof TeamManager> {
 	clearTeamStore();
-	const tm = new TeamManager(sm, config);
+	const tm = clock ? new TeamManager(sm, config, undefined, clock) : new TeamManager(sm, config);
+	// When a virtual clock is injected, stop the separate stuck-team watchdog so
+	// advancing time only drives the idle-nudge timers under test.
+	if (clock) tm.stopStuckSweep();
 	_createdManagers.push(tm);
 	return tm;
 }
@@ -754,8 +762,8 @@ describe("TeamManager", () => {
 	// ---------------------------------------------------------------------------
 
 	describe("idle nudge sleep guard", () => {
-		it("should only enqueue one nudge after sleep wake (pending guard)", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval"] });
+		it("should only enqueue one nudge after sleep wake (pending guard)", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -785,7 +793,7 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			// Get the team lead session and inject a fake active worker
@@ -817,7 +825,8 @@ describe("TeamManager", () => {
 			}
 
 			// Advance time by 5 hours — simulates a sleep/wake where all overdue intervals fire
-			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
+			clock.advance(5 * 60 * 60 * 1000);
+			await flush();
 
 			// CORRECT behavior: only ONE nudge should be enqueued, not ~30
 			const callCount = enqueuePrompt.mock.calls.length;
@@ -825,12 +834,10 @@ describe("TeamManager", () => {
 				callCount <= 1,
 				`Expected enqueuePrompt to be called at most once (pending guard), but got ${callCount}`,
 			);
-
-			vi.useRealTimers();
 		});
 
-		it("should resume nudging after agent processes the pending nudge", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+		it("should resume nudging after agent processes the pending nudge", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -847,7 +854,7 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
@@ -866,7 +873,8 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance 5 hours — should get exactly 1 nudge (pending guard blocks the rest)
-			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
+			clock.advance(5 * 60 * 60 * 1000);
+			await flush();
 			assert.equal(enqueuePrompt.mock.calls.length, 1, "First batch: exactly 1 nudge");
 
 			// Simulate agent processing the nudge: agent_start then agent_end
@@ -875,14 +883,13 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance another 15 minutes — should get a second nudge
-			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+			clock.advance(15 * 60 * 1000);
+			await flush();
 			assert.ok(enqueuePrompt.mock.calls.length >= 2, "Second nudge should fire after agent processes first");
-
-			vi.useRealTimers();
 		});
 
-		it("should not nudge a team lead whose goal is already complete", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval"] });
+		it("should not nudge a team lead whose goal is already complete", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -899,7 +906,7 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
@@ -918,15 +925,14 @@ describe("TeamManager", () => {
 			goal.state = "complete";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
+			clock.advance(5 * 60 * 60 * 1000);
+			await flush();
 
 			assert.equal(enqueuePrompt.mock.calls.length, 0, "Completed goal team lead must not be nudged");
-
-			vi.useRealTimers();
 		});
 
-		it("should not nudge a team lead whose goal is archived", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval"] });
+		it("should not nudge a team lead whose goal is archived", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -943,7 +949,7 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
@@ -952,15 +958,14 @@ describe("TeamManager", () => {
 			(goal as any).archived = true;
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
+			clock.advance(5 * 60 * 60 * 1000);
+			await flush();
 
 			assert.equal(enqueuePrompt.mock.calls.length, 0, "Archived goal team lead must not be nudged");
-
-			vi.useRealTimers();
 		});
 
-		it("should skip workers-nudge when all streaming workers are under 30 min", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+		it("should skip workers-nudge when all streaming workers are under 30 min", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -977,19 +982,19 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
-			// Worker streaming since "now" (mocked clock) — well under 30m
+			// Worker streaming since "now" (virtual clock) — well under 30m
 			const workerSession = {
 				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
-				streamingStartedAt: Date.now(), // after timers enabled — mocked clock baseline
+				streamingStartedAt: clock.now(), // virtual clock baseline
 				rpcClient: { prompt: vi.fn(async () => {}), onEvent: vi.fn(() => () => {}) },
 				clients: new Set(),
 			};
 			sm._sessions.set("worker-1", workerSession);
-			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: clock.now() });
 
 			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
 			tlSession.status = "idle";
@@ -998,18 +1003,17 @@ describe("TeamManager", () => {
 
 			// Advance past the 10-minute base workers-nudge delay
 			// (and keep worker streamingStartedAt under threshold by tick < 30m from its start)
-			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+			clock.advance(15 * 60 * 1000);
+			await flush();
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 0,
 				"Should not nudge when all streaming workers are under the 30m threshold",
 			);
-
-			vi.useRealTimers();
 		});
 
-		it("should nudge when any streaming worker exceeds 30 min", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+		it("should nudge when any streaming worker exceeds 30 min", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -1026,19 +1030,19 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
-			// Worker that has been streaming for a long time already (45m ago, mocked clock)
+			// Worker that has been streaming for a long time already (45m ago, virtual clock)
 			const workerSession = {
 				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
-				streamingStartedAt: Date.now() - 45 * 60 * 1000,
+				streamingStartedAt: clock.now() - 45 * 60 * 1000,
 				rpcClient: { prompt: vi.fn(async () => {}), onEvent: vi.fn(() => () => {}) },
 				clients: new Set(),
 			};
 			sm._sessions.set("worker-1", workerSession);
-			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: clock.now() });
 
 			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
 			tlSession.status = "idle";
@@ -1046,18 +1050,17 @@ describe("TeamManager", () => {
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
 
 			// Advance past the 10-minute base workers-nudge delay
-			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+			clock.advance(15 * 60 * 1000);
+			await flush();
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 1,
 				"Should nudge when a streaming worker has exceeded the 30m threshold",
 			);
-
-			vi.useRealTimers();
 		});
 
-		it("should still nudge when a worker is idle (not streaming)", async (t) => {
-			vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
+		it("should still nudge when a worker is idle (not streaming)", async () => {
+			const clock = createManualClock();
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
@@ -1074,7 +1077,7 @@ describe("TeamManager", () => {
 				return session;
 			};
 
-			const team = createTeamManager(sm);
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
 
 			const entry = (team as any).teams.get("goal-1")!;
@@ -1084,20 +1087,19 @@ describe("TeamManager", () => {
 				clients: new Set(),
 			};
 			sm._sessions.set("worker-1", workerSession);
-			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: clock.now() });
 
 			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
 			tlSession.status = "idle";
 
 			for (const cb of eventCallbacks) cb({ type: "agent_end" });
-			await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+			clock.advance(15 * 60 * 1000);
+			await flush();
 
 			assert.equal(
 				enqueuePrompt.mock.calls.length, 1,
 				"Idle workers should not block the workers-nudge",
 			);
-
-			vi.useRealTimers();
 		});
 	});
 

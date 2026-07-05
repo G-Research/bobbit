@@ -14,6 +14,12 @@ import path from "node:path";
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-direct-prompt-test-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
+import { createManualClock } from "../harness/clock.js";
+
+// Flush pending microtasks/IO after advancing the manual clock so async timer
+// callbacks settle before assertions.
+const flush = () => new Promise((r) => setImmediate(r));
+
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
@@ -49,7 +55,13 @@ function deferred<T>() {
 }
 
 function makeManager(): any {
-	const manager: any = new SessionManager();
+	const clock = createManualClock();
+	const manager: any = new SessionManager({ clock });
+	// Stop the status heartbeat interval so advancing the virtual clock only
+	// drives the auto-retry setTimeout timers under test (the original suite faked
+	// setTimeout only, leaving the setInterval heartbeat dormant).
+	if (manager._statusHeartbeatTimer) { clock.clearInterval(manager._statusHeartbeatTimer); manager._statusHeartbeatTimer = null; }
+	manager._testClock = clock;
 	manager._testStore = {
 		update: vi.fn(() => {}),
 		get: vi.fn(() => undefined),
@@ -143,7 +155,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("recovers a failed direct prompt by restoring idle status and requeueing", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: false, error: "preflight failed" }));
 		const { session, client } = putSession(manager, { rpcClient: { prompt } });
@@ -163,7 +174,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("schedules visible auto retry when direct prompt delivery rejects with fetch failed before message_end", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -195,7 +205,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("schedules visible auto retry when queued drain dispatch rejects with fetch failed before message_end", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -219,7 +228,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("auto retry consumes the recovered direct prompt row before redispatch", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -235,7 +243,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.promptQueue.length, 1, "expected recovered row before auto retry fires");
 
-		await vi.advanceTimersByTimeAsync(1000);
+		manager._testClock.advance(1000);
 		await Promise.resolve();
 		await Promise.resolve();
 
@@ -246,7 +254,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("fresh prompt before dispatch auto retry drops the recovered failed prompt", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -287,7 +294,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("auto retry clears stale tool-call state after pre-agent_start prompt delivery failure", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		let calls = 0;
 		const prompt = vi.fn(async () => {
@@ -306,7 +312,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.turnHadToolCalls, false, "pre-agent_start delivery failure should clear stale tool-call state");
 
-		await vi.advanceTimersByTimeAsync(1000);
+		manager._testClock.advance(1000);
 		await flushAutoRetryMicrotasks();
 
 		assert.equal(prompt.mock.calls.length, 2, "expected initial failed delivery plus one auto retry");
@@ -325,7 +331,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("emits auto_retry_cancelled when dispatch-time auto retries exhaust before agent_start", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const prompt = vi.fn(async () => {
 			throw new TypeError("fetch failed");
@@ -341,7 +346,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		for (const expectedAttempt of [2, 3]) {
 			const pending = autoRetryPendingEvents(session).at(-1);
 			assert.ok(pending, `expected pending retry before attempt ${expectedAttempt}`);
-			await vi.advanceTimersByTimeAsync(pending.retryDelayMs);
+			manager._testClock.advance(pending.retryDelayMs);
 			await flushAutoRetryMicrotasks();
 
 			const latestPending = autoRetryPendingEvents(session).at(-1);
@@ -352,7 +357,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		const finalPending = autoRetryPendingEvents(session).at(-1);
 		assert.ok(finalPending, "expected third pending retry before exhaustion");
-		await vi.advanceTimersByTimeAsync(finalPending.retryDelayMs);
+		manager._testClock.advance(finalPending.retryDelayMs);
 		await flushAutoRetryMicrotasks();
 
 		assert.equal(prompt.mock.calls.length, 4, "expected initial delivery plus three bounded auto-retry attempts");
@@ -464,7 +469,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(steer.mock.calls.length, 1);
 		const ledgerUpdate = manager._testStore.update.mock.calls
-			.map((call: any) => call.arguments[1])
+			.map((call: any) => call[1])
 			.find((update: any) => Array.isArray(update?.inFlightSteerTexts));
 		assert.deepEqual(ledgerUpdate, {
 			messageQueue: [],
@@ -475,7 +480,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			type: "message_end",
 			message: { role: "user", content: [{ type: "text", text: "durable steer" }] },
 		});
-		const clearUpdate = manager._testStore.update.mock.calls.at(-1)?.arguments[1];
+		const clearUpdate = manager._testStore.update.mock.calls.at(-1)?.[1];
 		assert.deepEqual(clearUpdate, { inFlightSteerTexts: undefined });
 
 		pending.resolve({ success: true });
@@ -540,7 +545,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -575,7 +579,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("recovers a queued prompt when local abort status changes before prompt rejection", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -607,7 +610,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 	});
 
 	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async (t) => {
-		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const prompt = vi.fn(() => pending.promise);
@@ -623,7 +625,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		pending.reject(new Error("Agent process exited with code 17"));
 		await assert.rejects(() => sendPromise, /Agent process exited with code 17/);
 
-		await vi.advanceTimersByTimeAsync(0);
+		manager._testClock.advance(0);
+		await flush();
 		assert.equal(prompt.mock.calls.length, 1, "terminated sessions must not redrain rejected prompts");
 		assert.equal(session.status, "terminated", "recovery must not broadcast idle over process_exit termination");
 		assert.equal(session.promptQueue.length, 0, "prompt rejected by a dead child must not be requeued");
