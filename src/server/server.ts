@@ -84,6 +84,8 @@ import { registerServerProjectConfigRoutes } from "./routes/project-config-serve
 // review-annotation family (/api/sessions/:id/review/*).
 import { registerWorkflowsRoutes } from "./routes/workflows-routes.js";
 import { registerReviewAnnotationRoutes } from "./routes/review-annotations-routes.js";
+// STR-01 cohort 7: background-process, draft, abort, and prompt-section routes.
+import { registerSessionUtilityRoutes } from "./routes/session-utility-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -129,7 +131,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
+import { initPromptDirs, persistPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
@@ -145,7 +147,6 @@ import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
-import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
@@ -3289,6 +3290,7 @@ registerPackRuntimesRoutes(coreRouteTable);
 registerServerProjectConfigRoutes(coreRouteTable);
 registerWorkflowsRoutes(coreRouteTable);
 registerReviewAnnotationRoutes(coreRouteTable);
+registerSessionUtilityRoutes(coreRouteTable);
 
 async function handleApiRoute(
 	url: URL,
@@ -3532,7 +3534,9 @@ async function handleApiRoute(
 	// and the server-scope /api/project-config trio
 	// (src/server/routes/project-config-server-routes.ts); cohort 6, the
 	// workflows family (src/server/routes/workflows-routes.ts) and the
-	// review-annotation family (src/server/routes/review-annotations-routes.ts).
+	// review-annotation family (src/server/routes/review-annotations-routes.ts);
+	// cohort 7, session utility routes
+	// (src/server/routes/session-utility-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3560,6 +3564,8 @@ async function handleApiRoute(
 				// Cohort 6 (workflows + review-annotations) additions — append-only,
 				// see core-route-ctx.ts. Workflows needed no new fields.
 				reviewAnnotationStore,
+				// Cohort 7 (session utility routes) additions — append-only.
+				bgProcessManager, noContent, toolManager,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -13041,224 +13047,6 @@ async function handleApiRoute(
 		};
 		req.on("close", cleanup);
 		req.on("error", cleanup);
-		return;
-	}
-
-	// ── Background process endpoints ──────────────────────────────
-
-	// POST /api/sessions/:id/bg-processes — create a background process
-	const bgCreateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes$/);
-	if (bgCreateMatch && req.method === "POST") {
-		const id = bgCreateMatch[1];
-		const session = sessionManager.getSession(id);
-		if (!session) { json({ error: "Session not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body?.command) { json({ error: "command is required" }, 400); return; }
-		try {
-			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed, body.name);
-			json(info, 201);
-		} catch (err: any) {
-			if (err?.message?.includes("Sandboxed session without containerId")) {
-				json({ error: "Sandboxed session cannot run host processes" }, 403);
-			} else {
-				throw err;
-			}
-		}
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes — list background processes
-	if (bgCreateMatch && req.method === "GET") {
-		const id = bgCreateMatch[1];
-		json({ processes: bgProcessManager.list(id) });
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/logs — get logs
-	const bgLogsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/logs$/);
-	if (bgLogsMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgLogsMatch;
-		const logs = bgProcessManager.getLogs(sessionId, processId);
-		if (!logs) { json({ error: "Process not found" }, 404); return; }
-		const tail = parseInt(url.searchParams.get("tail") || "15", 10);
-		json({
-			log: logs.log.slice(-tail),
-			stdout: logs.stdout.slice(-tail),
-			stderr: logs.stderr.slice(-tail),
-		});
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/grep — search logs
-	const bgGrepMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/grep$/);
-	if (bgGrepMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgGrepMatch;
-		const pattern = url.searchParams.get("pattern") || "";
-		if (!pattern) { json({ error: "pattern is required" }, 400); return; }
-		const context = parseInt(url.searchParams.get("context") || "0", 10);
-		const maxResults = parseInt(url.searchParams.get("max") || "50", 10);
-		const result = bgProcessManager.grepLogs(sessionId, processId, pattern, context, maxResults);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/head — first N lines
-	const bgHeadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/head$/);
-	if (bgHeadMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgHeadMatch;
-		const lines = parseInt(url.searchParams.get("lines") || "50", 10);
-		const result = bgProcessManager.headLogs(sessionId, processId, lines);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/slice — line range (1-indexed)
-	const bgSliceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/slice$/);
-	if (bgSliceMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgSliceMatch;
-		const from = parseInt(url.searchParams.get("from") || "1", 10);
-		const to = parseInt(url.searchParams.get("to") || "50", 10);
-		const result = bgProcessManager.sliceLogs(sessionId, processId, from, to);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/wait — block until exit or timeout
-	const bgWaitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/wait$/);
-	if (bgWaitMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgWaitMatch;
-		const timeout = parseInt(url.searchParams.get("timeout") || "300", 10);
-		const controller = new AbortController();
-		bgProcessManager.registerWait(sessionId, controller);
-		try {
-			await streamBgWaitResponse(res, () =>
-				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal));
-		} finally {
-			bgProcessManager.unregisterWait(sessionId, controller);
-		}
-		return;
-	}
-
-	// DELETE /api/sessions/:id/bg-processes/:pid — kill or dismiss a background process
-	//   ?action=kill    → terminate a running process; KEEP the exited record until dismissed
-	//   ?action=dismiss → remove the record + delete persisted log/status/spool files
-	//   (no action)     → legacy: kill-if-running else dismiss
-	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
-	if (bgKillMatch && req.method === "DELETE") {
-		const [, sessionId, processId] = bgKillMatch;
-		const action = url.searchParams.get("action");
-		if (action === "kill") {
-			const killed = bgProcessManager.kill(sessionId, processId);
-			if (!killed) { json({ error: "Process not found or not running" }, 404); return; }
-			json({ ok: true, killed: true });
-			return;
-		}
-		if (action === "dismiss") {
-			const dismissed = bgProcessManager.dismiss(sessionId, processId);
-			if (!dismissed) { json({ error: "Process not found or still running" }, 409); return; }
-			json({ ok: true });
-			return;
-		}
-		// Legacy: kill-if-running else dismiss.
-		const killed = bgProcessManager.kill(sessionId, processId);
-		if (!killed) {
-			const dismissed = bgProcessManager.dismiss(sessionId, processId);
-			if (!dismissed) { json({ error: "Process not found" }, 404); return; }
-		}
-		json({ ok: true });
-		return;
-	}
-	// ── Draft endpoints ─────────────────────────────────────────────
-
-	// PUT|POST /api/sessions/:id/draft — upsert a draft
-	// POST is accepted alongside PUT because navigator.sendBeacon (used for
-	// beforeunload draft flush) always sends POST requests.
-	const draftPutMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
-	if (draftPutMatch && (req.method === "PUT" || req.method === "POST")) {
-		const id = draftPutMatch[1];
-		const body = await readBody(req);
-		if (!body || typeof body.type !== "string") {
-			json({ error: "Missing type" }, 400);
-			return;
-		}
-		const ok = sessionManager.setDraft(id, body.type, body.data);
-		if (!ok) { json({ error: "Session not found" }, 404); return; }
-		json({ ok: true });
-		return;
-	}
-
-	// POST /api/sessions/:id/abort — force-abort a streaming session (graceful + force-kill)
-	const abortMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/abort$/);
-	if (abortMatch && req.method === "POST") {
-		const id = abortMatch[1];
-		const session = sessionManager.getSession(id);
-		if (!session) { json({ error: "Session not found" }, 404); return; }
-		if (session.status !== "streaming") { json({ ok: true, status: session.status }); return; }
-		await sessionManager.forceAbort(id);
-		json({ ok: true, status: "idle" });
-		return;
-	}
-
-	// GET /api/sessions/:id/prompt-sections — return system prompt broken into labeled sections
-	const promptSectionsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-sections$/);
-	if (promptSectionsMatch && req.method === "GET") {
-		const id = promptSectionsMatch[1];
-
-		// Try persisted snapshot first (captures the actual prompt at creation time)
-		const persisted = loadPersistedPromptSections(id);
-		if (persisted) {
-			json(persisted);
-			return;
-		}
-
-		// Fallback: reconstruct for legacy sessions without a persisted snapshot
-		const parts = sessionManager.getPromptParts(id);
-		if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
-
-		// Ensure tool docs are populated (they may have been injected at assemblePrompt time,
-		// but re-inject if missing to handle edge cases)
-		if (!parts.toolDocs && toolManager) {
-			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
-		}
-
-		const sections = getPromptSections(parts);
-		const totalTokens = sections.reduce((sum, s) => sum + s.tokens, 0);
-		json({ sections, totalTokens });
-		return;
-	}
-
-	// GET /api/sessions/:id/draft?type=prompt — retrieve a draft
-	const draftGetMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
-	if (draftGetMatch && req.method === "GET") {
-		const id = draftGetMatch[1];
-		const type = url.searchParams.get("type");
-		if (!type) { json({ error: "Missing type query param" }, 400); return; }
-		const data = sessionManager.getDraft(id, type);
-		if (data === undefined) {
-			// Check if session exists at all
-			const session = sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
-			if (url.searchParams.get("optional") === "1") { noContent(); return; }
-			json({ error: "Draft not found" }, 404);
-			return;
-		}
-		json({ type, data });
-		return;
-	}
-
-	// DELETE /api/sessions/:id/draft?type=prompt — clear a draft
-	const draftDelMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
-	if (draftDelMatch && req.method === "DELETE") {
-		const id = draftDelMatch[1];
-		const type = url.searchParams.get("type");
-		if (!type) { json({ error: "Missing type query param" }, 400); return; }
-		const session = sessionManager.getSession(id);
-		if (!session) { json({ error: "Session not found" }, 404); return; }
-		sessionManager.deleteDraft(id, type);
-		json({ ok: true });
 		return;
 	}
 
