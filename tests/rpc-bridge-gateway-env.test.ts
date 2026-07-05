@@ -8,13 +8,38 @@
  *   npx tsx --test --test-force-exit tests/rpc-bridge-gateway-env.test.ts
  */
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { resolveDirectGatewayEnv } from "../src/server/agent/rpc-bridge.ts";
+
+// Hermetic isolation: `resolveDirectGatewayEnv` reads `process.env.BOBBIT_GATEWAY_URL`
+// as a fallback. On a dev box (or CI) where the shell exports that var — and its
+// sibling BOBBIT_TOKEN — subtests that pass `envGatewayUrl: undefined` (expecting
+// the state-file fallback) would otherwise inherit the ambient value and fail.
+// Snapshot and delete them for the duration of this file, restoring exactly
+// (preserving delete-vs-empty) afterwards. This does not change any assertion or
+// expected URL — the test simply controls its own environment.
+const AMBIENT_ENV_KEYS = ["BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN"] as const;
+const savedEnv = new Map<string, string | undefined>();
+
+before(() => {
+	for (const key of AMBIENT_ENV_KEYS) {
+		savedEnv.set(key, process.env[key]);
+		delete process.env[key];
+	}
+});
+
+after(() => {
+	for (const key of AMBIENT_ENV_KEYS) {
+		const prev = savedEnv.get(key);
+		if (prev === undefined) delete process.env[key];
+		else process.env[key] = prev;
+	}
+});
 
 function tmpStateDirWith(gatewayUrl: string | null): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gw-env-"));
