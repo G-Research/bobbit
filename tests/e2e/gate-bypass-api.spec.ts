@@ -283,6 +283,8 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 				body: JSON.stringify(HUMAN),
 			});
 			expect(res.status).toBe(403);
+			const body = await res.json();
+			expect(body.error).toBe("Forbidden: sandbox token cannot bypass gates");
 		} finally {
 			await deleteGoal(goalId).catch(() => {});
 			await deleteWorkflow(wf);

@@ -12,7 +12,7 @@
 // block here gated on path and method in the same `if` condition. A method
 // mismatch skipped the block and fell through to the terminal 404; RouteTable's
 // method-scoped matching preserves that by leaving other methods unregistered.
-// Exact segment-count registrations keep still-inline siblings such as
+// Exact segment-count registrations keep sibling routes such as
 // gates/:gateId/inspect, /signal, /reset, /bypass, /signoff, and
 // workflow-context from being shadowed.
 

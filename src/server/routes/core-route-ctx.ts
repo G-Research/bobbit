@@ -360,4 +360,7 @@ export interface CoreRouteCtx {
 	routeRegistry: RouteRegistry;
 	// ── Goals G3a additions — append-only.
 	broadcastToGoal(goalId: string, event: any): void;
+
+	// ── Goals G3b additions — append-only.
+	getGateAndTransitiveDependents(workflow: Workflow, gateId: string): string[];
 }
