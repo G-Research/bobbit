@@ -419,6 +419,34 @@ export function resolveReadablePersistedAgentSessionFile(filePath: string | null
 	return realPath;
 }
 
+// Single source of truth for host-vs-container agentSessionFile path-trust
+// classification. session-manager.ts and session-transcripts.ts import these;
+// never reintroduce local copies at call sites — two copies of path-trust
+// logic will drift.
+function isWindowsAbsolutePath(filePath: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function isContainerAgentSessionPath(filePath: string): boolean {
+	const normalized = filePath.replace(/\\/g, "/");
+	return normalized === "/home/node/.bobbit/agent/sessions"
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
+		|| normalized === "/bobbit-state/sessions"
+		|| normalized.startsWith("/bobbit-state/sessions/");
+}
+
+export function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
+	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
+	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
+}
+
+export function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
+	if (!filePath) return null;
+	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
+	trustPersistedAgentSessionFile(filePath);
+	return resolveReadablePersistedAgentSessionFile(filePath);
+}
+
 function validateReadableOutsideTranscriptFile(filePath: string | null | undefined): string | null {
 	if (!filePath || hasTraversalSegment(filePath)) return null;
 	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return null;
