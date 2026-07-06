@@ -49,6 +49,7 @@ import type { TaskManager } from "../agent/task-manager.js";
 import type { Workflow } from "../agent/workflow-store.js";
 import type { ColorStore } from "../agent/color-store.js";
 import type { GoalManager } from "../agent/goal-manager.js";
+import type { PrStatusStore } from "../agent/pr-status-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -298,4 +299,9 @@ export interface CoreRouteCtx {
 	// ── Cohort 22 (session creation route) additions — append-only.
 	sandboxTokenStore?: SandboxTokenStore;
 	writeCwdValidationError(validation: Extract<CwdValidationResult, { ok: false }>): void;
+
+	// ── Cohort 23 (session git read/status routes) additions — append-only.
+	isHeadquartersSession(session: { projectId?: string }): boolean;
+	prStatusStore: PrStatusStore;
+	sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown>;
 }
