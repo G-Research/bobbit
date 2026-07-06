@@ -50,6 +50,7 @@ import type { Workflow } from "../agent/workflow-store.js";
 import type { ColorStore } from "../agent/color-store.js";
 import type { GoalManager } from "../agent/goal-manager.js";
 import type { PrStatusStore } from "../agent/pr-status-store.js";
+import type { VerificationHarness } from "../agent/verification-harness.js";
 import type { TeamManager } from "../agent/team-manager.js";
 import type { PersistedTask } from "../agent/task-store.js";
 /**
@@ -306,6 +307,13 @@ export interface CoreRouteCtx {
 	isHeadquartersSession(session: { projectId?: string }): boolean;
 	prStatusStore: PrStatusStore;
 	sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown>;
+
+	// ── Goals G1 additions — append-only.
+	archivedGoalMatchesQuery(goal: PersistedGoal, sessions: any[], query: string): boolean;
+	getTaskManagerForGoal(goalId: string): TaskManager;
+	listGoalsAcrossProjects(opts?: { projectId?: string }): PersistedGoal[];
+	requireSubgoalsEnabled(): boolean;
+	verificationHarness: VerificationHarness;
 
 	// ── Cohort 27 (task routes) additions — append-only.
 	getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined;

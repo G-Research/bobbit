@@ -64,11 +64,12 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("server.ts exposes /api/goals/:id/descendants route (restored by 2c08b07e)", () => {
-		const text = read("src/server/server.ts");
+	it("goal-read-routes.ts exposes /api/goals/:id/descendants route (restored by 2c08b07e)", () => {
+		const text = read("src/server/routes/goal-read-routes.ts");
 		assert.ok(
-			text.includes("/^\\/api\\/goals\\/([^/]+)\\/descendants$/"),
-			"src/server/server.ts must contain the /api/goals/:goalId/descendants\n" +
+			text.includes('table.register("GET", "/api/goals/:goalId/descendants", handleGoalDescendants)') &&
+			text.includes("Feeds dashboardDescendants in goal-dashboard.ts so archived children render in the DAG"),
+			"src/server/routes/goal-read-routes.ts must contain the /api/goals/:goalId/descendants\n" +
 			"GET handler. Without it the Plan tab silently drops all archived\n" +
 			"children from the descendant list. Restored by 2c08b07e after a silent\n" +
 			"merge loss that broke the Plan tab archived rollup for a full UI session.\n" +
@@ -76,11 +77,12 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("server.ts exposes /api/goals/:id/tree-cost route (restored by 2c08b07e)", () => {
-		const text = read("src/server/server.ts");
+	it("goal-read-routes.ts exposes /api/goals/:id/tree-cost route (restored by 2c08b07e)", () => {
+		const text = read("src/server/routes/goal-read-routes.ts");
 		assert.ok(
-			text.includes("/^\\/api\\/goals\\/([^/]+)\\/tree-cost$/"),
-			"src/server/server.ts must contain the /api/goals/:goalId/tree-cost GET\n" +
+			text.includes('table.register("GET", "/api/goals/:goalId/tree-cost", handleGoalTreeCost)') &&
+			text.includes("Dashboard tree-cost is intentionally rooted at the REQUESTED goal"),
+			"src/server/routes/goal-read-routes.ts must contain the /api/goals/:goalId/tree-cost GET\n" +
 			"handler. Without it the cost rollup shows zero archived spend and the\n" +
 			"Plan tab dashboard silently underreports total cost. Restored by 2c08b07e\n" +
 			"alongside the descendants route. DO NOT delete this pin.",
