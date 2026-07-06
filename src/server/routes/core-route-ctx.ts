@@ -53,6 +53,7 @@ import type { PrStatusStore } from "../agent/pr-status-store.js";
 import type { VerificationHarness } from "../agent/verification-harness.js";
 import type { TeamManager } from "../agent/team-manager.js";
 import type { PersistedTask } from "../agent/task-store.js";
+import type { CookieStore } from "../auth/cookie.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -319,4 +320,7 @@ export interface CoreRouteCtx {
 	getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined;
 	sandboxCanAccessTask(task: PersistedTask): boolean;
 	teamManager: TeamManager;
+
+	// ── Goals G2a additions — append-only.
+	cookieStore: CookieStore;
 }

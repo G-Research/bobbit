@@ -18,7 +18,7 @@ const SCAN_DIRS = [
 	join(ROOT, "src", "app"),
 ];
 const GOAL_WORKFLOW_ROUTE_FILES = [
-	join(ROOT, "src", "server", "server.ts"),
+	join(ROOT, "src", "server", "routes", "goal-crud-routes.ts"),
 ];
 
 /** Per-file allowlist for non-workflow uses of the literal "general". */
@@ -147,12 +147,12 @@ describe("no 'general' as workflow default in source", () => {
 		const routeFilesWithGoalCreateRoute = GOAL_WORKFLOW_ROUTE_FILES
 			.filter(file => {
 				const src = readFileSync(file, "utf8");
-				return src.includes('url.pathname === "/api/goals"') && src.includes('req.method === "POST"');
+				return src.includes('table.register("POST", "/api/goals", handleGoalsCreate)');
 			})
 			.map(relPath);
 		assert.deepEqual(
 			routeFilesWithGoalCreateRoute,
-			["src/server/server.ts"],
+			["src/server/routes/goal-crud-routes.ts"],
 			"Update GOAL_WORKFLOW_ROUTE_FILES when the POST /api/goals route moves.",
 		);
 	});
