@@ -797,10 +797,10 @@ export class ProjectRegistry {
         kind: "headquarters",
         colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
         colorDark: DEFAULT_PROJECT_COLOR_DARK,
-        // Headquarters is a normal, user-reorderable project. Do NOT assign a
-        // position here — let normalizeVisiblePositions() assign positions to
-        // all visible projects based on createdAt, so projects registered before
-        // Headquarters sort ahead of it (e.g. the startup same-root project).
+        // Headquarters is a normal, user-reorderable project: a freshly
+        // registered one appends to the end of the visible order just like any
+        // other new project. Its position persists and can be changed by drag.
+        position: this.nextVisiblePosition(),
       };
     }
 
