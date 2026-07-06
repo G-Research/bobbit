@@ -37,10 +37,13 @@ async function setProjectSandbox(projectId: string, value: "docker" | null): Pro
 }
 
 async function createTempProject(name: string): Promise<{ id: string; rootPath: string }> {
+	// Let registerProject's default auto-seed apply (post-#231 strict NO_WORKFLOWS
+	// cascade): the "leaves a goal todo" test below creates a real goal on one of
+	// these temp projects, and none of this file's tests assert the zero-workflows
+	// shape, so opting out with seedWorkflows:false is unnecessary and unsafe here.
 	const project = await registerProject({
 		name,
 		rootPath: tempProjectRoot(name),
-		seedWorkflows: false,
 	});
 	createdProjectIds.push(project.id);
 	return { id: project.id, rootPath: project.rootPath };
