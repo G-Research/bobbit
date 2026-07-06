@@ -342,17 +342,17 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		await setHeadquartersVisible(true).catch(() => {});
 	});
 
-	test.skip("Headquarters is first by default but is a reorderable project like any other", async ({ page }) => {
-		// Skipped: master commit cd75f50b changed HQ ordering so it is no longer
-		// first by default; headquarters-api.spec.ts and project-reorder-api.spec.ts
-		// were updated but this drag-reorder UI test was not. The assertion at line
-		// 351 (headerIds[0] === HEADQUARTERS_PROJECT_ID) is now stale.
+	test("Headquarters is a reorderable project like any other", async ({ page }) => {
+		// Note: master commit cd75f50b changed HQ to no longer be first by default.
+		// The test now asserts HQ is in the list and has a reorder handle (participates),
+		// without asserting its position.
+		test.slow();
 		await setHeadquartersVisible(true);
 		await openDesktop(page);
 		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
 			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
 		);
-		expect(headerIds[0], "Headquarters should be first by default when visible").toBe(HEADQUARTERS_PROJECT_ID);
+		expect(headerIds, "Headquarters should appear in the project list when visible").toContain(HEADQUARTERS_PROJECT_ID);
 		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 20_000 });
 		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters participates in reorder rows").toHaveCount(1);
 		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters renders a reorder handle like any other project").toHaveCount(1);

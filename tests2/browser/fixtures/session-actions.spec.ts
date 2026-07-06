@@ -304,9 +304,8 @@ test.describe("unified session actions", () => {
 		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
 	});
 
-	test.skip("staff and team-lead sessions keep canonical labels and visibility", async ({ page }) => {
-		// Skipped: staff-session sidebar lookup is timing-sensitive under concurrent
-		// verification load (10s window insufficient). Covered by legacy suite.
+	test("staff and team-lead sessions keep canonical labels and visibility", async ({ page }) => {
+		test.slow(); // staff-session sidebar lookup: extend timeout for concurrent verification load
 		await page.setViewportSize({ width: 900, height: 900 });
 
 		const staff = await createStaffAgent(`ActionsBot-${Date.now()}`);
@@ -322,7 +321,7 @@ test.describe("unified session actions", () => {
 
 		await openSessionView(page, staffSessionId);
 		const staffRow = staffSessionRow(page, staffSessionId);
-		await expect(staffRow, "staff sidebar rows use nav ids and expose an existing Edit button").toBeVisible({ timeout: 10_000 });
+		await expect(staffRow, "staff sidebar rows use nav ids and expose an existing Edit button").toBeVisible({ timeout: 30_000 });
 		await staffRow.hover();
 		const staffSidebarEdit = staffRow.locator(`button[title="Edit"]`).first();
 		await expect(staffSidebarEdit).toBeVisible({ timeout: 5_000 });
