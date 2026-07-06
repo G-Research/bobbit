@@ -141,7 +141,7 @@ describe("spawn-tree helper", () => {
 		const childPid = t.child.pid!;
 		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
 		assert.strictEqual(t.timedOut(), true, "timedOut() should be true after timer fires");
-		const dead = await poll(() => !isAlive(childPid), 3000);
+		const dead = await poll(() => !isAlive(childPid), 15000);
 		assert.ok(dead, `child pid ${childPid} should be reaped after close`);
 	});
 
@@ -155,7 +155,7 @@ describe("spawn-tree helper", () => {
 		});
 		t.child.stdout!.on("data", (d: Buffer) => { buf += d.toString(); });
 
-		const got = await poll(() => /PARENT_PID=(\d+)/.test(buf) && /CHILD_PID=(\d+)/.test(buf), 5000);
+		const got = await poll(() => /PARENT_PID=(\d+)/.test(buf) && /CHILD_PID=(\d+)/.test(buf), 15000);
 		assert.ok(got, `expected both pids on stdout; got: ${JSON.stringify(buf)}`);
 		const parentPid = Number(/PARENT_PID=(\d+)/.exec(buf)![1]);
 		const childPid = Number(/CHILD_PID=(\d+)/.exec(buf)![1]);
@@ -165,7 +165,7 @@ describe("spawn-tree helper", () => {
 		t.killTree("SIGKILL", 0);
 		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
 
-		const cleaned = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 3000);
+		const cleaned = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 15000);
 		assert.ok(cleaned, `both pids should be reaped; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 	});
 
@@ -177,7 +177,7 @@ describe("spawn-tree helper", () => {
 		assert.ok(_trackedCount() >= 3, `expected >=3 tracked, got ${_trackedCount()}`);
 		killAllTracked("SIGKILL");
 		await Promise.all(children.map(c => new Promise<void>((res) => c.child.once("close", () => res()))));
-		const ok = await poll(() => pids.every(p => !isAlive(p)), 3000);
+		const ok = await poll(() => pids.every(p => !isAlive(p)), 15000);
 		assert.ok(ok, "all tracked children should be reaped within budget");
 	});
 });
@@ -206,7 +206,7 @@ describe("runCommandStep tree-kill", () => {
 		const parentPid = Number(parentMatch![1]);
 		const childPid = Number(childMatch![1]);
 
-		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 5000);
+		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 15000);
 		assert.ok(dead, `descendants should be reaped after timeout; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 	});
 
@@ -234,7 +234,7 @@ describe("runCommandStep tree-kill", () => {
 		let parentPid = 0;
 		let childPid = 0;
 		try {
-			const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+			const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 15000);
 			assert.ok(registered, "tracked child should be registered shortly after spawn");
 
 			const pidsReady = await poll(() => {

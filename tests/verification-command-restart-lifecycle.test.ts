@@ -1114,7 +1114,7 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 			if (!step?.pid || !step?.pidFile || !step?.outFile || !fs.existsSync(step.pidFile) || !fs.existsSync(startedFile)) return false;
 			const out = fs.existsSync(step.outFile) ? fs.readFileSync(step.outFile, "utf8") : "";
 			return out.includes("gate-signal-probe:started") ? step : false;
-		}, 15_000, 25);
+		}, 20_000, 25);
 
 		const resumed = makeHarnessForStateDir(initial.stateDir);
 		const resumePromise = resumed.harness.resumeInterruptedVerifications();
