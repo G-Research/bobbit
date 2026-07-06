@@ -176,6 +176,34 @@ Startup runs `migrateLegacyHeadquartersDirectory()` (`src/server/agent/state-mig
 
 Diagnostics are written to `<headquarters-state-dir>/headquarters-migration-diagnostics.json` (source paths, copied/merged/quarantined files, ambiguous records, restored normal ids, previous-override hints, failures). User work is never silently moved between Headquarters and a normal project without a deterministic rule or a visible diagnostic.
 
+### Model-default preference seeding
+
+After `migrateLegacyHeadquartersDirectory()` runs, `seedModelDefaultsFromLegacy()` performs a second, narrower pass that preserves the user's configured model defaults across Headquarters directory changes.
+
+**Why a separate pass is needed.** `migrateLegacyHeadquartersDirectory()` skips copying any legacy files when `BOBBIT_DIR` or `BOBBIT_PI_DIR` is set (`usingOverride = true`). This means a user who changes `BOBBIT_DIR` to point at a fresh directory loses their previously configured model settings even though the old `<server-run-dir>/.bobbit/state/preferences.json` still exists on disk. Without a separate seeding step, starting with a new `BOBBIT_DIR` silently resets all model choices to the built-in defaults.
+
+**What it seeds.** The function reads the legacy default path (`<serverRunDir>/.bobbit/state/preferences.json`) and copies any of the following keys that are absent from the current Headquarters `preferences.json`:
+
+- `default.sessionModel`
+- `default.reviewModel`
+- `default.namingModel`
+- `default.imageModel`
+- `default.sessionThinkingLevel`
+- `default.reviewThinkingLevel`
+- `default.namingThinkingLevel`
+
+**Guarantees:**
+- Non-destructive: keys already present in the target are never overwritten.
+- No-op when source and target resolve to the same file (the legacy path IS the Headquarters state dir).
+- No-op when the legacy file does not exist.
+- Idempotent: running it again on a fully-seeded preferences file changes nothing.
+
+Seeding is logged at the `[migration]` level when at least one key is copied.
+
+### Headquarters project ordering (position field)
+
+The Headquarters project entry in `projects.json` carries a `position` field that records the user's custom sidebar ordering (set via drag-reorder). Two migration functions — `repairProjectsFileForHeadquartersSplit` and `migrateHeadquartersProjectAliases` — run on every startup to repair the Headquarters registry record. Neither function modifies the `position` field. Deleting or resetting it would silently move Headquarters back to the end of the project list on every restart, undoing the user's reorder.
+
 ## Related docs
 
 - [internals.md — Headquarters project](internals.md#headquarters-project) and [projectId-required API contract](internals.md#projectid-required-api-contract).
