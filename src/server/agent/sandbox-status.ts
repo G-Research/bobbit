@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PI_AI_BEDROCK_HEADERS_PATCH_LABEL } from "./pi-ai-bedrock-headers-patch.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export interface SandboxStatus {
@@ -99,19 +98,6 @@ export async function getImageAgentVersion(imageName: string, commandRunner: Com
 	}
 }
 
-export async function getImageBedrockHeadersPatchLabel(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
-	try {
-		const { stdout } = await commandRunner.execFile(
-			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-ai-bedrock-ua-patch\"}}", imageName],
-			{ timeout: 5000 },
-		);
-		const label = stdout.toString().trim();
-		return label && label !== "<no value>" ? label : null;
-	} catch {
-		return null;
-	}
-}
-
 /** Get the host's installed pi-coding-agent version. */
 export function getHostAgentVersion(): string | null {
 	try {
@@ -137,17 +123,14 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 		return true;
 	}
 
-	const imageVersion = await getImageAgentVersion(imageName, commandRunner);
-	const imagePatchLabel = await getImageBedrockHeadersPatchLabel(imageName, commandRunner);
-	if (imageVersion === hostVersion && imagePatchLabel === PI_AI_BEDROCK_HEADERS_PATCH_LABEL) {
-		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} and Bedrock headers patch ${imagePatchLabel} (matches host)`);
+	const imageVersion = await getImageAgentVersion(imageName);
+	if (imageVersion === hostVersion) {
+		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} (matches host)`);
 		return true;
 	}
 
 	const reason = imageVersion
-		? imagePatchLabel === PI_AI_BEDROCK_HEADERS_PATCH_LABEL
-			? `image has v${imageVersion}, host has v${hostVersion}`
-			: `image missing Bedrock headers patch ${PI_AI_BEDROCK_HEADERS_PATCH_LABEL}, host has v${hostVersion}`
+		? `image has v${imageVersion}, host has v${hostVersion}`
 		: `image missing version label, host has v${hostVersion}`;
 	console.log(`[sandbox] Rebuilding image "${imageName}": ${reason}`);
 
@@ -164,7 +147,7 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, path.join(contextRoot, "docker")],
 			{ cwd: contextRoot, timeout: 300_000 },
 		);
-		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion} and Bedrock headers patch ${PI_AI_BEDROCK_HEADERS_PATCH_LABEL}`);
+		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion}`);
 		return true;
 	} catch (err: any) {
 		const errorMsg = err.stderr || err.message || String(err);

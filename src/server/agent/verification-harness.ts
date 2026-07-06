@@ -164,7 +164,7 @@ import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
-import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
+
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
@@ -2899,22 +2899,6 @@ export class VerificationHarness {
 			const steps = failureContext?.steps ?? [];
 			const message = buildVerificationFailureMessage(gateId, steps);
 			this.notifyTeamLeadFn(goalId, message);
-		}
-		// Cross-team propagation: when a CHILD goal's ready-to-merge gate
-		// resolves (passed OR failed), wake up the PARENT goal's team-lead
-		// too. Otherwise the parent sits idle "awaiting completion
-		// notifications" with no signal that work is done — or stuck. The
-		// pure helper decides whether to fire (only for ready-to-merge,
-		// only when child has a parent, only on passed/failed).
-		try {
-			const ctx = this.projectContextManager?.getContextForGoal(goalId);
-			const child = ctx?.goalStore.get(goalId);
-			const parentNotify = buildParentReadyNotification(child, gateId, status);
-			if (parentNotify) {
-				this.notifyTeamLeadFn(parentNotify.parentGoalId, parentNotify.message);
-			}
-		} catch (err) {
-			console.warn("[verification] Failed to notify parent team-lead on child ready-to-merge:", err);
 		}
 	}
 

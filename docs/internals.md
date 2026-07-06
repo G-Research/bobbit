@@ -1694,11 +1694,10 @@ Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=
 
 Claude models exposed by the gateway are stored under `providers.aigw` but routed through `api: "bedrock-converse-stream"` for Bedrock Converse feature parity. Those model entries also get a per-model `baseUrl` pointing at the gateway `/aws` subtree, while the provider `baseUrl` stays on the OpenAI-compatible root for non-Claude models.
 
-pi-ai's Bedrock provider does not normally forward provider-level `headers` into the AWS SDK request. Bobbit applies a narrow compatibility patch before model-completion and agent subprocess startup: `ensurePiAiBedrockHeadersPatch()` injects a middleware hook into pi-ai's Bedrock provider that copies `options.headers` into the outgoing Bedrock request **only when `model.provider === "aigw"`**. The hook is intentionally not global:
+pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK request via `addCustomHeadersMiddleware()`, which is called automatically whenever `options.headers` is non-empty. No Bobbit-side patch is required: `providers.aigw.headers` written by `aigw-manager.ts` are resolved by pi-coding-agent's `resolveConfigValue` and passed as `options.headers`, and pi-ai injects them into the Bedrock request directly.
 
 - aigw-routed Claude/Bedrock traffic receives `User-Agent: Bobbit/<version>` and the resolved `x-opencode-session` when present.
-- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched.
-- Existing AWS user-agent middleware is not globally replaced; the Bobbit headers are applied only to the specific aigw Bedrock client request.
+- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched (their `options.headers` is empty).
 
 ### Startup refresh behavior
 

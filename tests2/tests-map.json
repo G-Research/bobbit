@@ -6497,15 +6497,6 @@
       "v2Path": "tests2/core/perm-frame-late-joiner-seq-gap.test.ts"
     },
     {
-      "file": "tests/pi-ai-bedrock-headers-patch.test.ts",
-      "bucket": "v2-core",
-      "method": "codemod",
-      "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
-      "migrated": true,
-      "v2Path": "tests2/core/pi-ai-bedrock-headers-patch.test.ts"
-    },
-    {
       "file": "tests/pi-extension-collision.test.ts",
       "bucket": "v2-core",
       "method": "codemod",
@@ -10054,6 +10045,22 @@
       "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
       "migrated": true,
       "v2Path": "tests2/core/ws-overflow-guard.test.ts"
+    },
+    {
+      "file": "tests/notify-team-lead-child-passed.test.ts",
+      "bucket": "v2-core",
+      "method": "codemod",
+      "migrated": true,
+      "v2Path": "tests2/core/notify-team-lead-child-passed.test.ts",
+      "rationale": "new unit test from master cbd0c82f"
+    },
+    {
+      "file": "tests/reproducing-child-completion-bugs.test.ts",
+      "bucket": "v2-core",
+      "method": "codemod",
+      "migrated": true,
+      "v2Path": "tests2/core/reproducing-child-completion-bugs.test.ts",
+      "rationale": "new unit test from master cbd0c82f"
     }
   ]
 }

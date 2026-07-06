@@ -50,7 +50,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"), NODE_ENV: "test" },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -186,14 +186,14 @@ test("bg-process-restart-survival: running re-attaches & keeps streaming; finish
 	const reg = await regRes.json() as any;
 	gw.defaultProjectId = reg.id;
 
-	// Plain (non-worktree) session: bash_bg runs in this cwd.
-	const sessCwd = join(tmp, `.bobbit-bgrestart-cwd-${port1}`);
-	mkdirSync(sessCwd, { recursive: true });
-	const sRes = await api(gw, "/api/sessions", { method: "POST", body: JSON.stringify({ projectId: reg.id, cwd: sessCwd }) });
+	// Plain (non-worktree) session: bash_bg runs in the session cwd (the project
+	// root). Pass worktree:false to opt out of auto-worktree; cwd defaults to the
+	// project root (validateExecutionCwd rejects cwds outside the project since PR #932).
+	const sRes = await api(gw, "/api/sessions", { method: "POST", body: JSON.stringify({ projectId: reg.id, worktree: false }) });
 	expect(sRes.status).toBe(201);
 	const sessionId = (await sRes.json() as any).id;
 	await pollIdle(gw, sessionId);
-	console.log(`  [boot] session ${sessionId} idle, cwd=${sessCwd}`);
+	console.log(`  [boot] session ${sessionId} idle (no worktree)`);
 
 	// (1) Long-running ticker — must survive the restart and keep streaming.
 	const tickRes = await api(gw, `/api/sessions/${sessionId}/bg-processes`, {
@@ -307,7 +307,6 @@ test("bg-process-restart-survival: running re-attaches & keeps streaming; finish
 	try { await api(gw, `/api/sessions/${sessionId}/bg-processes/${tickId}?action=kill`, { method: "DELETE" }); } catch { /* ignore */ }
 	await stopGatewayOnly(gw);
 	cleanDirs(dir);
-	cleanDirs(sessCwd);
 
 	if (failures.length) {
 		throw new Error(`bg-process-restart-survival failures:\n  - ${failures.join("\n  - ")}`);
