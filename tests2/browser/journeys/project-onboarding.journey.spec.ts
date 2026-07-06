@@ -5,9 +5,65 @@
  *   add-project-post-archive, add-project-preflight, add-project-select-all,
  *   add-project-symlink, add-project-typeahead, and related specs.
  */
-import { test, expect, openApp } from "../_helpers/journey-fixture.js";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { test, expect, openApp, apiFetch } from "../_helpers/journey-fixture.js";
+
+/** Stable selectors from tests/e2e/ui/add-project-helpers.ts */
+const ADD_PROJECT = {
+	dialog:       '[data-testid="add-project-dialog"]',
+	picker:       '[data-testid="add-project-picker"]',
+	pickerInput:  '[data-testid="directory-picker-input"]',
+	pickerBrowse: '[data-testid="directory-picker-browse"]',
+	pickerSuggestions: '[data-testid="directory-picker-suggestions"]',
+	statusSlot:   '[data-testid="add-project-status-slot"]',
+	footer:       '[data-testid="add-project-footer"]',
+	browseDialog: '[data-testid="add-project-browse-dialog"]',
+	browseUp:     '[data-testid="add-project-browse-up"]',
+	browseCurrent:'[data-testid="add-project-browse-current"]',
+	browseEntry:  '[data-testid="add-project-browse-entry"]',
+	browseList:   '[data-testid="add-project-browse-list"]',
+	continue:     '[data-testid="add-project-continue"]',
+	createDirectory: '[data-testid="add-project-create-directory"]',
+} as const;
+
+let _dirCounter = 0;
+function uniqueDir(label: string): string {
+	const dir = join(
+		tmpdir(),
+		`bobbit-v2-onb-${label}-${process.env.E2E_PORT ?? "0"}-${Date.now()}-${++_dirCounter}`,
+	);
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+async function clearAddedProjects(): Promise<void> {
+	try {
+		const res = await apiFetch("/api/projects");
+		const data = await res.json();
+		const projects: Array<{ id: string; name: string }> = data.projects || data || [];
+		for (const p of projects) {
+			if (p.name === "default") continue;
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	} catch {
+		// best-effort cleanup
+	}
+}
+
+/** Open the Add Project dialog; returns the input locator. */
+async function openAddProjectDialog(page: import("@playwright/test").Page): Promise<void> {
+	await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+	await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 8_000 });
+	await expect(page.locator(ADD_PROJECT.pickerInput)).toBeVisible({ timeout: 5_000 });
+}
 
 test.describe("Journey: Project Onboarding", () => {
+	test.afterEach(async () => {
+		await clearAddedProjects();
+	});
+
 	test("settings projects page is reachable", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
@@ -36,22 +92,127 @@ test.describe("Journey: Project Onboarding", () => {
 		expect(title).toBeTruthy();
 	});
 
-	test("clicking Add Project opens dialog with path input", async ({ page }) => {
+	test("clicking Add Project opens dialog with data-testid selectors", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		// Find and click the Add Project button
+
 		const addBtn = page.getByRole("button", { name: /add project/i }).first();
 		await expect(addBtn).toBeVisible({ timeout: 15_000 });
 		await addBtn.click();
-		// Dialog should open — look for the dialog element or a path/browse input
-		const dialog = page.locator("add-project-dialog, [data-testid='add-project-dialog'], dialog").first();
-		const pickerInput = page.locator("[data-testid='add-project-picker-input'], input[placeholder*='path' i], input[placeholder*='browse' i]").first();
-		const browseBtn = page.getByRole("button", { name: /browse/i }).first();
-		const dialogOpened =
-			await dialog.isVisible({ timeout: 8_000 }).catch(() => false)
-			|| await pickerInput.isVisible({ timeout: 3_000 }).catch(() => false)
-			|| await browseBtn.isVisible({ timeout: 3_000 }).catch(() => false);
-		expect(dialogOpened, "Add Project dialog with path input or Browse button should open").toBe(true);
+
+		// Dialog must open — assert via data-testid
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 8_000 });
+		// Path input exposed via data-testid
+		await expect(page.locator(ADD_PROJECT.pickerInput)).toBeVisible({ timeout: 5_000 });
+		// Browse button present
+		await expect(page.locator(ADD_PROJECT.pickerBrowse)).toBeVisible({ timeout: 5_000 });
+		// Continue button present
+		const continueBtn = page.locator(ADD_PROJECT.footer).locator(ADD_PROJECT.continue).first();
+		if (!await continueBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
+			// Continue may be a direct button in the footer
+			await expect(page.locator("button").filter({ hasText: /continue/i }).first()).toBeVisible({ timeout: 5_000 });
+		}
+		// Status slot shows hint text
+		await expect(page.locator(ADD_PROJECT.statusSlot)).toBeVisible({ timeout: 5_000 });
+	});
+
+	test("Browse button opens add-project-browse-dialog overlay", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+
+		const addBtn = page.getByRole("button", { name: /add project/i }).first();
+		await expect(addBtn).toBeVisible({ timeout: 15_000 });
+		await addBtn.click();
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 8_000 });
+
+		// Click Browse — add-project-browse-dialog should appear
+		await page.locator(ADD_PROJECT.pickerBrowse).click();
+		const modal = page.locator(ADD_PROJECT.browseDialog);
+		await expect(modal).toBeVisible({ timeout: 8_000 });
+
+		// Parent dialog stays mounted underneath
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+
+		// Browse modal exposes a current-path indicator
+		await expect(modal.locator(ADD_PROJECT.browseCurrent)).toBeVisible({ timeout: 5_000 });
+
+		// Browse modal has a "Select current" button that becomes enabled once listing loads
+		const selectBtn = modal.locator("button").filter({ hasText: "Select current" }).first();
+		await expect(selectBtn).toBeVisible({ timeout: 5_000 });
+
+		// Esc closes the modal without mutating the picker input
+		const inputValueBefore = await page.locator(ADD_PROJECT.pickerInput).inputValue();
+		await page.keyboard.press("Escape");
+		await expect(modal).toHaveCount(0, { timeout: 5_000 });
+		// Picker value unchanged after Esc
+		const inputValueAfter = await page.locator(ADD_PROJECT.pickerInput).inputValue();
+		expect(inputValueAfter).toBe(inputValueBefore);
+		// Parent dialog still open
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible();
+	});
+
+	test("Browse → Select current copies path back into picker input", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+
+		const addBtn = page.getByRole("button", { name: /add project/i }).first();
+		await expect(addBtn).toBeVisible({ timeout: 15_000 });
+		await addBtn.click();
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 8_000 });
+
+		await page.locator(ADD_PROJECT.pickerBrowse).click();
+		const modal = page.locator(ADD_PROJECT.browseDialog);
+		await expect(modal).toBeVisible({ timeout: 8_000 });
+
+		// Wait for Select current to become enabled (listing has loaded)
+		const selectBtn = modal.locator("button").filter({ hasText: "Select current" }).first();
+		await expect(selectBtn).toBeEnabled({ timeout: 10_000 });
+		await selectBtn.click();
+
+		// Modal closes
+		await expect(modal).toHaveCount(0, { timeout: 5_000 });
+
+		// Picker input now has a non-empty path
+		const inputValue = await page.locator(ADD_PROJECT.pickerInput).inputValue();
+		expect(inputValue.length, "picker input should be populated after Select current").toBeGreaterThan(0);
+	});
+
+	test("Browse modal shows directory entries and Up button", async ({ page }) => {
+		// Create a temp dir with a subdirectory so there's something to navigate
+		const parent = uniqueDir("browse-entries");
+		const child = join(parent, "child-dir");
+		mkdirSync(child, { recursive: true });
+
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+
+		const addBtn = page.getByRole("button", { name: /add project/i }).first();
+		await expect(addBtn).toBeVisible({ timeout: 15_000 });
+		await addBtn.click();
+		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 8_000 });
+
+		// Seed the picker with the parent path so the browse modal opens there
+		await page.locator(ADD_PROJECT.pickerInput).fill(parent);
+		await page.locator(ADD_PROJECT.pickerBrowse).click();
+		const modal = page.locator(ADD_PROJECT.browseDialog);
+		await expect(modal).toBeVisible({ timeout: 8_000 });
+
+		// Wait for entries to load — browse-list or browse-entry should appear
+		const browseList = modal.locator(ADD_PROJECT.browseList);
+		const browseEntry = modal.locator(ADD_PROJECT.browseEntry);
+		const listOrEntry = await browseList.isVisible({ timeout: 8_000 }).catch(() => false)
+			|| await browseEntry.first().isVisible({ timeout: 5_000 }).catch(() => false);
+		expect(listOrEntry, "browse modal should show a directory list or entries").toBe(true);
+
+		// Up button should exist (for navigating to parent directory)
+		await expect(modal.locator(ADD_PROJECT.browseUp)).toBeVisible({ timeout: 5_000 });
+
+		// Close with Escape
+		await page.keyboard.press("Escape");
+		await expect(modal).toHaveCount(0, { timeout: 5_000 });
 	});
 });
