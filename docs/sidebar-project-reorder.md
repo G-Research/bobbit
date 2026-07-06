@@ -1,11 +1,11 @@
 # Sidebar project drag reorder
 
-Project drag reorder lets users choose the order of normal project sections in the sidebar. Headquarters is anchored first when visible and is not reorderable. The normal-project order is server-side project registry state, not per-browser UI state, so the same order appears after reloads and in other connected browser sessions.
+Project drag reorder lets users choose the order of project sections in the sidebar. Headquarters is a normal reorderable project (since PR #933) — it participates in the same drag-reorder system as normal projects, carries a `position` field, and can be moved to any slot. The project order is server-side project registry state, not per-browser UI state, so the same order appears after reloads and in other connected browser sessions.
 
 This feature sits between the project registry/API and the sidebar render paths:
 
 - The server stores normal visible-project order as contiguous project positions.
-- `GET /api/projects` returns Headquarters first when visible, followed by normal projects in persisted order.
+- `GET /api/projects` returns all visible projects in persisted position order (Headquarters and normal projects each carry a `position` field).
 - The desktop sidebar and mobile landing page render projects in `state.projects` order.
 - `PUT /api/projects/order` saves a complete visible-project order and broadcasts `projects_changed` so other clients can update without a reload.
 
@@ -23,7 +23,7 @@ Normal project headers are ordered as:
 4. project name/status;
 5. project actions such as settings and new goal.
 
-The Headquarters header omits the reorder handle and uses the `TowerControl` icon instead of the folder icon.
+The Headquarters header uses the `TowerControl` icon instead of the folder icon and renders a reorder handle like any other project.
 
 Desktop keeps the normal sidebar density by reserving the handle slot but hiding the icon until the project header is hovered, the header has focus within it, the handle itself is focused, or a reorder is active.
 
@@ -70,15 +70,16 @@ When a reorder completes:
 
 The regular session refresh path also fetches projects, so tabs without an active session WebSocket still converge on the saved order.
 
-New normal projects append to the end of the current custom order after Headquarters. Removing a normal project compacts the remaining positions without changing their relative order.
+New projects (including a freshly-created Headquarters) append to the end of the current custom order. Removing a normal project compacts the remaining positions without changing their relative order.
 
 ## Validation and edge cases
 
-Only visible normal projects participate in user ordering. Headquarters is visible by default but anchored outside the user order. Hidden projects, including the synthetic `system` project, remain hidden from `GET /api/projects` and must not be sent to the reorder endpoint.
+All visible projects participate in user ordering, including Headquarters when it is shown. Hidden projects, including the synthetic `system` project, remain hidden from `GET /api/projects` and must not be sent to the reorder endpoint.
 
-`PUT /api/projects/order` requires a complete, duplicate-free list of the current visible normal project IDs:
+`PUT /api/projects/order` requires a complete, duplicate-free list of all current visible project IDs (normal projects **and** Headquarters when visible). When Headquarters is hidden via the `showHeadquartersInProjectLists` preference, omit it from the payload — the server excludes it automatically and preserves its position slot.
 
-- malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, and hidden/system IDs return `400` with `code: "invalid_project_order"`;
+- malformed bodies, non-string IDs, duplicate IDs, unknown IDs, and hidden/system IDs return `400` with `code: "invalid_project_order"`;
+- including Headquarters when it is hidden via preference also returns `400` with `code: "invalid_project_order"`;
 - otherwise valid lists that do not exactly match the current visible project set return `409` with `code: "stale_project_order"` plus the expected and received IDs;
 - failed saves do not mutate the registry.
 
