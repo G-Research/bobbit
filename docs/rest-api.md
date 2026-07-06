@@ -707,7 +707,7 @@ Invalid requests return `400` and do not mutate the registry:
 { "error": "projectIds must be an array of strings", "code": "invalid_project_order" }
 ```
 
-`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, hidden project IDs, and the synthetic `system` project ID. Headquarters/system/hidden projects do not participate in user ordering; `system` is never returned by `GET /api/projects`.
+`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, hidden project IDs, and the synthetic `system` project ID. It also covers including Headquarters in `projectIds` when it is **hidden** via the `showHeadquartersInProjectLists` preference (because the server excludes it from the expected set in that case). When Headquarters is **visible**, it is a valid and required entry in `projectIds`; omitting it when visible returns `stale_project_order`. `system` is never returned by `GET /api/projects`.
 
 Stale complete-order mismatches return `409` and do not mutate the registry:
 

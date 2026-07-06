@@ -4,7 +4,7 @@ Project drag reorder lets users choose the order of project sections in the side
 
 This feature sits between the project registry/API and the sidebar render paths:
 
-- The server stores normal visible-project order as contiguous project positions.
+- The server stores visible-project order as contiguous project positions.
 - `GET /api/projects` returns all visible projects in persisted position order (Headquarters and normal projects each carry a `position` field).
 - The desktop sidebar and mobile landing page render projects in `state.projects` order.
 - `PUT /api/projects/order` saves a complete visible-project order and broadcasts `projects_changed` so other clients can update without a reload.
