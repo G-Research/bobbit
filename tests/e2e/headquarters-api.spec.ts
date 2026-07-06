@@ -13,6 +13,7 @@ const SYSTEM_PROJECT_ID = "system";
 const SAME_ROOT_PROJECT_ID = "same-root-normal-project";
 const SAME_ROOT_PROJECT_NAME = "Original Same Root Project";
 const SAME_ROOT_WORKFLOW_ID = "same-root-normal-workflow";
+const HEADQUARTERS_WORKFLOW_ID = "headquarters-baseline-workflow";
 
 const test = base;
 test.describe.configure({ mode: "serial" });
@@ -137,6 +138,37 @@ function seedNormalSameRootLayout(serverRoot: string, opts: { sessions?: unknown
 	writeJson(join(normalStateDir, "staff.json"), opts.staff ?? []);
 }
 
+/**
+ * Seed a baseline inline workflow into Headquarters' own `project.yaml`.
+ *
+ * Product contract: workflows are project-scoped with no default seed —
+ * Headquarters is not special-cased ("No default workflow scaffold",
+ * docs/internals.md; a project may legitimately persist with zero
+ * workflows until the project assistant designs one). `POST /api/goals`
+ * is correspondingly strict (`NO_WORKFLOWS` when the target project has
+ * none). Several tests in this file create a Headquarters goal without
+ * naming a `workflowId`, relying on the server's "first workflow in
+ * store order" fallback — exactly like `seedNormalSameRootLayout` does
+ * for the same-root normal project. Idempotent (skips if already
+ * present) so it plays nicely with the `clean: false` restart tests.
+ */
+function seedHeadquartersWorkflow(headquartersDir: string): void {
+	const configDir = join(headquartersDir, "config");
+	const yamlPath = join(configDir, "project.yaml");
+	if (existsSync(yamlPath)) return;
+	mkdirSync(configDir, { recursive: true });
+	writeFileSync(yamlPath, [
+		"workflows:",
+		`  ${HEADQUARTERS_WORKFLOW_ID}:`,
+		`    id: ${HEADQUARTERS_WORKFLOW_ID}`,
+		"    name: Headquarters Baseline Workflow",
+		"    gates:",
+		"      - id: plan",
+		"        name: Plan",
+		"",
+	].join("\n"));
+}
+
 async function startHeadquartersGateway(opts: StartOptions = {}): Promise<StartedGateway> {
 	const serverRoot = opts.serverRoot ?? uniqueDir("server");
 	const headquartersDir = opts.headquartersDir ?? join(serverRoot, ".bobbit", "headquarters");
@@ -223,6 +255,7 @@ async function startHeadquartersGateway(opts: StartOptions = {}): Promise<Starte
 	// Re-assert seeded files after scaffolding; scaffold must be idempotent and should not overwrite them.
 	if (opts.projects !== undefined) writeJson(projectsPath, opts.projects);
 	if (opts.preferences !== undefined) writeJson(preferencesPath, { subgoalsEnabled: true, showHeadquartersInProjectLists: true, ...opts.preferences });
+	seedHeadquartersWorkflow(headquartersDir);
 	const token = loadOrCreateToken();
 	const gw = createGateway({
 		host: "127.0.0.1",
