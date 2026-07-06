@@ -222,8 +222,9 @@ test.describe("Phase 5b — tree cost rollup", () => {
 	// descendant's dashboard previously showed the whole-tree rollup because
 	// the handler resolved `rootGoalId = goal.rootGoalId ?? goal.id`.
 	//
-	// Server fix lives in `src/server/server.ts` (GET /api/goals/:id/tree-cost)
-	// and is pinned at the unit level by `tests/api-goals-tree-cost.test.ts`.
+	// Server fix lives in `src/server/routes/goal-read-routes.ts`
+	// (GET /api/goals/:id/tree-cost) and is pinned at the unit level by
+	// `tests/api-goals-tree-cost.test.ts`.
 	// This block pins the user-visible behaviour: the dashboard header value
 	// (`data-testid="tree-cost-total"`) must reflect the requested subgoal's
 	// subtree sum, not the project-wide grand total.

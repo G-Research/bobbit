@@ -50,6 +50,7 @@ import type { Workflow } from "../agent/workflow-store.js";
 import type { ColorStore } from "../agent/color-store.js";
 import type { GoalManager } from "../agent/goal-manager.js";
 import type { PrStatusStore } from "../agent/pr-status-store.js";
+import type { VerificationHarness } from "../agent/verification-harness.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -304,4 +305,11 @@ export interface CoreRouteCtx {
 	isHeadquartersSession(session: { projectId?: string }): boolean;
 	prStatusStore: PrStatusStore;
 	sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown>;
+
+	// ── Goals G1 additions — append-only.
+	archivedGoalMatchesQuery(goal: PersistedGoal, sessions: any[], query: string): boolean;
+	getTaskManagerForGoal(goalId: string): TaskManager;
+	listGoalsAcrossProjects(opts?: { projectId?: string }): PersistedGoal[];
+	requireSubgoalsEnabled(): boolean;
+	verificationHarness: VerificationHarness;
 }
