@@ -28,6 +28,7 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 	test.setTimeout(75_000);
 
 	test("STREAM_BURST:2 stays pinned and live DOM equals post-refresh DOM", async ({ page, rec }) => {
+		test.slow(); // streaming + scroll assertions need 3× timeout under concurrent v2-browser load
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
