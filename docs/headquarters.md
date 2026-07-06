@@ -105,7 +105,7 @@ Workflows are the exception. They remain project-scoped, read from `project.yaml
 
 ## Project lists, ordering, and visibility
 
-`GET /api/projects` includes Headquarters by default and lists it first. The hidden `system` project is always excluded.
+`GET /api/projects` includes Headquarters by default. Headquarters is a reorderable project with a `position` field; its position in the list reflects the saved sidebar order (see [Headquarters project ordering](#headquarters-project-ordering-position-field)). The hidden `system` project is always excluded.
 
 The `showHeadquartersInProjectLists` preference controls presentation only:
 
