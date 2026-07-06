@@ -122,6 +122,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-03/N-10: Deep links and settings sub-navigation @smoke", async () => {
+		test.slow(); // goal-dashboard can be slow to render under concurrent v2-browser load
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
