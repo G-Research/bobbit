@@ -1,6 +1,6 @@
 # EXP-003: Warm Pool Spawn Latency A/B
 
-Status: pre-registered; no data collected yet.
+Status: measured; pre-registration was committed before data collection.
 Registered: 2026-07-06.
 Decision lane: evidence only; no product-default flips in this experiment.
 
@@ -105,3 +105,66 @@ Run a dedicated E2E/unit-harness measurement that emits:
 The measured results and recommendation section must be appended to this
 document only after this pre-registration has been committed.
 
+## Results
+
+Collected by running `node scripts/exp-warm-pool-report.mjs` after the
+pre-registration commit (`a6948372`). Machine-readable output:
+`docs/experiments/EXP-003-warm-pool-spawn-latency-results.json`; markdown
+summary:
+`docs/experiments/EXP-003-warm-pool-spawn-latency-summary.md`.
+
+Generated: 2026-07-06T00:51:44.161Z (UTC).
+
+Harness notes:
+
+- The measurement used an isolated in-process gateway and the repo
+  `tests/e2e/mock-agent.mjs` as a real `RpcBridge` child process, not the
+  `InProcessMockBridge` shortcut.
+- The primary ready signal was `SessionManager.createSession` returning a
+  session whose normal setup path had set `status` to `idle`.
+- Child-process RSS was measured from the warmed idle pool entry via `ps`;
+  the first sandboxed pass could not read RSS, so the final recorded pass was
+  rerun with approval for the same script command.
+
+| Metric | `off` | `on` |
+|---|---:|---:|
+| Measured spawns | 10 | 10 |
+| Median latency | 126.2 ms | 28.5 ms |
+| Mean latency | 142.9 ms | 28.5 ms |
+| p90 latency | 127.7 ms | 29.6 ms |
+| Min latency | 124.0 ms | 26.6 ms |
+| Max latency | 295.2 ms | 29.8 ms |
+
+| Pool metric | Value |
+|---|---:|
+| Measured `on` hits | 10 |
+| Measured `on` misses | 0 |
+| Measured `on` hit rate | 100.0% |
+| Warm-up misses | 10 |
+
+| Paired effect | Value |
+|---|---:|
+| Median paired reduction | 77.8% |
+| Median paired reduction | 97.2 ms |
+| p90 regression vs `off` | -76.8% |
+
+| Memory | Value |
+|---|---:|
+| Measurable | yes |
+| Median idle RSS per ready process | 57.8 MiB |
+| p90 idle RSS per ready process | 58.0 MiB |
+| Max idle RSS per ready process | 58.1 MiB |
+
+## Recommendation
+
+Result: `recommend-default-on-follow-up`.
+
+The preregistered success thresholds passed in this isolated harness: 10 valid
+paired measured spawns per arm, 100% measured `on` hit rate, 77.8% median
+paired latency reduction, no p90 regression, and max measured idle RSS below
+200 MiB per ready pool process.
+
+This is evidence for considering default-on in a follow-up lane, not a default
+flip by itself. The harness uses the repo mock agent, so it proves the
+session-setup and pool-claim mechanism under real child-process transport but
+does not measure production model/provider startup variance.
