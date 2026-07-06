@@ -120,8 +120,8 @@ Use `mode: "prompt"` when the agent should treat the message as a fresh next-tur
 
 ## REST surfaces
 
-- `POST /api/sessions/:id/prompt` backs `session_prompt`. Body: `{ message, mode? }`; `:id` is the target session. The caller is authenticated by session secret and must have the `session_prompt` tool allowed.
-- `POST /api/goals/:id/team/prompt` backs goal-team `team_prompt`. Body: `{ sessionId, message, mode?, workflowGateId?, inputGateIds? }`; `:id` is the caller's goal.
+- `POST /api/sessions/:id/prompt` backs `session_prompt`. Body: `{ message, mode? }`; `:id` is the target session. The caller is authenticated by session secret and must have the `session_prompt` tool allowed. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused; sessions with no associated goal are unaffected.
+- `POST /api/goals/:id/team/prompt` backs goal-team `team_prompt`. Body: `{ sessionId, message, mode?, workflowGateId?, inputGateIds? }`; `:id` is the caller's goal. Returns `409 { code: "GOAL_PAUSED" }` when the goal is paused — this check fires before team membership verification.
 - `POST /api/sessions/:id/orchestrate/prompt` backs own-child `team_prompt`. Body includes the child session id and message; `:id` is the owner session.
 
 See [REST API](rest-api.md) for the route table and [Orchestration](orchestration.md) for child-agent scoping.

@@ -1,9 +1,14 @@
 /**
- * `403 SUBGOALS_DISABLED` server-gate coverage for the nine nested-goal
- * REST routes. With the system-scope flag OFF, every one of these routes
- * must short-circuit to `{code:"SUBGOALS_DISABLED"}` before any further
- * processing. With the flag ON, the gate is transparent (the request
- * proceeds and may fail for unrelated reasons — we just assert non-403).
+ * `403 SUBGOALS_DISABLED` server-gate coverage for the seven nested-goal
+ * REST routes gated by `requireSubgoalsEnabled()`. With the system-scope
+ * flag OFF, every one of these routes must short-circuit to
+ * `{code:"SUBGOALS_DISABLED"}` before any further processing. With the
+ * flag ON, the gate is transparent (the request proceeds and may fail for
+ * unrelated reasons — we just assert non-403).
+ *
+ * Note: pause and resume are NOT in this list — they are operator verbs
+ * with no dependency on subgoals and were intentionally removed from the
+ * `requireSubgoalsEnabled()` guard. See nested-goal-routes.ts.
  *
  * See docs/nested-goals.md.
  */
@@ -66,8 +71,8 @@ const ROUTES: RouteCase[] = [
 	{ name: "plan PATCH", method: "PATCH", path: (id) => `/api/goals/${id}/plan`, body: { proposedSteps: [] } },
 	{ name: "plan GET", method: "GET", path: (id) => `/api/goals/${id}/plan` },
 	{ name: "integrate-child", method: "POST", path: (id) => `/api/goals/${id}/integrate-child/some-child` },
-	{ name: "pause", method: "POST", path: (id) => `/api/goals/${id}/pause`, body: { cascade: false } },
-	{ name: "resume", method: "POST", path: (id) => `/api/goals/${id}/resume`, body: { cascade: false } },
+	// pause and resume are intentionally excluded — they no longer go through
+	// requireSubgoalsEnabled() and must work regardless of the subgoals flag.
 	{ name: "mutation decision", method: "POST", path: (id) => `/api/goals/${id}/mutation/req-1/decision`, body: { decision: "approve" } },
 	{ name: "policy", method: "PATCH", path: (id) => `/api/goals/${id}/policy`, body: { divergencePolicy: "balanced" } },
 	{ name: "tree-cost", method: "GET", path: (id) => `/api/goals/${id}/tree-cost` },
@@ -79,7 +84,7 @@ test.describe("Subgoals (Experimental) feature gate — REST routes", () => {
 		await setSubgoalsEnabled(true);
 	});
 
-	test("all nine routes return 403 SUBGOALS_DISABLED when flag is off @smoke", async () => {
+	test("seven routes return 403 SUBGOALS_DISABLED when flag is off (pause/resume excluded) @smoke", async () => {
 		await setSubgoalsEnabled(false);
 		const goal = await createGoalReady();
 		for (const route of ROUTES) {
@@ -92,7 +97,7 @@ test.describe("Subgoals (Experimental) feature gate — REST routes", () => {
 		}
 	});
 
-	test("all nine routes return 403 SUBGOALS_DISABLED on a fresh install (pref unset)", async () => {
+	test("seven routes return 403 SUBGOALS_DISABLED on a fresh install (pref unset; pause/resume excluded)", async () => {
 		// Unset the pref entirely (no stored value) — the new default reads OFF,
 		// so the REST layer must enforce SUBGOALS_DISABLED end-to-end.
 		await unsetSubgoalsEnabled();
@@ -107,7 +112,7 @@ test.describe("Subgoals (Experimental) feature gate — REST routes", () => {
 		}
 	});
 
-	test("when flag is on, none of the nine routes return 403 SUBGOALS_DISABLED", async () => {
+	test("when flag is on, none of the seven routes return 403 SUBGOALS_DISABLED", async () => {
 		await setSubgoalsEnabled(true);
 		const goal = await createGoalReady();
 		for (const route of ROUTES) {
