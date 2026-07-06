@@ -18,9 +18,8 @@ test.describe("tail-chat: session navigate lands on latest message", () => {
 
 	test.setTimeout(90_000);
 
-	test.skip("A → B → A: replayed transcripts are bottom-pinned", async ({ page, rec }) => {
-		// Skipped: scroll-pinning timing is sensitive to CPU load under concurrent
-		// verification (515 tests, 4 workers). Scroll behaviour covered by legacy suite.
+	test("A → B → A: replayed transcripts are bottom-pinned", async ({ page, rec }) => {
+		test.slow(); // 3× timeout for scroll-pinning precision under concurrent load
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");

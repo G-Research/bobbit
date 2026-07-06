@@ -2698,9 +2698,6 @@
       "file": "tests/e2e/ui/add-project-browse-modal.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
@@ -2729,72 +2726,48 @@
       "file": "tests/e2e/ui/add-project-multi-repo-subset.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/add-project-post-archive.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/add-project-preflight.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/add-project-select-all.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/add-project-symlink.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/add-project-typeahead.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/api-error-modal.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-notification-policy"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy."
     },
     {
       "file": "tests/e2e/ui/archive-child-cascade.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-team-delegate"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate."
     },
     {
@@ -2823,171 +2796,114 @@
       "file": "tests/e2e/ui/artifacts-pack.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/ask-user-choices-ui.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/at-mention.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/auto-retry-banner.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-notification-policy"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy."
     },
     {
       "file": "tests/e2e/ui/base-ref-detect.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
       "file": "tests/e2e/ui/base-ref-settings.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
       "file": "tests/e2e/ui/bg-process-persistence.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-bg-wait-steer"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer."
     },
     {
       "file": "tests/e2e/ui/bg-wait-no-dup.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-bg-wait-steer"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer."
     },
     {
       "file": "tests/e2e/ui/bg-wait-steer-flow.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-bg-wait-steer"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer."
     },
     {
       "file": "tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-bg-wait-steer"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer."
     },
     {
       "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-debug-tools"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools."
     },
     {
       "file": "tests/e2e/ui/compact-cost.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-compaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction."
     },
     {
       "file": "tests/e2e/ui/compaction-persistence.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-compaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction."
     },
     {
       "file": "tests/e2e/ui/copy-session-link.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-session-sharing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing."
     },
     {
       "file": "tests/e2e/ui/cost-popover-cache-hit.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-cost-tracking"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking."
     },
     {
       "file": "tests/e2e/ui/dashboard-mutation-pending.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-dashboard-fanout"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout."
     },
     {
       "file": "tests/e2e/ui/debug-mode-toggle.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-debug-tools"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools."
     },
     {
       "file": "tests/e2e/ui/dormant-revive-live-reply.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-crash-restart"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart."
     },
     {
       "file": "tests/e2e/ui/draft-loss.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
@@ -3005,27 +2921,18 @@
       "file": "tests/e2e/ui/escape-aborts-anywhere.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/extension-host.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/failed-goal-proposal-ux.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
@@ -3043,9 +2950,6 @@
       "file": "tests/e2e/ui/gate-bypass.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-workflow-editor"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor."
     },
     {
@@ -3063,54 +2967,36 @@
       "file": "tests/e2e/ui/git-status-untracked-race.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-multi-repo"
-      ],
       "rationale": "Read in re-audit: requestAnimationFrame is only a flush helper; consolidate git-status race into multi-repo/git journey (tests/e2e/ui/git-status-untracked-race.spec.ts:32)."
     },
     {
       "file": "tests/e2e/ui/github-trusted-hosts.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
       "file": "tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-assistant"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant."
     },
     {
       "file": "tests/e2e/ui/goal-archive-always-on.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-editing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing."
     },
     {
       "file": "tests/e2e/ui/goal-creation.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-editing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing."
     },
     {
       "file": "tests/e2e/ui/goal-dashboard-fanout.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-dashboard-fanout"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout."
     },
     {
@@ -3128,108 +3014,72 @@
       "file": "tests/e2e/ui/goal-empty-workflows-banner.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-editing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing."
     },
     {
       "file": "tests/e2e/ui/goal-form-tooltips.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-editing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing."
     },
     {
       "file": "tests/e2e/ui/goal-metadata.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-editing"
-      ],
       "rationale": "Read in re-audit: form/tab metadata flow with no geometry API; consolidate into goal-editing journey (tests/e2e/ui/goal-metadata.spec.ts:118-154)."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-offscreen-return.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Read in re-audit: off-screen proposal guard uses app state and rAF flush only; consolidate into proposals journey (tests/e2e/ui/goal-proposal-offscreen-return.spec.ts:122-193)."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/goal-proposal-workflow-tab.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/goal-reattempt-project-binding.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-assistant"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant."
     },
     {
       "file": "tests/e2e/ui/goal-role-tabs-wiring.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-dynamic-panels"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dynamic-panels."
     },
     {
       "file": "tests/e2e/ui/goal-status-widget.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-dashboard-fanout"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout."
     },
     {
@@ -3247,36 +3097,24 @@
       "file": "tests/e2e/ui/headquarters.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-headquarters"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-headquarters."
     },
     {
       "file": "tests/e2e/ui/image-attach-roundtrip.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-preview-artifacts"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts."
     },
     {
       "file": "tests/e2e/ui/image-model-selector-lock.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-preview-artifacts"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts."
     },
     {
       "file": "tests/e2e/ui/instant-loader.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-debug-tools"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools."
     },
     {
@@ -3294,54 +3132,36 @@
       "file": "tests/e2e/ui/local-only-policy-status.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
       "file": "tests/e2e/ui/market-activation.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/marketplace-conflicts.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/marketplace-mcp.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Read in re-audit: marketplace MCP UI tabs/keyboard only, no real MCP subprocess or geometry (tests/e2e/ui/marketplace-mcp.spec.ts:229-350)."
     },
     {
       "file": "tests/e2e/ui/marketplace.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Read in re-audit: marketplace tabs/search/keyboard flows only; no geometry API (tests/e2e/ui/marketplace.spec.ts:374-448)."
     },
     {
       "file": "tests/e2e/ui/mid-session-project-proposal.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Read in re-audit: project proposal tab lifecycle with no geometry API; consolidate into proposals journey (tests/e2e/ui/mid-session-project-proposal.spec.ts:80-107)."
     },
     {
@@ -3359,81 +3179,54 @@
       "file": "tests/e2e/ui/mobile-staff-sidebar.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-mobile-layout"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-mobile-layout."
     },
     {
       "file": "tests/e2e/ui/multi-repo-flow.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-multi-repo"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-multi-repo."
     },
     {
       "file": "tests/e2e/ui/new-tab-no-duplicate-messages.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-session-sharing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing."
     },
     {
       "file": "tests/e2e/ui/notification-policy.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-notification-policy"
-      ],
       "rationale": "Read in re-audit: notification policy assertions; rAF is only a flush helper (tests/e2e/ui/notification-policy.spec.ts:44)."
     },
     {
       "file": "tests/e2e/ui/open-session-new-window.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-session-sharing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing."
     },
     {
       "file": "tests/e2e/ui/optional-steps.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-workflow-editor"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor."
     },
     {
       "file": "tests/e2e/ui/page-title.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-session-sharing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing."
     },
     {
       "file": "tests/e2e/ui/palette-session.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-session-sharing"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing."
     },
     {
       "file": "tests/e2e/ui/per-project-native-yaml-fields.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
@@ -3451,27 +3244,18 @@
       "file": "tests/e2e/ui/plan-archived-children.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-team-delegate"
-      ],
       "rationale": "Read in re-audit: archived-child plan tab flow with no geometry API (tests/e2e/ui/plan-archived-children.spec.ts:122-124)."
     },
     {
       "file": "tests/e2e/ui/plan-tab-archived-children.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-team-delegate"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate."
     },
     {
       "file": "tests/e2e/ui/plan-tab-gate-status.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-goal-team-gates-verification"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-team-gates-verification."
     },
     {
@@ -3500,9 +3284,6 @@
       "file": "tests/e2e/ui/preparing-ux.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-crash-restart"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart."
     },
     {
@@ -3520,9 +3301,6 @@
       "file": "tests/e2e/ui/preview-happy-path.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-preview-artifacts"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts."
     },
     {
@@ -3540,9 +3318,6 @@
       "file": "tests/e2e/ui/project-assistant.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-assistant"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant."
     },
     {
@@ -3560,36 +3335,24 @@
       "file": "tests/e2e/ui/project-management.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/project-palette-none.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-app-smoke"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke."
     },
     {
       "file": "tests/e2e/ui/prompt-stats-e2e.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-cost-tracking"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking."
     },
     {
       "file": "tests/e2e/ui/proposal-edit-flow.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
@@ -3607,9 +3370,6 @@
       "file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
@@ -3638,18 +3398,12 @@
       "file": "tests/e2e/ui/proposal-spec-survives-navigate.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
       "file": "tests/e2e/ui/proposal-tools.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-proposals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals."
     },
     {
@@ -3667,72 +3421,48 @@
       "file": "tests/e2e/ui/queue-ui.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/remove-first-project.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/replace-bobbit-text.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-debug-tools"
-      ],
       "rationale": "Read in re-audit: asserts canvas element is replaced/restored but never exercises canvas API/drawing; consolidate into debug-tools journey (tests/e2e/ui/replace-bobbit-text.spec.ts:30-94)."
     },
     {
       "file": "tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-crash-restart"
-      ],
       "rationale": "Read in re-audit: websocket/live-row ordering with rAF flush only; consolidate into crash/restart journey (tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts:134)."
     },
     {
       "file": "tests/e2e/ui/review-pane.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-review-commenting"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-review-commenting."
     },
     {
       "file": "tests/e2e/ui/role-assistant-new.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-assistant"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant."
     },
     {
       "file": "tests/e2e/ui/search-e2e.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/search-result-navigation.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
@@ -3750,63 +3480,42 @@
       "file": "tests/e2e/ui/session-created-push-sync.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-crash-restart"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart."
     },
     {
       "file": "tests/e2e/ui/session-git-status-multi-repo.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-multi-repo"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-multi-repo."
     },
     {
       "file": "tests/e2e/ui/session-interactions.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/session-prompt-grant-replay.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/session-status-recovery.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-crash-restart"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart."
     },
     {
       "file": "tests/e2e/ui/settings-agent-dir.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-settings"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings."
     },
     {
       "file": "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-settings"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings."
     },
     {
@@ -3824,18 +3533,12 @@
       "file": "tests/e2e/ui/settings-model-fallback.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-settings"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings."
     },
     {
       "file": "tests/e2e/ui/settings-restart-button.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-settings"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings."
     },
     {
@@ -3864,54 +3567,36 @@
       "file": "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-layout.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-search-repro.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-child-loading.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-filters.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
@@ -3929,18 +3614,12 @@
       "file": "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-goal-staff.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
@@ -3958,45 +3637,30 @@
       "file": "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Read in re-audit: Ctrl+Arrow navigation smoke with no geometry API; consolidate into sidebar keyboard journey (tests/e2e/ui/sidebar-keyboard-nav.spec.ts:275-291)."
     },
     {
       "file": "tests/e2e/ui/sidebar-mobile-archived-per-project.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-mobile-archived-search.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-navigation.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-refresh-agent.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
@@ -4014,108 +3678,72 @@
       "file": "tests/e2e/ui/sidebar-search-filter.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-session-actions.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-spawned-children-dedupe.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-staff-loading.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-tree-restart.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/sidebar-unified-tree.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-sidebar-nav-search-keyboard"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard."
     },
     {
       "file": "tests/e2e/ui/single-project-sidebar.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/skill-multifile.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/skills-chip.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-marketplace-packs"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs."
     },
     {
       "file": "tests/e2e/ui/splash-multi-project.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/splash-no-projects.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-onboarding"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding."
     },
     {
       "file": "tests/e2e/ui/staff-accessory.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-staff"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff."
     },
     {
@@ -4133,81 +3761,54 @@
       "file": "tests/e2e/ui/staff-role.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-staff"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff."
     },
     {
       "file": "tests/e2e/ui/staff-sandbox-indicator.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-staff"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff."
     },
     {
       "file": "tests/e2e/ui/staff-sub-section.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-staff"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff."
     },
     {
       "file": "tests/e2e/ui/staff-triggers.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-staff"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff."
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool-abort-toolend.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool-busy-race.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/stories-drafts.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/stories-goal-routing.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
@@ -4225,90 +3826,60 @@
       "file": "tests/e2e/ui/stories-projects.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/stories-resilience.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/stories-sessions.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/stories-sidebar.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/stories-streaming.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-stories-registry"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry."
     },
     {
       "file": "tests/e2e/ui/subgoal-existing-goal-settings.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-subgoals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals."
     },
     {
       "file": "tests/e2e/ui/subgoal-nesting-limit.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-subgoals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals."
     },
     {
       "file": "tests/e2e/ui/subgoal-parent-picker-repro.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-subgoals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals."
     },
     {
       "file": "tests/e2e/ui/subgoals-experimental-toggle.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-subgoals"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals."
     },
     {
       "file": "tests/e2e/ui/system-prompt-customise.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-project-settings"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings."
     },
     {
@@ -4337,9 +3908,6 @@
       "file": "tests/e2e/ui/team-delegate.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-team-delegate"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate."
     },
     {
@@ -4357,63 +3925,42 @@
       "file": "tests/e2e/ui/tool-ask-policy.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/tool-assistant-system-scope.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-prompt-interaction"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction."
     },
     {
       "file": "tests/e2e/ui/tree-cost-rollup.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-cost-tracking"
-      ],
       "rationale": "Read in re-audit: tree cost rollup data/UI assertions with no geometry API (tests/e2e/ui/tree-cost-rollup.spec.ts:1-443)."
     },
     {
       "file": "tests/e2e/ui/unseen-activity.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-notification-policy"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy."
     },
     {
       "file": "tests/e2e/ui/verification-progress-indicator.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-dashboard-fanout"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout."
     },
     {
       "file": "tests/e2e/ui/workflow-editor.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-workflow-editor"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor."
     },
     {
       "file": "tests/e2e/ui/workflow-page-scope.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "replacement": [
-        "journey-workflow-editor"
-      ],
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor."
     },
     {

@@ -27,8 +27,7 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 
 	test.setTimeout(75_000);
 
-	// Skip: requires bash.exe (STREAM_BURST uses shell commands) — not available in all worktree envs.
-	test.skip("STREAM_BURST:2 stays pinned and live DOM equals post-refresh DOM", async ({ page, rec }) => {
+	test("STREAM_BURST:2 stays pinned and live DOM equals post-refresh DOM", async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
