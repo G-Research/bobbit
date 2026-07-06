@@ -308,9 +308,21 @@ export default function (pi: ExtensionAPI) {
 				return ok(result.body);
 			}
 			if (result.status === 409) {
-				// Return structured body so the renderer can display conflict/RTM-failed
-				// state correctly. data.conflict, data.rtmFailed, data.output are all
-				// accessible to GoalMergeChildRenderer this way.
+				// Normalize 409 bodies so the renderer's field expectations are met:
+				//   - RTM_NOT_PASSED  → add rtmFailed: true  (renderer checks data.rtmFailed)
+				//   - GOAL_GIT_UNAVAILABLE → surface as err() — no merge occurred, no
+				//     structured pill is defined for this case; show a plain error message.
+				//   - conflict: true  → already in the body, pass through as-is.
+				const b = typeof result.body === "object" && result.body !== null
+					? (result.body as Record<string, unknown>)
+					: {};
+				if (b.code === "RTM_NOT_PASSED") {
+					return ok({ ...b, rtmFailed: true });
+				}
+				if (b.code === "GOAL_GIT_UNAVAILABLE") {
+					return err(String(b.error ?? "Git unavailable for child merge"));
+				}
+				// conflict: true (and any other 409) — pass through; renderer handles it.
 				return ok(result.body);
 			}
 			// Other non-2xx: extract error message and surface as isError
