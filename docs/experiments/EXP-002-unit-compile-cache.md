@@ -1,6 +1,6 @@
 # EXP-002: Unit Compile Cache A/B
 
-Status: pre-registered; data not yet collected.
+Status: measured; pre-registration was committed before data collection.
 Registered: 2026-07-06.
 Decision lane: evidence only; no default flips.
 
@@ -120,4 +120,74 @@ default.
 
 ## Results
 
-Data not yet collected.
+Collected after the pre-registration commit (`683adf4b`). Included run logs:
+`/tmp/exp-unit-compile-cache-20260705T234347Z-included/`.
+
+Two failed setup attempts were excluded before collection:
+
+- A sandboxed run could not launch Chromium for the browser fixture phase
+  (`MachPortRendezvousServer... Permission denied`). The included sequence ran
+  outside the command sandbox so `npm run test:unit` could launch Playwright.
+- The first unsandboxed OFF attempt exposed local git metadata drift:
+  `origin/HEAD` pointed at `origin/aj-current`, while this repo's primary branch
+  convention is `master`. The local remote-head metadata was corrected to
+  `origin/master`; the source tree stayed on `origin/aj-current` plus the
+  pre-registration commit. The narrow failing file
+  `tests/verification-basebranch-regression.test.ts` passed before the included
+  10-run sequence began.
+
+Included sequence: 2026-07-05T23:43:47Z through approximately
+2026-07-06T00:22:45Z. All included runs used the exact commands registered
+above. The ON cache directory did not exist before run 1 and was not changed
+during collection.
+
+| Pair | Arm | Started UTC | Pre-run load avg 1/5/15 | Adaptive workers | Node s | Browser s | Total s | Summary |
+|---:|---|---|---|---:|---:|---:|---:|---|
+| 1 | off | 2026-07-05T23:43:47Z | 13.59 / 22.10 / 25.04 | 3 | 192.7 | 101.2 | 192.7 | pass/pass |
+| 1 | on | 2026-07-05T23:47:00Z | 25.49 / 23.10 / 24.81 | 2 | 285.2 | 164.8 | 285.2 | pass/pass |
+| 2 | off | 2026-07-05T23:51:46Z | 21.03 / 29.52 / 28.29 | 2 | 313.3 | 174.9 | 313.3 | pass/pass |
+| 2 | on | 2026-07-05T23:57:00Z | 14.13 / 24.02 / 26.60 | 3 | 178.3 | 101.5 | 178.3 | pass/pass |
+| 3 | off | 2026-07-05T23:59:58Z | 19.90 / 22.01 / 25.24 | 2 | 280.3 | 155.5 | 280.3 | pass/pass |
+| 3 | on | 2026-07-06T00:04:39Z | 17.02 / 19.68 / 23.40 | 3 | 177.5 | 103.3 | 177.5 | pass/pass |
+| 4 | off | 2026-07-06T00:07:37Z | 19.32 / 22.52 / 24.09 | 2 | 243.6 | 141.1 | 243.6 | pass/pass |
+| 4 | on | 2026-07-06T00:11:40Z | 14.71 / 18.07 / 21.70 | 3 | 162.6 | 98.2 | 162.6 | pass/pass |
+| 5 | off | 2026-07-06T00:14:23Z | 14.37 / 16.88 / 20.59 | 3 | 210.2 | 97.1 | 210.2 | pass/pass |
+| 5 | on | 2026-07-06T00:17:54Z | 35.40 / 25.28 / 23.14 | 2 | 290.7 | 144.7 | 290.7 | pass/pass |
+
+Summary metrics:
+
+| Metric | `off` | `on` | Effect |
+|---|---:|---:|---:|
+| Paired runs | 5 | 5 | - |
+| Correctness proxy failures | 0 | 0 | pass |
+| Median total wall-clock | 243.6s | 178.3s | 26.8% lower for `on` |
+| Mean total wall-clock | 248.0s | 218.9s | 11.7% lower for `on` |
+| Median node-logic wall-clock | 243.6s | 178.3s | 26.8% lower for `on` |
+| Mean node-logic wall-clock | 248.0s | 218.9s | 11.7% lower for `on` |
+| Median browser-fixtures wall-clock | 141.1s | 103.3s | 26.8% lower for `on` |
+| ON slower than paired OFF | - | 2 / 5 pairs | fails success criterion |
+
+Paired total deltas (`off - on`): pair 1 `-92.5s`, pair 2 `+135.0s`,
+pair 3 `+102.8s`, pair 4 `+81.0s`, pair 5 `-80.5s`.
+
+Per-file compile time was unavailable: the shipped runner does not emit it, and
+this experiment did not add instrumentation.
+
+Correctness risk proxy passed for every included run: exit code `0`,
+`[unit-summary] node=pass browser=pass`, and no masked-failure override warning.
+
+## Recommendation
+
+Result: `inconclusive`.
+
+The median total and node-logic wall-clock improvements cleared the 10%
+threshold, and all included runs passed the correctness proxy. However, `on`
+was slower than paired `off` in two of five pairs, failing the pre-registered
+"not slower in more than one pair" success criterion. Pair 1 also measured the
+cold ON cache under higher load than its OFF pair, and pair 5 hit a large load
+spike before ON, so the evidence is suggestive but not stable enough for a
+default-on recommendation.
+
+Keep `BOBBIT_TEST_COMPILE_CACHE=1` opt-in. Do not flip the default from this
+experiment. A follow-up should run on a quieter host or use a larger paired
+sample with tighter load matching before reconsidering default-on.
