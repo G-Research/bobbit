@@ -95,7 +95,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"), NODE_ENV: "test" },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
