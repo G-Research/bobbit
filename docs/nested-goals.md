@@ -480,20 +480,36 @@ place.
 ### Pause/resume cascade
 
 `POST /api/goals/:id/pause` and `/resume` require a `{cascade: boolean}` body
-(`422 CASCADE_REQUIRED` if absent). Pause:
+(`422 CASCADE_REQUIRED` if absent). Both endpoints work regardless of the
+`subgoalsEnabled` system preference — pause and resume are operator lifecycle
+verbs with no dependency on the subgoal feature. Pause:
 
 - soft-aborts the subtree's sessions and cancels in-flight verifications,
 - makes every spawn path return `409 GOAL_PAUSED`,
-- and keeps the pause durable across gateway restart.
+- rejects prompts to sessions on the paused goal (see below), and
+- keeps the pause durable across gateway restart.
 
 Restart restores persisted active teams and re-subscribes their existing leads.
 Boot-resume/nudge skip predicates apply only to those restored leads, so a
 paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
-Resume re-enables spawns but does not auto-restart sessions. Pause/resume is an
-**operator** action and is distinct from the scheduler's dependency `blocked`
-state.
+Resume re-enables spawns and prompt delivery but does not auto-restart sessions.
+Pause/resume is an **operator** action and is distinct from the scheduler's
+dependency `blocked` state.
+
+**Prompt rejection.** While a goal is paused, `POST /api/goals/:id/team/prompt`
+and `POST /api/sessions/:id/prompt` return `409 GOAL_PAUSED` before any team
+membership or authorization checks. Sessions with no associated goal are
+unaffected. This ensures agents targeting a paused goal receive a clear,
+actionable error rather than an opaque auth failure.
+
+**In-chat banner.** A warning banner with an inline Resume button appears inside
+the session panel when the active session's goal is paused. It is visible in all
+layout modes and disappears when the goal is resumed.
+
+See [docs/design/pause-cascade.md](design/pause-cascade.md) for full details,
+including the error shape, key files, and test coverage.
 
 ### Auto-retry / rescue
 
