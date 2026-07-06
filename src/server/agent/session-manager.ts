@@ -1,4 +1,4 @@
-import { execFile as execFileCb, execFileSync } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,14 +8,12 @@ import type {
 	ServerMessage,
 	QueuedMessage,
 } from "../ws/protocol.js";
-import { sandboxNetworkCreateArgs } from "./docker-args.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
-import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
 import { safePersistedHostAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
@@ -57,10 +55,11 @@ import { SessionSteering } from "./session-steering.js";
 import { SessionBoot } from "./session-boot.js";
 import { SessionModels, type SessionModelsDeps } from "./session-models.js";
 import { SessionTranscripts, type SessionTranscriptsDeps } from "./session-transcripts.js";
+import { SessionSetupPlumbing, type SessionSetupPlumbingDeps } from "./session-setup-plumbing.js";
+export { resolveSandboxTokens, resolveLegacySandboxCredentials } from "./session-setup-plumbing.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
-import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -81,7 +80,7 @@ import { writeOpenAiOrphanToolResultExtension } from "./openai-orphan-tool-resul
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
-import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy, Role } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
@@ -106,11 +105,11 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir } from "../bobbit-dir.js";
 import { isHostAbsoluteAgentSessionPath, migratedActiveAgentSessionFileForHostPath } from "./agent-session-path.js";
 import type { OrchestrationCoreView, InboxNudgerView, StaffRecordSource } from "./session-manager-consumer-types.js";
 
-import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
+import type { SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { PiProcessPool, isWarmPoolEnabled } from "./pi-process-pool.js";
@@ -123,16 +122,9 @@ import {
 	type PiExtensionDiagnostic,
 	resolveMarketplacePiExtensionActivation,
 	scopedToolContext,
-	applySandboxCwdOffset,
-	normalizeSandboxCwdOffset,
-	relativeSandboxCwdOffset,
 } from "./session-setup.js";
 
 const execFileAsync = promisify(execFileCb);
-
-function isSandboxContainerPath(cwd?: string): boolean {
-	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
-}
 
 export function extractClaudeCodeSessionId(value: any): string | undefined {
 	if (!value || typeof value !== "object") return undefined;
@@ -1055,6 +1047,7 @@ export class SessionManager {
 	private sessionBoot!: SessionBoot;
 	private sessionModels!: SessionModels;
 	private sessionTranscripts!: SessionTranscripts;
+	private sessionSetupPlumbing!: SessionSetupPlumbing;
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
@@ -1392,6 +1385,49 @@ export class SessionManager {
 			host: this,
 		} satisfies SessionReviveDeps);
 
+		this.sessionSetupPlumbing = new SessionSetupPlumbing({
+			getAgentCliPath: () => this.agentCliPath,
+			getSystemPromptPath: () => this.systemPromptPath,
+			getRoleManager: () => this.roleManager,
+			getToolManager: () => this.toolManager,
+			getGroupPolicyStore: () => this.groupPolicyStore,
+			getConfigCascade: () => this.configCascade,
+			getPreferencesStore: () => this.preferencesStore,
+			getProjectConfigStore: () => this.projectConfigStore,
+			getProjectContextManager: () => this.projectContextManager,
+			getSandboxManager: () => this.sandboxManager,
+			getSandboxTokenStore: () => this.sandboxTokenStore,
+			getSessionSecretStore: () => this.sessionSecretStore,
+			getPiProcessPool: () => this.piProcessPool,
+			getLifecycleHub: () => this.lifecycleHub,
+			getPrStatusStore: () => this.prStatusStore,
+			getTestCostTracker: () => this._testCostTracker,
+			getTestGoalManager: () => this._testGoalManager,
+			getTestTaskManager: () => this._testTaskManager,
+			getSessionStore: (projectId) => this.getSessionStore(projectId),
+			getSearchIndexForProject: (projectId) => this.getSearchIndexForProject(projectId),
+			getSessions: () => this.sessions,
+			getAllPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
+			getMcpManagerForContext: (projectId, cwd) => this.getMcpManagerForContext(projectId, cwd),
+			getMarketplacePiExtensionResolver: () => this.marketplacePiExtensionResolver,
+			registerWarmPoolIdentityAlias: (poolOwnedId, realSessionId) => this.registerWarmPoolIdentityAlias(poolOwnedId, realSessionId),
+			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
+			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
+			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
+			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
+			broadcast: (clients, msg) => broadcast(clients, msg),
+			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
+			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
+			buildWorkflowList: (projectId) => this._buildWorkflowList(projectId),
+			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
+			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
+			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
+			resolveGoal: (goalId) => this.resolveGoal(goalId),
+			dispatchGoalProvisionedForWorktree: (opts) => this.dispatchGoalProvisionedForWorktree(opts),
+		} satisfies SessionSetupPlumbingDeps);
+		this.retainSessionSetupPlumbingHostSurface();
+
 		this.sessionSpawn = new SessionSpawn();
 		this.retainSessionSpawnHostSurface();
 		this.sessionSteering = new SessionSteering();
@@ -1509,6 +1545,21 @@ export class SessionManager {
 			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
 		);
 		(this._statusHeartbeatTimer as any).unref?.();
+	}
+
+	private retainSessionSetupPlumbingHostSurface(): void {
+		// SessionSetupPlumbing owns setup/sandbox behavior after cohort 11,
+		// while SessionManager keeps same-named wrappers for callers and pins.
+		void this.readClaudeCodeConfigForProject;
+		void this.buildPipelineContext;
+		void this.ensureSandboxNetwork;
+		void this.cleanupSandboxNetwork;
+		void this.resolveSandboxCwdOffset;
+		void this.readGatewayUrlForAgent;
+		void this.mintScopedGatewayToken;
+		void this.applyScopedGatewayCredentials;
+		void this.scopedGatewayEnvForDirectAgent;
+		void this.applySandboxWiring;
 	}
 
 	private retainSessionSpawnHostSurface(): void {
@@ -1803,364 +1854,68 @@ export class SessionManager {
 		return this.sandboxManager;
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private readClaudeCodeConfigForProject(projectId?: string) {
-		if (!this.preferencesStore) return undefined;
-		const projectConfigStore = projectId && this.projectContextManager
-			? (this.projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore ?? null)
-			: (this.projectConfigStore ?? null);
-		return readClaudeCodeConfig(this.preferencesStore, projectConfigStore);
+		return this.sessionSetupPlumbing.readClaudeCodeConfigForProject(projectId);
 	}
 
-	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	buildPipelineContext(projectId?: string, cwd?: string): PipelineContext {
-		const resolvedStore = this.getSessionStore(projectId);
-		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
-		let resolvedGoalManager: GoalManager;
-		let resolvedTaskManager: TaskManager;
-		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
-		let resolvedCostTracker: CostTracker;
-		if (projectId && this.projectContextManager) {
-			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (ctx) {
-				resolvedGoalManager = ctx.goalManager;
-				resolvedTaskManager = new TaskManager(ctx.taskStore);
-				resolvedProjectConfigStore = ctx.projectConfigStore;
-				resolvedCostTracker = ctx.costTracker;
-			} else {
-				throw new Error(`Cannot build pipeline context: project "${projectId}" not found`);
-			}
-		} else if (this._testCostTracker && this._testGoalManager && this._testTaskManager) {
-			resolvedCostTracker = this._testCostTracker;
-			resolvedGoalManager = this._testGoalManager;
-			resolvedTaskManager = this._testTaskManager;
-		} else {
-			throw new Error("Cannot build pipeline context: no project context manager or test stores");
-		}
-		resolvedGoalManager.setLiveSessionResolver(() => this.getAllPersistedSessionsForWorktreeGuard());
-		return {
-			agentCliPath: this.agentCliPath,
-			systemPromptPath: this.systemPromptPath,
-			roleManager: this.roleManager ?? null,
-			toolManager: this.toolManager ?? null,
-			mcpManager: this.getMcpManagerForContext(projectId, cwd),
-			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
-			goalManager: resolvedGoalManager,
-			taskManager: resolvedTaskManager,
-			projectConfigStore: resolvedProjectConfigStore,
-			serverProjectConfigStore: this.projectConfigStore ?? null,
-			preferencesStore: this.preferencesStore ?? null,
-			sandboxManager: this.sandboxManager,
-			sandboxTokenStore: this.sandboxTokenStore,
-			sessionSecretStore: this.sessionSecretStore,
-			// Dark by default (BOBBIT_WARM_POOL=1 opts in) — see the field doc
-			// comment. Gating here (not inside pi-process-pool.ts) means a
-			// disabled pool is never even referenced by session-setup.ts's
-			// spawnAgent(), matching `claim() returns null → cold path` for
-			// "the flag is off" as just another kind of miss.
-			piProcessPool: isWarmPoolEnabled() ? this.piProcessPool : undefined,
-			registerWarmPoolIdentityAlias: (poolOwnedId, realSessionId) => this.registerWarmPoolIdentityAlias(poolOwnedId, realSessionId),
-			groupPolicyStore: this.groupPolicyStore ?? null,
-			configCascade: this.configCascade,
-			lifecycleHub: this.lifecycleHub,
-			costTracker: resolvedCostTracker,
-			store: resolvedStore,
-			searchIndex: resolvedSearchIndex,
-			sessions: this.sessions,
-			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
-			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
-
-			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
-			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
-			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
-			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
-			broadcast: (clients, msg) => broadcast(clients, msg),
-			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
-			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
-			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
-			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
-			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
-			prStatusStore: this.prStatusStore!,
-			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
-			// The pipeline (tool activation, prompt order, bridge-install) resolves the
-			// effective (inherited) metadata for a session's goal through this single
-			// closure — no other site walks the goal ancestry. Absent metadata ⇒ {}.
-			resolveGoalMetadata: (goalId: string | undefined) => resolvedGoalManager.getEffectiveGoalMetadata(goalId),
-		};
+		return this.sessionSetupPlumbing.buildPipelineContext(projectId, cwd);
 	}
 
-	/** Network name for sandbox containers. */
-	private static readonly SANDBOX_NETWORK = "bobbit-sandbox-net";
-
-	/**
-	 * Ensure the Docker bridge network for sandboxed containers exists.
-	 * Idempotent — checks with `docker network inspect` first.
-	 */
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	async ensureSandboxNetwork(): Promise<string> {
-		const name = SessionManager.SANDBOX_NETWORK;
-		try {
-			await execFileAsync("docker", sandboxNetworkCreateArgs(name), { timeout: 15_000 });
-			console.log(`[session-manager] Created Docker network "${name}"`);
-		} catch (err: any) {
-			const msg = err.stderr || err.message || "";
-			if (!msg.includes("already exists")) {
-				console.error(`[session-manager] Failed to create Docker network "${name}":`, err);
-				throw err;
-			}
-			// Network was created concurrently — that's fine
-		}
-		return name;
+		return this.sessionSetupPlumbing.ensureSandboxNetwork();
 	}
 
-	/**
-	 * Remove the sandbox Docker network. Non-fatal if it doesn't exist
-	 * or has connected containers.
-	 */
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	async cleanupSandboxNetwork(): Promise<void> {
-		try {
-			await execFileAsync("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
-			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
-		} catch {
-			// Non-fatal — network may not exist or may have connected containers
-		}
+		return this.sessionSetupPlumbing.cleanupSandboxNetwork();
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private async resolveSandboxCwdOffset(
 		cwd: string,
 		projectId?: string,
 		goalId?: string,
 		explicitOffset?: string,
 	): Promise<string | undefined> {
-		const explicit = normalizeSandboxCwdOffset(explicitOffset);
-		if (explicit) return explicit;
-		if (!cwd || isSandboxContainerPath(cwd)) return undefined;
-
-		// Goal/team sessions often pass a host worktree cwd without worktreeOpts.
-		// Prefer the goal's stable repo/worktree metadata when available.
-		if (goalId) {
-			const goal = this.resolveGoal(goalId);
-			const goalCwd = goal?.cwd || cwd;
-			const goalWorktreeOffset = relativeSandboxCwdOffset(goal?.worktreePath, goalCwd);
-			if (goalWorktreeOffset) return goalWorktreeOffset;
-			const goalRepoOffset = relativeSandboxCwdOffset(goal?.repoPath, goalCwd);
-			if (goalRepoOffset) return goalRepoOffset;
-		}
-
-		try {
-			if (await isGitRepo(cwd)) {
-				const repoRoot = await getRepoRoot(cwd);
-				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
-				if (repoOffset) return repoOffset;
-			}
-		} catch {
-			// Fall back to project-root containment below.
-		}
-
-		if (projectId && this.projectContextManager) {
-			const project = this.projectContextManager.getOrCreate(projectId)?.project;
-			const projectRoot = project?.rootPath;
-			if (projectRoot) {
-				try {
-					if (await isGitRepo(projectRoot)) {
-						const repoRoot = await getRepoRoot(projectRoot);
-						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
-						if (repoOffset) return repoOffset;
-					}
-				} catch {
-					// Project may be non-git; project-relative offset still works for /workspace.
-				}
-				const projectOffset = relativeSandboxCwdOffset(projectRoot, cwd);
-				if (projectOffset) return projectOffset;
-			}
-		}
-
-		return undefined;
+		return this.sessionSetupPlumbing.resolveSandboxCwdOffset(cwd, projectId, goalId, explicitOffset);
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private readGatewayUrlForAgent(): string | undefined {
-		try {
-			return fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim() || undefined;
-		} catch {
-			return undefined;
-		}
+		return this.sessionSetupPlumbing.readGatewayUrlForAgent();
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private mintScopedGatewayToken(projectId: string | undefined, sessionId: string, goalId?: string): string | undefined {
-		if (!projectId || !this.sandboxTokenStore) return undefined;
-		const scopedToken = this.sandboxTokenStore.register(projectId);
-		this.sandboxTokenStore.addSession(projectId, sessionId);
-		if (goalId) this.sandboxTokenStore.addGoal(projectId, goalId);
-		return scopedToken;
+		return this.sessionSetupPlumbing.mintScopedGatewayToken(projectId, sessionId, goalId);
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private applyScopedGatewayCredentials(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
 		projectId: string | undefined,
 		goalId?: string,
 	): void {
-		const gwUrl = this.readGatewayUrlForAgent();
-		if (gwUrl) bridgeOptions.gatewayUrl = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
-		if (scopedToken) bridgeOptions.gatewayToken = scopedToken;
+		return this.sessionSetupPlumbing.applyScopedGatewayCredentials(bridgeOptions, sessionId, projectId, goalId);
 	}
 
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private scopedGatewayEnvForDirectAgent(sessionId: string, projectId: string | undefined, goalId?: string): Record<string, string> | undefined {
-		const env: Record<string, string> = {};
-		const gwUrl = this.readGatewayUrlForAgent();
-		if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId);
-		if (scopedToken) env.BOBBIT_TOKEN = scopedToken;
-		return Object.keys(env).length > 0 ? env : undefined;
+		return this.sessionSetupPlumbing.scopedGatewayEnvForDirectAgent(sessionId, projectId, goalId);
 	}
 
-	/**
-	 * Apply Docker sandbox wiring to bridge options.
-	 * Shared by createSession(), restoreSession(), and createDelegateSession().
-	 * Returns true if sandbox was applied, false if sandbox is not configured.
-	 *
-	 * With the new per-project sandbox architecture, this:
-	 * - Gets the ProjectSandbox for the project
-	 * - Gets the container ID
-	 * - Sets up credentials and token (one per project, not per session)
-	 * - Sets bridgeOptions.containerId
-	 * - The CWD is the container-internal worktree path (set by caller or /workspace)
-	 */
+	/** Delegates to SessionSetupPlumbing (SessionManager decomposition cohort 11). */
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
 		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
-		// Resolve project ID before reading sandbox config. The selected project's
-		// config is authoritative; the server/HQ store is only a legacy fallback for
-		// genuinely unscoped callers.
-		const projectId = opts?.projectId;
-		if (!projectId) {
-			throw new Error("Sandbox mode requires a projectId");
-		}
-		if (isSandboxExemptProject(projectId)) {
-			bridgeOptions.sandboxed = false;
-			delete bridgeOptions.containerId;
-			return false;
-		}
-
-		const projectContext = this.projectContextManager?.getOrCreate(projectId) ?? null;
-		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
-		if (!projectConfigStore) return false;
-		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-		if (sandboxConfig !== "docker") return false;
-
-		// Get the ProjectSandbox for this project
-		if (!this.sandboxManager) {
-			throw new Error("Sandbox mode requires SandboxManager — not initialized");
-		}
-		// Lazy per-project init — idempotent. Handles restore paths and any call site
-		// that reached wiring without going through the explicit session-setup /
-		// goals / staff entry points.
-		await this.sandboxManager.ensureForProject(projectId);
-		const sandbox = this.sandboxManager.get(projectId);
-		if (!sandbox) {
-			throw new Error(`No sandbox initialized for project ${projectId}`);
-		}
-
-		const containerId = await sandbox.getContainerId();
-
-		// Read gateway URL and generate scoped token for the container.
-		const gwUrl = this.readGatewayUrlForAgent();
-		if (!gwUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url not found");
-		bridgeOptions.gatewayUrl = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
-		if (scopedToken) {
-			bridgeOptions.gatewayToken = scopedToken;
-		} else {
-			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
-			// unchanged there. Direct agents never use this admin fallback.
-			const adminToken = readToken();
-			if (adminToken === null) {
-				throw new Error("Cannot read gateway credentials for sandbox");
-			}
-			bridgeOptions.gatewayToken = adminToken;
-		}
-
-		bridgeOptions.sandboxed = true;
-		bridgeOptions.containerId = containerId;
-		const projectRootPath = projectContext?.project.rootPath;
-		if (projectRootPath) {
-			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
-		}
-
-		// Create a worktree inside the container when a branch is specified.
-		// This is the primary code path for goal agents (team lead + members).
-		// Headquarters is always no-worktree, so ignore any legacy sandboxBranch.
-		if (opts?.sandboxBranch && projectId !== HEADQUARTERS_PROJECT_ID) {
-			// Capture the HOST-side working directory BEFORE it is remapped into the
-			// container worktree below. The `goalProvisioned` provider runs HOST-side
-			// (LifecycleHub.dispatchGoalProvisioned executes the provider module on
-			// the host with `workingDir: ctx.cwd`), so it must be handed a host
-			// filesystem path it can actually write to. The container worktree
-			// (`/workspace-wt/<branch>`) lives in a Docker volume and is NOT reachable
-			// from the host — passing it made the marker write silently no-op (the
-			// hook is non-fatal), so metadata-driven filesystem treatments never
-			// landed on sandboxed worktrees. For session-setup-provisioned sandbox
-			// sessions this is the session's host worktree cwd; for team members /
-			// delegates it is the goal's host worktree cwd they were created with.
-			const hostWorktreeCwd = bridgeOptions.cwd;
-			try {
-				const worktreePath = await sandbox.createWorktree(
-					opts.sandboxBranch,
-					opts.sandboxBranch,
-					opts.sandboxBaseBranch,
-				);
-				// Agent runtime cwd → the container worktree (offset applied). The
-				// agent boots here; only the host-side provider dispatch below uses
-				// host coordinates.
-				bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
-				// Fire the `goalProvisioned` lifecycle hook for the freshly provisioned
-				// sandbox worktree. team-manager skips its own dispatch for sandboxed
-				// members (no host worktreeResult), and the session-setup provisioning
-				// dispatch never runs for these container worktrees — so without this,
-				// metadata-driven filesystem treatments would be missing on every
-				// sandboxed team lead / member worktree. We dispatch with HOST
-				// coordinates (`hostWorktreeCwd`), NOT the container path, so the
-				// host-side provider can write its marker files. Skipped when there is
-				// no usable host path — restore / respawn paths arrive with
-				// `bridgeOptions.cwd` already pointing at a container-internal path
-				// (`/workspace-wt/...`); the worktree was provisioned on first creation
-				// and providers are idempotent, so a re-dispatch is unnecessary (and
-				// would just no-op host-side).
-				if (hostWorktreeCwd && !isSandboxContainerPath(hostWorktreeCwd)) {
-					await this.dispatchGoalProvisionedForWorktree({
-						goalId: opts.goalId,
-						projectId,
-						worktreePath: hostWorktreeCwd,
-						cwd: hostWorktreeCwd,
-						branch: opts.sandboxBranch,
-					});
-				}
-			} catch (err) {
-				if (!isUnresolvedHeadWorktreeError(err) || opts.sandboxBaseBranch || opts.goalId) throw err;
-				console.warn(`[session-manager] ${err.message}; running sandbox session ${sessionId} without a worktree in /workspace`);
-				bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts.sandboxCwdOffset);
-			}
-		} else if (!isSandboxContainerPath(bridgeOptions.cwd)) {
-			// Regular no-worktree sessions run from the project clone in /workspace.
-			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
-		}
-
-		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get project-scoped config/secrets when available.
-		const secretsStore = projectContext?.secretsStore ?? null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
-		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
-		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
-		ensureSandboxAgentAuthFile({
-			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
-			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
-			scope: opts?.projectId,
-		});
-
-		return true;
+		return this.sessionSetupPlumbing.applySandboxWiring(bridgeOptions, sessionId, opts);
 	}
 
 	/** Get a CostTracker for a specific project. Requires explicit projectId when PCM is active. */
@@ -5591,166 +5346,4 @@ export class SessionManager {
 		// details preserved verbatim from this file's pre-extraction logic.
 		await this.mcpWiring.shutdownDisconnectAll();
 	}
-}
-
-// ── Sandbox credential auto-resolution ─────────────────────────────
-
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
-
-/**
- * Map of auth.json provider keys → env vars that pi-coding-agent checks.
- * OAuth providers use their OAuth token env var; API-key providers use the standard key var.
- * Kept for legacy fallback when sandbox_tokens is not set.
- */
-const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any) => string | undefined }> = {
-	anthropic: {
-		envVar: "ANTHROPIC_OAUTH_TOKEN",
-		extractKey: (cred) => cred?.type === "oauth" ? cred.access : cred?.type === "api_key" ? cred.key : undefined,
-	},
-	openai: {
-		envVar: "OPENAI_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-	google: {
-		envVar: "GEMINI_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-	xai: {
-		envVar: "XAI_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-	groq: {
-		envVar: "GROQ_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-	mistral: {
-		envVar: "MISTRAL_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-	openrouter: {
-		envVar: "OPENROUTER_API_KEY",
-		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
-	},
-};
-
-/**
- * Resolve sandbox tokens from the unified sandbox_tokens config key.
- * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
- * when sandbox_tokens is not set.
- */
-export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
-	const entries = projectConfig?.getSandboxTokens() ?? [];
-
-	// ── New unified path: sandbox_tokens is set ──
-	if (entries.length > 0) {
-		const result: Record<string, string> = {};
-		const secrets = secretsStore?.getAll() || {};
-		for (const entry of entries) {
-			if (!entry.enabled || !entry.key) continue;
-			// Check secrets store first, then fall back to inline value (pre-migration).
-			const explicitValue = secrets[entry.key] || entry.value;
-			if (explicitValue) {
-				result[entry.key] = explicitValue;
-			} else {
-				// Empty value = resolve from host.
-				const resolved = resolveHostTokenValue(entry.key, prefs);
-				if (resolved) {
-					result[entry.key] = resolved;
-				}
-			}
-		}
-		return result;
-	}
-
-	// ── Legacy fallback: sandbox_tokens not set ──
-	return resolveLegacySandboxCredentials(prefs, projectConfig);
-}
-
-/**
- * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
- * Used as fallback when sandbox_tokens is not configured.
- */
-export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
-	const result: Record<string, string> = {};
-
-	// 1. Read auth.json
-	let authData: Record<string, any> | null = null;
-	try {
-		const authPath = globalAuthPath();
-		if (fs.existsSync(authPath)) {
-			authData = JSON.parse(fs.readFileSync(authPath, "utf-8"));
-		}
-	} catch {
-		// Ignore read errors
-	}
-
-	for (const [provider, { envVar, extractKey }] of Object.entries(PROVIDER_ENV_MAP)) {
-		const hostEnvVal = process.env[envVar];
-		if (hostEnvVal) {
-			result[envVar] = hostEnvVal;
-			continue;
-		}
-
-		if (prefs) {
-			const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
-			if (storedKey) {
-				result[envVar] = storedKey;
-				continue;
-			}
-		}
-
-		if (authData && authData[provider]) {
-			const key = extractKey(authData[provider]);
-			if (key) {
-				result[envVar] = key;
-			}
-		}
-	}
-
-	// Auto-detect GITHUB_TOKEN for gh CLI
-	const overridesRaw = projectConfig?.get("sandbox_host_token_overrides") || "";
-	let tokenOverrides: Record<string, string> = {};
-	try { tokenOverrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
-
-	const ghTokenEnabled = tokenOverrides["GITHUB_TOKEN"] !== undefined
-		? tokenOverrides["GITHUB_TOKEN"] !== "false"
-		: (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
-
-	if (ghTokenEnabled && !result["GITHUB_TOKEN"]) {
-		const hostGhToken = process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"];
-		if (hostGhToken) {
-			result["GITHUB_TOKEN"] = hostGhToken;
-		} else {
-			try {
-				const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
-				if (token) {
-					result["GITHUB_TOKEN"] = token;
-				}
-			} catch {
-				// gh not installed or not authenticated — skip
-			}
-		}
-	}
-
-	// Auto-detect NPM_TOKEN if enabled
-	const npmTokenEnabled = tokenOverrides["NPM_TOKEN"] !== "false";
-	if (npmTokenEnabled && !result["NPM_TOKEN"] && process.env["NPM_TOKEN"]) {
-		result["NPM_TOKEN"] = process.env["NPM_TOKEN"];
-	}
-
-	// Remove any tokens that are explicitly disabled in overrides
-	for (const [envVar, override] of Object.entries(tokenOverrides)) {
-		if (override === "false" && result[envVar]) {
-			delete result[envVar];
-		}
-	}
-
-	// Merge manual sandbox_credentials on top
-	const credentialsRaw = projectConfig?.get("sandbox_credentials") || "";
-	try {
-		const credentials: Record<string, string> = credentialsRaw ? JSON.parse(credentialsRaw) : {};
-		Object.assign(result, credentials);
-	} catch { /* ignore */ }
-
-	return result;
 }

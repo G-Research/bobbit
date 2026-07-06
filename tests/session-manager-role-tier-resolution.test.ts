@@ -142,6 +142,10 @@ describe("source pin: restore / respawn / force-abort-respawn route through the 
 		path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 		"utf-8",
 	);
+	const setupPlumbingSrc = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-setup-plumbing.ts"),
+		"utf-8",
+	);
 
 	it("restoreSession falls back to this.resolveInitialModel/resolveInitialThinkingLevel(ps.role, ps.projectId)", () => {
 		const idx = reviveSrc.indexOf("async restoreSession(ps: PersistedSession)");
@@ -170,7 +174,7 @@ describe("source pin: restore / respawn / force-abort-respawn route through the 
 	});
 
 	it("buildPipelineContext wires resolveInitialModel/resolveInitialThinkingLevel to session-setup.ts (normal-create pipeline)", () => {
-		assert.match(src, /resolveInitialModel:\s*\(role, projectId\)\s*=>\s*this\.resolveInitialModel\(role, projectId\)/);
-		assert.match(src, /resolveInitialThinkingLevel:\s*\(role, projectId\)\s*=>\s*this\.resolveInitialThinkingLevel\(role, projectId\)/);
+		assert.match(setupPlumbingSrc, /resolveInitialModel:\s*\(role, projectId\)\s*=>\s*this\.deps\.resolveInitialModel\(role, projectId\)/);
+		assert.match(setupPlumbingSrc, /resolveInitialThinkingLevel:\s*\(role, projectId\)\s*=>\s*this\.deps\.resolveInitialThinkingLevel\(role, projectId\)/);
 	});
 });
