@@ -1,9 +1,9 @@
 /**
- * Journey: App Smoke + Session Sharing — v2 browser smoke
- * Covers: journey-app-smoke, journey-session-sharing
- * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, etc.
+ * Journey: App Smoke + Session Sharing + Draft Persistence — v2 browser smoke
+ * Covers: journey-app-smoke, journey-session-sharing, journey-draft-persistence
+ * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
 
 test.describe("Journey: App Smoke", () => {
 	test("app loads and sidebar is visible", async ({ page }) => {
@@ -80,5 +80,136 @@ test.describe("Journey: Session Sharing", () => {
 		// Skipped: clipboard assertions require https context or explicit permission grants
 		// that are unreliable across headless environments.
 		// The button presence is verified in the test above.
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Draft Persistence (CT-02 contract)
+//
+// Covers: draft-loss.spec.ts behavioral scenarios.
+// Guarantee: editor draft typed in a session is never silently lost
+// across session switches or page reloads.
+// ═══════════════════════════════════════════════════════════════
+
+test.describe("Journey: Draft Persistence", () => {
+	/**
+	 * CT-02-a: Draft typed in session A persists after switching to B and back.
+	 * Covers: draft-loss.spec.ts "draft survives send→switch→reload" scenario.
+	 */
+	test("draft typed in session A persists after switching to B and back", async ({ page }) => {
+		const sA = await createSession();
+		const sB = await createSession();
+		await waitForSessionStatus(sA, "idle");
+		await waitForSessionStatus(sB, "idle");
+		try {
+			await openApp(page);
+
+			// Navigate to A and type a unique draft
+			await navigateToHash(page, `#/session/${sA}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const draftText = `app-smoke-draft-${Date.now()}`;
+			await page.locator("message-editor textarea").first().fill(draftText);
+
+			// Wait until the server has saved the draft (100 ms debounce)
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/sessions/${sA}/draft?type=prompt`);
+				if (!resp.ok) return null;
+				const body = await resp.json() as { data?: { text?: string } };
+				return body?.data?.text ?? null;
+			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+
+			// Switch to B
+			await navigateToHash(page, `#/session/${sB}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			// Switch back to A — draft must be restored
+			await navigateToHash(page, `#/session/${sA}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expect(async () => {
+				const val = await page.locator("message-editor textarea").first().inputValue();
+				expect(val, "draft must survive session switch").toContain(draftText);
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+		} finally {
+			await deleteSession(sA).catch(() => {});
+			await deleteSession(sB).catch(() => {});
+		}
+	});
+
+	/**
+	 * CT-02-d: Draft typed survives page reload.
+	 * Covers: draft-loss.spec.ts "draft survives … hard reload" and stories-drafts CT-02-d.
+	 */
+	test("draft typed in session survives page reload", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const draftText = `draft-reload-smoke-${Date.now()}`;
+			await page.locator("message-editor textarea").first().fill(draftText);
+
+			// Confirm server has the draft before reload
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=prompt`);
+				if (!resp.ok) return null;
+				const body = await resp.json() as { data?: { text?: string } };
+				return body?.data?.text ?? null;
+			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+
+			// Full page reload
+			await page.reload();
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
+
+			// Navigate back to the same session
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			// Editor must show the previously typed draft
+			await expect(async () => {
+				const val = await page.locator("message-editor textarea").first().inputValue();
+				expect(val, "draft must survive page reload").toContain(draftText);
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
+	/**
+	 * CT-02 / isolation: Draft typed in session A must not appear in session B.
+	 * Covers the draft isolation story (S-03) from stories-sessions.spec.ts.
+	 */
+	test("draft typed in session A does not bleed into session B", async ({ page }) => {
+		const sA = await createSession();
+		const sB = await createSession();
+		await waitForSessionStatus(sA, "idle");
+		await waitForSessionStatus(sB, "idle");
+		try {
+			await openApp(page);
+
+			// Type a draft in A
+			await navigateToHash(page, `#/session/${sA}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const draftA = `draft-isolation-A-${Date.now()}`;
+			await page.locator("message-editor textarea").first().fill(draftA);
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/sessions/${sA}/draft?type=prompt`);
+				if (!resp.ok) return null;
+				const body = await resp.json() as { data?: { text?: string } };
+				return body?.data?.text ?? null;
+			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftA);
+
+			// Navigate to B — editor must not show A's draft
+			await navigateToHash(page, `#/session/${sB}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expect(async () => {
+				const val = await page.locator("message-editor textarea").first().inputValue();
+				expect(val, "session B must not contain session A's draft").not.toContain(draftA);
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 8_000 });
+		} finally {
+			await deleteSession(sA).catch(() => {});
+			await deleteSession(sB).catch(() => {});
+		}
 	});
 });
