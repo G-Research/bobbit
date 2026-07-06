@@ -7,8 +7,8 @@
  * Uses the crash()/restart() fixture from gateway-harness.ts.
  */
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "../_helpers/journey-fixture.js";
+import { apiFetch, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
+import { openApp, navigateToHash } from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
 async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> {
@@ -38,7 +38,9 @@ async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> 
 	).toBe(true);
 }
 
-test.describe("Journey: Crash + Restart", () => {
+// ── Basic reachability ─────────────────────────────────────────────────────
+
+test.describe("Journey: Crash + Restart — basic", () => {
 	test("app is reachable before crash", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
@@ -48,7 +50,6 @@ test.describe("Journey: Crash + Restart", () => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		await crashAndRestart(gateway, page);
-		// After restart, app should reconnect
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
 	});
@@ -58,5 +59,115 @@ test.describe("Journey: Crash + Restart", () => {
 		await gateway.restart();
 		const r = await apiFetch("/health");
 		expect(r.status).toBe(200);
+	});
+});
+
+// ── Session persistence ────────────────────────────────────────────────────
+
+test.describe("Journey: Crash + Restart — session persistence", () => {
+	test("session created before crash is still accessible via API after restart", async ({ gateway }) => {
+		test.slow();
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await gateway.crash();
+		await gateway.restart();
+		const resp = await apiFetch(`/api/sessions/${sessionId}`);
+		expect(resp.status).toBe(200);
+		const data = await resp.json() as { id: string };
+		expect(data.id).toBe(sessionId);
+		await deleteSession(sessionId).catch(() => {});
+	});
+
+	test("navigating to pre-crash session after restart shows the editor", async ({ page, gateway }) => {
+		test.slow();
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+		await crashAndRestart(gateway, page);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+		const hash = await page.evaluate(() => window.location.hash);
+		expect(hash).toContain(sessionId);
+		await deleteSession(sessionId).catch(() => {});
+	});
+});
+
+// ── WS reconnect ───────────────────────────────────────────────────────────
+
+test.describe("Journey: Crash + Restart — WS reconnect", () => {
+	test("client connectionStatus returns to connected after restart", async ({ page, gateway }) => {
+		test.slow();
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		const before = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
+		expect(before).toBe("connected");
+		await gateway.crash();
+		await page.waitForFunction(
+			() => { const s = (window as any).bobbitState; return !!s && s.connectionStatus !== "connected"; },
+			{ timeout: 10_000, polling: 250 },
+		).catch(() => {});
+		await gateway.restart();
+		await page.waitForFunction(
+			() => { const s = (window as any).bobbitState; return !!s && s.connectionStatus === "connected"; },
+			{ timeout: 15_000, polling: 250 },
+		).catch(() => {});
+		const after = await page.evaluate(() => (window as any).bobbitState?.connectionStatus ?? "unknown");
+		expect(["connected", "reconnecting"]).toContain(after);
+	});
+});
+
+// ── Preview mount durability ───────────────────────────────────────────────
+
+test.describe("Journey: Crash + Restart — preview durability", () => {
+	test("preview mount entry is still accessible via API after restart", async ({ gateway }) => {
+		test.slow();
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const patchResp = await apiFetch(`/api/sessions/${sessionId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ preview: true }),
+		});
+		expect(patchResp.status).toBe(200);
+		const mountResp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+			method: "POST",
+			body: JSON.stringify({ html: "<!DOCTYPE html><body>crash-test</body>", entry: "crash-test.html" }),
+		});
+		expect(mountResp.status).toBe(200);
+		const mountBody = await mountResp.json() as { entry: string };
+		expect(mountBody.entry).toBe("crash-test.html");
+		await gateway.crash();
+		await gateway.restart();
+		const afterResp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`);
+		expect(afterResp.status).toBe(200);
+		const afterBody = await afterResp.json() as { entry?: string; contentHash?: string };
+		expect(afterBody.entry).toBe("crash-test.html");
+		expect(afterBody.contentHash).toMatch(/^[a-f0-9]{64}$/);
+		await deleteSession(sessionId).catch(() => {});
+	});
+});
+
+// ── Sidebar tree localStorage durability ──────────────────────────────────
+
+test.describe("Journey: Crash + Restart — sidebar tree state", () => {
+	test("sidebar tree localStorage key survives crash+restart+reload", async ({ page, gateway }) => {
+		test.slow();
+		const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		await page.evaluate((key) => {
+			localStorage.setItem(key, JSON.stringify({ expansion: { "test-key": "expanded" } }));
+		}, TREE_STATE_KEY);
+		const before = await page.evaluate((key) => localStorage.getItem(key), TREE_STATE_KEY);
+		expect(before).toBeTruthy();
+		await crashAndRestart(gateway, page);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
+		const after = await page.evaluate((key) => localStorage.getItem(key), TREE_STATE_KEY);
+		expect(after).toBe(before);
+		const parsed = JSON.parse(after!);
+		expect(parsed.expansion?.["test-key"]).toBe("expanded");
 	});
 });
