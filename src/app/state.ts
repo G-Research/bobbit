@@ -42,6 +42,8 @@ export interface Project {
   colorLight: string;
   colorDark: string;
   provisional?: boolean;
+  hidden?: boolean;
+  position?: number;
 }
 
 export interface GatewaySession {
