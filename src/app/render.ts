@@ -21,7 +21,7 @@ import {
 	type GatewaySession,
 	type Project,
 } from "./state.js";
-import { fetchProjects, gatewayFetch, retryLoadSessions } from "./api.js";
+import { fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
@@ -1994,6 +1994,28 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 // RENDER APP
 // ============================================================================
 
+function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").GatewaySession | undefined) {
+	if (!activeSession) return "";
+	const activeGoalId = activeSession.goalId ?? activeSession.teamGoalId;
+	if (!activeGoalId) return "";
+	const goal = state.goals.find((g: any) => g.id === activeGoalId);
+	if (!goal?.paused) return "";
+	return html`
+		<div class="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-sm"
+		     style="background: color-mix(in oklch, var(--warning) 12%, transparent); border-bottom: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);"
+		     data-testid="goal-paused-banner">
+			<span style="color: var(--warning);">This goal is paused.</span>
+			<button
+				class="shrink-0 rounded border px-2 py-1 text-xs font-medium hover:opacity-80 transition-opacity"
+				style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); color: var(--warning);"
+				data-testid="goal-paused-banner-resume-btn"
+				@click=${() => resumeGoalWithDialog(activeGoalId)}>
+				Resume
+			</button>
+		</div>
+	`;
+}
+
 function renderArchivedBanner() {
 	const agent = state.remoteAgent;
 	if (!agent?.state?.isArchived) return "";
@@ -2902,7 +2924,7 @@ export function doRenderApp(): void {
 	`;
 	/** Render individual pane content for mobile slider. */
 	const mobilePaneContent = (tab: MobilePaneTab) => {
-		if (tab.kind === "chat") return state.chatPanel;
+		if (tab.kind === "chat") return html`${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}`;
 		const content = unifiedPanelContent(tab);
 		return html`<div class="side-panel-pane goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
@@ -3005,7 +3027,7 @@ export function doRenderApp(): void {
 					${reconnectBanner()}
 					${staffInboxOpenAffordance()}
 					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
-						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
+						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}</div>
 						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
 					</div>
 				`;
@@ -3026,7 +3048,7 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${renderGoalPausedBannerIfNeeded(activeSession)}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`
