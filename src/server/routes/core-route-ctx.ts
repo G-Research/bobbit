@@ -358,4 +358,6 @@ export interface CoreRouteCtx {
 	): Promise<RuntimeContext | undefined>;
 	routeDispatcher: RouteDispatcher;
 	routeRegistry: RouteRegistry;
+	// ── Goals G3a additions — append-only.
+	broadcastToGoal(goalId: string, event: any): void;
 }
