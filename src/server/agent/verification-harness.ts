@@ -6335,7 +6335,7 @@ export class VerificationHarness {
 
 		if (!wasBarrierFired && record.barrierFired) {
 			this._maybeTriggerPlanSynthesis(ctx, record).catch((err) => {
-				console.warn(`[verification-harness] plan-fan-in synthesis trigger failed for group ${swarmGroup} (non-fatal):`, err);
+				console.warn(`[verification-harness] swarm synthesis trigger failed for group ${swarmGroup} (non-fatal):`, err);
 			});
 		}
 	}
@@ -6387,7 +6387,8 @@ export class VerificationHarness {
 	/**
 	 * SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1) — plan-fan-in's
 	 * synthesis reduce step: the instant the barrier fires for a
-	 * `topology: "plan-fan-in"` group, spawn exactly ONE `TeamManager.spawnRole`
+	 * `topology: "plan-fan-in"` or `topology: "orchestrator-worker"` group,
+	 * spawn exactly ONE `TeamManager.spawnRole`
 	 * node (role "reviewer" — read-only tool policy, no `edit`/`bash_bg`,
 	 * see defaults/roles/reviewer.yaml — a deliberate safety fit for a node
 	 * that must never touch files) that reads the N plan siblings' distilled
@@ -6416,11 +6417,11 @@ export class VerificationHarness {
 	 */
 	private async _maybeTriggerPlanSynthesis(ctx: ProjectContext, record: SwarmGroupRecord): Promise<void> {
 		const config = record.config as { topology?: string; parentGoalId?: string } | undefined;
-		if (config?.topology !== "plan-fan-in") return;
+		if (config?.topology !== "plan-fan-in" && config?.topology !== "orchestrator-worker") return;
 		const parentGoalId = config.parentGoalId;
 		if (!parentGoalId) {
 			ctx.swarmGroupStore.recordSynthesisStarted(record.swarmGroup);
-			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { error: "plan-fan-in group config is missing parentGoalId — cannot spawn the synthesis role" });
+			ctx.swarmGroupStore.recordSynthesisResult(record.swarmGroup, { error: `${config?.topology ?? "swarm"} group config is missing parentGoalId — cannot spawn the synthesis role` });
 			return;
 		}
 		if (!this.teamManager || !this.sessionManager) {
@@ -6431,21 +6432,31 @@ export class VerificationHarness {
 
 		ctx.swarmGroupStore.recordSynthesisStarted(record.swarmGroup);
 
-		const orderedPlans = record.artifacts
+		const orderedArtifacts = record.artifacts
 			.slice()
 			.sort((a, b) => a.capturedAt - b.capturedAt)
-			.map((a, i) => `## Candidate plan ${i + 1} (sibling ${a.goalId.slice(0, 8)}, status: ${a.status})\n\n${(a.output || "").trim() || "(no output captured — this sibling produced nothing usable)"}`)
+			.map((a, i) => `## ${config.topology === "orchestrator-worker" ? "Shard" : "Candidate plan"} ${i + 1} (sibling ${a.goalId.slice(0, 8)}, status: ${a.status})\n\n${(a.output || "").trim() || "(no output captured — this sibling produced nothing usable)"}`)
 			.join("\n\n---\n\n");
 
-		const synthesisPrompt = [
-			"You are the SYNTHESIS step of a swarm plan-fan-in group.",
-			`${record.artifacts.length} sibling agents independently proposed an approach for the SAME task, WITHOUT modifying any files (planning-only — you cannot modify files either).`,
-			"Read every candidate plan below and produce exactly ONE merged, coherent plan that takes the best ideas from across the candidates — resolve disagreements explicitly rather than listing them.",
-			"",
-			orderedPlans,
-			"",
-			"Output ONLY the final synthesized plan as your final message (no meta-commentary about the synthesis process itself), then go idle. A human will review it before any build starts.",
-		].join("\n");
+		const synthesisPrompt = config.topology === "orchestrator-worker"
+			? [
+				"You are the SYNTHESIS step of a swarm orchestrator-worker merge-all group.",
+				`${record.artifacts.length} shard worker(s) ran as disjoint children. Successful shards may already be merged; failed/conflicted shards are included below and must be surfaced.`,
+				"Produce exactly ONE coherent final summary for a human operator: what landed, what failed or conflicted, and any manual follow-up required.",
+				"",
+				orderedArtifacts,
+				"",
+				"Output ONLY the final synthesis text as your final message, then go idle.",
+			].join("\n")
+			: [
+				"You are the SYNTHESIS step of a swarm plan-fan-in group.",
+				`${record.artifacts.length} sibling agents independently proposed an approach for the SAME task, WITHOUT modifying any files (planning-only — you cannot modify files either).`,
+				"Read every candidate plan below and produce exactly ONE merged, coherent plan that takes the best ideas from across the candidates — resolve disagreements explicitly rather than listing them.",
+				"",
+				orderedArtifacts,
+				"",
+				"Output ONLY the final synthesized plan as your final message (no meta-commentary about the synthesis process itself), then go idle. A human will review it before any build starts.",
+			].join("\n");
 
 		let sessionId: string | undefined;
 		try {
@@ -6790,6 +6801,10 @@ export class VerificationHarness {
 					return { passed: true, output: `Recovered workflow-less swarm sibling ${childId} — auto-merge suppressed, candidate recorded` };
 				}
 				if (outcome.conflict) {
+					const conflictChild = ctx.goalStore.get(childId);
+					if (conflictChild?.swarmGroup) {
+						try { await this.notifyChildTerminal(childId, "failed"); } catch { /* non-fatal */ }
+					}
 					return {
 						passed: false,
 						output: `Workflow-less child ${childId} has merge conflict — manual recovery required: see docs/nested-goals.md §recovery. ${truncateForOutput(outcome.output)}`,
@@ -7125,6 +7140,10 @@ export class VerificationHarness {
 					await goalManager.updateGoal(childGoalId, { mergeConflict: true });
 					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
 				} catch (err) { console.warn(`[verification] failed to set mergeConflict for ${childGoalId} (non-fatal):`, err); }
+				const conflictChild = ctx.goalStore.get(childGoalId);
+				if (conflictChild?.swarmGroup) {
+					try { await this.notifyChildTerminal(childGoalId, "failed"); } catch { /* non-fatal */ }
+				}
 				return {
 					passed: false,
 					output: `Merge conflict between child ${childGoalId} and parent ${parentGoalId} — manual resolution required. See docs/nested-goals.md §conflicts. Conflict diagnostic: ${truncateForOutput(outcome.output)}`,

@@ -1168,6 +1168,11 @@ export async function tryHandleNestedGoalRoute(
 				} catch (err) {
 					console.warn(`[integrate-child] failed to set mergeConflict (non-fatal):`, err);
 				}
+				if (child.swarmGroup) {
+					try { await verificationHarness.notifyChildTerminal(childId, "failed"); } catch (err) {
+						console.warn(`[integrate-child] notifyChildTerminal(failed) failed for conflicted swarm child ${childId} (non-fatal):`, err);
+					}
+				}
 				json({ conflict: true, output: outcome.output ?? "" }, 409);
 				return true;
 			}
