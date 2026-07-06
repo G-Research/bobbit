@@ -618,7 +618,11 @@ function repairProjectsFileForHeadquartersSplit(
 			project.rootPath = path.resolve(headquartersDirPath);
 			changed = true;
 		}
-		for (const key of ["position", "provisional", "parentProjectId", "hidden"]) {
+		// NOTE: do NOT include "position" here. Since PR #933, Headquarters
+		// is a user-reorderable project and its saved position must be
+		// preserved across restarts. Stripping it here causes HQ to sort
+		// last on every subsequent boot.
+		for (const key of ["provisional", "parentProjectId", "hidden"]) {
 			if (key in project) {
 				delete project[key];
 				changed = true;
