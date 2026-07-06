@@ -22,7 +22,8 @@
  *
  *   1. Structural: `pushFrame()` is called from exactly ONE site in
  *      `src/server/` (excluding `event-buffer.ts` itself, where it's
- *      defined) — the body of `requestToolGrant` in `session-manager.ts`.
+ *      defined) — the body of `requestToolGrant` in
+ *      `session-tool-permissions.ts`.
  *      Any future regression that re-introduces a unicast `pushFrame()` in
  *      `ws/handler.ts` (or anywhere else) fails CI immediately.
  *
@@ -53,6 +54,7 @@ const SRC_DIR = path.resolve(
 );
 const HANDLER_PATH = path.join(SRC_DIR, "ws", "handler.ts");
 const MANAGER_PATH = path.join(SRC_DIR, "agent", "session-manager.ts");
+const TOOL_PERMISSIONS_PATH = path.join(SRC_DIR, "agent", "session-tool-permissions.ts");
 const EVENT_BUFFER_PATH = path.join(SRC_DIR, "agent", "event-buffer.ts");
 
 // ── 1. Structural — single allocation site ──────────────────────────────────
@@ -93,21 +95,21 @@ test("pushFrame() is called from exactly one site in src/server/ — requestTool
 	const only = callsites[0];
 	assert.match(
 		only.file.replace(/\\/g, "/"),
-		/agent\/session-manager\.ts$/,
-		`only pushFrame() callsite must live in agent/session-manager.ts — got ${only.file}`,
+		/agent\/session-tool-permissions\.ts$/,
+		`only pushFrame() callsite must live in agent/session-tool-permissions.ts — got ${only.file}`,
 	);
 
 	// And it must sit inside requestToolGrant — find that function's body and
 	// assert the line number falls inside it.
-	const mgrSrc = readFileSync(MANAGER_PATH, "utf8");
-	const mgrLines = mgrSrc.split(/\r?\n/);
-	const fnIdx = mgrLines.findIndex(l => /\basync\s+requestToolGrant\s*\(/.test(l));
-	assert.ok(fnIdx >= 0, "requestToolGrant must be defined in session-manager.ts");
+	const toolPermissionsSrc = readFileSync(TOOL_PERMISSIONS_PATH, "utf8");
+	const toolPermissionsLines = toolPermissionsSrc.split(/\r?\n/);
+	const fnIdx = toolPermissionsLines.findIndex(l => /\basync\s+requestToolGrant\s*\(/.test(l));
+	assert.ok(fnIdx >= 0, "requestToolGrant must be defined in session-tool-permissions.ts");
 	// Find end-of-function: scan forward for the next top-level method declaration.
-	let endIdx = mgrLines.length;
-	for (let i = fnIdx + 1; i < mgrLines.length; i++) {
-		if (/^\t(?:private |public |async |static |\/\*\*|[a-zA-Z_][a-zA-Z0-9_]*\s*\()/.test(mgrLines[i])
-			&& !mgrLines[i].includes("requestToolGrant")) {
+	let endIdx = toolPermissionsLines.length;
+	for (let i = fnIdx + 1; i < toolPermissionsLines.length; i++) {
+		if (/^\t(?:private |public |async |static |\/\*\*|[a-zA-Z_][a-zA-Z0-9_]*\s*\()/.test(toolPermissionsLines[i])
+			&& !toolPermissionsLines[i].includes("requestToolGrant")) {
 			// Heuristic: next member declaration at indent 1 (tab).
 			endIdx = i;
 			break;
