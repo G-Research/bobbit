@@ -333,6 +333,43 @@ test.describe("Pre-compaction history affordance", () => {
 		await expect(rows.last()).toContainText("pre-msg-2");
 	});
 
+	// Manual `/compact` slash-command path (deterministic, mock agent, no LLM).
+	//
+	// This is the coverage that formerly lived in the real-LLM manual spec
+	// `tests/manual-integration/compaction.spec.ts` (removed: its copied
+	// auth.json OAuth snapshot expired mid-run). The mock agent's `compact`
+	// command emits `compaction_start`/`compaction_end` with reason "manual"
+	// exactly like pi 0.74+, exercising the ws-handler manual branch +
+	// session-manager manual sidecar path. The summary card must render as a
+	// SUCCESSFUL compaction (complete/ok), with the single-card invariant.
+	test("@live-compaction-affordance manual /compact surfaces a complete summary card (no reload)", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		await openApp(page);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+		// Drive the manual /compact slash command. Typing "/" opens the slash
+		// autocomplete menu, which captures Enter as a menu selection; press
+		// Escape first to close it, then Enter submits the /compact command
+		// (AgentInterface intercepts it and calls session.compact()).
+		await textarea.fill("/compact");
+		await textarea.press("Escape");
+		await textarea.press("Enter");
+
+		// The manual compaction resolves to a SUCCESSFUL card.
+		const cards = page.locator("[data-testid='compaction-summary-card']");
+		await expect(cards.first()).toBeVisible({ timeout: 20_000 });
+		await expect(cards.first()).toHaveAttribute("data-state", "complete", { timeout: 20_000 });
+		await expect(cards.first().locator("[data-test='verdict']"))
+			.toHaveAttribute("data-verdict", "ok", { timeout: 15_000 });
+
+		// Single-card invariant (no duplicate live + spliced-sidecar cards).
+		await expect(cards).toHaveCount(1, { timeout: 8_000 });
+	});
+
 	// Manual-compaction late-sidecar RACE regression (no reload).
 	//
 	// On a live (esp. manual `/compact`) compaction the affordance widget mounts
