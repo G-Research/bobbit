@@ -26,19 +26,16 @@ import { readToken, validateToken } from "./auth/token.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
 import { invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
-import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { TeamManager } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
 import { tryHandleSwarmRoute } from "./agent/swarm-routes.js";
 import { reArmSwarmGovernorsOnBoot } from "./agent/swarm-restart-resume.js";
 import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";
-import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
-import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
-import { checkGateDependencies } from "./agent/gate-dependency-check.js";
-import { deliverSessionPrompt, parseSessionPromptMode, SessionPromptDeliveryError } from "./agent/session-prompt-delivery.js";
+import { deliverSessionPrompt, SessionPromptDeliveryError } from "./agent/session-prompt-delivery.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { buildOrientPayload, type OrientSessionInput } from "./agent/orient.js";
@@ -123,6 +120,8 @@ import { registerGoalGateHeavyRoutes } from "./routes/goal-gate-heavy-routes.js"
 import { registerGoalGateMutationRoutes } from "./routes/goal-gate-mutation-routes.js";
 // STR-01 goals cohort G4a: goal git/PR/team read routes.
 import { registerGoalGitTeamReadRoutes } from "./routes/goal-git-team-read-routes.js";
+// STR-01 goals cohort G4b: goal team/PR mutation routes.
+import { registerGoalTeamMutationRoutes } from "./routes/goal-team-mutation-routes.js";
 // STR-01 cohort 27: task routes.
 import { registerTasksRoutes } from "./routes/tasks-routes.js";
 // STR-01 cohort 28: pack UI/contribution discovery routes.
@@ -525,9 +524,6 @@ function viewerSubscribedToGoal(ws: AuthenticatedWS, goalId: string): boolean {
 }
 
 import {
-	hasGoalGitWorktree,
-	goalGitUnavailablePayload,
-	buildGhPrMergeArgs,
 	_prCache,
 } from "./skills/git-gh.js";
 import { VerificationHarness, sanitizeVerificationFindings } from "./agent/verification-harness.js";
@@ -593,7 +589,6 @@ import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type San
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
-import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -3357,6 +3352,7 @@ registerGoalCrudRoutes(coreRouteTable);
 registerGoalLifecycleRoutes(coreRouteTable);
 registerGoalGateHeavyRoutes(coreRouteTable);
 registerGoalGitTeamReadRoutes(coreRouteTable);
+registerGoalTeamMutationRoutes(coreRouteTable);
 registerTasksRoutes(coreRouteTable);
 registerExtensionHostUiRoutes(coreRouteTable);
 registerToolsRoutes(coreRouteTable);
@@ -3733,6 +3729,9 @@ async function handleApiRoute(
 				getGateAndTransitiveDependents,
 				// Goals G4a additions — append-only.
 				// No new fields: goal git/PR/team read routes reuse ctx values
+				// already threaded by earlier cohorts.
+				// Goals G4b additions — append-only.
+				// No new fields: goal team/PR mutation routes reuse ctx values
 				// already threaded by earlier cohorts.
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
@@ -4442,499 +4441,14 @@ async function handleApiRoute(
 	// moved to the core route registry (STR-01 cohort 27) — see
 	// src/server/routes/tasks-routes.ts.
 
-	// ── Team endpoints ─────────────────────────────────────────────
-	// Routes accept both /team/ and legacy /swarm/ paths
-
-	// POST /api/goals/:id/team/start — start a team for a goal
-	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
-	if (teamStartMatch && req.method === "POST") {
-		const goalId = teamStartMatch[1];
-		// Guard: goal spec must be set before starting the team.
-		const startGoal = getGoalAcrossProjects(goalId);
-		const trimmedSpec = (startGoal?.spec ?? "").trim();
-		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
-			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
-			return;
-		}
-		try {
-			const session = await teamManager.startTeam(goalId);
-			json({ sessionId: session.id, title: session.title }, 201);
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/spawn — spawn a role agent
-	const teamSpawnMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/spawn$/);
-	if (teamSpawnMatch && req.method === "POST") {
-		const goalId = teamSpawnMatch[1];
-		// Guard: reject spawn if goal is archived
-		const spawnGoal = getGoalAcrossProjects(goalId);
-		if (spawnGoal?.archived) {
-			json({ error: "Goal is archived" }, 409);
-			return;
-		}
-		// Pause-cascade: refuse to spawn role agents on a paused goal.
-		if (spawnGoal?.paused) {
-			json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
-			return;
-		}
-		// Guard: reject spawn if goal worktree is not ready
-		if (spawnGoal && spawnGoal.setupStatus !== "ready") {
-			json({ error: "Goal setup not complete" }, 409);
-			return;
-		}
-		const body = await readBody(req);
-		if (!body?.role || !body?.task) {
-			json({ error: "Missing role or task" }, 400);
-			return;
-		}
-		try {
-			const spawnOpts: { workflowGateId?: string; inputGateIds?: string[] } = {};
-			if (typeof body.workflowGateId === "string") spawnOpts.workflowGateId = body.workflowGateId;
-			if (Array.isArray(body.inputGateIds)) spawnOpts.inputGateIds = body.inputGateIds as string[];
-			const result = await teamManager.spawnRole(goalId, body.role, body.task, spawnOpts);
-			json(result, 201);
-		} catch (err) {
-			if (err instanceof GateDependencyError) {
-				jsonError(409, err);
-			} else if (err instanceof GoalPausedError) {
-				json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
-			} else {
-				jsonError(400, err);
-			}
-		}
-		return;
-	}
-
-	// Finding #6 fallback: a team-lead's `team_delegate(non_blocking)` child is NOT a
-	// goal team member, so the goal /team/* routes would reject it — yet the team-lead
-	// holds team_prompt/dismiss/steer/abort (registered goal-scoped via team/extension.ts,
-	// NOT the own-child variants in agent/extension.ts, to avoid double-registration).
-	// When the target is an own child of THIS goal's team-lead (tracked by the shared
-	// OrchestrationCore), route the verb through the core so the documented verbs work
-	// on the lead's own delegate helpers. Goal-member behaviour is unchanged.
-	const teamLeadOwnChildOwner = (goalId: string, targetId: string): string | undefined => {
-		const teamState = teamManager.getTeamState(goalId);
-		if (!teamState?.teamLeadSessionId) return undefined;
-		const lead = teamState.teamLeadSessionId;
-
-		// Tracked goal team members must flow through TeamManager.dismissRoleForGoal()
-		// so it can remove team-manager state, subscriptions, timers, and broadcasts.
-		// They are also registered in OrchestrationCore under the team lead, so a
-		// plain owner/child match would incorrectly route real team agents through
-		// the private team_delegate fallback. Check both the goal state snapshot and
-		// the session→goal index; tests and restart paths can observe one before the
-		// other is refreshed.
-		if (teamState.agents.some((agent) => agent.sessionId === targetId)) return undefined;
-		if (teamManager.findAgentBySessionId(targetId)) return undefined;
-		const persisted = sessionManager.getPersistedSession(targetId) as any;
-
-		if (orchestrationCore.list(lead).some(h => h.sessionId === targetId && h.childKind !== "team")) return lead;
-		if (orchestrationCore.dismissedOwnerOf(targetId) === lead) return lead;
-		return persisted?.delegateOf === lead || (persisted?.parentSessionId === lead && persisted?.childKind !== "team") ? lead : undefined;
-	};
-	const resolveAuthenticCallerFromSessionSecret = (): string | undefined => {
-		const h = req.headers as Record<string, string | string[] | undefined>;
-		const secretHeader = h["x-bobbit-session-secret"];
-		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
-		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
-		);
-	};
-	const denyDismissNotOwned = (sessionId: string, message = "Caller session is not the team lead for this goal") => json({
-		ok: false,
-		status: "not-owned",
-		sessionId,
-		message,
-		retryable: false,
-	}, 403);
-
-	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
-	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
-	// sandbox-scoped token, so without this a same-goal agent that learns a
-	// helper child's session id could prompt/steer/abort/dismiss the team-lead's
-	// PRIVATE team_delegate child. Bind to the unforgeable per-session secret and
-	// require the AUTHENTIC caller to BE the team-lead owner. Goal-MEMBER
-	// operations use TeamManager below; tracked team-agent dismiss has its own
-	// team-lead authz check before destructive cleanup. Returns the owner id when
-	// authorized, a `denied` sentinel when the target IS an own child but the
-	// caller is not its owner, or `undefined` when the target is not an own child
-	// (normal path continues).
-	const resolveOwnChildOwner = (goalId: string, targetId: string): { owner: string } | { denied: true } | undefined => {
-		const owner = teamLeadOwnChildOwner(goalId, targetId);
-		if (!owner) return undefined;
-		const authenticCaller = resolveAuthenticCallerFromSessionSecret();
-		if (!authenticCaller || authenticCaller !== owner) return { denied: true };
-		return { owner };
-	};
-	const denyOwnChild = () => json({ error: "Caller session is not the owner of this child agent", code: "NOT_OWNER" }, 403);
-	const ocStatusForTeamFallback = (err: unknown): number => {
-		if (err instanceof SessionPromptDeliveryError) return err.status;
-		if (err instanceof OrchestrationCoreError) {
-			if (err.code === "NOT_STREAMING") return 409;
-			if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
-			return 400;
-		}
-		return 500;
-	};
-
-	// POST /api/goals/:id/team/dismiss — dismiss a role agent
-	const teamDismissMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/dismiss$/);
-	if (teamDismissMatch && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body?.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		const goalId = teamDismissMatch[1];
-		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
-		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
-		const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
-		if (ownerResult) {
-			if ("denied" in ownerResult) {
-				json({ ok: false, status: "not-owned", sessionId: body.sessionId, message: "Caller session is not the owner of this child agent", retryable: false }, 403);
-				return;
-			}
-			const result = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
-			json(result, dismissHttpStatus(result));
-			return;
-		}
-		const teamState = teamManager.getTeamState(goalId);
-		const isTrackedTeamAgent = teamState?.agents.some((agent) => agent.sessionId === body.sessionId) ?? false;
-		if (isTrackedTeamAgent) {
-			const authz = authorizeChildrenMutation({
-				mutationClass: "orchestration",
-				isHumanOperator: false,
-				authenticCallerSessionId: resolveAuthenticCallerFromSessionSecret(),
-				teamLeadSessionId: teamState?.teamLeadSessionId,
-			});
-			if (!authz.ok) {
-				denyDismissNotOwned(body.sessionId);
-				return;
-			}
-		}
-		const result = await teamManager.dismissRoleForGoal(goalId, body.sessionId);
-		json(result, dismissHttpStatus(result));
-		return;
-	}
+	// POST /api/goals/:id/team|swarm/{start,spawn,dismiss,steer,abort,prompt,complete,teardown}
+	// and POST /api/goals/:id/pr-merge moved to the core route registry
+	// (STR-01 goals cohort G4b) — see
+	// src/server/routes/goal-team-mutation-routes.ts.
 
 	// GET /api/pr-status-cache — bulk PR status from disk cache (startup hydration)
 	if (req.method === "GET" && url.pathname === "/api/pr-status-cache") {
 		json(prStatusStore.getAll());
-		return;
-	}
-
-	// POST /api/goals/:id/pr-merge — merge PR for goal branch
-	const goalPrMergeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-merge$/);
-	if (goalPrMergeMatch && req.method === "POST") {
-		const goalId = goalPrMergeMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		const body = await readBody(req);
-		const method = body?.method ?? "squash";
-		if (!["merge", "squash", "rebase"].includes(method)) {
-			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
-			return;
-		}
-		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const resolvedGoalBranch = clientGoalBranch || goal.branch;
-		try {
-			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
-			json({ ok: true });
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			json({ error: msg }, 500);
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/steer — steer a team agent mid-turn
-	const teamSteerMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/steer$/);
-	if (teamSteerMatch && req.method === "POST") {
-		const goalId = teamSteerMatch[1];
-		const body = await readBody(req);
-		if (!body?.sessionId || !body?.message) {
-			json({ error: "Missing sessionId or message" }, 400);
-			return;
-		}
-		// Validate target is a team agent
-		const agents = teamManager.listAgents(goalId);
-		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
-			if (ownerResult) {
-				if ("denied" in ownerResult) { denyOwnChild(); return; }
-				try {
-					await orchestrationCore.steer(ownerResult.owner, body.sessionId, body.message);
-					json({ ok: true, dispatched: true });
-				} catch (err) {
-					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
-				}
-				return;
-			}
-			json({ error: "Session is not a member of this team" }, 403);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		// Allow steering non-interactive sessions (e.g. verification reviewers)
-		// so the user can redirect them mid-run
-		if (session.status !== "streaming") {
-			json({ error: "Agent is not currently streaming — use team/prompt instead" }, 409);
-			return;
-		}
-		try {
-			await sessionManager.deliverLiveSteer(session.id, body.message);
-			json({ ok: true, dispatched: true });
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/abort — force-abort a stuck team agent
-	const teamAbortMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/abort$/);
-	if (teamAbortMatch && req.method === "POST") {
-		const goalId = teamAbortMatch[1];
-		const body = await readBody(req);
-		if (!body?.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		// Validate target is a team agent
-		const agents = teamManager.listAgents(goalId);
-		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
-			if (ownerResult) {
-				if ("denied" in ownerResult) { denyOwnChild(); return; }
-				try {
-					await orchestrationCore.abort(ownerResult.owner, body.sessionId);
-					const afterSession = sessionManager.getSession(body.sessionId);
-					json({ ok: true, status: afterSession?.status || "idle" });
-				} catch (err) {
-					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
-				}
-				return;
-			}
-			json({ error: "Session is not a member of this team" }, 403);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		try {
-			await sessionManager.forceAbort(body.sessionId);
-			const afterSession = sessionManager.getSession(body.sessionId);
-			json({ ok: true, status: afterSession?.status || "idle" });
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/prompt — prompt or steer a team agent, direct-child lead, or owned helper.
-	const teamPromptMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/prompt$/);
-	if (teamPromptMatch && req.method === "POST") {
-		const goalId = teamPromptMatch[1];
-		const body = await readBody(req);
-		if (typeof body?.sessionId !== "string" || typeof body?.message !== "string") {
-			json({ error: "Missing sessionId or message" }, 400);
-			return;
-		}
-		let mode: "prompt" | "steer";
-		try {
-			mode = parseSessionPromptMode(body.mode, "steer");
-		} catch (err) {
-			if (err instanceof SessionPromptDeliveryError) json({ error: err.message, code: err.code }, err.status);
-			else jsonError(500, err);
-			return;
-		}
-
-		// Validate target is a team agent OR a direct-child team-lead OR an owned helper child.
-		const agents = teamManager.listAgents(goalId);
-		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
-		let ownChildOwner: string | undefined;
-		if (!allowed) {
-			const targetSession = sessionManager.getSession(body.sessionId);
-			if (targetSession?.role === "team-lead" && targetSession.goalId) {
-				const targetGoal = getGoalAcrossProjects(targetSession.goalId);
-				if (targetGoal?.parentGoalId === goalId) {
-					allowed = true;
-				}
-			}
-		}
-		if (!allowed) {
-			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
-			if (ownerResult) {
-				if ("denied" in ownerResult) { denyOwnChild(); return; }
-				ownChildOwner = ownerResult.owner;
-				allowed = true;
-			}
-		}
-		if (!allowed) {
-			json({
-				error: "Session is not a member of this team and is not a direct-child team-lead",
-				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
-			}, 403);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-
-		// Enforce gate dependency check for team/prompt.
-		const wfGateId = typeof body.workflowGateId === "string" ? body.workflowGateId : undefined;
-		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
-		if (wfGateId) {
-			const goal = getGoalAcrossProjects(goalId);
-			const goalGateCtx = projectContextManager.getContextForGoal(goalId);
-			const goalGateStore = goalGateCtx?.gateStore;
-			if (goal?.workflow && goalGateStore) {
-				const gateStates = goalGateStore.getGatesForGoal(goalId);
-				const depError = checkGateDependencies(wfGateId, goal.workflow.gates, gateStates);
-				if (depError) {
-					json({ error: depError }, 409);
-					return;
-				}
-			}
-		}
-		try {
-			// Resolve workflow gate context and prepend to message if provided.
-			let message = body.message as string;
-			if (wfGateId || inputIds?.length) {
-				const ctx = teamManager.buildDependencyContext(goalId, wfGateId, inputIds);
-				if (ctx) {
-					message = ctx + "\n\n---\n\n" + message;
-				}
-			}
-			const result = ownChildOwner
-				? await orchestrationCore.prompt(ownChildOwner, body.sessionId, message, { mode })
-				: await deliverSessionPrompt({
-					getSession: (id) => sessionManager.getSession(id),
-					enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
-					deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
-				}, body.sessionId, message, { mode, defaultMode: "steer" });
-			json(result);
-		} catch (err) {
-			if (err instanceof SessionPromptDeliveryError || err instanceof OrchestrationCoreError) {
-				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof Error ? (err as { code?: string }).code : undefined }, ocStatusForTeamFallback(err));
-			} else {
-				jsonError(500, err);
-			}
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/complete — complete a team (dismiss agents, keep team lead)
-	const teamCompleteMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/complete$/);
-	if (teamCompleteMatch && req.method === "POST") {
-		const goalId = teamCompleteMatch[1];
-		// Guard: a goal cannot be marked complete while it still has unresolved
-		// live descendant goals. Nested child work must be rolled up (merged +
-		// completed) or archived before the parent completes — otherwise the
-		// parent's branch/PR would land without its children's work. This is
-		// independent of gate-requirement state (the gate checks in
-		// completeTeam() can be absent/skipped/stale, so we enforce here too).
-		// Archived and already-complete descendants don't block.
-		const completeCtx = projectContextManager.getContextForGoal(goalId);
-		const completeAllGoals = completeCtx?.goalStore.getAll() ?? [];
-		const unresolvedChildIds = walkGoalSubtree(goalId, completeAllGoals, { includeRoot: false, includeArchived: false })
-			.filter(g => g.state !== "complete")
-			.map(g => g.id);
-		if (unresolvedChildIds.length > 0) {
-			json({
-				error: `Cannot complete: ${unresolvedChildIds.length} unresolved child goal(s) must be completed or archived first`,
-				code: "UNRESOLVED_CHILDREN",
-				childIds: unresolvedChildIds,
-			}, 409);
-			return;
-		}
-		const completeBody = await readBody(req);
-		const confirmBypassedGates = completeBody?.confirmBypassedGates === true;
-		// Bypassed-gate confirmation is a HUMAN-only override. A sandbox-scoped
-		// agent token must not be able to confirm completion past bypassed gates
-		// by hitting this REST endpoint directly — that would defeat the
-		// human-in-the-loop trust boundary the bypass feature enforces.
-		if (confirmBypassedGates && sandboxScope) {
-			json({ error: "Forbidden: sandbox token cannot confirm completion of bypassed gates" }, 403);
-			return;
-		}
-		try {
-			await teamManager.completeTeam(goalId, { allowBypassedGates: confirmBypassedGates });
-			json({ ok: true });
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead).
-	// Cascade required — mirror of `tests/api-team-teardown-cascade.test.ts::teardownRoute`.
-	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
-	if (teamTeardownMatch && req.method === "POST") {
-		const goalId = teamTeardownMatch[1];
-		const cascadeParam = url.searchParams.get("cascade");
-		if (cascadeParam !== "true" && cascadeParam !== "false") {
-			json({ error: "cascade=true|false query parameter is required", code: "CASCADE_REQUIRED" }, 422);
-			return;
-		}
-		const cascade = cascadeParam === "true";
-		// Validate goal exists before attempting teardown.
-		if (!getGoalAcrossProjects(goalId)) { json({ error: "Goal not found" }, 404); return; }
-		const tdCtx = projectContextManager.getContextForGoal(goalId);
-		const tdAllGoals = tdCtx?.goalStore.getAll() ?? [];
-
-		// cascade=false + live descendant teams → 409 HAS_DESCENDANT_TEAMS.
-		if (!cascade) {
-			const descendants = walkGoalSubtree(goalId, tdAllGoals, { includeRoot: false, includeArchived: false });
-			const descendantsWithTeams = descendants
-				.filter(d => !!teamManager.getTeamState(d.id))
-				.map(d => ({ id: d.id, title: d.title }));
-			if (descendantsWithTeams.length > 0) {
-				json({
-					code: "HAS_DESCENDANT_TEAMS",
-					count: descendantsWithTeams.length,
-					descendants: descendantsWithTeams,
-					message: `Goal has ${descendantsWithTeams.length} descendant team(s) still running. Re-call with ?cascade=true to stop them all.`,
-				}, 409);
-				return;
-			}
-		}
-
-		// Bottom-up: children torn down before parents. Skip archived
-		// nodes. cascade=false collapses to root-only by capping depth at 0.
-		const result = await cascadeGoalSubtree(
-			goalId,
-			tdAllGoals,
-			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
-			{
-				order: "bottom-up",
-				apply: async (g) => {
-					if (!teamManager.getTeamState(g.id)) return false;
-					await teamManager.teardownTeam(g.id);
-					return true;
-				},
-			},
-		);
-		const toreDown = result.processed.filter(p => p.result === true).length;
-		json({
-			ok: true,
-			toreDown,
-			errors: result.errors.map(e => ({ goalId: e.goalId, error: e.error.message })),
-		});
 		return;
 	}
 

@@ -367,4 +367,8 @@ export interface CoreRouteCtx {
 	// ── Goals G4a additions — append-only.
 	// No new fields: goal git/PR/team read routes reuse ctx values already
 	// threaded by earlier cohorts.
+
+	// ── Goals G4b additions — append-only.
+	// No new fields: goal team/PR mutation routes reuse ctx values already
+	// threaded by earlier cohorts.
 }
