@@ -117,6 +117,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/session-creation-routes.ts",
 	// STR-01 cohort 23 (session git read/status routes).
 	"src/server/routes/session-git-read-routes.ts",
+	// STR-01 cohort 24 (session git write/PR mutation routes).
+	"src/server/routes/session-git-write-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
@@ -220,11 +222,11 @@ export function extractServerRoutes(src: string): ServerRoute[] {
 	const routes: ServerRoute[] = [];
 
 	// Both quote styles appear in server.ts. Discovered while building the
-	// client-orphan pinning test: the ~10 session git/PR/commits endpoints
-	// (git-pull, git-push, git-status, pr-merge, pr-status, commits, ...)
-	// are written as `url.pathname.startsWith('/api/sessions/') &&
-	// url.pathname.endsWith('/git-pull')` with SINGLE quotes, unlike the rest
-	// of the file's double-quoted idiom. An extractor that only matched
+	// client-orphan pinning test: the then-legacy session git/PR/commits
+	// endpoints (git-pull, git-push, git-status, pr-merge, pr-status,
+	// commits, ...) were written as `url.pathname.startsWith('/api/sessions/')
+	// && url.pathname.endsWith('/git-pull')` with SINGLE quotes, unlike the
+	// rest of the file's double-quoted idiom. An extractor that only matched
 	// double quotes silently dropped all of them, which would have made
 	// tests/client-api-orphan-pinning.test.ts misreport ~10 real, live routes
 	// as new orphans. Matching both quote styles here fixes that for every

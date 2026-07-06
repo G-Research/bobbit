@@ -856,7 +856,7 @@ test.describe("Headquarters session git isolation", () => {
 				expect(String(resp.body.error)).toMatch(new RegExp(action, "i"));
 			}
 
-			const postEndpoints = ["git-pull", "git-push", "git-squash-push"];
+			const postEndpoints = ["git-pull", "git-push", "git-squash-push", "git-merge-primary", "pr-merge"];
 			for (const endpoint of postEndpoints) {
 				const resp = await gw.json(`/api/sessions/${hqSession.id}/${endpoint}`, {
 					method: "POST",
