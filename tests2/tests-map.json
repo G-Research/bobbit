@@ -3884,24 +3884,24 @@
     },
     {
       "file": "tests/e2e/ui/tail-chat-real-stream.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/tail-chat-real-stream.spec.ts"
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/tail-chat-real-stream.spec.ts:62 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/tail-chat-real-stream.spec.ts"
+      "v2Path": "tests2/browser/daily/tail-chat-real-stream.spec.ts"
     },
     {
       "file": "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/tail-chat-session-navigate.spec.ts"
       ],
       "rationale": "Uses scroll geometry / browser-only behaviour - keep in Chromium fixture tier; copied to tests2/browser/fixtures/.",
-      "v2Path": "tests2/browser/fixtures/tail-chat-session-navigate.spec.ts",
+      "v2Path": "tests2/browser/daily/tail-chat-session-navigate.spec.ts",
       "migrated": true
     },
     {

@@ -103,6 +103,7 @@ export default {
 			name: "browser-v2",
 			testDir: "./tests2/browser",
 			testMatch: ["**/*.spec.ts"],
+			testIgnore: ["**/daily/**"], // bash.exe-dependent tests; run in isolation via test:daily
 			use: {
 				browserName: "chromium" as const,
 			},
