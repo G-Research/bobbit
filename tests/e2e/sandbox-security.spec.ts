@@ -207,7 +207,11 @@ test.describe("Sandbox Security Boundaries", () => {
 			scopedGoalId = scopedGoal.id as string;
 			const scopedProjectId = scopedGoal.projectId as string;
 
-			const otherProject = await registerProject({ name: `task-scope-other-${Date.now()}`, rootPath: otherRoot, seedWorkflows: false });
+			// Needs a real workflow seeded (post-#231 strict NO_WORKFLOWS cascade) since
+			// this test creates a goal on `otherProject` below — it only cares about
+			// cross-project task-scope isolation, not the zero-workflows contract, so
+			// let registerProject's default auto-seed apply instead of opting out.
+			const otherProject = await registerProject({ name: `task-scope-other-${Date.now()}`, rootPath: otherRoot });
 			otherProjectId = otherProject.id;
 			const otherGoal = await createGoal({
 				projectId: otherProject.id,
