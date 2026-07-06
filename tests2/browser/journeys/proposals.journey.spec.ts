@@ -184,6 +184,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 		await expect(dismissBtn).toBeEnabled();
 		await dismissBtn.click();
 		await expect(titleInput).toBeHidden({ timeout: 5_000 });
+		await page.waitForFunction(
 			() => (window as any).bobbitState?.remoteAgent?.state?.status === "idle",
 			{ timeout: 15_000 },
 		);
@@ -201,8 +202,7 @@ test.describe("Journey: Proposals — API error handling", () => {
 				contentType: "application/json",
 				body: JSON.stringify({
 					error: "Journey test: missing title",
-					stack: "Error: Journey test: missing title
-    at goalManager.create (server.ts:1:1)",
+					stack: "Error: Journey test: missing title\n    at goalManager.create (server.ts:1:1)",
 				}),
 			});
 		});
