@@ -49,7 +49,7 @@ export class GoalSpawnChildRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, GitBranchPlus, skipped ? "Aborted child spawn" : "Failed to spawn child")}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};

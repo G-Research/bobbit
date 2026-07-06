@@ -69,7 +69,7 @@ export class CompactionSummaryRenderer
 
 		if (!payload) {
 			return {
-				content: html`<div class="text-xs text-muted-foreground">Compacting…</div>`,
+				content: html`<div class="text-xs text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">Compacting…</div>`,
 				isCustom: false,
 			};
 		}
@@ -147,7 +147,7 @@ export class CompactionSummaryRenderer
 		const errorLine = (() => {
 			const msg = friendlyError(payload);
 			if (!msg) return nothing;
-			return html`<div class="mt-2 text-sm text-destructive" data-test="error">${msg}</div>`;
+			return html`<div class="mt-2 text-sm text-destructive" data-test="error" role="alert" aria-live="assertive" aria-atomic="true">${msg}</div>`;
 		})();
 
 		// Payload disclosure: only useful on hard compaction failures — the

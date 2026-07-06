@@ -106,6 +106,9 @@ test.describe("CompactionSummaryRenderer (browser E2E)", () => {
 		// error is surfaced verbatim because there is no useful friendly
 		// alternative; users may need the literal string to file a bug.
 		await expect(card.locator("[data-test='error']")).toContainText("timed out");
+		await expect(card.locator("[data-test='error']")).toHaveAttribute("role", "alert");
+		await expect(card.locator("[data-test='error']")).toHaveAttribute("aria-live", "assertive");
+		await expect(card.locator("[data-test='error']")).toHaveAttribute("aria-atomic", "true");
 		// Still exactly one card on the page.
 		await expect(page.locator("[data-testid='compaction-summary-card']")).toHaveCount(1);
 	});

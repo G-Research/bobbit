@@ -35,7 +35,7 @@ export class GoalMergeChildRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, GitMerge, skipped ? "Aborted merge" : "Merge failed")}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -49,7 +49,7 @@ export class GoalMergeChildRenderer implements ToolRenderer {
 		const output: string | undefined = data?.output || data?.conflictOutput;
 
 		let pill;
-		if (rtmFailed) pill = html`<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-600 dark:text-red-400" data-testid="children-merge-pill">RTM not passed ✗</span>`;
+		if (rtmFailed) pill = html`<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-600 dark:text-red-400" data-testid="children-merge-pill" role="alert" aria-live="assertive" aria-atomic="true">RTM not passed ✗</span>`;
 		else if (conflict) pill = html`<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-600 dark:text-amber-400" data-testid="children-merge-pill">conflict ⚠</span>`;
 		else if (alreadyMerged) pill = html`<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-muted text-muted-foreground" data-testid="children-merge-pill">already merged</span>`;
 		else pill = html`<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-green-500/20 text-green-600 dark:text-green-400" data-testid="children-merge-pill">merged ✓</span>`;

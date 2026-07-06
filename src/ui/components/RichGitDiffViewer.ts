@@ -329,7 +329,7 @@ export class RichGitDiffViewer extends LitElement {
 	private renderTruncation(parsed: UnifiedDiffParseResult): TemplateResult | typeof nothing {
 		if (!parsed.isTruncated) return nothing;
 		return html`
-			<div class="rich-git-diff-truncated" data-testid="rich-git-diff-truncated" role="status">
+			<div class="rich-git-diff-truncated" data-testid="rich-git-diff-truncated" role="status" aria-live="polite" aria-atomic="true">
 				<svg class="rich-git-diff-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 4.2 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z"></path></svg>
 				<span><strong>Diff truncated.</strong> Showing the available portion of the raw unified diff.</span>
 			</div>
@@ -354,6 +354,7 @@ export class RichGitDiffViewer extends LitElement {
 						data-testid="rich-git-diff-file-toggle"
 						aria-expanded=${String(!collapsed)}
 						aria-controls=${bodyId}
+						aria-label=${`${collapsed ? "Expand" : "Collapse"} ${file.displayPath || file.path || file.header}`}
 						@click=${() => this.toggleFile(file.id)}
 					>
 						<span class="rich-git-diff-caret" aria-hidden="true">▸</span>

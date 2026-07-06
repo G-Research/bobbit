@@ -58,7 +58,7 @@ export class EditProposalRenderer implements ToolRenderer {
 						<div class="text-xs text-muted-foreground" data-testid="proposal-rev">rev ${rev}</div>
 					` : ""}
 					${isFailure && errorCode ? html`
-						<div class="text-xs text-red-500" data-testid="edit-proposal-error-code">${errorCode}</div>
+						<div class="text-xs text-red-500" data-testid="edit-proposal-error-code" role="alert" aria-live="assertive" aria-atomic="true">${errorCode}</div>
 					` : ""}
 					${result && typeof rev === "number" && rev > 0 ? html`
 						<div class="flex justify-end">

@@ -99,11 +99,13 @@ test.describe("Transparency Panel — decisions rows (CLF-W1a)", () => {
 			const toggle = page.locator('[data-testid="transparency-panel-toggle"]').first();
 			await expect(toggle).toBeVisible({ timeout: 15_000 });
 			await expect(toggle).toContainText("2 decisions");
+			await expect(toggle).toHaveAttribute("aria-expanded", "false");
 
 			// Folded by default — row detail is not in the DOM until expanded.
 			await expect(page.locator('[data-testid="transparency-panel-rows"]')).toHaveCount(0);
 
 			await toggle.click();
+			await expect(toggle).toHaveAttribute("aria-expanded", "true");
 			const rows = page.locator('[data-testid="transparency-panel-rows"]');
 			await expect(rows).toBeVisible();
 			await expect(rows).toContainText("agent-prompt");
@@ -116,7 +118,10 @@ test.describe("Transparency Panel — decisions rows (CLF-W1a)", () => {
 			await expect(rows).toContainText("abstained");
 
 			// Expand the row's own detail toggle for consulted ids + rationale.
-			await page.locator('[data-testid="transparency-panel-row-toggle"]').first().click();
+			const rowToggle = page.locator('[data-testid="transparency-panel-row-toggle"]').first();
+			await expect(rowToggle).toHaveAttribute("aria-expanded", "false");
+			await rowToggle.click();
+			await expect(rowToggle).toHaveAttribute("aria-expanded", "true");
 			await expect(rows).toContainText("e2e-fake-classifier");
 			await expect(rows).toContainText("e2e fixture");
 

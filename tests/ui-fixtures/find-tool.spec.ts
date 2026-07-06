@@ -130,6 +130,9 @@ test.describe("FindRenderer (browser E2E)", () => {
 		const errDiv = page.locator("#container div").filter({ hasText: "No such file or directory" }).last();
 		const cls = (await errDiv.getAttribute("class")) ?? "";
 		expect(cls).toMatch(/text-destructive|text-amber/);
+		await expect(errDiv).toHaveAttribute("role", "alert");
+		await expect(errDiv).toHaveAttribute("aria-live", "assertive");
+		await expect(errDiv).toHaveAttribute("aria-atomic", "true");
 	});
 
 	test("renderer is a pure function: persists identical DOM across reload", async ({ page }) => {
@@ -152,4 +155,3 @@ test.describe("FindRenderer (browser E2E)", () => {
 		await expect(page.locator("#container console-block")).toContainText("src/a.ts");
 	});
 });
-

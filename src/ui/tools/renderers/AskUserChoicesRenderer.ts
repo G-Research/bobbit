@@ -85,6 +85,9 @@ function renderAskHeader(state: ToolHeaderState, text: string | TemplateResult):
 			<span
 				class="inline-block h-2.5 w-2.5 rounded-full bg-foreground ask-heartbeat"
 				aria-label="Waiting for your answer"
+				role="status"
+				aria-live="polite"
+				aria-atomic="true"
 				title="Waiting for your answer"
 			></span>
 		</div>
