@@ -52,6 +52,7 @@ export {
 	type ArchivedSessionWorktreeCleanupResult,
 } from "./archived-worktree-manager.js";
 import { McpWiring, type McpWiringDeps } from "./mcp-wiring.js";
+import { SessionCostPlumbing, type SessionCostPlumbingDeps } from "./session-cost-plumbing.js";
 import { SessionLifecycleFence, type RestoreCoordinator, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
 export { type RestoreCoordinator, type LifecycleFenceSession, type SessionLifecycleFenceDeps } from "./session-lifecycle-fence.js";
 import { SessionRevive, type SessionReviveDeps } from "./session-revive.js";
@@ -1103,6 +1104,13 @@ export class SessionManager {
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
 	/**
+	 * Cost lookup, hydration, and live message_end accounting
+	 * (SessionManager decomposition cohort 7). Constructed once with late-bound
+	 * getters for test-only stores and verification harness because those are
+	 * mutable across setup paths.
+	 */
+	private sessionCostPlumbing!: SessionCostPlumbing;
+	/**
 	 * Archived-worktree bookkeeping (SessionManager decomposition cohort 1,
 	 * docs/design/session-manager-decomposition.md). Constructed once at the
 	 * end of this constructor (after colorStore/projectContextManager/
@@ -1489,6 +1497,18 @@ export class SessionManager {
 		this.sessionSteering = new SessionSteering();
 		this.retainSessionSteeringHostSurface();
 
+		this.sessionCostPlumbing = new SessionCostPlumbing({
+			projectContextManager: this.projectContextManager,
+			getTestCostTracker: () => this._testCostTracker,
+			getTestTaskManager: () => this._testTaskManager,
+			getSession: (sessionId) => this.sessions.get(sessionId),
+			getPersistedSession: (sessionId) => this.getPersistedSession(sessionId),
+			taskIdCache: this.taskIdCache,
+			getTurnBudgetGovernor: () => this._verificationHarness?.turnBudgetGovernor,
+			broadcast: (clients, msg) => broadcast(clients, msg),
+		} satisfies SessionCostPlumbingDeps);
+		this.retainSessionCostHostSurface();
+
 		// Constructed here (not lazily) so every field it captures by value
 		// (projectContextManager, testStore, testSearchIndex, colorStore) is
 		// already final — all four are assigned above, never reassigned again.
@@ -1607,6 +1627,15 @@ export class SessionManager {
 		void this.resolveIdleWaiters;
 		void this.rejectIdleWaiters;
 		void this._finishSessionSetup;
+	}
+
+	private retainSessionCostHostSurface(): void {
+		// Keep these legacy private seam names present on SessionManager after
+		// cohort 7; tests and extracted modules still reach them through the
+		// manager object even though the implementation now lives elsewhere.
+		void this.resolveCostTracker;
+		void this.resolveTaskIdForSession;
+		void this.costTriggerFromEvent;
 	}
 
 	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
@@ -1767,12 +1796,7 @@ export class SessionManager {
 
 	/** Resolve the correct CostTracker for a session based on its project. */
 	private resolveCostTracker(session: { projectId?: string }): CostTracker {
-		if (session.projectId && this.projectContextManager) {
-			const ctx = this.projectContextManager.getOrCreate(session.projectId);
-			if (ctx) return ctx.costTracker;
-		}
-		if (this._testCostTracker) return this._testCostTracker;
-		throw new Error("Cannot resolve cost tracker: session has no projectId");
+		return this.sessionCostPlumbing.resolveCostTracker(session);
 	}
 
 	/** Resolve the correct SearchService for a session based on its project. */
@@ -2186,77 +2210,27 @@ export class SessionManager {
 
 	/** Get a CostTracker for a specific project. Requires explicit projectId when PCM is active. */
 	getCostTracker(projectId?: string): CostTracker {
-		if (projectId && this.projectContextManager) {
-			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (ctx) return ctx.costTracker;
-		}
-		if (this._testCostTracker) return this._testCostTracker;
-		if (this.projectContextManager) {
-			throw new Error("Cannot resolve cost tracker: projectId is required");
-		}
-		throw new Error("No cost tracker available");
+		return this.sessionCostPlumbing.getCostTracker(projectId);
 	}
 
 	/** Return persisted cumulative cost for a session, without creating a zero-cost record. */
 	getSessionCost(sessionId: string): SessionCost | undefined {
-		const live = this.sessions.get(sessionId);
-		if (live) {
-			try {
-				const cost = this.resolveCostTracker(live).getSessionCost(sessionId);
-				if (cost) return cost;
-			} catch {
-				// Fall through to persisted/store scans below.
-			}
-		}
-
-		const persisted = this.getPersistedSession(sessionId);
-		if (persisted?.projectId || !this.projectContextManager) {
-			try {
-				const cost = this.getCostTracker(persisted?.projectId).getSessionCost(sessionId);
-				if (cost) return cost;
-			} catch {
-				// Fall through to cross-project scan.
-			}
-		}
-
-		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) {
-				const cost = ctx.costTracker.getSessionCost(sessionId);
-				if (cost) return cost;
-			}
-		}
-		return undefined;
+		return this.sessionCostPlumbing.getSessionCost(sessionId);
 	}
 
 	/** Merge authoritative persisted cost into a state snapshot when cost exists. */
 	withSessionCostInState(sessionId: string, data: unknown): unknown {
-		const cost = this.getSessionCost(sessionId);
-		if (!cost) return data;
-		if (data && typeof data === "object" && !Array.isArray(data)) {
-			return { ...(data as Record<string, unknown>), serverCost: cost };
-		}
-		return { serverCost: cost };
+		return this.sessionCostPlumbing.withSessionCostInState(sessionId, data);
 	}
 
 	/** Build the cumulative cost_update payload used for attach/reconnect hydration. */
 	getSessionCostUpdate(sessionId: string): Extract<ServerMessage, { type: "cost_update" }> | null {
-		const cost = this.getSessionCost(sessionId);
-		if (!cost) return null;
-		const live = this.sessions.get(sessionId);
-		const persisted = live ? undefined : this.getPersistedSession(sessionId);
-		return {
-			type: "cost_update",
-			sessionId,
-			goalId: live?.goalId ?? persisted?.goalId,
-			taskId: this.resolveTaskIdForSession(sessionId),
-			cost,
-		};
+		return this.sessionCostPlumbing.getSessionCostUpdate(sessionId);
 	}
 
 	/** Broadcast cumulative persisted cost to connected clients, if this session has cost data. */
 	broadcastSessionCost(session: SessionInfo): void {
-		const update = this.getSessionCostUpdate(session.id);
-		if (update) broadcast(session.clients, update);
+		return this.sessionCostPlumbing.broadcastSessionCost(session);
 	}
 
 	/**
@@ -2279,26 +2253,7 @@ export class SessionManager {
 	 * reproduction case), while still observing a later (re)binding.
 	 */
 	private resolveTaskIdForSession(sessionId: string): string | undefined {
-		const live = this.sessions.get(sessionId);
-		if (live?.taskId) return live.taskId;
-		const persisted = this.getPersistedSession(sessionId);
-		if (persisted?.taskId) return persisted.taskId;
-		if (this.projectContextManager) {
-			const gen = this.projectContextManager.getTaskGeneration();
-			const cached = this.taskIdCache.get(sessionId);
-			if (cached && cached.gen === gen) return cached.taskId;
-
-			let taskId: string | undefined;
-			for (const ctx of this.projectContextManager.all()) {
-				const tm = new TaskManager(ctx.taskStore);
-				const tasks = tm.getTasksForSession(sessionId);
-				if (tasks.length > 0) { taskId = tasks[0].id; break; }
-			}
-			this.taskIdCache.set(sessionId, { taskId, gen });
-			return taskId;
-		}
-		const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
-		return tasks.length > 0 ? tasks[0].id : undefined;
+		return this.sessionCostPlumbing.resolveTaskIdForSession(sessionId);
 	}
 
 	/** Delegates to McpWiring (SessionManager decomposition cohort 2, docs/design/session-manager-decomposition.md). */
@@ -3714,94 +3669,11 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
-		// Only track cost on message_end (fires once per completed message).
-		// message_update fires on every streaming chunk with the same usage
-		// object, which would multiply costs by ~30-40x.
-		if (event.type !== "message_end") return;
-		if (event.message?.role !== "assistant") return;
-		const usage = event.message?.usage ?? event.usage;
-		if (!usage) return;
-
-		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
-		const costValue = typeof usage.cost === "number" ? usage.cost
-			: typeof usage.cost?.total === "number" ? usage.cost.total
-			: undefined;
-		if (costValue === undefined) return;
-
-		const sessionCostTracker = this.resolveCostTracker(session);
-		const stampGoalId = session.goalId ?? session.teamGoalId;
-		const trigger = this.costTriggerFromEvent(session, event);
-		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
-			inputTokens: usage.inputTokens ?? usage.input,
-			outputTokens: usage.outputTokens ?? usage.output,
-			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
-			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
-			// pi-ai's Anthropic provider sets `cacheWrite1h` from
-			// `cache_creation.ephemeral_1h_input_tokens` (verified in
-			// node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js:352).
-			// No `cacheWrite5m`-equivalent field exists on the wire — see
-			// cost-tracker.ts's `cacheWrite1hTokens` doc.
-			cacheWrite1hTokens: usage.cacheWrite1hTokens ?? usage.cacheWrite1h,
-			cost: costValue,
-		}, stampGoalId, trigger);
-
-		// SWARM-W1 — hard per-node token-budget governor (design/swarm-orchestration.md
-		// §6, must-fix #1): this `message_end` hook is the ONE place cumulative
-		// turn usage becomes known, so it's the enforcement point for a HARD
-		// per-node ceiling — not just a spawn-boundary "pause and ask". Zero
-		// overhead for every non-swarm session: `check` is a Map lookup that
-		// returns `{kind:"ok"}` unless `stampGoalId` was explicitly
-		// `registerNode`-d by `swarm-best-of-n.ts`.
-		//
-		// S3 (extension-seam audit, P1): goes through the narrow
-		// `TurnBudgetGovernor` seam (session-manager-consumer-types.ts) instead
-		// of reaching `_verificationHarness.swarmGovernor.checkTokenBudget` /
-		// `.hardKillSwarmNode` directly — see
-		// tests/session-manager-turn-budget-governor.test.ts for the pin.
-		// `?.turnBudgetGovernor` is a plain property read (constructed once at
-		// harness-construction time), so this stays exactly as cheap as the
-		// raw access it replaces — no added awaits or allocations per message.
-		if (stampGoalId) {
-			const totalTokens = (cumulativeCost.inputTokens ?? 0) + (cumulativeCost.outputTokens ?? 0);
-			const action = this._verificationHarness?.turnBudgetGovernor.check(stampGoalId, totalTokens);
-			if (action?.kind === "abort-turn") {
-				console.warn(`[swarm-governor] aborting in-flight turn for goal ${stampGoalId}: ${action.reason}`);
-				try {
-					session.rpcClient.abort();
-				} catch (err) {
-					console.warn(`[swarm-governor] abort() failed for session ${session.id} (non-fatal):`, err);
-				}
-			} else if (action?.kind === "hard-kill") {
-				this._verificationHarness?.turnBudgetGovernor.hardKill(stampGoalId, action.reason)
-					.catch((err) => console.warn(`[swarm-governor] hardKillSwarmNode failed for goal ${stampGoalId} (non-fatal):`, err));
-			}
-		}
-
-		// PERF-05: was a per-message, per-project TaskManager alloc + full
-		// scan inlined here. Now reuses the shared, cached resolver (also
-		// used by getSessionCostUpdate/broadcastSessionCost for reconnect
-		// hydration), so live and reconnect cost_update frames agree on
-		// taskId and the hot streaming path stops paying the scan whenever
-		// the session already carries its taskId or a cached resolution.
-		const taskId = this.resolveTaskIdForSession(session.id);
-
-		broadcast(session.clients, {
-			type: "cost_update",
-			sessionId: session.id,
-			goalId: session.goalId,
-			taskId,
-			cost: cumulativeCost,
-		});
+		return this.sessionCostPlumbing.trackCostFromEvent(session, event);
 	}
 
 	private costTriggerFromEvent(session: SessionInfo, event: any): string | undefined {
-		if (event.type !== "message_end") return undefined;
-		if (!session.isCompacting) return undefined;
-		const pending = (session as any)._pendingCompactionStart as
-			| { trigger?: "auto" | "overflow" }
-			| undefined;
-		const trigger = pending?.trigger ?? ((session as any)._manualCompactionId ? "manual" : undefined);
-		return trigger ? `compaction:${trigger}` : undefined;
+		return this.sessionCostPlumbing.costTriggerFromEvent(session, event);
 	}
 
 	/**
